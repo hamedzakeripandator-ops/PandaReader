@@ -1,0 +1,284 @@
+/* ==========================================================================
+   ۱. تعریف لوکال ۳ خانواده فونت استاندارد (Estedad, Manrope, JetBrains Mono)
+   مسیر قرارگیری فایل‌ها: public/fonts/...
+   ========================================================================== */
+
+/* --- فونت فارسی رابط کاربری: Estedad (وزن‌های 400 تا 800) --- */
+@font-face {
+  font-family: 'Estedad';
+  src: url('/fonts/estedad/Estedad-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Estedad';
+  src: url('/fonts/estedad/Estedad-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Estedad';
+  src: url('/fonts/estedad/Estedad-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Estedad';
+  src: url('/fonts/estedad/Estedad-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Estedad';
+  src: url('/fonts/estedad/Estedad-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* --- فونت لاتین عناوین، چپترها و برند: Manrope (وزن‌های 700 و 800) --- */
+@font-face {
+  font-family: 'Manrope';
+  src: url('/fonts/manrope/Manrope-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Manrope';
+  src: url('/fonts/manrope/Manrope-ExtraBold.woff2') format('woff2');
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* --- فونت فنی مسیرها، حجم، شمارنده‌ها و شورت‌کات‌ها: JetBrains Mono (400 تا 700) --- */
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono/JetBrainsMono-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono/JetBrainsMono-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ==========================================================================
+   ۲. متغیرهای سراسری فونت و پالت رنگ تیره اختصاصی
+   ========================================================================== */
+:root {
+  /* سیستم ۳ فونت با Fallback ایمن آفلاین */
+  --font-fa: 'Estedad', 'Vazirmatn', system-ui, -apple-system, 'Segoe UI', Tahoma, sans-serif;
+  --font-latin: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Consolas, Monaco, monospace;
+
+  /* پالت رنگ اصلی طبق استاندارد جدید */
+  --bg: #0a0f13;
+  --panel: #0f171c;
+  --panel2: #141d23;
+  --border: #1d2a31;
+  --accent: #22d3ee;
+  --text: #d7e2e6;
+  --muted: #7d8f97;
+  --purple: #bc8cff;
+  --danger: #f85149;
+
+  /* نگاشت متغیرهای قبلی به پالت جدید جهت یکپارچگی کامل کل کامپوننت‌ها */
+  --bg-main: #0a0f13;
+  --bg-panel: #0f171c;
+  --bg-secondary: #141d23;
+  --bg-active: #1d2a31;
+  --text-primary: #d7e2e6;
+  --text-secondary: #7d8f97;
+
+  /* شعاع انحنا */
+  --radius-lg: 20px;
+  --radius-md: 14px;
+  --radius-sm: 10px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-fa);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* کلاس‌های استاندارد تایپوگرافی سه‌گانه */
+.font-fa {
+  font-family: var(--font-fa);
+}
+
+.font-latin {
+  font-family: var(--font-latin);
+  direction: ltr;
+  unicode-bidi: embed;
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+  direction: ltr;
+  unicode-bidi: embed;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.ellipsis-ltr {
+  direction: ltr;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* پنل‌های تیره مدرن */
+.panel {
+  background-color: var(--panel);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+
+.btn-icon {
+  background-color: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-icon:hover {
+  background-color: var(--border);
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-2px);
+}
+
+.btn-icon:active {
+  transform: scale(0.96);
+}
+
+/* اسکرول‌بار یکپارچه و باریک */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 15, 19, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* انیمیشن چرخش آیکون‌های لودینگ */
+@keyframes iconSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.icon-spin {
+  animation: iconSpin 1.1s linear infinite;
+}
+
+/* انیمیشن اسامی طولانی */
+.marquee-wrapper {
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  position: relative;
+  mask-image: linear-gradient(to right, black 80%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 80%, transparent 100%);
+}
+
+.marquee-text {
+  display: inline-block;
+  animation: marquee-scroll 8s linear infinite;
+}
+
+.marquee-text:hover {
+  animation-play-state: paused;
+}
+
+@keyframes marquee-scroll {
+  0% { transform: translateX(0); }
+  15% { transform: translateX(0); }
+  100% { transform: translateX(calc(-100% + 150px)); }
+}
+
+@keyframes contextMenuFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.comic-page-item img {
+  image-rendering: auto;
+  will-change: transform;
+}

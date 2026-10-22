@@ -1,0 +1,1064 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import './index.css';
+
+// ۱. چیدمان اصلی و ساختار پنجره
+import TopBar from './components/layout/TopBar';
+import Sidebar from './components/layout/Sidebar';
+import RightPanel from './components/layout/RightPanel';
+
+// ۲. استورها، هوک‌ها، سرویس هسته و آیکون‌های وکتور لوکال
+import useKeyboard from './hooks/useKeyboard';
+import useReaderStore from './store/useReaderStore';
+import useLibraryStore from './store/useLibraryStore';
+import useAppStore from './store/useAppStore';
+import useSettingsStore from './store/useSettingsStore';
+import { coreApi } from './services/coreApi';
+import Icons from './components/common/Icons';
+
+// ۳. کامپوننت‌های رندر کمیک و PDF
+import VerticalViewer from './components/reader/VerticalViewer';
+import PdfViewer from './components/reader/PdfViewer';
+import BottomControls from './components/reader/BottomControls';
+
+// ۴. لایه‌های تعاملی، مودال‌ها و ابزارهای شناور شیشه‌ای
+import ContextMenu from './components/common/ContextMenu';
+import ScreenshotWidget from './components/modals/ScreenshotWidget';
+import SnippingOverlay from './components/modals/SnippingOverlay';
+import AreaZoomOverlay from './components/modals/AreaZoomOverlay';
+import QuickSettingsModal from './components/modals/QuickSettingsModal';
+import ToastHUD from './components/common/ToastHUD';
+
+// ۵. صفحات ماژولار برنامه
+import HomeView from './views/home/HomeView';
+import LibraryView from './views/library/LibraryView';
+import RecentView from './views/recent/RecentView';
+import FavoritesView from './views/favorites/FavoritesView';
+import DownloadsView from './views/downloads/DownloadsView';
+import SettingsView from './views/settings/SettingsView';
+import ProfileView from './views/profile/ProfileView';
+
+export default function App() {
+  const comicData = useReaderStore((state) => state.comicData);
+  const setComicData = useReaderStore((state) => state.setComicData);
+  const isLoading = useReaderStore((state) => state.isLoading);
+  const setIsLoading = useReaderStore((state) => state.setIsLoading);
+  const loadingProgress = useReaderStore((state) => state.loadingProgress);
+  const setLoadingProgress = useReaderStore((state) => state.setLoadingProgress);
+
+  const currentView = useAppStore((state) => state.currentView);
+  const setCurrentView = useAppStore((state) => state.setCurrentView);
+  const isLeftSidebarOpen = useAppStore((state) => state.isLeftSidebarOpen);
+  const setIsLeftSidebarOpen = useAppStore((state) => state.setIsLeftSidebarOpen);
+  const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
+  const setIsRightSidebarOpen = useAppStore((state) => state.setIsRightSidebarOpen);
+  const showToast = useAppStore((state) => state.showToast);
+  const isSnippingActive = useAppStore((state) => state.isSnippingActive);
+  const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
+  const isQuickSettingsOpen = useAppStore((state) => state.isQuickSettingsOpen);
+  const isScreenshotModalOpen = useAppStore((state) => state.isScreenshotModalOpen);
+  const setIsAnnotationActive = useAppStore((state) => state.setIsAnnotationActive);
+  const setIsAreaZoomActive = useAppStore((state) => state.setIsAreaZoomActive);
+
+  const [isDragging, setIsDragging] = useState(false);
+  const [loadingFileName, setLoadingFileName] = useState('');
+
+  const isLeftPinnedByClickRef = useRef(false);
+  const isRightPinnedByClickRef = useRef(false);
+
+  const autoZenTimerRef = useRef(null);
+  const leftCloseTimerRef = useRef(null);
+  const rightCloseTimerRef = useRef(null);
+  const isCanceledRef = useRef(false);
+  const isProcessingRef = useRef(false);
+  const transitionTimerRef = useRef(null);
+  const postLoadTimerRef = useRef(null);
+  const isDraggingRef = useRef(false);
+
+  const isReadingMode = Boolean(comicData && currentView === 'reader');
+  const isAnyModalActive = Boolean(
+    isSnippingActive || isAreaZoomActive || isQuickSettingsOpen || isScreenshotModalOpen
+  );
+
+  const isReadingModeRef = useRef(isReadingMode);
+  isReadingModeRef.current = isReadingMode;
+
+  const cancelAutoZen = useCallback(() => {
+    if (autoZenTimerRef.current) {
+      clearTimeout(autoZenTimerRef.current);
+      autoZenTimerRef.current = null;
+    }
+  }, []);
+
+  // باز شدن موقت پنل راست در ابتدای ورود به کمیک و بسته شدن خودکار
+  const triggerAutoZen = useCallback(() => {
+    cancelAutoZen();
+    const prefs = useSettingsStore.getState().preferences;
+    const autoZenEnabled = prefs?.autoZenOnOpen !== false;
+    const autoZenDelay = prefs?.autoZenDelay || 2800;
+
+    setIsRightSidebarOpen(true);
+
+    if (autoZenEnabled) {
+      autoZenTimerRef.current = setTimeout(() => {
+        if (!isRightPinnedByClickRef.current) {
+          setIsRightSidebarOpen(false);
+        }
+        autoZenTimerRef.current = null;
+      }, autoZenDelay);
+    }
+  }, [cancelAutoZen, setIsRightSidebarOpen]);
+
+  // ۱. شنونده زنده پیشرفت استخراج فایل
+  useEffect(() => {
+    const unsubscribe = coreApi.onProgress((percent) => {
+      if (typeof percent === 'number') {
+        setLoadingProgress(Math.min(99, Math.max(5, percent)));
+      }
+    });
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [setLoadingProgress]);
+
+  // ۲. لغو فوری عملیات بارگذاری توسط کاربر
+  const handleCancelLoading = useCallback(async () => {
+    isCanceledRef.current = true;
+    isProcessingRef.current = false;
+    if (transitionTimerRef.current) {
+      clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = null;
+    }
+
+    try {
+      if (coreApi.cancelExtraction) {
+        await coreApi.cancelExtraction();
+      }
+    } catch (_) {}
+
+    setIsLoading(false);
+    setLoadingProgress(0);
+    setLoadingFileName('');
+    showToast('بارگذاری فایل متوقف شد', { type: 'info' });
+  }, [setIsLoading, setLoadingProgress, showToast]);
+
+  // ۳. کلید میانبر Escape برای لغو لودینگ در حالت انتظار
+  useEffect(() => {
+    if (!isLoading) return;
+    const handleEscCancel = (e) => {
+      if (e.key === 'Escape' || e.code === 'Escape') {
+        e.preventDefault();
+        handleCancelLoading();
+      }
+    };
+    window.addEventListener('keydown', handleEscCancel);
+    return () => window.removeEventListener('keydown', handleEscCancel);
+  }, [isLoading, handleCancelLoading]);
+
+  // ۴. بستن کامل کمیک، ذخیره پیشرفت معلق و آزادسازی حافظه رم و دیسک
+  const handleCloseCurrentComic = useCallback(async () => {
+    cancelAutoZen();
+    isRightPinnedByClickRef.current = false;
+    setIsAnnotationActive(false);
+    setIsAreaZoomActive(false);
+
+    try {
+      useLibraryStore.getState().flushPendingProgress?.();
+    } catch (_) {}
+
+    setComicData(null);
+    setCurrentView('home');
+    try {
+      if (coreApi.cleanupComicCache) {
+        await coreApi.cleanupComicCache();
+      }
+    } catch (_) {}
+  }, [
+    setComicData,
+    setCurrentView,
+    cancelAutoZen,
+    setIsAnnotationActive,
+    setIsAreaZoomActive,
+  ]);
+
+  useEffect(() => {
+    const onCloseComicEvent = () => {
+      handleCloseCurrentComic();
+    };
+    window.addEventListener('app:close-comic', onCloseComicEvent);
+    return () => window.removeEventListener('app:close-comic', onCloseComicEvent);
+  }, [handleCloseCurrentComic]);
+
+  // ۵. پردازش باز کردن فایل‌ها (کمیک، پوشه مانهوا و PDF)
+  const processFiles = useCallback(
+    async (inputFiles) => {
+      if (!inputFiles) return;
+
+      const rawList = Array.isArray(inputFiles) ? inputFiles : [inputFiles];
+      const filePaths = rawList
+        .map((item) => (typeof item === 'string' ? item : item?.path || item?.filePath))
+        .filter((p) => p && typeof p === 'string' && p.trim().length > 0);
+
+      if (filePaths.length === 0) return;
+
+      try {
+        useLibraryStore.getState().flushPendingProgress?.();
+      } catch (_) {}
+
+      if (isProcessingRef.current) {
+        try {
+          await coreApi.cancelExtraction();
+        } catch (_) {}
+      }
+
+      isProcessingRef.current = true;
+      isCanceledRef.current = false;
+      setIsAnnotationActive(false);
+      setIsAreaZoomActive(false);
+
+      const targetName = filePaths[0].split(/[\\/]/).pop() || '';
+      setLoadingFileName(targetName);
+      setIsLoading(true);
+      setLoadingProgress(8);
+
+      try {
+        const result = await coreApi.handleDrop(filePaths);
+
+        if (isCanceledRef.current || result?.canceled) {
+          setIsLoading(false);
+          setLoadingProgress(0);
+          setLoadingFileName('');
+          isProcessingRef.current = false;
+          return;
+        }
+
+        if (result && result.success) {
+          setLoadingProgress(100);
+
+          if (result.type !== 'pdf' && (!result.items || result.items.length === 0)) {
+            setIsLoading(false);
+            setLoadingProgress(0);
+            setLoadingFileName('');
+            isProcessingRef.current = false;
+            showToast('هیچ تصویر معتبری در این کمیک یافت نشد.', { type: 'error' });
+            return;
+          }
+
+          let savedPage = 1;
+          let savedTotalPages = result.items?.length || 1;
+
+          try {
+            const normTarget = result.filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+            const existingRecent = (useLibraryStore.getState().recentItems || []).find(
+              (r) =>
+                (r.path || r.filePath || '').trim().replace(/[\\/]+/g, '\\').toLowerCase() ===
+                normTarget
+            );
+
+            if (existingRecent) {
+              if (existingRecent.lastPage > 1) savedPage = Number(existingRecent.lastPage);
+              if (existingRecent.totalPages > 1) savedTotalPages = Number(existingRecent.totalPages);
+            }
+
+            const timeoutGuard = new Promise((resolve) => setTimeout(() => resolve(null), 300));
+            const progRes = await Promise.race([
+              coreApi.dbAction({
+                action: 'GET_PROGRESS',
+                payload: { filePath: result.filePath },
+              }),
+              timeoutGuard,
+            ]);
+
+            if (progRes?.progress) {
+              const dbPage = Number(progRes.progress.currentPage) || 1;
+              const dbTotal = Number(progRes.progress.totalPages) || 1;
+              if (dbTotal > 1) savedTotalPages = dbTotal;
+
+              if (result.type === 'pdf') {
+                savedPage = Math.max(1, dbPage);
+              } else {
+                const maxPages = result.items?.length || 1;
+                savedTotalPages = maxPages;
+                savedPage = Math.max(1, Math.min(dbPage, maxPages));
+              }
+            }
+          } catch (_) {}
+
+          if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+
+          transitionTimerRef.current = setTimeout(() => {
+            try {
+              if (isCanceledRef.current) return;
+
+              const comicPayload = {
+                type: result.type,
+                items: result.items || [],
+                fileName: result.fileName,
+                fileSize: result.fileSize,
+                filePath: result.filePath,
+                cover: result.cover || null,
+                savedResumePage: savedPage,
+                savedTotalPages: savedTotalPages,
+                dirInfo: result.dirInfo,
+                nextComic: result.nextComic,
+                prevComic: result.prevComic,
+              };
+
+              setComicData(comicPayload);
+              useReaderStore.getState().setCurrentPage(savedPage);
+              setCurrentView('reader');
+              triggerAutoZen();
+
+              if (postLoadTimerRef.current) clearTimeout(postLoadTimerRef.current);
+              postLoadTimerRef.current = setTimeout(() => {
+                postLoadTimerRef.current = null;
+                const libState = useLibraryStore.getState();
+
+                if (result.cover && typeof libState.cacheCover === 'function') {
+                  try {
+                    libState.cacheCover(result.filePath, result.cover);
+                  } catch (_) {}
+                }
+
+                if (typeof libState.addToRecent === 'function') {
+                  try {
+                    libState.addToRecent({
+                      path: result.filePath,
+                      name: result.fileName,
+                      type: result.type,
+                      fileSize: result.fileSize,
+                      cover: result.cover || null,
+                      totalPages:
+                        result.type === 'pdf' ? savedTotalPages : result.items?.length || 1,
+                      lastPage: savedPage,
+                    });
+                  } catch (_) {}
+                }
+              }, 300);
+            } catch (viewTransitionErr) {
+              console.error('View transition error:', viewTransitionErr);
+              showToast('خطا در ورود به نمای مطالعه', { type: 'error' });
+            } finally {
+              setIsLoading(false);
+              setLoadingProgress(0);
+              setLoadingFileName('');
+              isLeftPinnedByClickRef.current = false;
+              setIsLeftSidebarOpen(false);
+              isProcessingRef.current = false;
+              transitionTimerRef.current = null;
+            }
+          }, 30);
+        } else {
+          setIsLoading(false);
+          setLoadingProgress(0);
+          setLoadingFileName('');
+          isProcessingRef.current = false;
+          if (!result?.canceled) {
+            showToast(result?.error || 'خطا در بارگذاری کمیک یا سند نامعتبر', {
+              type: 'error',
+            });
+          }
+        }
+      } catch (error) {
+        console.error('File process error:', error);
+        setIsLoading(false);
+        setLoadingProgress(0);
+        setLoadingFileName('');
+        isProcessingRef.current = false;
+        showToast('خطای سیستمی در خواندن فایل از دیسک', { type: 'error' });
+      }
+    },
+    [
+      setComicData,
+      setIsLoading,
+      setLoadingProgress,
+      setIsLeftSidebarOpen,
+      setCurrentView,
+      setIsAnnotationActive,
+      setIsAreaZoomActive,
+      showToast,
+      triggerAutoZen,
+    ]
+  );
+
+  useKeyboard({
+    onOpenComic: processFiles,
+  });
+
+  useEffect(() => {
+    useReaderStore.getState().initZoomSettings?.();
+    useLibraryStore.getState().initLibrary?.();
+    useSettingsStore.getState().initSettings?.();
+
+    const handleBeforeUnload = () => {
+      try {
+        useLibraryStore.getState().flushPendingProgress?.();
+      } catch (_) {}
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
+  useEffect(() => {
+    const handleNavEvent = (e) => {
+      if (e.detail) processFiles(e.detail);
+    };
+    window.addEventListener('app:navigate-comic', handleNavEvent);
+    return () => window.removeEventListener('app:navigate-comic', handleNavEvent);
+  }, [processFiles]);
+
+  useEffect(() => {
+    return () => {
+      if (autoZenTimerRef.current) clearTimeout(autoZenTimerRef.current);
+      if (leftCloseTimerRef.current) clearTimeout(leftCloseTimerRef.current);
+      if (rightCloseTimerRef.current) clearTimeout(rightCloseTimerRef.current);
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      if (postLoadTimerRef.current) clearTimeout(postLoadTimerRef.current);
+    };
+  }, []);
+
+  const handleSelectFile = useCallback(async () => {
+    try {
+      const result = await coreApi.openFile();
+      if (result && result.success && result.filePath) {
+        processFiles(result.filePath);
+      } else if (result?.error && !result?.canceled) {
+        showToast(result.error, { type: 'error' });
+      }
+    } catch (e) {
+      console.error('Open file dialog error:', e);
+    }
+  }, [processFiles, showToast]);
+
+  const handleSelectFolder = useCallback(async () => {
+    try {
+      const result = await coreApi.openFolder();
+      if (result && result.success && result.filePath) {
+        processFiles(result.filePath);
+      } else if (result?.error && !result?.canceled) {
+        showToast(result.error, { type: 'error' });
+      }
+    } catch (e) {
+      console.error('Open folder dialog error:', e);
+    }
+  }, [processFiles, showToast]);
+
+  // مدیریت هاور سایدبارهای چپ و راست
+  const handleLeftMouseEnter = useCallback(() => {
+    cancelAutoZen();
+    if (leftCloseTimerRef.current) {
+      clearTimeout(leftCloseTimerRef.current);
+      leftCloseTimerRef.current = null;
+    }
+    setIsLeftSidebarOpen(true);
+  }, [cancelAutoZen, setIsLeftSidebarOpen]);
+
+  const handleLeftMouseLeave = useCallback(() => {
+    if (leftCloseTimerRef.current) clearTimeout(leftCloseTimerRef.current);
+    leftCloseTimerRef.current = setTimeout(() => {
+      if (!isLeftPinnedByClickRef.current) {
+        setIsLeftSidebarOpen(false);
+      }
+    }, 520);
+  }, [setIsLeftSidebarOpen]);
+
+  const handleToggleLeftByButton = useCallback(
+    (e) => {
+      e.stopPropagation();
+      if (leftCloseTimerRef.current) {
+        clearTimeout(leftCloseTimerRef.current);
+        leftCloseTimerRef.current = null;
+      }
+      const nextState = !useAppStore.getState().isLeftSidebarOpen;
+      isLeftPinnedByClickRef.current = nextState;
+      setIsLeftSidebarOpen(nextState);
+    },
+    [setIsLeftSidebarOpen]
+  );
+
+  const handleRightMouseEnter = useCallback(() => {
+    cancelAutoZen();
+    if (rightCloseTimerRef.current) {
+      clearTimeout(rightCloseTimerRef.current);
+      rightCloseTimerRef.current = null;
+    }
+    setIsRightSidebarOpen(true);
+  }, [cancelAutoZen, setIsRightSidebarOpen]);
+
+  const handleRightMouseLeave = useCallback(() => {
+    if (rightCloseTimerRef.current) clearTimeout(rightCloseTimerRef.current);
+    if (isReadingModeRef.current) {
+      rightCloseTimerRef.current = setTimeout(() => {
+        if (!isRightPinnedByClickRef.current) {
+          setIsRightSidebarOpen(false);
+        }
+      }, 520);
+    }
+  }, [setIsRightSidebarOpen]);
+
+  const handleToggleRightByButton = useCallback(
+    (e) => {
+      e.stopPropagation();
+      if (rightCloseTimerRef.current) {
+        clearTimeout(rightCloseTimerRef.current);
+        rightCloseTimerRef.current = null;
+      }
+      const nextState = !useAppStore.getState().isRightSidebarOpen;
+      isRightPinnedByClickRef.current = nextState;
+      setIsRightSidebarOpen(nextState);
+    },
+    [setIsRightSidebarOpen]
+  );
+
+  // مدیریت کشیدن و رها کردن فایل‌ها (Drag & Drop)
+  useEffect(() => {
+    const handleDragOver = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!isDraggingRef.current) {
+        isDraggingRef.current = true;
+        setIsDragging(true);
+      }
+    };
+
+    const handleDragLeave = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (
+        e.clientX <= 0 ||
+        e.clientY <= 0 ||
+        e.clientX >= window.innerWidth ||
+        e.clientY >= window.innerHeight
+      ) {
+        if (isDraggingRef.current) {
+          isDraggingRef.current = false;
+          setIsDragging(false);
+        }
+      }
+    };
+
+    const handleDrop = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      isDraggingRef.current = false;
+      setIsDragging(false);
+
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const files = Array.from(e.dataTransfer.files)
+          .map((file) => coreApi.getFilePath(file))
+          .filter(Boolean);
+
+        if (files.length > 0) processFiles(files);
+      }
+    };
+
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+    window.addEventListener('dragleave', handleDragLeave);
+
+    return () => {
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+      window.removeEventListener('dragleave', handleDragLeave);
+    };
+  }, [processFiles]);
+
+  if (isLoading) {
+    return (
+      <div style={styles.loadingContainer}>
+        <div style={styles.loadingCard}>
+          <div style={styles.spinnerBox}>
+            <Icons.Loader size={38} />
+          </div>
+
+          <h2 style={styles.loadingTitle}>در حال آماده‌سازی و استخراج کمیک...</h2>
+
+          {loadingFileName && (
+            <div style={styles.loadingFileBadge} title={loadingFileName}>
+              {loadingFileName}
+            </div>
+          )}
+
+          <div style={styles.progressWrap}>
+            <div style={styles.progressHeader}>
+              <span style={styles.progressLabel}>پیشرفت پردازش</span>
+              <span style={styles.progressPercent}>{loadingProgress}%</span>
+            </div>
+            <div style={styles.progressBarBg}>
+              <div
+                style={{
+                  ...styles.progressBarFill,
+                  transform: `scaleX(${Math.max(0, Math.min(100, loadingProgress)) / 100})`,
+                }}
+              />
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleCancelLoading}
+            style={styles.cancelBtn}
+            title="توقف بارگذاری فایل (Escape)"
+          >
+            <Icons.X size={15} />
+            <span>لغو عملیات بارگذاری</span>
+            <span style={styles.escBadge}>Esc</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const renderCenterContent = () => {
+    if (isReadingMode) {
+      return (
+        <div style={styles.readerInnerBox}>
+          {comicData.type === 'pdf' ? (
+            <PdfViewer filePath={comicData.filePath} />
+          ) : (
+            <VerticalViewer />
+          )}
+        </div>
+      );
+    }
+
+    switch (currentView) {
+      case 'library':
+        return <LibraryView onOpenComic={processFiles} />;
+      case 'recent':
+        return <RecentView onOpenComic={processFiles} />;
+      case 'favorites':
+        return <FavoritesView onOpenComic={processFiles} />;
+      case 'downloads':
+        return <DownloadsView />;
+      case 'settings':
+        return <SettingsView />;
+      case 'profile':
+        return <ProfileView />;
+      case 'home':
+      default:
+        return (
+          <HomeView
+            onSelectFile={handleSelectFile}
+            onSelectFolder={handleSelectFolder}
+            onOpenComic={processFiles}
+          />
+        );
+    }
+  };
+
+  return (
+    <div
+      style={{
+        ...styles.appContainer,
+        backgroundColor: isDragging ? '#141d23' : 'var(--bg)',
+      }}
+    >
+      {/* تاپ‌بار سراسری با اتوهاید هوشمند، زوم باکسی و دکمه انحصاری استودیو ویرایش */}
+      <TopBar
+        onOpenClick={handleSelectFile}
+        onOpenComic={processFiles}
+        isReaderActive={isReadingMode}
+      />
+
+      <div style={styles.mainLayout}>
+        {!isLeftSidebarOpen && (
+          <div onMouseEnter={handleLeftMouseEnter} style={styles.leftHotspot} />
+        )}
+
+        <div
+          onMouseEnter={handleLeftMouseEnter}
+          onMouseLeave={handleLeftMouseLeave}
+          style={{
+            ...styles.sidebarWrapper,
+            pointerEvents: isLeftSidebarOpen ? 'auto' : 'none',
+          }}
+        >
+          <Sidebar onMouseEnter={handleLeftMouseEnter} onMouseLeave={handleLeftMouseLeave} />
+        </div>
+
+        <main
+          className="panel"
+          style={{
+            ...styles.centerReader,
+            width: '100%',
+            padding: isReadingMode ? '0' : '10px',
+            backgroundColor: isReadingMode ? '#0a0f13' : 'var(--panel)',
+          }}
+        >
+          <button
+            type="button"
+            onClick={handleToggleLeftByButton}
+            style={{
+              ...styles.circleHandleBase,
+              left: isLeftSidebarOpen ? '236px' : '10px',
+              transform: isLeftSidebarOpen
+                ? 'translateY(-50%) rotate(180deg)'
+                : 'translateY(-50%) rotate(0deg)',
+              pointerEvents: isAnyModalActive ? 'none' : 'auto',
+              opacity: isAnyModalActive ? 0 : 1,
+            }}
+            title={isLeftSidebarOpen ? 'بستن منو' : 'باز کردن منو'}
+          >
+            <div style={styles.iconCenterWrapper}>
+              <Icons.ChevronRight size={18} />
+            </div>
+          </button>
+
+          {isReadingMode && (
+            <button
+              type="button"
+              onClick={handleToggleRightByButton}
+              style={{
+                ...styles.circleHandleBase,
+                right: isRightSidebarOpen ? '326px' : '10px',
+                transform: isRightSidebarOpen
+                  ? 'translateY(-50%) rotate(180deg)'
+                  : 'translateY(-50%) rotate(0deg)',
+              }}
+              style={{
+                ...styles.circleHandleBase,
+                right: isRightSidebarOpen ? '326px' : '10px',
+                transform: isRightSidebarOpen
+                  ? 'translateY(-50%) rotate(180deg)'
+                  : 'translateY(-50%) rotate(0deg)',
+                pointerEvents: isAnyModalActive ? 'none' : 'auto',
+                opacity: isAnyModalActive ? 0 : 1,
+              }}
+              title={isRightSidebarOpen ? 'بستن پنل صفحات' : 'باز کردن پنل صفحات'}
+            >
+              <div style={styles.iconCenterWrapper}>
+                <Icons.ChevronLeft size={18} />
+              </div>
+            </button>
+          )}
+
+          {renderCenterContent()}
+
+          {isReadingMode && <BottomControls />}
+        </main>
+
+        {isReadingMode && (
+          <div
+            onMouseEnter={handleRightMouseEnter}
+            onMouseLeave={handleRightMouseLeave}
+            style={{
+              ...styles.rightPanelWrapper,
+              pointerEvents: isRightSidebarOpen ? 'auto' : 'none',
+            }}
+          >
+            <RightPanel
+              onLoadComic={processFiles}
+              onOpenFolder={handleSelectFolder}
+              onMouseEnter={handleRightMouseEnter}
+              onMouseLeave={handleRightMouseLeave}
+            />
+          </div>
+        )}
+
+        {isReadingMode && !isRightSidebarOpen && (
+          <div onMouseEnter={handleRightMouseEnter} style={styles.rightHotspot} />
+        )}
+      </div>
+
+      {isDragging && (
+        <div style={styles.dragOverlay}>
+          <div style={styles.dragDropModal}>
+            <div style={styles.dragIconWrap}>
+              <Icons.FolderOpen size={46} />
+            </div>
+            <h3 style={styles.dragTitle}>فایل کمیک را اینجا رها کنید</h3>
+            <span style={styles.dragSub}>
+              پشتیبانی از CBZ, ZIP, CBR, RAR, PDF و پوشه‌های عکس
+            </span>
+          </div>
+        </div>
+      )}
+
+      <ContextMenu onOpenComic={processFiles} onOpenFile={handleSelectFile} />
+      <ScreenshotWidget />
+      <SnippingOverlay />
+      <AreaZoomOverlay />
+      <QuickSettingsModal />
+      <ToastHUD />
+    </div>
+  );
+}
+
+const styles = {
+  appContainer: {
+    height: '100vh',
+    width: '100vw',
+    display: 'flex',
+    flexDirection: 'column',
+    padding: '8px 16px 14px',
+    gap: '8px',
+    boxSizing: 'border-box',
+    position: 'relative',
+    overflow: 'hidden',
+    userSelect: 'none',
+  },
+  mainLayout: {
+    display: 'flex',
+    flex: 1,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  centerReader: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    position: 'relative',
+    borderRadius: 'var(--radius-lg)',
+  },
+  sidebarWrapper: {
+    display: 'flex',
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 42,
+  },
+  rightPanelWrapper: {
+    display: 'flex',
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    zIndex: 42,
+  },
+  leftHotspot: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: '12px',
+    zIndex: 38,
+  },
+  rightHotspot: {
+    position: 'absolute',
+    right: 0,
+    top: 0,
+    bottom: 0,
+    width: '12px',
+    zIndex: 38,
+  },
+  circleHandleBase: {
+    position: 'absolute',
+    top: '50%',
+    width: '38px',
+    height: '38px',
+    borderRadius: '50%',
+    backgroundColor: 'var(--panel2)',
+    borderWidth: '2px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    color: 'var(--text)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    zIndex: 46,
+    boxShadow: '0 4px 14px rgba(0,0,0,0.55)',
+    transition:
+      'left 0.3s cubic-bezier(0.16, 1, 0.3, 1), right 0.3s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease',
+    outline: 'none',
+    padding: 0,
+  },
+  iconCenterWrapper: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+    height: '100%',
+  },
+  readerInnerBox: {
+    width: '100%',
+    height: '100%',
+    overflow: 'hidden',
+  },
+  loadingContainer: {
+    backgroundColor: 'var(--bg)',
+    color: 'var(--text)',
+    height: '100vh',
+    width: '100vw',
+    display: 'flex',
+    justifyContent: 'center',
+    alignItems: 'center',
+    direction: 'rtl',
+    userSelect: 'none',
+  },
+  loadingCard: {
+    backgroundColor: 'var(--panel)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    borderRadius: '20px',
+    padding: '32px 36px',
+    width: '380px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '16px',
+    boxShadow: '0 20px 50px rgba(0, 0, 0, 0.65)',
+  },
+  spinnerBox: {
+    width: '64px',
+    height: '64px',
+    borderRadius: '18px',
+    backgroundColor: 'rgba(34, 211, 238, 0.1)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(34, 211, 238, 0.3)',
+    color: 'var(--accent)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontWeight: 700,
+    fontSize: '16px',
+    color: 'var(--text)',
+    margin: 0,
+  },
+  loadingFileBadge: {
+    fontFamily: 'var(--font-latin)',
+    fontWeight: 700,
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    backgroundColor: 'var(--panel2)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    padding: '4px 12px',
+    borderRadius: '8px',
+    maxWidth: '100%',
+    direction: 'ltr',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  progressWrap: {
+    width: '100%',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  progressHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  progressLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    fontWeight: 500,
+    color: 'var(--muted)',
+  },
+  progressPercent: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '11.5px',
+    fontWeight: 700,
+    color: 'var(--accent)',
+    direction: 'ltr',
+  },
+  progressBarBg: {
+    width: '100%',
+    height: '6px',
+    backgroundColor: 'var(--panel2)',
+    borderRadius: '4px',
+    overflow: 'hidden',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    position: 'relative',
+  },
+  progressBarFill: {
+    height: '100%',
+    width: '100%',
+    transformOrigin: 'left center',
+    backgroundColor: 'var(--accent)',
+    boxShadow: '0 0 10px var(--accent)',
+    transition: 'transform 0.15s ease-out',
+  },
+  cancelBtn: {
+    marginTop: '6px',
+    width: '100%',
+    padding: '10px 16px',
+    borderRadius: '12px',
+    backgroundColor: 'rgba(248, 81, 73, 0.12)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(248, 81, 73, 0.35)',
+    color: 'var(--danger)',
+    fontFamily: 'var(--font-fa)',
+    fontWeight: 700,
+    fontSize: '13px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '8px',
+    transition: 'all 0.2s ease',
+    outline: 'none',
+  },
+  escBadge: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '10.5px',
+    fontWeight: 600,
+    backgroundColor: 'rgba(248, 81, 73, 0.18)',
+    padding: '2px 6px',
+    borderRadius: '5px',
+    direction: 'ltr',
+  },
+  dragOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(10, 15, 19, 0.82)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    zIndex: 9999,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    pointerEvents: 'none',
+  },
+  dragDropModal: {
+    padding: '36px 48px',
+    borderRadius: '24px',
+    backgroundColor: 'var(--panel)',
+    borderWidth: '2px',
+    borderStyle: 'dashed',
+    borderColor: 'var(--accent)',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '12px',
+    boxShadow: '0 20px 60px rgba(0, 0, 0, 0.75)',
+  },
+  dragIconWrap: {
+    color: 'var(--accent)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dragTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '18px',
+    fontWeight: 800,
+    color: 'var(--text)',
+    margin: 0,
+  },
+  dragSub: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    margin: 0,
+  },
+};
