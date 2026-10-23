@@ -35,8 +35,12 @@ const useAppStore = create((set, get) => ({
   annotationColor: '#06b6d4',
   annotationStrokeWidth: 4,
   annotationOpacity: 0.85,
+  annotationFontFamily: "'Estedad', 'Vazirmatn', sans-serif",
+  annotationFontSize: 22,
+  annotationArrowStyle: 'straight', // 'straight' | 'curved'
   selectedAnnotationId: null,
   selectedAnnotationPage: null,
+  selectedAnnotationTool: null,
 
   // اعلان HUD
   toast: {
@@ -66,10 +70,10 @@ const useAppStore = create((set, get) => ({
     }
 
     const defaultIcons = {
-      success: '✅',
-      error: '❌',
-      warning: '⚠️',
-      info: 'ℹ️',
+      success: '',
+      error: '',
+      warning: '',
+      info: '',
     };
 
     set({
@@ -77,7 +81,7 @@ const useAppStore = create((set, get) => ({
         visible: true,
         message,
         type,
-        icon: icon || defaultIcons[type] || 'ℹ️',
+        icon: icon || defaultIcons[type] || '',
         id: Date.now(),
       },
     });
@@ -179,7 +183,7 @@ const useAppStore = create((set, get) => ({
       isContextMenuOpen: false,
       ...(next
         ? { isSnippingActive: false, isAreaZoomActive: false }
-        : { selectedAnnotationId: null, selectedAnnotationPage: null }),
+        : { selectedAnnotationId: null, selectedAnnotationPage: null, selectedAnnotationTool: null }),
     });
   },
 
@@ -192,7 +196,7 @@ const useAppStore = create((set, get) => ({
         isSnippingActive: false,
         isAreaZoomActive: false,
         ...(!nextActive
-          ? { selectedAnnotationId: null, selectedAnnotationPage: null }
+          ? { selectedAnnotationId: null, selectedAnnotationPage: null, selectedAnnotationTool: null }
           : {}),
       };
     }),
@@ -239,10 +243,20 @@ const useAppStore = create((set, get) => ({
     });
   },
 
-  setSelectedAnnotation: (id, pageNumber = null) =>
+  setAnnotationFontFamily: (family) =>
+    set({ annotationFontFamily: family || "'Estedad', 'Vazirmatn', sans-serif" }),
+
+  setAnnotationFontSize: (size) =>
+    set({ annotationFontSize: Math.max(14, Math.min(76, Number(size) || 22)) }),
+
+  setAnnotationArrowStyle: (style) =>
+    set({ annotationArrowStyle: style === 'curved' ? 'curved' : 'straight' }),
+
+  setSelectedAnnotation: (id, pageNumber = null, tool = null) =>
     set({
       selectedAnnotationId: id || null,
       selectedAnnotationPage: id ? pageNumber : null,
+      selectedAnnotationTool: id ? tool : null,
     }),
 
   // همگام‌سازی نوار ابزار بالا با ویژگی‌های شکل انتخاب‌شده (Two-Way Binding)
@@ -259,6 +273,14 @@ const useAppStore = create((set, get) => ({
       annotationHasFill:
         typeof item.hasFill === 'boolean' ? item.hasFill : state.annotationHasFill,
       ...(item.boxStyle ? { annotationBoxStyle: item.boxStyle } : {}),
+      ...(item.tool ? { selectedAnnotationTool: item.tool } : {}),
+      ...(item.fontFamily ? { annotationFontFamily: item.fontFamily } : {}),
+      ...(typeof item.fontSize === 'number'
+        ? { annotationFontSize: Math.max(14, Math.min(76, item.fontSize)) }
+        : {}),
+      ...(item.arrowStyle
+        ? { annotationArrowStyle: item.arrowStyle === 'curved' ? 'curved' : 'straight' }
+        : {}),
     }));
   },
 
@@ -284,6 +306,7 @@ const useAppStore = create((set, get) => ({
             isAreaZoomActive: false,
             selectedAnnotationId: null,
             selectedAnnotationPage: null,
+            selectedAnnotationTool: null,
           }
         : {}),
     }),

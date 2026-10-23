@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import { useRef, useCallback } from 'react';
 import useAppStore from '../../store/useAppStore';
 import Icons from '../common/Icons';
 import { PRESET_ANNOTATION_COLORS } from '../../utils/annotationEngine';
@@ -15,9 +15,21 @@ const STUDIO_TOOLS = [
 ];
 
 const BOX_STYLES = [
-  { id: 'cloud', label: '☁️ کادر ابری' },
+  { id: 'cloud', label: 'کادر ابری' },
   { id: 'rect', label: 'مستطیل' },
   { id: 'round', label: 'گوشه گرد' },
+];
+
+const ARROW_STYLES = [
+  { id: 'straight', label: 'فلش صاف' },
+  { id: 'curved', label: 'فلش منحنی' },
+];
+
+// فونت‌های باندل‌شده آفلاین پروژه
+const FONT_OPTIONS = [
+  { id: "'Estedad', 'Vazirmatn', sans-serif", label: 'استعداد' },
+  { id: "'Manrope', sans-serif", label: 'منروپ' },
+  { id: "'JetBrains Mono', monospace", label: 'مونو' },
 ];
 
 export function AnnotationToolbar({
@@ -38,7 +50,11 @@ export function AnnotationToolbar({
   const annotationColor = useAppStore((state) => state.annotationColor || '#06b6d4');
   const annotationStrokeWidth = useAppStore((state) => state.annotationStrokeWidth || 4);
   const annotationOpacity = useAppStore((state) => state.annotationOpacity ?? 0.85);
+  const annotationFontFamily = useAppStore((state) => state.annotationFontFamily);
+  const annotationFontSize = useAppStore((state) => state.annotationFontSize ?? 22);
+  const annotationArrowStyle = useAppStore((state) => state.annotationArrowStyle || 'straight');
   const selectedAnnotationId = useAppStore((state) => state.selectedAnnotationId);
+  const selectedAnnotationTool = useAppStore((state) => state.selectedAnnotationTool);
 
   const setAnnotationTool = useAppStore((state) => state.setAnnotationTool);
   const setAnnotationBoxStyle = useAppStore((state) => state.setAnnotationBoxStyle);
@@ -46,6 +62,9 @@ export function AnnotationToolbar({
   const setAnnotationColor = useAppStore((state) => state.setAnnotationColor);
   const setAnnotationStrokeWidth = useAppStore((state) => state.setAnnotationStrokeWidth);
   const setAnnotationOpacity = useAppStore((state) => state.setAnnotationOpacity);
+  const setAnnotationFontFamily = useAppStore((state) => state.setAnnotationFontFamily);
+  const setAnnotationFontSize = useAppStore((state) => state.setAnnotationFontSize);
+  const setAnnotationArrowStyle = useAppStore((state) => state.setAnnotationArrowStyle);
   const setIsAnnotationActive = useAppStore((state) => state.setIsAnnotationActive);
   const showToast = useAppStore((state) => state.showToast);
 
@@ -73,9 +92,34 @@ export function AnnotationToolbar({
     (e) => {
       const val = parseInt(e.target.value, 10) || 4;
       setAnnotationStrokeWidth(val);
-      broadcastSelectedPropertyPatch({ strokeWidth: val, fontSize: val * 5 });
+      broadcastSelectedPropertyPatch({ strokeWidth: val });
     },
     [setAnnotationStrokeWidth, broadcastSelectedPropertyPatch]
+  );
+
+  const handleFontFamilySelect = useCallback(
+    (fontId) => {
+      setAnnotationFontFamily(fontId);
+      broadcastSelectedPropertyPatch({ fontFamily: fontId });
+    },
+    [setAnnotationFontFamily, broadcastSelectedPropertyPatch]
+  );
+
+  const handleFontSizeChange = useCallback(
+    (e) => {
+      const val = Math.max(14, Math.min(76, parseInt(e.target.value, 10) || 22));
+      setAnnotationFontSize(val);
+      broadcastSelectedPropertyPatch({ fontSize: val });
+    },
+    [setAnnotationFontSize, broadcastSelectedPropertyPatch]
+  );
+
+  const handleArrowStyleSelect = useCallback(
+    (styleId) => {
+      setAnnotationArrowStyle(styleId);
+      broadcastSelectedPropertyPatch({ arrowStyle: styleId });
+    },
+    [setAnnotationArrowStyle, broadcastSelectedPropertyPatch]
   );
 
   const handleOpacityChange = useCallback(
@@ -136,7 +180,12 @@ export function AnnotationToolbar({
   const strokeFillPct = ((annotationStrokeWidth - 1) / 23) * 100;
   const opacityFillPct = ((opacityPercent - 15) / 85) * 100;
   const showBoxSubOptions =
-    annotationTool === 'box' || Boolean(selectedAnnotationId);
+    annotationTool === 'box' || selectedAnnotationTool === 'box';
+  const showArrowSubOptions =
+    annotationTool === 'arrow' || selectedAnnotationTool === 'arrow';
+  const showTextSubOptions =
+    annotationTool === 'text' || selectedAnnotationTool === 'text';
+  const fontSizeFillPct = ((annotationFontSize - 14) / 62) * 100;
 
   return (
     <div
@@ -242,6 +291,75 @@ export function AnnotationToolbar({
         </>
       )}
 
+      {/* ۲ب. زیرمجموعه استایل فلش (صاف / منحنی) */}
+      {showArrowSubOptions && (
+        <>
+          <div style={styles.group}>
+            <div style={styles.subStylePills}>
+              {ARROW_STYLES.map((a) => {
+                const isSelected = annotationArrowStyle === a.id;
+                return (
+                  <button
+                    key={a.id}
+                    type="button"
+                    onClick={() => handleArrowStyleSelect(a.id)}
+                    style={{
+                      ...styles.pillOpt,
+                      ...(isSelected ? styles.pillOptActive : {}),
+                    }}
+                  >
+                    {a.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div style={styles.divider} />
+        </>
+      )}
+
+      {/* ۲ج. زیرمجموعه فونت متن (خانواده + اندازه) */}
+      {showTextSubOptions && (
+        <>
+          <div style={styles.group}>
+            <div style={styles.subStylePills}>
+              {FONT_OPTIONS.map((f) => {
+                const isSelected = annotationFontFamily === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    type="button"
+                    onClick={() => handleFontFamilySelect(f.id)}
+                    style={{
+                      ...styles.pillOpt,
+                      ...(isSelected ? styles.pillOptActive : {}),
+                    }}
+                  >
+                    {f.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={styles.sliderUnit} title="اندازه فونت متن">
+              <span style={styles.sliderTitle}>فونت:</span>
+              <input
+                type="range"
+                min="14"
+                max="76"
+                value={annotationFontSize}
+                onChange={handleFontSizeChange}
+                style={{
+                  ...styles.customRange,
+                  background: `linear-gradient(to left, #22d3ee 0%, #22d3ee ${fontSizeFillPct}%, rgba(255,255,255,0.14) ${fontSizeFillPct}%, rgba(255,255,255,0.14) 100%)`,
+                }}
+              />
+              <span style={styles.sliderBadge}>{annotationFontSize}px</span>
+            </div>
+          </div>
+          <div style={styles.divider} />
+        </>
+      )}
+
       {/* ۳. پالت رنگ + انتخابگر رنگ سفارشی */}
       <div style={styles.group}>
         <div style={styles.colorSwatches}>
@@ -279,7 +397,7 @@ export function AnnotationToolbar({
 
       {/* ۴. اسلایدرهای اختصاصی ضخامت و شفافیت با بج مونو */}
       <div style={styles.group}>
-        <div style={styles.sliderUnit} title="ضخامت خط، کادر یا اندازه فونت">
+        <div style={styles.sliderUnit} title="ضخامت خط و کادر">
           <span style={styles.sliderTitle}>ضخامت:</span>
           <input
             type="range"

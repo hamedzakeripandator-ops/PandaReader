@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import useAppStore from '../../store/useAppStore';
 import useReaderStore from '../../store/useReaderStore';
-import Icons from '../common/Icons';
+
 import { AnnotationToolbar } from './AnnotationToolbar';
 import {
   VIEWBOX_SIZE,
@@ -14,6 +14,9 @@ import {
   findTopAnnotationAtPoint,
   moveAnnotationByDelta,
   resizeAnnotationWithHandle,
+  penPointsToOutlinePath,
+  generateCurvedArrowGeometry,
+  defaultCurveControl,
 } from '../../utils/annotationEngine';
 
 // بازصادر کردن نوار ابزار برای سازگاری کامل با ایمپورت‌های PdfViewer و VerticalViewer
@@ -30,6 +33,8 @@ const normalizeItem = (raw) => {
     color: raw.color || '#06b6d4',
     strokeWidth: Number(raw.strokeWidth) || 4,
     opacity: typeof raw.opacity === 'number' ? raw.opacity : 0.85,
+    arrowStyle: raw.arrowStyle === 'curved' ? 'curved' : 'straight',
+    fontFamily: raw.fontFamily || null,
   };
 };
 
@@ -45,6 +50,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const annotationColor = useAppStore((state) => state.annotationColor || '#06b6d4');
   const annotationStrokeWidth = useAppStore((state) => state.annotationStrokeWidth || 4);
   const annotationOpacity = useAppStore((state) => state.annotationOpacity ?? 0.85);
+  const annotationFontFamily = useAppStore((state) => state.annotationFontFamily);
+  const annotationFontSize = useAppStore((state) => state.annotationFontSize ?? 22);
+  const annotationArrowStyle = useAppStore((state) => state.annotationArrowStyle || 'straight');
 
   const selectedAnnotationId = useAppStore((state) => state.selectedAnnotationId);
   const selectedAnnotationPage = useAppStore((state) => state.selectedAnnotationPage);
@@ -55,6 +63,32 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const [draftShape, setDraftShape] = useState(null);
   const [liveItemsOverride, setLiveItemsOverride] = useState(null);
   const [textEditorState, setTextEditorState] = useState(null); // { x, y, value, editId, fontSize, color }
+  const [stickyDrafts, setStickyDrafts] = useState({}); // متن تایپ‌شده ولی هنوز کامیت‌نشده
+  const stickyTimers = useRef({});
+  const stickyDraftsRef = useRef({});
+  const itemsRef = useRef([]);
+
+  // کامیت debounceشده متن استیکی: هر کلید = رندر محلی، ذخیره DB هر ۶۰۰ms یا با blur
+  const flushStickyDraft = useCallback((id) => {
+    const t = stickyTimers.current[id];
+    if (t) { clearTimeout(t); delete stickyTimers.current[id]; }
+    if (!(id in stickyDraftsRef.current)) return;
+    const val = stickyDraftsRef.current[id];
+    delete stickyDraftsRef.current[id];
+    setStickyDrafts((prev) => { const n = { ...prev }; delete n[id]; return n; });
+    const list = itemsRef.current.map((i) => (i.id === id ? { ...i, text: val } : i));
+    onCommitPageItems?.(pageNumber, list);
+  }, [pageNumber, onCommitPageItems]);
+
+  const handleStickyTextChange = useCallback((id, val) => {
+    stickyDraftsRef.current[id] = val;
+    setStickyDrafts((prev) => ({ ...prev, [id]: val }));
+    const t = stickyTimers.current[id];
+    if (t) clearTimeout(t);
+    stickyTimers.current[id] = setTimeout(() => flushStickyDraft(id), 600);
+  }, [flushStickyDraft]);
+
+  useEffect(() => () => { Object.values(stickyTimers.current).forEach(clearTimeout); }, []);
 
   const wrapperRef = useRef(null);
   const interactionRef = useRef({
@@ -71,6 +105,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     const source = liveItemsOverride || items || [];
     return source.map(normalizeItem).filter(Boolean);
   }, [items, liveItemsOverride]);
+  itemsRef.current = normalizedItems;
 
   const isSelectedOnThisPage =
     isAnnotationActive &&
@@ -135,7 +170,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       const next = [...normalizedItems, newImg];
       onCommitPageItems?.(pageNumber, next);
       setAnnotationTool('select');
-      setSelectedAnnotation(newImg.id, pageNumber);
+      setSelectedAnnotation(newImg.id, pageNumber, 'image');
     },
     [
       annotationColor,
@@ -204,7 +239,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     const shifted = moveAnnotationByDelta(cloned, cloned, 28, 28);
     const next = [...normalizedItems, shifted];
     onCommitPageItems?.(pageNumber, next);
-    setSelectedAnnotation(shifted.id, pageNumber);
+    setSelectedAnnotation(shifted.id, pageNumber, shifted.tool);
   }, [selectedItem, normalizedItems, pageNumber, onCommitPageItems, setSelectedAnnotation]);
 
   const handleMoveLayer = useCallback(
@@ -336,7 +371,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     if (annotationTool === 'select') {
       const hitItem = findTopAnnotationAtPoint(normalizedItems, pt, 14);
       if (hitItem) {
-        setSelectedAnnotation(hitItem.id, pageNumber);
+        setSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
         syncToolbarWithSelectedItem(hitItem);
         interactionRef.current = {
           mode: 'move',
@@ -361,8 +396,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         y: pt.y,
         value: '',
         editId: null,
-        fontSize: Math.max(16, annotationStrokeWidth * 5),
+        fontSize: annotationFontSize,
         color: annotationColor,
+        fontFamily: annotationFontFamily,
       });
       return;
     }
@@ -403,6 +439,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     const newDraft = {
       id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       tool: annotationTool,
+      arrowStyle: annotationTool === 'arrow' ? annotationArrowStyle : 'straight',
       boxStyle: annotationBoxStyle,
       hasFill: annotationHasFill,
       color: annotationColor,
@@ -499,6 +536,12 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
           ey = currentDraft.startY + (pt.y >= currentDraft.startY ? side : -side);
         }
         const updated = { ...currentDraft, endX: ex, endY: ey };
+        // پیش‌نمایش زنده خمیدگی برای فلش منحنی
+        if (currentDraft.tool === 'arrow' && currentDraft.arrowStyle === 'curved') {
+          const cc = defaultCurveControl(currentDraft.startX, currentDraft.startY, ex, ey);
+          updated.cx = cc.x;
+          updated.cy = cc.y;
+        }
         draftRef.current = updated;
         setDraftShape(updated);
       }
@@ -529,7 +572,16 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
           : Math.hypot(finished.endX - finished.startX, finished.endY - finished.startY) >= 8;
 
       if (isValid) {
-        const next = [...normalizedItems, finished];
+        const finalItem = { ...finished };
+        if (finalItem.tool === 'arrow') {
+          if (!finalItem.arrowStyle) finalItem.arrowStyle = annotationArrowStyle || 'straight';
+          if (finalItem.arrowStyle === 'curved' && !Number.isFinite(finalItem.cx)) {
+            const cc = defaultCurveControl(finalItem.startX, finalItem.startY, finalItem.endX, finalItem.endY);
+            finalItem.cx = cc.x;
+            finalItem.cy = cc.y;
+          }
+        }
+        const next = [...normalizedItems, finalItem];
         onCommitPageItems?.(pageNumber, next);
       }
     }
@@ -565,14 +617,15 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         startX: textEditorState.x,
         startY: textEditorState.y,
         color: textEditorState.color || annotationColor,
-        fontSize: textEditorState.fontSize || Math.max(16, annotationStrokeWidth * 5),
+        fontFamily: textEditorState.fontFamily || annotationFontFamily,
+        fontSize: textEditorState.fontSize || annotationFontSize,
         strokeWidth: annotationStrokeWidth,
         opacity: annotationOpacity,
       };
       const next = [...normalizedItems, newText];
       onCommitPageItems?.(pageNumber, next);
       setAnnotationTool('select');
-      setSelectedAnnotation(newText.id, pageNumber);
+      setSelectedAnnotation(newText.id, pageNumber, 'text');
     }
 
     setTextEditorState(null);
@@ -612,9 +665,10 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       );
     }
 
-    // ۲. قلم نرم آزاد
+    // ۲. قلم نرم آزاد — رندر پهنای متغیر با perfect-freehand
     if (item.tool === 'pen') {
-      const d = pointsToSmoothSvgPath(item.points);
+      const outline = penPointsToOutlinePath(item.points, strokeW);
+      const d = outline ? outline.path : pointsToSmoothSvgPath(item.points);
       return (
         <g key={item.id} data-id={item.id}>
           <path
@@ -623,15 +677,19 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             stroke="transparent"
             strokeWidth={Math.max(18, strokeW + 12)}
           />
-          <path
-            d={d}
-            fill="none"
-            stroke={item.color}
-            strokeWidth={strokeW}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={opacity}
-          />
+          {outline ? (
+            <path d={outline.path} fill={item.color} opacity={opacity} />
+          ) : (
+            <path
+              d={d}
+              fill="none"
+              stroke={item.color}
+              strokeWidth={strokeW}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={opacity}
+            />
+          )}
         </g>
       );
     }
@@ -677,8 +735,47 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       );
     }
 
-    // ۴. فلش اشاره‌گر مهندسی
+    // ۴. فلش اشاره‌گر مهندسی (صاف یا منحنی ۳ نقطه‌ای)
     if (item.tool === 'arrow') {
+      const isCurved =
+        item.arrowStyle === 'curved' &&
+        Number.isFinite(item.cx) &&
+        Number.isFinite(item.cy);
+      if (isCurved) {
+        const cgeom = generateCurvedArrowGeometry(
+          item.startX,
+          item.startY,
+          item.cx,
+          item.cy,
+          item.endX,
+          item.endY,
+          strokeW
+        );
+        return (
+          <g key={item.id} data-id={item.id}>
+            <path
+              d={cgeom.shaftPath}
+              fill="none"
+              stroke="transparent"
+              strokeWidth={Math.max(20, strokeW + 14)}
+            />
+            <path
+              d={cgeom.shaftPath}
+              fill="none"
+              stroke={item.color}
+              strokeWidth={strokeW}
+              strokeLinecap="round"
+              opacity={opacity}
+            />
+            <polygon
+              points={cgeom.headPoints}
+              fill={item.color}
+              opacity={opacity}
+              strokeLinejoin="round"
+            />
+          </g>
+        );
+      }
       const geom = generateArrowGeometry(
         item.startX,
         item.startY,
@@ -780,7 +877,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             fontSize={fontSize}
             opacity={opacity}
             style={{
-              fontFamily: 'var(--font-fa), sans-serif',
+              fontFamily: item.fontFamily || 'var(--font-fa), sans-serif',
               fontWeight: 800,
               direction: 'rtl',
               userSelect: 'none',
@@ -804,6 +901,12 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     if (!selectedItem || annotationTool !== 'select') return null;
 
     if (selectedItem.tool === 'arrow') {
+      const curveX = Number.isFinite(selectedItem.cx)
+        ? selectedItem.cx
+        : (selectedItem.startX + selectedItem.endX) / 2;
+      const curveY = Number.isFinite(selectedItem.cy)
+        ? selectedItem.cy
+        : (selectedItem.startY + selectedItem.endY) / 2;
       return (
         <g>
           <line
@@ -836,6 +939,22 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             data-handle="head"
             style={{ cursor: 'move' }}
           />
+          {/* هندل خمیدگی فلش منحنی — کشیدن آن فلش را خمیده می‌کند */}
+          <rect
+            x={curveX - 7}
+            y={curveY - 7}
+            width="14"
+            height="14"
+            rx="3"
+            transform={`rotate(45 ${curveX} ${curveY})`}
+            fill="#0a0f13"
+            stroke="#facc15"
+            strokeWidth="2.5"
+            data-handle="curve"
+            style={{ cursor: 'move' }}
+          >
+            <title>خمیدگی فلش</title>
+          </rect>
         </g>
       );
     }
@@ -957,7 +1076,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
               }
 
               setAnnotationTool('select');
-              setSelectedAnnotation(st.id, pageNumber);
+              setSelectedAnnotation(st.id, pageNumber, 'sticky');
               syncToolbarWithSelectedItem(st);
 
               const pt = getSvgCoords(e.clientX, e.clientY);
@@ -993,15 +1112,10 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
               )}
             </div>
             <textarea
-              value={st.text || ''}
+              value={stickyDrafts[st.id] ?? st.text ?? ''}
               placeholder="نکته را بنویسید..."
-              onChange={(e) => {
-                const val = e.target.value;
-                const next = normalizedItems.map((i) =>
-                  i.id === st.id ? { ...i, text: val } : i
-                );
-                onCommitPageItems?.(pageNumber, next);
-              }}
+              onChange={(e) => handleStickyTextChange(st.id, e.target.value)}
+              onBlur={() => flushStickyDraft(st.id)}
               style={styles.stickyTextarea}
             />
           </div>

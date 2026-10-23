@@ -1,3 +1,5 @@
+import { getStroke } from 'perfect-freehand';
+
 // موتور ریاضی و هندسی استودیو ویرایش و حاشیه‌نویسی (Normalized 1000x1000 Coordinate Space)
 
 export const VIEWBOX_SIZE = 1000;
@@ -173,6 +175,11 @@ export function getItemBounds(item) {
 
   // ج: قلم نرم و ماژیک هایلایت
   if (Array.isArray(item.points) && item.points.length > 0) {
+    // برای قلم نرم، کادر از روی outline پهنای متغیر perfect-freehand محاسبه می‌شود
+    if (item.tool === 'pen') {
+      const ob = getPenOutlineBounds(item.points, strokeW);
+      if (ob) return ob;
+    }
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -211,11 +218,17 @@ export function getItemBounds(item) {
 
   if (item.tool === 'arrow') {
     const pad = Math.max(14, strokeW * 2.5);
+    let ax1 = minX, ay1 = minY, ax2 = minX + w, ay2 = minY + h;
+    // نقطه کنترل فلش منحنی هم داخل کادر محاطی می‌آید
+    if (item.arrowStyle === 'curved' && Number.isFinite(item.cx) && Number.isFinite(item.cy)) {
+      ax1 = Math.min(ax1, item.cx); ay1 = Math.min(ay1, item.cy);
+      ax2 = Math.max(ax2, item.cx); ay2 = Math.max(ay2, item.cy);
+    }
     return {
-      x: minX - pad,
-      y: minY - pad,
-      width: w + pad * 2,
-      height: h + pad * 2,
+      x: ax1 - pad,
+      y: ay1 - pad,
+      width: Math.max(20, ax2 - ax1 + pad * 2),
+      height: Math.max(20, ay2 - ay1 + pad * 2),
     };
   }
 
@@ -284,14 +297,24 @@ export function hitTestAnnotationItem(item, pt, extraTolerance = 14) {
     );
   }
 
-  // فلش اشاره‌گر
+  // فلش اشاره‌گر (صاف یا منحنی)
   if (item.tool === 'arrow') {
     const tol = Math.max(extraTolerance, strokeW * 2.5);
-    const d = distanceToSegment(
-      pt,
-      { x: item.startX, y: item.startY },
-      { x: item.endX, y: item.endY }
-    );
+    let d;
+    if (item.arrowStyle === 'curved' && Number.isFinite(item.cx) && Number.isFinite(item.cy)) {
+      d = distanceToQuadraticBezier(
+        pt,
+        { x: item.startX, y: item.startY },
+        { x: item.cx, y: item.cy },
+        { x: item.endX, y: item.endY }
+      );
+    } else {
+      d = distanceToSegment(
+        pt,
+        { x: item.startX, y: item.startY },
+        { x: item.endX, y: item.endY }
+      );
+    }
     return d <= tol;
   }
 
@@ -354,6 +377,8 @@ export function moveAnnotationByDelta(item, original, dx, dy) {
   next.startY = Number((original.startY + dy).toFixed(1));
   next.endX = Number((original.endX + dx).toFixed(1));
   next.endY = Number((original.endY + dy).toFixed(1));
+  if (Number.isFinite(original.cx)) next.cx = Number((original.cx + dx).toFixed(1));
+  if (Number.isFinite(original.cy)) next.cy = Number((original.cy + dy).toFixed(1));
   return next;
 }
 
@@ -361,8 +386,14 @@ export function moveAnnotationByDelta(item, original, dx, dy) {
 export function resizeAnnotationWithHandle(item, handle, currentPt, orig) {
   const next = { ...item };
 
-  // هندل‌های دوگانه اختصاصی فلش (سر و ته آزاد)
+  // هندل‌های فلش: سر و ته آزاد + هندل خمیدگی منحنی
   if (orig.tool === 'arrow') {
+    if (handle === 'curve') {
+      next.cx = Number(currentPt.x.toFixed(1));
+      next.cy = Number(currentPt.y.toFixed(1));
+      next.arrowStyle = 'curved';
+      return next;
+    }
     if (handle === 'tail') {
       next.startX = currentPt.x;
       next.startY = currentPt.y;
@@ -453,4 +484,124 @@ export function resizeAnnotationWithHandle(item, handle, currentPt, orig) {
   next.endX = maxX;
   next.endY = maxY;
   return next;
+}
+
+// ============================================================================
+// فاز ۳ — فلش منحنی ۳ نقطه‌ای و قلم perfect-freehand
+// ============================================================================
+
+// نقطه روی منحنی بزیه درجه ۲ در پارامتر t
+export function quadraticPoint(p0, pc, p2, t) {
+  const u = 1 - t;
+  return {
+    x: u * u * p0.x + 2 * u * t * pc.x + t * t * p2.x,
+    y: u * u * p0.y + 2 * u * t * pc.y + t * t * p2.y,
+  };
+}
+
+// بردار مماس منحنی در t (برای جهت‌دهی نوک پیکان)
+export function quadraticTangent(p0, pc, p2, t) {
+  return {
+    x: 2 * (1 - t) * (pc.x - p0.x) + 2 * t * (p2.x - pc.x),
+    y: 2 * (1 - t) * (pc.y - p0.y) + 2 * t * (p2.y - pc.y),
+  };
+}
+
+// فاصله نقطه تا منحنی بزیه (نمونه‌برداری از پاره‌خط‌ها)
+export function distanceToQuadraticBezier(pt, p0, pc, p2, samples = 16) {
+  let best = Infinity;
+  let prev = p0;
+  for (let i = 1; i <= samples; i++) {
+    const cur = quadraticPoint(p0, pc, p2, i / samples);
+    const d = distanceToSegment(pt, prev, cur);
+    if (d < best) best = d;
+    prev = cur;
+  }
+  return best;
+}
+
+// مسیر shaft منحنی؛ headCutback انتها را برای جا دادن نوک پیکان کوتاه می‌کند
+export function curvedShaftPath(x1, y1, cx, cy, x2, y2, headCutback = 0) {
+  let ex = x2, ey = y2;
+  if (headCutback > 0) {
+    const tan = quadraticTangent({ x: x1, y: y1 }, { x: cx, y: cy }, { x: x2, y: y2 }, 1);
+    const len = Math.hypot(tan.x, tan.y) || 1;
+    ex = x2 - (tan.x / len) * headCutback;
+    ey = y2 - (tan.y / len) * headCutback;
+  }
+  return `M ${x1.toFixed(1)} ${y1.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${ex.toFixed(1)} ${ey.toFixed(1)}`;
+}
+
+// هندسه کامل فلش منحنی: shaft خمیده + نوک پیکان در جهت مماس انتهایی
+export function generateCurvedArrowGeometry(x1, y1, cx, cy, x2, y2, strokeW = 4) {
+  const tan = quadraticTangent({ x: x1, y: y1 }, { x: cx, y: cy }, { x: x2, y: y2 }, 1);
+  if (Math.hypot(tan.x, tan.y) < 1e-6) {
+    return generateArrowGeometry(x1, y1, x2, y2, strokeW); // fallback به فلش صاف
+  }
+  const headSize = Math.max(16, Math.min(38, 14 + strokeW * 2.5));
+  const angle = Math.atan2(tan.y, tan.x);
+  const spread = Math.PI / 6.4;
+  const leftX = x2 - headSize * Math.cos(angle - spread);
+  const leftY = y2 - headSize * Math.sin(angle - spread);
+  const rightX = x2 - headSize * Math.cos(angle + spread);
+  const rightY = y2 - headSize * Math.sin(angle + spread);
+  const notchX = x2 - Math.cos(angle) * (headSize * 0.72);
+  const notchY = y2 - Math.sin(angle) * (headSize * 0.72);
+  return {
+    shaftPath: curvedShaftPath(x1, y1, cx, cy, x2, y2, headSize * 0.62),
+    headPoints: `${x2.toFixed(1)},${y2.toFixed(1)} ${leftX.toFixed(1)},${leftY.toFixed(1)} ${notchX.toFixed(1)},${notchY.toFixed(1)} ${rightX.toFixed(1)},${rightY.toFixed(1)}`,
+  };
+}
+
+// نقطه کنترل پیش‌فرض برای فلش منحنی تازه‌رسم‌شده (انحنای ۱۸٪ طول)
+export function defaultCurveControl(x1, y1, x2, y2, bendRatio = 0.18) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  return {
+    x: Number(((x1 + x2) / 2 + (-dy / len) * len * bendRatio).toFixed(1)),
+    y: Number(((y1 + y2) / 2 + (dx / len) * len * bendRatio).toFixed(1)),
+  };
+}
+
+// تبدیل نقاط قلم به چندضلعی پهنای متغیر perfect-freehand (خروجی: path آماده SVG)
+export function penPointsToOutlinePath(points, strokeWidth = 4) {
+  try {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    const outline = getStroke(
+      points.map((p) => [p.x, p.y]),
+      {
+        size: Math.max(4, strokeWidth * 2.2),
+        thinning: 0.55,
+        smoothing: 0.6,
+        streamline: 0.55,
+        simulatePressure: true,
+        last: true,
+      }
+    );
+    if (!outline || outline.length < 3) return null;
+    const d = outline.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt[0].toFixed(1)} ${pt[1].toFixed(1)}`).join(' ');
+    return { path: d + ' Z', outline };
+  } catch (_) {
+    return null;
+  }
+}
+
+// کادر محاطی outline قلم (برای گیزمو ۱۰۰٪ منطبق)
+export function getPenOutlineBounds(points, strokeWidth = 4) {
+  const res = penPointsToOutlinePath(points, strokeWidth);
+  if (!res) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const pt of res.outline) {
+    if (pt[0] < minX) minX = pt[0];
+    if (pt[0] > maxX) maxX = pt[0];
+    if (pt[1] < minY) minY = pt[1];
+    if (pt[1] > maxY) maxY = pt[1];
+  }
+  const pad = 6;
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    width: Math.max(20, maxX - minX + pad * 2),
+    height: Math.max(20, maxY - minY + pad * 2),
+  };
 }
