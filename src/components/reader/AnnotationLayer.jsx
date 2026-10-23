@@ -1,1681 +1,1085 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import useAppStore from '../../store/useAppStore';
-import useReaderStore from '../../store/useReaderStore';
+// ============================================================================
+// KonvaAnnotationLayer.jsx — فاز ۱ (v7.1 + حذف History داخلی)
+//
+// فیکس‌ها:
+//   ۱. حذف رویدادهای مضاعف: فقط Pointer Events (بدون mouse/touch موازی)
+//   ۲. setPointerCapture روی (nativeEvent.target || stage.content)
+//   ۳. رفع چشمک‌زدن: پیش‌نویس تا سینک شدن props والد مخفی نمی‌شه
+//   ۴. دقت نقطه پایانی: آخرین مختصات خام بدون فیلتر اضافه می‌شه
+//   ۵. حذف حلقه RAF: batchDraw مستقیم در هندلر (تأخیر کمتر)
+//   ۶. پاک‌کن بهینه: پیش‌فیلتر bounding box
+// فاز ۱:
+//   ۷. حذف کامل کلاس History داخلی — Undo/Redo صددرصد در والد
+//   ۸. اکسپورت نام‌دار AnnotationLayer اضافه شد
+// ============================================================================
 
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from 'react';
+import { Stage, Layer, Shape, Group, Line } from 'react-konva';
+import useAppStore from '../../store/useAppStore';
 import { AnnotationToolbar } from './AnnotationToolbar';
 import {
-  VIEWBOX_SIZE,
-  clientToSvgPoint,
+  storageToUniform,
+  uniformToStorage,
+  uid,
   generateCloudPath,
-  generateArrowGeometry,
-  pointsToSmoothSvgPath,
-  getItemBounds,
-  hitTestAnnotationItem,
-  findTopAnnotationAtPoint,
-  moveAnnotationByDelta,
-  resizeAnnotationWithHandle,
-  penPointsToOutlinePath,
-  generateCurvedArrowGeometry,
-  defaultCurveControl,
-  storageToUniformItem,
-  uniformToStorageItem,
-  rectsIntersect,
-  getUnionBounds,
-  marqueeRect,
-  getBrushOutline,
+  drawCloudPathCanvas,
+  eraserHitsBox,
 } from '../../utils/annotationEngine';
 
-// بازصادر کردن نوار ابزار برای سازگاری کامل با ایمپورت‌های PdfViewer و VerticalViewer
 export { AnnotationToolbar };
 
-// نرمالایز + تبدیل دیتابیس→یکنواخت (y در [0..1000*aspect])؛ فرمت DB دست نمی‌خورد
-const normalizeItem = (raw, aspect = 1) => {
-  if (!raw) return null;
-  const tool = raw.tool || raw.type || 'box';
-  const base = {
-    ...raw,
-    tool: tool === 'rect' ? 'box' : tool === 'note' ? 'sticky' : tool,
-    boxStyle: raw.boxStyle || (raw.type === 'rect' ? 'rect' : 'cloud'),
-    hasFill: typeof raw.hasFill === 'boolean' ? raw.hasFill : true,
-    color: raw.color || '#06b6d4',
-    strokeWidth: Number(raw.strokeWidth) || 4,
-    opacity: typeof raw.opacity === 'number' ? raw.opacity : 0.85,
-    arrowStyle: raw.arrowStyle === 'curved' ? 'curved' : 'straight',
-    fontFamily: raw.fontFamily || null,
-  };
-  return storageToUniformItem(base, aspect);
-};
+// ============================================================================
+// بخش ۱: ریاضیات
+// ============================================================================
 
-const AnnotationLayer = React.memo(function AnnotationLayer({
+const MIN_POINT_DIST = 1.5;
+const STREAMLINE_FACTOR = 0.25;
+
+function dist2(ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  return dx * dx + dy * dy;
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function streamline(prev, curr, factor = STREAMLINE_FACTOR) {
+  const t = 1 - factor;
+  return {
+    x: prev.x + (curr.x - prev.x) * t,
+    y: prev.y + (curr.y - prev.y) * t,
+  };
+}
+
+function pointToSegmentDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq < 1e-10) return Math.sqrt(dist2(px, py, ax, ay));
+  let t = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  t = Math.max(0, Math.min(1, t));
+  return Math.sqrt(dist2(px, py, ax + t * dx, ay + t * dy));
+}
+
+/** محاسبه bounding box یک استروک (برای پیش‌فیلتر پاک‌کن) */
+function getStrokeBBox(points, padding = 15) {
+  if (!points || points.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return {
+    minX: minX - padding,
+    minY: minY - padding,
+    maxX: maxX + padding,
+    maxY: maxY + padding,
+  };
+}
+
+function bboxesIntersect(a, b) {
+  return !(a.maxX < b.minX || a.minX > b.maxX || a.maxY < b.minY || a.minY > b.maxY);
+}
+
+// ============================================================================
+// بخش ۲: رندر مستقیم — Midpoint Quadratic Bézier
+// ============================================================================
+
+function drawSmoothStroke(ctx, points, opts) {
+  const { color, width, opacity, compositeOp } = opts;
+  if (!points || points.length === 0) return;
+
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  if (compositeOp) ctx.globalCompositeOperation = compositeOp;
+
+  if (points.length === 1) {
+    ctx.beginPath();
+    ctx.fillStyle = color;
+    ctx.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    return;
+  }
+
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const n = points.length;
+  if (n === 2) {
+    ctx.moveTo(points[0].x, points[0].y);
+    ctx.lineTo(points[1].x, points[1].y);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  ctx.moveTo(points[0].x, points[0].y);
+  const m1 = midpoint(points[0], points[1]);
+  ctx.lineTo(m1.x, m1.y);
+  for (let i = 1; i < n - 1; i++) {
+    const mNext = midpoint(points[i], points[i + 1]);
+    ctx.quadraticCurveTo(points[i].x, points[i].y, mNext.x, mNext.y);
+  }
+  const last = points[n - 1];
+  ctx.lineTo(last.x, last.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function getStrokeWidth(tool, baseWidth) {
+  if (tool === 'highlighter') return baseWidth * 5.5;
+  return baseWidth * 2.4;
+}
+
+function getStrokeOpacity(tool, baseOpacity) {
+  if (tool === 'highlighter') return 0.35;
+  return baseOpacity;
+}
+
+function getCompositeOp(tool) {
+  return tool === 'highlighter' ? 'multiply' : 'source-over';
+}
+
+// ============================================================================
+// بخش ۳: تاریخچه — فاز ۱: حذف شد
+// مدیریت کامل Undo/Redo در والد (PdfViewer.jsx) انجام می‌شود.
+// هیچ آرایه تاریخچه موازی در لایه نگه داشته نمی‌شود.
+// ============================================================================
+
+// ============================================================================
+// بخش ۴: پاک‌کن بهینه — پیش‌فیلتر BBox (فیکس #۶)
+// ============================================================================
+
+function eraserHitsStroke(eraserPts, strokePts, strokeBBox, radius = 14) {
+  if (eraserPts.length === 0 || strokePts.length < 1) return false;
+
+  // فیکس #۶: اول BBox چک می‌شه — اکثر استروک‌ها اینجا رد می‌شن
+  if (strokeBBox) {
+    const eBBox = getStrokeBBox(eraserPts, radius);
+    if (eBBox && !bboxesIntersect(eBBox, strokeBBox)) {
+      return false; // بدون برخورد — بدون محاسبه پرهزینه
+    }
+  }
+
+  if (strokePts.length === 1) {
+    const sp = strokePts[0];
+    const r2 = radius * radius;
+    // فاز ۱-مرحله ۳: همه نقاط پاک‌کن بررسی شوند (نه یکی‌درمیان)
+    for (let i = 0; i < eraserPts.length; i++) {
+      const ep = eraserPts[i];
+      const dx = ep.x - sp.x;
+      const dy = ep.y - sp.y;
+      if (dx * dx + dy * dy < r2) return true;
+    }
+    return false;
+  }
+
+  const eStep = Math.max(1, Math.floor(eraserPts.length / 10));
+  const sStep = Math.max(1, Math.floor(strokePts.length / 30));
+
+  for (let ei = 0; ei < eraserPts.length; ei += eStep) {
+    const ep = eraserPts[ei];
+    for (let si = 0; si < strokePts.length - 1; si += sStep) {
+      const a = strokePts[si];
+      const b = strokePts[si + 1];
+      // رد سریع BBox سگمنت
+      const minX = Math.min(a.x, b.x) - radius;
+      const maxX = Math.max(a.x, b.x) + radius;
+      const minY = Math.min(a.y, b.y) - radius;
+      const maxY = Math.max(a.y, b.y) + radius;
+      if (ep.x < minX || ep.x > maxX || ep.y < minY || ep.y > maxY) continue;
+      if (pointToSegmentDist(ep.x, ep.y, a.x, a.y, b.x, b.y) < radius) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// بخش ۵: استروک ذخیره‌شده
+// ============================================================================
+
+const CommittedStroke = React.memo(function CommittedStroke({ item, onErase }) {
+  // BBox کش‌شده برای پاک‌کن بهینه
+  const bbox = useMemo(() => getStrokeBBox(item.points, 15), [item.points]);
+
+  const sceneFunc = useCallback((ctx) => {
+    drawSmoothStroke(ctx, item.points, {
+      color: item.color || '#22d3ee',
+      width: getStrokeWidth(item.tool, item.strokeWidth),
+      opacity: getStrokeOpacity(item.tool, item.opacity ?? 0.95),
+      compositeOp: getCompositeOp(item.tool),
+    });
+  }, [item.points, item.color, item.tool, item.strokeWidth, item.opacity]);
+
+  const hitFunc = useCallback((ctx) => {
+    const pts = item.points;
+    if (!pts || pts.length === 0) return;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.lineWidth = Math.max(20, getStrokeWidth(item.tool, item.strokeWidth));
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }, [item.points, item.tool, item.strokeWidth]);
+
+  const handleClick = useCallback(() => {
+    onErase?.(item.id, bbox);
+  }, [onErase, item.id, bbox]);
+
+  // bbox رو برای پاک‌کن در دیتای item نگه می‌داریم
+  const itemWithBBox = useMemo(() => ({ ...item, _bbox: bbox }), [item, bbox]);
+
+  return (
+    <Shape
+      sceneFunc={sceneFunc}
+      hitFunc={hitFunc}
+      onClick={handleClick}
+      onTap={handleClick}
+      perfectDrawEnabled={false}
+      shadowForStrokeEnabled={false}
+      _bbox={bbox}
+    />
+  );
+});
+
+
+
+// ============================================================================
+// فاز ۲: پیش‌نمایش زنده باکس حین رسم
+// sceneFunc مستقیماً از draftBoxRef می‌خواند — با هر batchDraw به‌روز می‌شود
+// ============================================================================
+const BoxLiveDraft = React.forwardRef(function BoxLiveDraft(
+  { boxRef, boxStyleRef, hasFillRef, colorRef, widthRef, opacityRef },
+  ref
+) {
+  const sceneFunc = useCallback(
+    (ctx, shape) => {
+      const db = boxRef?.current;
+      if (!db) return;
+
+      const x = Math.min(db.startX, db.currentX);
+      const y = Math.min(db.startY, db.currentY);
+      const w = Math.abs(db.currentX - db.startX);
+      const h = Math.abs(db.currentY - db.startY);
+      if (w < 2 || h < 2) return; // خیلی کوچک — رندر نکن
+
+      const style = boxStyleRef?.current || 'cloud';
+      const color = colorRef?.current || '#22d3ee';
+      const sw = Number(widthRef?.current) || 4;
+      const opacity = Number(opacityRef?.current ?? 0.9);
+      const hasFill = hasFillRef?.current ?? true;
+
+      ctx.save();
+      ctx.globalAlpha = opacity;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = sw;
+
+      if (style === 'cloud') {
+        // کادر ابری
+        drawCloudPathCanvas(ctx, x, y, x + w, y + h, sw);
+        if (hasFill) {
+          ctx.globalAlpha = opacity * 0.15;
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.globalAlpha = opacity;
+        }
+        ctx.stroke();
+      } else {
+        // مستطیل ساده یا گوشه‌گرد
+        const r = style === 'round' ? 12 : 0;
+        ctx.beginPath();
+        if (r > 0 && ctx.roundRect) {
+          ctx.roundRect(x, y, w, h, r);
+        } else {
+          ctx.rect(x, y, w, h);
+        }
+        if (hasFill) {
+          ctx.globalAlpha = opacity * 0.15;
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.globalAlpha = opacity;
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+    },
+    [boxRef, boxStyleRef, hasFillRef, colorRef, widthRef, opacityRef]
+  );
+
+  return (
+    <Shape
+      ref={ref}
+      sceneFunc={sceneFunc}
+      visible={false}
+      listening={false}
+      perfectDrawEnabled={false}
+      shadowForStrokeEnabled={false}
+    />
+  );
+});
+
+// ============================================================================
+// فاز ۲: کامپوننت رندر باکس ذخیره‌شده
+// ============================================================================
+const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
+  const boxStyle = item.boxStyle || 'rect';
+  const hasFill = item.hasFill ?? true;
+  const color = item.color || '#22d3ee';
+  const sw = Number(item.strokeWidth) || 4;
+  const opacity = Number(item.opacity ?? 0.9);
+
+  const fillProps = hasFill
+    ? { fill: color, fillOpacity: 0.15 }
+    : { fillEnabled: false };
+
+  const handleClick = useCallback(() => {
+    onErase?.(item.id);
+  }, [onErase, item.id]);
+
+  const commonProps = {
+    stroke: color,
+    strokeWidth: sw,
+    opacity: opacity,
+    onClick: handleClick,
+    onTap: handleClick,
+    perfectDrawEnabled: false,
+    shadowForStrokeEnabled: false,
+    ...fillProps,
+  };
+
+  // مستطیل ساده
+  if (boxStyle === 'rect') {
+    return (
+      <Rect
+        x={item.x}
+        y={item.y}
+        width={item.width}
+        height={item.height}
+        {...commonProps}
+      />
+    );
+  }
+
+  // مستطیل گوشه‌گرد
+  if (boxStyle === 'round') {
+    return (
+      <Rect
+        x={item.x}
+        y={item.y}
+        width={item.width}
+        height={item.height}
+        cornerRadius={12}
+        {...commonProps}
+      />
+    );
+  }
+
+  // کادر ابری — رسم با Canvas 2D نیتیو
+  const cloudSceneFunc = useCallback(
+    (ctx, shape) => {
+      drawCloudPathCanvas(
+        ctx,
+        item.x,
+        item.y,
+        item.x + item.width,
+        item.y + item.height,
+        sw
+      );
+      // اعمال استایل‌ها بعد از ساخت مسیر
+      ctx.fillStrokeShape(shape);
+    },
+    [item.x, item.y, item.width, item.height, sw]
+  );
+
+  const cloudHitFunc = useCallback(
+    (ctx, shape) => {
+      // هیت‌تست تقریبی: مستطیل با حاشیه
+      ctx.beginPath();
+      ctx.rect(item.x - 10, item.y - 10, item.width + 20, item.height + 20);
+      ctx.fillStrokeShape(shape);
+    },
+    [item.x, item.y, item.width, item.height]
+  );
+
+  return (
+    <Shape
+      sceneFunc={cloudSceneFunc}
+      hitFunc={cloudHitFunc}
+      stroke={color}
+      strokeWidth={sw}
+      opacity={opacity}
+      fill={hasFill ? color : undefined}
+      fillOpacity={hasFill ? 0.15 : 0}
+      onClick={handleClick}
+      onTap={handleClick}
+      perfectDrawEnabled={false}
+      shadowForStrokeEnabled={false}
+    />
+  );
+});
+
+// ============================================================================
+// بخش ۶: کامپوننت اصلی
+// ============================================================================
+
+const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageNumber,
   items = [],
   onCommitPageItems,
 }) {
-  const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
-  const annotationTool = useAppStore((state) => state.annotationTool || 'box');
-  const annotationBoxStyle = useAppStore((state) => state.annotationBoxStyle || 'cloud');
-  const annotationHasFill = useAppStore((state) => Boolean(state.annotationHasFill));
-  const annotationColor = useAppStore((state) => state.annotationColor || '#06b6d4');
-  const annotationStrokeWidth = useAppStore((state) => state.annotationStrokeWidth || 4);
-  const annotationOpacity = useAppStore((state) => state.annotationOpacity ?? 0.85);
-  const annotationFontFamily = useAppStore((state) => state.annotationFontFamily);
-  const annotationFontSize = useAppStore((state) => state.annotationFontSize ?? 22);
-  const annotationArrowStyle = useAppStore((state) => state.annotationArrowStyle || 'straight');
+  const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
+  const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
+  const annotationColor = useAppStore((s) => s.annotationColor || '#22d3ee');
+  const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
+  const annotationOpacity = useAppStore((s) => s.annotationOpacity ?? 0.9);
+  // فاز ۲: استیت‌های باکس
+  const annotationBoxStyle = useAppStore((s) => s.annotationBoxStyle || 'cloud');
+  const annotationHasFill = useAppStore((s) => Boolean(s.annotationHasFill));
 
-  const selectedAnnotationId = useAppStore((state) => state.selectedAnnotationId);
-  const selectedAnnotationIds = useAppStore((state) => state.selectedAnnotationIds || []);
-  const selectedAnnotationPage = useAppStore((state) => state.selectedAnnotationPage);
-  const setSelectedAnnotation = useAppStore((state) => state.setSelectedAnnotation);
-  const setSelectedAnnotations = useAppStore((state) => state.setSelectedAnnotations);
-  const toggleSelectedAnnotation = useAppStore((state) => state.toggleSelectedAnnotation);
-  const clearSelection = useAppStore((state) => state.clearSelection);
-  const syncToolbarWithSelectedItem = useAppStore((state) => state.syncToolbarWithSelectedItem);
-  const setAnnotationTool = useAppStore((state) => state.setAnnotationTool);
+  const containerRef = useRef(null);
+  const stageRef = useRef(null);
 
-  const [draftShape, setDraftShape] = useState(null);
-  const [liveItemsOverride, setLiveItemsOverride] = useState(null);
-  const [textEditorState, setTextEditorState] = useState(null); // { x, y, value, editId, fontSize, color }
-  const [marquee, setMarquee] = useState(null); // { x, y, width, height } در مختصات یکنواخت
-  const [stickyDrafts, setStickyDrafts] = useState({}); // متن تایپ‌شده ولی هنوز کامیت‌نشده
-  const stickyTimers = useRef({});
-  const stickyDraftsRef = useRef({});
-  const itemsRef = useRef([]);
+  // --- بافرها (صفر setState حین رسم) ---
+  const draftShapeRef = useRef(null);
+  const draftPointsRef = useRef([]);
+  const draftStyleRef = useRef(null);
+  const lastRawPointRef = useRef(null);   // فیکس #۴: آخرین نقطه خام بدون فیلتر
+  const eraserPtsRef = useRef([]);
+  const eraserLineRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const pendingCommitRef = useRef(null);  // فیکس #۳: ID استروک در انتظار سینک
+  const pendingTimeoutRef = useRef(null); // فاز ۱-مرحله ۳: تایمر ایمنی ضدفریز
+  // فاز ۲: پیش‌نویس زنده باکس
+  const draftBoxRef = useRef(null); // { startX, startY, currentX, currentY }
+  const draftBoxShapeRef = useRef(null);
+  const lastEventTimeRef = useRef(0);     // فیکس #۱: جلوگیری از اجرای مضاعف
 
-  // کامیت debounceشده متن استیکی: هر کلید = رندر محلی، ذخیره DB هر ۶۰۰ms یا با blur
-  const flushStickyDraft = useCallback((id) => {
-    const t = stickyTimers.current[id];
-    if (t) { clearTimeout(t); delete stickyTimers.current[id]; }
-    if (!(id in stickyDraftsRef.current)) return;
-    const val = stickyDraftsRef.current[id];
-    delete stickyDraftsRef.current[id];
-    setStickyDrafts((prev) => { const n = { ...prev }; delete n[id]; return n; });
-    const list = itemsRef.current.map((i) => (i.id === id ? { ...i, text: val } : i));
-    const storageList = (list || []).map((it) => uniformToStorageItem(it, aspectCache.current));
-    commitItems(storageList);
-  }, [pageNumber, onCommitPageItems]);
+  const toolRef = useRef(annotationTool);
+  const colorRef = useRef(annotationColor);
+  const widthRef = useRef(annotationStrokeWidth);
+  const opacityRef = useRef(annotationOpacity);
+  const boxStyleRef = useRef(annotationBoxStyle);
+  const hasFillRef = useRef(annotationHasFill);
+  toolRef.current = annotationTool;
+  colorRef.current = annotationColor;
+  widthRef.current = annotationStrokeWidth;
+  opacityRef.current = annotationOpacity;
+  boxStyleRef.current = annotationBoxStyle;
+  hasFillRef.current = annotationHasFill;
 
-  const handleStickyTextChange = useCallback((id, val) => {
-    stickyDraftsRef.current[id] = val;
-    setStickyDrafts((prev) => ({ ...prev, [id]: val }));
-    const t = stickyTimers.current[id];
-    if (t) clearTimeout(t);
-    stickyTimers.current[id] = setTimeout(() => flushStickyDraft(id), 600);
-  }, [flushStickyDraft]);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const [aspect, setAspect] = useState(1);
+  const [eraserVisible, setEraserVisible] = useState(false);
 
-  useEffect(() => () => { Object.values(stickyTimers.current).forEach(clearTimeout); }, []);
-
-  const wrapperRef = useRef(null);
-  // نسبت ارتفاع به عرض صفحه — تک‌منبع حقیقت (ref) + tick برای رندر مجدد
-  // همه‌جا (رندر، پوینتر، کامیت) از همین مقدار استفاده می‌شود تا ناهماهنگی رخ ندهد
-  const aspectCache = useRef(1);
-  const [, setAspectTick] = useState(0);
-  const readAspect = useCallback(() => {
-    const el = wrapperRef.current;
-    if (!el) return aspectCache.current;
-    let r = 0;
-    const img = el.parentElement?.querySelector('img');
-    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
-      r = img.naturalHeight / img.naturalWidth;
-    } else {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > 0) r = rect.height / rect.width;
-    }
-    if (r >= 0.05 && r <= 20) {
-      if (Math.abs(aspectCache.current - r) >= 0.001) {
-        aspectCache.current = r;
-        return 'changed';
-      }
-    }
-    return aspectCache.current;
-  }, []);
+  const itemsRef = useRef(items);
+  const aspectRef = useRef(aspect);
+  const pageRef = useRef(pageNumber);
+  const commitFnRef = useRef(onCommitPageItems);
+  itemsRef.current = items;
+  aspectRef.current = aspect;
+  pageRef.current = pageNumber;
+  commitFnRef.current = onCommitPageItems;
 
   useEffect(() => {
-    const el = wrapperRef.current;
+    const el = containerRef.current;
     if (!el) return;
-    if (readAspect() === 'changed') setAspectTick((t) => t + 1);
-    const ro = new ResizeObserver(() => {
-      if (readAspect() === 'changed') setAspectTick((t) => t + 1);
-    });
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) {
+        setSize({ w: r.width, h: r.height });
+        const a = r.height / r.width;
+        setAspect((prev) => (Math.abs(prev - a) < 0.01 ? prev : a));
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
     ro.observe(el);
-    const img = el.parentElement?.querySelector('img');
-    const onImgLoad = () => { if (readAspect() === 'changed') setAspectTick((t) => t + 1); };
-    if (img) img.addEventListener('load', onImgLoad);
-    return () => {
-      ro.disconnect();
-      if (img) img.removeEventListener('load', onImgLoad);
-    };
-  }, [readAspect]);
-
-  const pageAspect = aspectCache.current;
-
-  // لاگ نسخه و تشخیصی (DevTools → Console) — اگر این را نمی‌بینی، کد جدید اجرا نمی‌شود!
-  useEffect(() => {
-    console.info('[annotation] layer v3.14 (fix double-coord-conversion)');
-    try {
-      const probe = penPointsToOutlinePath([{ x: 0, y: 0 }, { x: 10, y: 10 }], 4);
-      console.info('[annotation] perfect-freehand:', probe ? 'OK (' + probe.outline.length + ' pts)' : 'FALLBACK (smooth path)');
-      console.info('[annotation] aspect:', aspectCache.current.toFixed(3));
-    } catch (err) {
-      console.warn('[annotation] perfect-freehand probe failed:', err?.message);
-    }
+    return () => ro.disconnect();
   }, []);
-  const interactionRef = useRef({
-    mode: null, // 'draw' | 'move' | 'resize' | 'erase_sweep' | 'marquee'
-    handle: null,
-    startPt: null,
-    originalItem: null,
-    workingItems: null,
-  });
-  const draftRef = useRef(null);
-  const textAreaRef = useRef(null);
 
-  const normalizedItems = useMemo(() => {
-    // liveItemsOverride از قبل در مختصات یکنواخت است — تبدیل مجدد ممنوع!
-    // فقط items (مختصات ذخیره‌سازی) نیاز به تبدیل دارند
-    if (liveItemsOverride) {
-      return liveItemsOverride.filter(Boolean);
-    }
-    const source = items || [];
-    return source.map((it) => normalizeItem(it, pageAspect)).filter(Boolean);
-  }, [items, liveItemsOverride, pageAspect]);
-  itemsRef.current = normalizedItems;
+  const scaleX = size.w > 0 ? size.w / 1000 : 1;
+  const scaleY = size.h > 0 ? size.h / (1000 * aspect) : 1;
+  const scaleRef = useRef({ scaleX: 1, scaleY: 1 });
+  scaleRef.current = { scaleX, scaleY };
 
-  const isSelectedOnThisPage =
-    isAnnotationActive &&
-    selectedAnnotationPage === pageNumber &&
-    selectedAnnotationIds.length > 0;
-
-  const selectedItems = useMemo(() => {
-    if (!isSelectedOnThisPage) return [];
-    const idSet = new Set(selectedAnnotationIds);
-    return normalizedItems.filter((it) => idSet.has(it.id));
-  }, [isSelectedOnThisPage, normalizedItems, selectedAnnotationIds]);
-
-  const selectedItem = selectedItems.length ? selectedItems[selectedItems.length - 1] : null;
-
-  useEffect(() => {
-    setLiveItemsOverride(null);
-  }, [items]);
-
-  useEffect(() => {
-    if (textEditorState && textAreaRef.current) {
-      textAreaRef.current.focus();
-    }
-  }, [textEditorState]);
-
-  // کامیت یکپارچه: تبدیل مختصات یکنواخت به فرمت دیتابیس، بعد ارسال به والد
-  const commitItems = useCallback((list) => {
-    const storageList = (list || []).map((it) => uniformToStorageItem(it, aspectCache.current));
-    onCommitPageItems?.(pageNumber, storageList);
-  }, [onCommitPageItems, pageNumber]);
-
-  // ۱. دریافت تغییرات زنده رنگ، ضخامت، شفافیت و نوع کادر از AnnotationToolbar برای شکل انتخاب‌شده
-  useEffect(() => {
-    if (!isSelectedOnThisPage || !selectedAnnotationId) return;
-
-    const handleUpdateSelected = (e) => {
-      const patch = e.detail;
-      if (!patch) return;
-
-      const idSet = new Set(selectedAnnotationIds);
-      const updatedList = normalizedItems.map((it) => {
-        if (!idSet.has(it.id)) return it;
-        const next = { ...it, ...patch };
-        if (it.tool === 'text' && patch.strokeWidth) {
-          next.fontSize = Math.max(14, patch.strokeWidth * 5);
-        }
-        return next;
-      });
-
-      commitItems(updatedList);
-    };
-
-    window.addEventListener('annotation:update-selected', handleUpdateSelected);
-    return () => window.removeEventListener('annotation:update-selected', handleUpdateSelected);
-  }, [isSelectedOnThisPage, selectedAnnotationId, normalizedItems, pageNumber, onCommitPageItems]);
-
-  // ۲. درج تصویر از طریق دکمه نوار ابزار یا پیست از کلیپ‌بورد (Ctrl + V) در صفحه فعال
-  const insertImageItem = useCallback(
-    (dataUrl) => {
-      if (!dataUrl) return;
-      const newImg = {
-        id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        tool: 'image',
-        dataUrl,
-        startX: 220,
-        startY: 220,
-        endX: 620,
-        endY: 520,
-        color: annotationColor,
-        strokeWidth: annotationStrokeWidth,
-        opacity: annotationOpacity,
-      };
-      const next = [...normalizedItems, newImg];
-      commitItems(next);
-      setAnnotationTool('select');
-      setSelectedAnnotation(newImg.id, pageNumber, 'image');
-    },
-    [
-      annotationColor,
-      annotationStrokeWidth,
-      annotationOpacity,
-      normalizedItems,
-      pageNumber,
-      onCommitPageItems,
-      setAnnotationTool,
-      setSelectedAnnotation,
-    ]
-  );
-
-  useEffect(() => {
-    if (!isAnnotationActive) return;
-
-    const handleInsertEvent = (e) => {
-      if (e.detail?.pageNumber === pageNumber && e.detail?.dataUrl) {
-        insertImageItem(e.detail.dataUrl);
-      }
-    };
-
-    const handlePasteImage = (e) => {
-      const currentActivePage = useReaderStore.getState().currentPage || 1;
-      if (currentActivePage !== pageNumber) return;
-
-      const clipItems = e.clipboardData?.items;
-      if (!clipItems) return;
-
-      for (const item of clipItems) {
-        if (item.type.indexOf('image') !== -1) {
-          const blob = item.getAsFile();
-          if (!blob) continue;
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            if (typeof ev.target?.result === 'string') {
-              insertImageItem(ev.target.result);
-            }
-          };
-          reader.readAsDataURL(blob);
-          break;
-        }
-      }
-    };
-
-    window.addEventListener('annotation:insert-image', handleInsertEvent);
-    window.addEventListener('paste', handlePasteImage);
-    return () => {
-      window.removeEventListener('annotation:insert-image', handleInsertEvent);
-      window.removeEventListener('paste', handlePasteImage);
-    };
-  }, [isAnnotationActive, pageNumber, insertImageItem]);
-
-  // ۳. اکشن‌های شکل انتخاب‌شده (حذف، تکثیر، تغییر لایه و جابه‌جایی با کیبورد)
-  const handleDeleteSelected = useCallback(() => {
-    if (selectedItems.length === 0) return;
-    const idSet = new Set(selectedItems.map((it) => it.id));
-    const next = normalizedItems.filter((it) => !idSet.has(it.id));
-    clearSelection();
-    commitItems(next);
-  }, [selectedItems, normalizedItems, pageNumber, commitItems, clearSelection]);
-
-  const handleDuplicateSelected = useCallback(() => {
-    if (selectedItems.length === 0) return;
-    const clones = selectedItems.map((it, i) => {
-      const cloned = JSON.parse(JSON.stringify(it));
-      cloned.id = `ann_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
-      return moveAnnotationByDelta(cloned, cloned, 28, 28);
+  const uniformItems = useMemo(() => {
+    return (items || []).filter(Boolean).map((it) => {
+      const u = storageToUniform(it, aspect);
+      // BBox کش برای پاک‌کن بهینه
+      return { ...u, _bbox: getStrokeBBox(u.points, 15) };
     });
-    const next = [...normalizedItems, ...clones];
-    commitItems(next);
-    setSelectedAnnotations(clones.map((c) => c.id), pageNumber);
-  }, [selectedItems, normalizedItems, pageNumber, commitItems, setSelectedAnnotations]);
+  }, [items, aspect]);
 
-  const handleMoveLayer = useCallback(
-    (dir) => {
-      if (selectedItems.length === 0) return;
-      const idSet = new Set(selectedItems.map((it) => it.id));
-      const copy = [...normalizedItems];
-      // بلوک انتخاب‌شده را یک پله جلو/عقب می‌برد
-      if (dir > 0) {
-        for (let i = copy.length - 2; i >= 0; i--) {
-          if (idSet.has(copy[i].id) && !idSet.has(copy[i + 1].id)) {
-            const t = copy[i]; copy[i] = copy[i + 1]; copy[i + 1] = t;
-          }
-        }
-      } else {
-        for (let i = 1; i < copy.length; i++) {
-          if (idSet.has(copy[i].id) && !idSet.has(copy[i - 1].id)) {
-            const t = copy[i]; copy[i] = copy[i - 1]; copy[i - 1] = t;
-          }
-        }
-      }
-      commitItems(copy);
-    },
-    [selectedItems, normalizedItems, pageNumber, commitItems]
-  );
-
-  useEffect(() => {
-    if (!isSelectedOnThisPage || selectedItems.length === 0) return;
-
-    const handleKeyDown = (e) => {
-      const tag = e.target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        e.preventDefault();
-        e.stopPropagation();
-        handleDeleteSelected();
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
-        e.preventDefault();
-        e.stopPropagation();
-        handleDuplicateSelected();
-      } else if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
-        e.preventDefault();
-        e.stopPropagation();
-        const step = e.shiftKey ? 12 : 2;
-        let dx = 0;
-        let dy = 0;
-        if (e.key === 'ArrowUp') dy = -step;
-        if (e.key === 'ArrowDown') dy = step;
-        if (e.key === 'ArrowLeft') dx = -step;
-        if (e.key === 'ArrowRight') dx = step;
-
-        const idSet = new Set(selectedItems.map((it) => it.id));
-        const next = normalizedItems.map((it) =>
-          idSet.has(it.id) ? moveAnnotationByDelta(it, it, dx, dy) : it
-        );
-        commitItems(next);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [
-    isSelectedOnThisPage,
-    selectedItems,
-    normalizedItems,
-    pageNumber,
-    commitItems,
-    handleDeleteSelected,
-    handleDuplicateSelected,
-  ]);
-
-  const getSvgCoords = useCallback((clientX, clientY) => {
-    const el = wrapperRef.current;
-    if (!el) return { x: 0, y: 0 };
-    return clientToSvgPoint(clientX, clientY, el.getBoundingClientRect(), aspectCache.current);
+  const commit = useCallback((uniformList) => {
+    const storageList = uniformList.map((it) => {
+      const { _bbox, ...clean } = it; // BBox ذخیره نمی‌شه
+      return uniformToStorage(clean, aspectRef.current);
+    });
+    commitFnRef.current?.(pageRef.current, storageList);
   }, []);
 
-  // ۴. پاک‌کن جارویی و کلیکی بدون مسدود شدن توسط PointerCapture
-  const sweepEraseAtPoint = useCallback(
-    (pt) => {
-      const currentList = interactionRef.current.workingItems || normalizedItems;
-      const remaining = currentList.filter((it) => !hitTestAnnotationItem(it, pt, 16));
+  // فاز ۱-مرحله ۳: پاک‌سازی متمرکز پیش‌نویس (هم برای سینک موفق، هم تایمر ایمنی)
+  const forceClearDraft = useCallback(() => {
+    pendingCommitRef.current = null;
+    if (pendingTimeoutRef.current) {
+      clearTimeout(pendingTimeoutRef.current);
+      pendingTimeoutRef.current = null;
+    }
+    draftPointsRef.current = [];
+    draftStyleRef.current = null;
+    lastRawPointRef.current = null;
+    // فاز ۲: پاک‌سازی پیش‌نویس باکس
+    draftBoxRef.current = null;
+    if (draftBoxShapeRef.current) {
+      draftBoxShapeRef.current.visible(false);
+    }
+    if (draftShapeRef.current) {
+      draftShapeRef.current.visible(false);
+      draftShapeRef.current.getLayer()?.batchDraw();
+    } else {
+      layerRef.current?.batchDraw();
+    }
+  }, []);
 
-      if (remaining.length !== currentList.length) {
-        interactionRef.current.workingItems = remaining;
-        setLiveItemsOverride(remaining);
-        if (selectedAnnotationId && !remaining.some((r) => r.id === selectedAnnotationId)) {
-          setSelectedAnnotation(null, null);
-        }
-        commitItems(remaining);
+  // --- فیکس #۳: مخفی کردن پیش‌نویس فقط بعد از سینک props ---
+  useEffect(() => {
+    const pendingId = pendingCommitRef.current;
+    if (!pendingId) return;
+
+    const found = uniformItems.some((item) => item.id === pendingId);
+    if (found) {
+      // والد استروک رو رندر کرده — حالا امنـه که پیش‌نویس پاک بشه
+      forceClearDraft();
+    }
+  }, [uniformItems, forceClearDraft]);
+
+  // فاز ۱-مرحله ۳: پاک‌سازی تایمر در unmount
+  useEffect(() => {
+    return () => {
+      if (pendingTimeoutRef.current) {
+        clearTimeout(pendingTimeoutRef.current);
+        pendingTimeoutRef.current = null;
       }
-    },
-    [normalizedItems, pageNumber, onCommitPageItems, selectedAnnotationId, setSelectedAnnotation]
-  );
+    };
+  }, []);
 
-  // ۵. شروع تعامل ماوس (انتخاب، تغییر اندازه، پاک‌کن، متن، استیکی‌نوت یا رسم پیوسته)
-  const handlePointerDown = (e) => {
-    if (!isAnnotationActive || e.button !== 0) return;
-    if (textEditorState) return;
+  const draftSceneFunc = useCallback((ctx) => {
+    const pts = draftPointsRef.current;
+    const style = draftStyleRef.current;
+    if (!pts || pts.length === 0 || !style) return;
+    drawSmoothStroke(ctx, pts, style);
+  }, []);
 
-    e.stopPropagation();
-    const pt = getSvgCoords(e.clientX, e.clientY);
+  const extractPoints = useCallback((nativeEvent) => {
+    const stage = stageRef.current;
+    if (!stage || !nativeEvent) return [];
+    const { scaleX: sx, scaleY: sy } = scaleRef.current;
 
-    // الف: کلیک روی هندل‌های تغییر سایز Gizmo
-    const handleType = e.target?.dataset?.handle;
-    if (handleType && selectedItem) {
-      interactionRef.current = {
-        mode: 'resize',
-        handle: handleType,
-        startPt: pt,
-        originalItem: JSON.parse(JSON.stringify(selectedItem)),
-        workingItems: normalizedItems,
+    const coalesced = (nativeEvent.getCoalescedEvents && typeof nativeEvent.getCoalescedEvents === 'function')
+      ? nativeEvent.getCoalescedEvents()
+      : [];
+    const events = coalesced.length > 0 ? coalesced : [nativeEvent];
+
+    const out = [];
+    const content = stage.content;
+    const rect = content ? content.getBoundingClientRect() : null;
+
+    for (const ce of events) {
+      if (!ce) continue;
+      let px, py;
+      if (rect && ce.clientX !== undefined) {
+        px = ce.clientX - rect.left;
+        py = ce.clientY - rect.top;
+      } else {
+        const pos = stage.getPointerPosition();
+        if (!pos) continue;
+        px = pos.x;
+        py = pos.y;
+      }
+      out.push({
+        x: px / sx,
+        y: py / sy,
+        time: ce.timeStamp || performance.now(),
+      });
+    }
+    return out;
+  }, []);
+
+  const getNative = useCallback((e) => e?.evt || e?.nativeEvent || e, []);
+
+  // --- فیکس #۲: capture روی المان فعال ---
+  const capturePointer = useCallback((nativeEvent) => {
+    try {
+      const target = nativeEvent?.target || stageRef.current?.content;
+      if (target?.setPointerCapture && nativeEvent?.pointerId !== undefined) {
+        target.setPointerCapture(nativeEvent.pointerId);
+      }
+    } catch {
+      // امن: ادامه بدون capture
+    }
+  }, []);
+
+  const releasePointer = useCallback((nativeEvent) => {
+    try {
+      const target = nativeEvent?.target || stageRef.current?.content;
+      if (
+        target?.releasePointerCapture &&
+        target?.hasPointerCapture?.(nativeEvent?.pointerId)
+      ) {
+        target.releasePointerCapture(nativeEvent.pointerId);
+      }
+    } catch {
+      // نادیده بگیر
+    }
+  }, []);
+
+  // --- فیکس #۱: محافظ اجرای مضاعف در یک فریم ---
+  const shouldProcessEvent = useCallback((nativeEvent) => {
+    const t = nativeEvent?.timeStamp || 0;
+    // اگه همین ایونت (یا هم‌زمان) قبلاً پردازش شده، رد کن
+    if (t !== 0 && t === lastEventTimeRef.current) return false;
+    lastEventTimeRef.current = t;
+    return true;
+  }, []);
+
+  const pushFilteredPoints = useCallback((pts) => {
+    let added = false;
+    const buf = draftPointsRef.current;
+    const minDistSq = MIN_POINT_DIST * MIN_POINT_DIST;
+
+    for (const pt of pts) {
+      // فیکس #۴: همیشه آخرین نقطه خام رو نگه دار (برای دقت نقطه پایانی)
+      lastRawPointRef.current = { x: pt.x, y: pt.y };
+
+      const prev = buf[buf.length - 1];
+      if (prev) {
+        if (dist2(pt.x, pt.y, prev.x, prev.y) < minDistSq) continue;
+        const smoothed = streamline(prev, pt);
+        buf.push({ x: smoothed.x, y: smoothed.y, time: pt.time });
+      } else {
+        buf.push({ x: pt.x, y: pt.y, time: pt.time });
+      }
+      added = true;
+      if (buf.length > 2000) buf.shift();
+    }
+    return added;
+  }, []);
+
+  // --- رسم مستقیم پیش‌نویس (فیکس #۵: بدون RAF، مستقیم batchDraw) ---
+  const redrawDraft = useCallback(() => {
+    const node = draftShapeRef.current;
+    if (node) {
+      // sceneFunc از draftPointsRef می‌خونه — فقط redraw
+      node.getLayer()?.batchDraw();
+    }
+  }, []);
+
+  const handleDown = useCallback((e) => {
+    if (!isAnnotationActive) return;
+    const native = getNative(e);
+    if (!shouldProcessEvent(native)) return; // فیکس #۱
+    capturePointer(native);
+
+    const pts = extractPoints(native);
+    if (pts.length === 0) return;
+
+    // فاز ۲: شروع رسم باکس — ثبت نقطه شروع
+    if (toolRef.current === 'box') {
+      const p0 = pts[0];
+      draftBoxRef.current = {
+        startX: p0.x,
+        startY: p0.y,
+        currentX: p0.x,
+        currentY: p0.y,
       };
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch (_) {}
+      isDrawingRef.current = true;
+      // ریست pending قبلی
+      pendingCommitRef.current = null;
+      if (pendingTimeoutRef.current) {
+        clearTimeout(pendingTimeoutRef.current);
+        pendingTimeoutRef.current = null;
+      }
+      // نمایش پیش‌نویس
+      if (draftBoxShapeRef.current) {
+        draftBoxShapeRef.current.visible(true);
+      }
+      layerRef.current?.batchDraw();
       return;
     }
 
-    // ب: حالت پاک‌کن (کلیکی و جارویی)
-    if (annotationTool === 'eraser') {
-      interactionRef.current = {
-        mode: 'erase_sweep',
-        handle: null,
-        startPt: pt,
-        originalItem: null,
-        workingItems: normalizedItems,
-      };
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch (_) {}
-      sweepEraseAtPoint(pt);
+    if (toolRef.current === 'eraser') {
+      eraserPtsRef.current = pts;
+      isDrawingRef.current = true;
+      setEraserVisible(true);
       return;
     }
 
-    // ج: حالت انتخاب و ویرایش شکل (Select Tool) — کلیک، شیفت+کلیک، درگ مارکی
-    if (annotationTool === 'select') {
-      const hitItem = findTopAnnotationAtPoint(normalizedItems, pt, 16);
-      if (hitItem) {
-        if (e.shiftKey) {
-          toggleSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
-          return;
+    draftPointsRef.current = [];
+    lastRawPointRef.current = null;
+    // فاز ۱-مرحله ۳: ریست کامل حالت pending — استروک قبلی دیگر در حال انتظار نیست
+    // (اگر والد هنوز سینک نکرده بود، تایمر ایمنی آن را مدیریت می‌کند)
+    pendingCommitRef.current = null;
+    if (pendingTimeoutRef.current) {
+      clearTimeout(pendingTimeoutRef.current);
+      pendingTimeoutRef.current = null;
+    }
+    pushFilteredPoints(pts);
+
+    const tool = toolRef.current === 'highlighter' ? 'highlighter' : 'pen';
+    draftStyleRef.current = {
+      color: colorRef.current,
+      width: getStrokeWidth(tool, widthRef.current),
+      opacity: getStrokeOpacity(tool, opacityRef.current),
+      compositeOp: getCompositeOp(tool),
+    };
+
+    isDrawingRef.current = true;
+
+    const node = draftShapeRef.current;
+    if (node) {
+      node.visible(true);
+      redrawDraft(); // فیکس #۵: مستقیم، بدون RAF
+    }
+  }, [isAnnotationActive, getNative, shouldProcessEvent, capturePointer, extractPoints, pushFilteredPoints, redrawDraft]);
+
+  const handleMove = useCallback((e) => {
+    if (!isDrawingRef.current || !isAnnotationActive) return;
+    const native = getNative(e);
+    // برای move، محافظ زمانی رو شل‌تر می‌گیریم (ایونت‌های پشت سر هم طبیعیه)
+    // فقط اگه دقیقاً همون timeStamp بود رد می‌کنیم
+    const t = native?.timeStamp || 0;
+    if (t !== 0 && t === lastEventTimeRef.current) return;
+
+    const pts = extractPoints(native);
+    if (pts.length === 0) return;
+
+    // فاز ۲: به‌روزرسانی پیش‌نویس باکس
+    if (toolRef.current === 'box' && draftBoxRef.current) {
+      const last = pts[pts.length - 1];
+      draftBoxRef.current.currentX = last.x;
+      draftBoxRef.current.currentY = last.y;
+      // رندر فوری پیش‌نویس
+      if (draftBoxShapeRef.current) {
+        draftBoxShapeRef.current.visible(true);
+      }
+      layerRef.current?.batchDraw();
+      return;
+    }
+
+    if (toolRef.current === 'eraser') {
+      for (const pt of pts) {
+        const prev = eraserPtsRef.current[eraserPtsRef.current.length - 1];
+        if (prev && dist2(pt.x, pt.y, prev.x, prev.y) < 4) continue;
+        eraserPtsRef.current.push(pt);
+      }
+      if (eraserLineRef.current) {
+        const epts = eraserPtsRef.current;
+        if (epts.length > 1) {
+          eraserLineRef.current.setAttr('points', epts.flatMap((p) => [p.x, p.y]));
+          eraserLineRef.current.getLayer()?.batchDraw();
         }
-        const alreadySelected = selectedAnnotationIds.includes(hitItem.id);
-        if (!alreadySelected) {
-          setSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
-          syncToolbarWithSelectedItem(hitItem);
-        }
-        const moveSnapshot = (alreadySelected && selectedItems.length > 1)
-          ? selectedItems.map((it) => JSON.parse(JSON.stringify(it)))
-          : [JSON.parse(JSON.stringify(hitItem))];
-        interactionRef.current = {
-          mode: 'move',
-          handle: null,
-          startPt: pt,
-          originalItem: JSON.parse(JSON.stringify(hitItem)),
-          originalItems: moveSnapshot,
-          workingItems: normalizedItems,
-        };
-        try {
-          e.currentTarget.setPointerCapture(e.pointerId);
-        } catch (_) {}
-      } else if (e.shiftKey) {
-        // شیفت+کلیک روی خالی: نگه داشتن انتخاب فعلی
+      }
+      return;
+    }
+
+    if (pushFilteredPoints(pts)) {
+      redrawDraft(); // فیکس #۵: مستقیم batchDraw، تأخیر صفر
+    }
+  }, [isAnnotationActive, getNative, extractPoints, pushFilteredPoints, redrawDraft]);
+
+  const handleUp = useCallback((e) => {
+    if (!isDrawingRef.current) return;
+    isDrawingRef.current = false;
+
+    const native = getNative(e);
+    releasePointer(native);
+
+    // فاز ۲: نهایی‌سازی باکس
+    if (toolRef.current === 'box' && draftBoxRef.current) {
+      const db = draftBoxRef.current;
+      draftBoxRef.current = null;
+      if (draftBoxShapeRef.current) {
+        draftBoxShapeRef.current.visible(false);
+      }
+
+      // محاسبه مستطیل نرمالایز شده
+      const x = Math.min(db.startX, db.currentX);
+      const y = Math.min(db.startY, db.currentY);
+      const width = Math.abs(db.currentX - db.startX);
+      const height = Math.abs(db.currentY - db.startY);
+
+      // محافظ کلیک تصادفی: باکس خیلی کوچک ساخته نمی‌شود
+      if (width < 5 || height < 5) {
+        isDrawingRef.current = false;
+        layerRef.current?.batchDraw();
         return;
-      } else {
-        // الگوی tldraw: اگر داخل کادر انتخاب بود → جابه‌جایی، وگرنه مارکی
-        let inBounds = false;
-        if (selectedItems.length > 0 && selectedAnnotationPage === pageNumber) {
-          const ub = getUnionBounds(selectedItems);
-          if (ub && pt.x >= ub.x - 10 && pt.x <= ub.x + ub.width + 10 &&
-              pt.y >= ub.y - 10 && pt.y <= ub.y + ub.height + 10) {
-            inBounds = true;
-          }
-        }
-        if (inBounds) {
-          // جابه‌جایی گروهی از داخل کادر
-          const snapshots = selectedItems.map((it) => JSON.parse(JSON.stringify(it)));
-          interactionRef.current = {
-            mode: 'move',
-            handle: null,
-            startPt: pt,
-            originalItem: snapshots[snapshots.length - 1],
-            originalItems: snapshots,
-            workingItems: normalizedItems,
-          };
-        } else {
-          // شروع مارکی (انتخاب چندتایی با درگ)
-          interactionRef.current = {
-            mode: 'marquee',
-            handle: null,
-            startPt: pt,
-            originalItem: null,
-            workingItems: normalizedItems,
-          };
-          setMarquee({ x: pt.x, y: pt.y, width: 0, height: 0 });
-        }
-        try {
-          e.currentTarget.setPointerCapture(e.pointerId);
-        } catch (_) {}
       }
-      return;
-    }
 
-    // د: درج متن برداری روی صفحه
-    if (annotationTool === 'text') {
-      setTextEditorState({
-        x: pt.x,
-        y: pt.y,
-        value: '',
-        editId: null,
-        fontSize: annotationFontSize,
-        color: annotationColor,
-        fontFamily: annotationFontFamily,
-      });
-      return;
-    }
-
-    // هـ: درج کارت استیکی‌نوت
-    if (annotationTool === 'sticky') {
-      const newSticky = {
-        id: `sticky_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        tool: 'sticky',
-        x: Math.min(760, Math.max(20, pt.x - 90)),
-        y: Math.min(800, Math.max(20, pt.y - 40)),
-        width: 210,
-        height: 170,
-        color: annotationColor,
-        opacity: annotationOpacity,
-        text: '',
+      const newId = uid('box');
+      const newBox = {
+        id: newId,
+        tool: 'box',
+        boxStyle: boxStyleRef.current || 'cloud',
+        hasFill: hasFillRef.current ?? true,
+        color: colorRef.current,
+        strokeWidth: widthRef.current,
+        opacity: opacityRef.current,
+        x: Number(x.toFixed(2)),
+        y: Number(y.toFixed(2)),
+        width: Number(width.toFixed(2)),
+        height: Number(height.toFixed(2)),
       };
-      const next = [...normalizedItems, newSticky];
-      commitItems(next);
-      setAnnotationTool('select');
-      setSelectedAnnotation(newSticky.id, pageNumber);
-      return;
-    }
 
-    // و: رسم پیوسته کادر ابری/مستطیل، هایلایت، قلم نرم یا فلش
-    interactionRef.current = {
-      mode: 'draw',
-      handle: null,
-      startPt: pt,
-      originalItem: null,
-      workingItems: normalizedItems,
-    };
-
-    try {
-      e.currentTarget.setPointerCapture(e.pointerId);
-    } catch (_) {}
-
-    const newDraft = {
-      id: `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      tool: annotationTool,
-      arrowStyle: annotationTool === 'arrow' ? annotationArrowStyle : 'straight',
-      boxStyle: annotationBoxStyle,
-      hasFill: annotationHasFill,
-      color: annotationColor,
-      strokeWidth: annotationStrokeWidth,
-      opacity: annotationOpacity,
-      startX: pt.x,
-      startY: pt.y,
-      endX: pt.x,
-      endY: pt.y,
-      points: [pt],
-    };
-
-    draftRef.current = newDraft;
-    setDraftShape(newDraft);
-  };
-
-  // ۶. حرکت ماوس (پاک‌کن جارویی، تغییر سایز، جابه‌جایی یا رسم زنده)
-  const handlePointerMove = (e) => {
-    const mode = interactionRef.current.mode;
-    if (!mode || !isAnnotationActive) return;
-
-    const pt = getSvgCoords(e.clientX, e.clientY);
-
-    if (mode === 'erase_sweep') {
-      sweepEraseAtPoint(pt);
-      return;
-    }
-
-    if (mode === 'marquee' && interactionRef.current.startPt) {
-      setMarquee(marqueeRect(interactionRef.current.startPt, pt));
-      return;
-    }
-
-    if (mode === 'resize' && selectedAnnotationId && interactionRef.current.originalItem) {
-      const resized = resizeAnnotationWithHandle(
-        selectedItem || interactionRef.current.originalItem,
-        interactionRef.current.handle,
-        pt,
-        interactionRef.current.originalItem
-      );
-      const nextList = normalizedItems.map((it) =>
-        it.id === selectedAnnotationId ? resized : it
-      );
-      interactionRef.current.workingItems = nextList;
-      setLiveItemsOverride(nextList);
-      return;
-    }
-
-    if (mode === 'move' && interactionRef.current.originalItem) {
-      const dx = pt.x - interactionRef.current.startPt.x;
-      const dy = pt.y - interactionRef.current.startPt.y;
-      const snapshots = interactionRef.current.originalItems || [interactionRef.current.originalItem];
-      const origMap = new Map(snapshots.map((o) => [o.id, o]));
-      const nextList = normalizedItems.map((it) => {
-        const o = origMap.get(it.id);
-        if (!o) return it;
-        return moveAnnotationByDelta(it, o, dx, dy);
-      });
-      interactionRef.current.workingItems = nextList;
-      setLiveItemsOverride(nextList);
-      return;
-    }
-
-    if (mode === 'draw' && draftRef.current) {
-      const currentDraft = draftRef.current;
-
-      if (currentDraft.tool === 'highlighter' || currentDraft.tool === 'pen') {
-        if (e.shiftKey && currentDraft.points.length > 0) {
-          const p0 = currentDraft.points[0];
-          const dx = Math.abs(pt.x - p0.x);
-          const dy = Math.abs(pt.y - p0.y);
-          const snapped = dx >= dy ? { x: pt.x, y: p0.y } : { x: p0.x, y: pt.y };
-          const updated = { ...currentDraft, points: [p0, snapped] };
-          draftRef.current = updated;
-          setDraftShape(updated);
-          return;
+      // ضدچشمک: همان الگوی فاز ۱
+      pendingCommitRef.current = newId;
+      if (pendingTimeoutRef.current) clearTimeout(pendingTimeoutRef.current);
+      pendingTimeoutRef.current = setTimeout(() => {
+        if (pendingCommitRef.current) {
+          forceClearDraft();
         }
+        pendingTimeoutRef.current = null;
+      }, 200);
 
-        // نقاط میانی coalesced برای نرمی حرفه‌ای (مثل Miro/tldraw)
-        const rawEvts = typeof e.nativeEvent?.getCoalescedEvents === 'function'
-          ? e.nativeEvent.getCoalescedEvents()
-          : [e.nativeEvent];
-        const newPts = [];
-        for (const cev of rawEvts) {
-          const cpt = getSvgCoords(cev.clientX, cev.clientY);
-          const lastPt = newPts.length > 0 ? newPts[newPts.length - 1] : currentDraft.points[currentDraft.points.length - 1];
-          if (Math.hypot(cpt.x - lastPt.x, cpt.y - lastPt.y) >= 1.2) {
-            newPts.push(cpt);
+      const current = uniformItems;
+      // تبدیل به Storage قبل از کامیت
+      const storageBox = uniformToStorage(newBox, aspectRef.current);
+      const storageList = [...(Array.isArray(items) ? items : []), storageBox];
+      // توجه: uniformItems از items مشتق شده، پس باید مستقیم از items استفاده کنیم
+      commitFnRef.current?.(pageRef.current, storageList);
+
+      isDrawingRef.current = false;
+      return;
+    }
+
+    if (toolRef.current === 'eraser') {
+      const epts = eraserPtsRef.current;
+      eraserPtsRef.current = [];
+      setEraserVisible(false);
+      if (eraserLineRef.current) {
+        eraserLineRef.current.setAttr('points', []);
+        eraserLineRef.current.getLayer()?.batchDraw();
+      }
+      if (epts.length > 0) {
+        const current = uniformItems;
+        const remaining = current.filter((it) => {
+          // فاز ۲: باکس‌ها با تابع اختصاصی بررسی می‌شوند
+          if (it.tool === 'box') {
+            return !eraserHitsBox(epts, it, 14);
           }
-        }
-        if (newPts.length === 0) return;
-
-        const updated = {
-          ...currentDraft,
-          points: [...currentDraft.points, ...newPts],
-        };
-        draftRef.current = updated;
-        setDraftShape(updated);
-      } else {
-        let ex = pt.x;
-        let ey = pt.y;
-        if (e.shiftKey && currentDraft.tool === 'box') {
-          const side = Math.max(
-            Math.abs(pt.x - currentDraft.startX),
-            Math.abs(pt.y - currentDraft.startY)
-          );
-          ex = currentDraft.startX + (pt.x >= currentDraft.startX ? side : -side);
-          ey = currentDraft.startY + (pt.y >= currentDraft.startY ? side : -side);
-        }
-        const updated = { ...currentDraft, endX: ex, endY: ey };
-        // پیش‌نمایش زنده خمیدگی برای فلش منحنی
-        if (currentDraft.tool === 'arrow' && currentDraft.arrowStyle === 'curved') {
-          const cc = defaultCurveControl(currentDraft.startX, currentDraft.startY, ex, ey);
-          updated.cx = cc.x;
-          updated.cy = cc.y;
-        }
-        draftRef.current = updated;
-        setDraftShape(updated);
+          return !eraserHitsStroke(epts, it.points, it._bbox, 14);
+        });
+        if (remaining.length !== current.length) commit(remaining);
       }
-    }
-  };
-
-  // ۷. پایان حرکت ماوس و ذخیره در دیتابیس (بدون خروج اجباری از ابزار رسم)
-  const handlePointerUp = (e) => {
-    const mode = interactionRef.current.mode;
-    if (!mode) return;
-
-    try {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    } catch (_) {}
-
-    if ((mode === 'move' || mode === 'resize') && interactionRef.current.workingItems) {
-      commitItems(interactionRef.current.workingItems);
-    }
-
-    if (mode === 'marquee') {
-      const pt = getSvgCoords(e.clientX, e.clientY);
-      const mq = marqueeRect(interactionRef.current.startPt, pt);
-      setMarquee(null);
-      // کلیک ساده (بدون درگ) → پاک کردن انتخاب
-      if (mq.width < 6 && mq.height < 6) {
-        clearSelection();
-      } else {
-        const hits = normalizedItems.filter((it) => rectsIntersect(getItemBounds(it), mq));
-        if (hits.length > 0) {
-          setSelectedAnnotations(hits.map((h) => h.id), pageNumber);
-          syncToolbarWithSelectedItem(hits[hits.length - 1]);
-        } else {
-          clearSelection();
-        }
-      }
-    }
-
-    if (mode === 'draw' && draftRef.current) {
-      const finished = draftRef.current;
-      draftRef.current = null;
-      setDraftShape(null);
-
-      const isValid =
-        finished.tool === 'highlighter' || finished.tool === 'pen'
-          ? finished.points.length >= 2
-          : Math.hypot(finished.endX - finished.startX, finished.endY - finished.startY) >= 8;
-
-      if (isValid) {
-        const finalItem = { ...finished };
-        if (finalItem.tool === 'arrow') {
-          if (!finalItem.arrowStyle) finalItem.arrowStyle = annotationArrowStyle || 'straight';
-          if (finalItem.arrowStyle === 'curved' && !Number.isFinite(finalItem.cx)) {
-            const cc = defaultCurveControl(finalItem.startX, finalItem.startY, finalItem.endX, finalItem.endY);
-            finalItem.cx = cc.x;
-            finalItem.cy = cc.y;
-          }
-        }
-        const next = [...normalizedItems, finalItem];
-        commitItems(next);
-      }
-    }
-
-    interactionRef.current = {
-      mode: null,
-      handle: null,
-      startPt: null,
-      originalItem: null,
-      workingItems: null,
-    };
-  };
-
-  // ۸. ثبت متن برداری
-  const commitTextEditor = () => {
-    if (!textEditorState) return;
-    const clean = (textEditorState.value || '').trim();
-    if (!clean) {
-      setTextEditorState(null);
       return;
     }
 
-    if (textEditorState.editId) {
-      const next = normalizedItems.map((it) =>
-        it.id === textEditorState.editId ? { ...it, text: clean } : it
-      );
-      commitItems(next);
-    } else {
-      const newText = {
-        id: `txt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        tool: 'text',
-        text: clean,
-        startX: textEditorState.x,
-        startY: textEditorState.y,
-        color: textEditorState.color || annotationColor,
-        fontFamily: textEditorState.fontFamily || annotationFontFamily,
-        fontSize: textEditorState.fontSize || annotationFontSize,
-        strokeWidth: annotationStrokeWidth,
-        opacity: annotationOpacity,
-      };
-      const next = [...normalizedItems, newText];
-      commitItems(next);
-      setAnnotationTool('select');
-      setSelectedAnnotation(newText.id, pageNumber, 'text');
-    }
-
-    setTextEditorState(null);
-  };
-
-  // ۹. رندر هر شکل برداری در بوم SVG
-  const renderVectorShape = (item) => {
-    if (!item || item.tool === 'sticky') return null;
-
-    const strokeW = Number(item.strokeWidth) || 4;
-    const opacity = typeof item.opacity === 'number' ? item.opacity : 0.85;
-    const fillHex = item.hasFill ? item.color : 'none';
-    const fillAlpha = item.hasFill ? Math.max(0.08, opacity * 0.18) : 0;
-
-    // ۱. ماژیک هایلایت طبیعی با perfect-freehand و ترکیب رنگی Multiply
-    if (item.tool === 'highlighter') {
-      const hlOutline = getBrushOutline(item);
-      const d = hlOutline ? hlOutline.path : pointsToSmoothSvgPath(item.points);
-      return (
-        <g key={item.id} data-id={item.id}>
-          <path
-            d={d}
-            fill="none"
-            stroke="transparent"
-            strokeWidth={Math.max(22, strokeW * 5)}
-          />
-          {hlOutline ? (
-            <g filter="url(#hl-soft-edge)">
-              <path
-                d={hlOutline.path}
-                fill={item.color}
-                opacity={opacity * 0.45}
-                style={{ mixBlendMode: 'multiply' }}
-              />
-            </g>
-          ) : (
-            <path
-              d={d}
-              fill="none"
-              stroke={item.color}
-              strokeWidth={strokeW * 4.4}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={opacity * 0.45}
-              style={{ mixBlendMode: 'multiply' }}
-            />
-          )}
-        </g>
-      );
-    }
-
-    // ۲. قلم نرم آزاد — با معماری جدید Brush Engine
-    if (item.tool === 'pen') {
-      const outline = getBrushOutline(item);
-      const d = outline ? outline.path : pointsToSmoothSvgPath(item.points);
-      return (
-        <g key={item.id} data-id={item.id}>
-          <path
-            d={d}
-            fill="none"
-            stroke="transparent"
-            strokeWidth={Math.max(18, strokeW + 12)}
-          />
-          {outline ? (
-            <path d={outline.path} fill={item.color} opacity={opacity} />
-          ) : (
-            <path
-              d={d}
-              fill="none"
-              stroke={item.color}
-              strokeWidth={strokeW}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={opacity}
-            />
-          )}
-        </g>
-      );
-    }
-
-    // ۳. کادربندی (کادر ابری، مستطیل، گوشه گرد)
-    if (item.tool === 'box') {
-      const x = Math.min(item.startX, item.endX);
-      const y = Math.min(item.startY, item.endY);
-      const w = Math.max(2, Math.abs(item.endX - item.startX));
-      const h = Math.max(2, Math.abs(item.endY - item.startY));
-
-      return (
-        <g key={item.id} data-id={item.id}>
-          {/* ماسک نامرئی جهت انتخاب‌پذیری ۱۰۰٪ حتی در کادرهای توخالی */}
-          <rect x={x} y={y} width={w} height={h} fill="rgba(0,0,0,0.001)" />
-          {item.boxStyle === 'cloud' ? (
-            <path
-              d={generateCloudPath(item.startX, item.startY, item.endX, item.endY, strokeW)}
-              fill={fillHex}
-              fillOpacity={fillAlpha}
-              stroke={item.color}
-              strokeWidth={strokeW}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              opacity={opacity}
-            />
-          ) : (
-            <rect
-              x={x}
-              y={y}
-              width={w}
-              height={h}
-              rx={item.boxStyle === 'round' ? 14 : 2}
-              ry={item.boxStyle === 'round' ? 14 : 2}
-              fill={fillHex}
-              fillOpacity={fillAlpha}
-              stroke={item.color}
-              strokeWidth={strokeW}
-              opacity={opacity}
-            />
-          )}
-        </g>
-      );
-    }
-
-    // ۴. فلش اشاره‌گر مهندسی (صاف یا منحنی ۳ نقطه‌ای)
-    if (item.tool === 'arrow') {
-      const isCurved =
-        item.arrowStyle === 'curved' &&
-        Number.isFinite(item.cx) &&
-        Number.isFinite(item.cy);
-      if (isCurved) {
-        const cgeom = generateCurvedArrowGeometry(
-          item.startX,
-          item.startY,
-          item.cx,
-          item.cy,
-          item.endX,
-          item.endY,
-          strokeW
-        );
-        return (
-          <g key={item.id} data-id={item.id}>
-            <path
-              d={cgeom.shaftPath}
-              fill="none"
-              stroke="transparent"
-              strokeWidth={Math.max(20, strokeW + 14)}
-            />
-            <path
-              d={cgeom.shaftPath}
-              fill="none"
-              stroke={item.color}
-              strokeWidth={strokeW}
-              strokeLinecap="round"
-              opacity={opacity}
-            />
-            <polygon
-              points={cgeom.headPoints}
-              fill={item.color}
-              opacity={opacity}
-              strokeLinejoin="round"
-            />
-          </g>
-        );
+    // فیکس #۴: آخرین نقطه خام (بدون استریم‌لاین) رو اضافه کن
+    // تا خط دقیقاً جایی تموم بشه که کاربر دستش رو برداشته
+    const buf = draftPointsRef.current;
+    const lastRaw = lastRawPointRef.current;
+    if (lastRaw && buf.length > 0) {
+      const lastFiltered = buf[buf.length - 1];
+      const d2 = dist2(lastRaw.x, lastRaw.y, lastFiltered.x, lastFiltered.y);
+      if (d2 > 0.01) { // اگه فرق داره، اضافه کن
+        buf.push({ x: lastRaw.x, y: lastRaw.y, time: performance.now() });
       }
-      const geom = generateArrowGeometry(
-        item.startX,
-        item.startY,
-        item.endX,
-        item.endY,
-        strokeW
-      );
-      return (
-        <g key={item.id} data-id={item.id}>
-          <line
-            x1={item.startX}
-            y1={item.startY}
-            x2={item.endX}
-            y2={item.endY}
-            stroke="transparent"
-            strokeWidth={Math.max(20, strokeW + 14)}
-          />
-          {geom.shaft && (
-            <>
-              <line
-                x1={geom.shaft.x1}
-                y1={geom.shaft.y1}
-                x2={geom.shaft.x2}
-                y2={geom.shaft.y2}
-                stroke={item.color}
-                strokeWidth={strokeW}
-                strokeLinecap="round"
-                opacity={opacity}
-              />
-              <polygon
-                points={geom.headPoints}
-                fill={item.color}
-                opacity={opacity}
-                strokeLinejoin="round"
-              />
-            </>
-          )}
-        </g>
-      );
     }
 
-    // ۵. تصویر درج‌شده روی صفحه
-    if (item.tool === 'image' && item.dataUrl) {
-      const x = Math.min(item.startX, item.endX);
-      const y = Math.min(item.startY, item.endY);
-      const w = Math.max(20, Math.abs(item.endX - item.startX));
-      const h = Math.max(20, Math.abs(item.endY - item.startY));
-      return (
-        <g key={item.id} data-id={item.id}>
-          <image
-            href={item.dataUrl}
-            x={x}
-            y={y}
-            width={w}
-            height={h}
-            preserveAspectRatio="none"
-            opacity={opacity}
-          />
-        </g>
-      );
-    }
+    const pts = [...buf]; // کپی برای کامیت
 
-    // ۶. متن برداری روی صفحه (با قابلیت دوکلیک برای ویرایش مجدد)
-    if (item.tool === 'text') {
-      const fontSize = Math.max(14, Number(item.fontSize) || strokeW * 5 || 22);
-      const lines = String(item.text || '').split('\n');
-      const sx = Number(item.startX ?? item.x ?? 100);
-      const sy = Number(item.startY ?? item.y ?? 100);
-      const b = getItemBounds(item);
+    if (pts.length === 0) return;
 
-      return (
-        <g
-          key={item.id}
-          data-id={item.id}
-          onDoubleClick={(e) => {
-            if (!isAnnotationActive) return;
-            e.stopPropagation();
-            setTextEditorState({
-              x: sx,
-              y: sy,
-              value: item.text,
-              editId: item.id,
-              fontSize,
-              color: item.color,
-            });
-          }}
-        >
-          <rect
-            x={b.x}
-            y={b.y}
-            width={b.width}
-            height={b.height}
-            fill="rgba(0,0,0,0.001)"
-          />
-          <text
-            x={sx}
-            y={sy}
-            fill={item.color}
-            fontSize={fontSize}
-            opacity={opacity}
-            style={{
-              fontFamily: item.fontFamily || 'var(--font-fa), sans-serif',
-              fontWeight: 800,
-              direction: 'rtl',
-              userSelect: 'none',
-            }}
-          >
-            {lines.map((lineText, idx) => (
-              <tspan key={idx} x={sx} dy={idx === 0 ? 0 : '1.3em'}>
-                {lineText}
-              </tspan>
-            ))}
-          </text>
-        </g>
-      );
-    }
+    const tool = toolRef.current === 'highlighter' ? 'highlighter' : 'pen';
+    const newId = uid(tool === 'highlighter' ? 'hl' : 'pen');
+    const newItem = {
+      id: newId,
+      tool,
+      color: colorRef.current,
+      strokeWidth: widthRef.current,
+      opacity: tool === 'highlighter' ? 0.35 : opacityRef.current,
+      points: pts.map((p) => ({ x: p.x, y: p.y })),
+    };
 
-    return null;
-  };
+    // فیکس #۳: پیش‌نویس رو مخفی نکن! تا سینک شدن props صبر کن
+    pendingCommitRef.current = newId;
+    // فاز ۱-مرحله ۳: تایمر ایمنی ۲۰۰ms — اگر والد پاسخ نداد، پیش‌نویس فریز نماند
+    if (pendingTimeoutRef.current) clearTimeout(pendingTimeoutRef.current);
+    pendingTimeoutRef.current = setTimeout(() => {
+      if (pendingCommitRef.current) {
+        forceClearDraft();
+      }
+      pendingTimeoutRef.current = null;
+    }, 200);
 
-  // ۱۰. رندر کادر انتخاب (Gizmo): تکی با هندل‌ها، چندتایی با کادر اجتماع
-  const renderSelectionGizmo = () => {
-    if (!isSelectedOnThisPage || annotationTool !== 'select') return null;
-    // استیکی: سلکت با CSS روی خود div است (تطابق پیکسلی) — گیزموی SVG نمی‌خواهد
-    if (selectedItems.length > 0 && selectedItems.every((it) => it.tool === 'sticky')) return null;
-    // مولتی‌سلکت: فقط کادر اجتماع (بدون هندل تغییر سایز)
-    if (selectedItems.length > 1) {
-      const ub = getUnionBounds(selectedItems);
-      if (!ub) return null;
-      return (
-        <g>
-          <rect
-            x={ub.x}
-            y={ub.y}
-            width={ub.width}
-            height={ub.height}
-            fill="none"
-            stroke="#a78bfa"
-            strokeWidth="2"
-            strokeDasharray="7 5"
-            pointerEvents="none"
-          />
-        </g>
-      );
-    }
-    if (!selectedItem) return null;
+    const current = uniformItems;
+    commit([...current, newItem]);
+    // توجه: پاک‌سازی draftPoints در useEffect بعد از سینک انجام می‌شه
+  }, [commit, getNative, releasePointer, uniformItems]);
 
-    if (selectedItem.tool === 'arrow') {
-      const curveX = Number.isFinite(selectedItem.cx)
-        ? selectedItem.cx
-        : (selectedItem.startX + selectedItem.endX) / 2;
-      const curveY = Number.isFinite(selectedItem.cy)
-        ? selectedItem.cy
-        : (selectedItem.startY + selectedItem.endY) / 2;
-      const ab = getItemBounds(selectedItem);
-      return (
-        <g>
-          {/* باکس دور فلش */}
-          {ab && (
-            <rect
-              x={ab.x}
-              y={ab.y}
-              width={ab.width}
-              height={ab.height}
-              fill="none"
-              stroke="#22d3ee"
-              strokeWidth="1.5"
-              strokeDasharray="6 4"
-              pointerEvents="none"
-              opacity="0.6"
-            />
-          )}
-          <line
-            x1={selectedItem.startX}
-            y1={selectedItem.startY}
-            x2={selectedItem.endX}
-            y2={selectedItem.endY}
-            stroke="#22d3ee"
-            strokeWidth="1.5"
-            strokeDasharray="5 4"
-            pointerEvents="none"
-          />
-          <circle
-            cx={selectedItem.startX}
-            cy={selectedItem.startY}
-            r="8"
-            fill="#0a0f13"
-            stroke="#22d3ee"
-            strokeWidth="2.5"
-            data-handle="tail"
-            style={{ cursor: 'move' }}
-          />
-          <circle
-            cx={selectedItem.endX}
-            cy={selectedItem.endY}
-            r="8"
-            fill="#0a0f13"
-            stroke="#22d3ee"
-            strokeWidth="2.5"
-            data-handle="head"
-            style={{ cursor: 'move' }}
-          />
-          {/* هندل خمیدگی فلش منحنی — کشیدن آن فلش را خمیده می‌کند */}
-          <rect
-            x={curveX - 7}
-            y={curveY - 7}
-            width="14"
-            height="14"
-            rx="3"
-            transform={`rotate(45 ${curveX} ${curveY})`}
-            fill="#0a0f13"
-            stroke="#facc15"
-            strokeWidth="2.5"
-            data-handle="curve"
-            style={{ cursor: 'move' }}
-          >
-            <title>خمیدگی فلش</title>
-          </rect>
-        </g>
-      );
-    }
+  const handleEraseClick = useCallback((id) => {
+    if (toolRef.current !== 'eraser') return;
+    const remaining = uniformItems.filter((it) => it.id !== id);
+    if (remaining.length !== uniformItems.length) commit(remaining);
+  }, [commit, uniformItems]);
 
-    // برای کادر: هندل‌ها روی لبه واقعی (بدون پد) تا ریسایز دقیق باشد
-    // باکس خط‌چین با پد کوچک برای دید بهتر
-    let b;
-    let bVisual;
-    if (selectedItem.tool === 'box') {
-      const bx = Math.min(selectedItem.startX, selectedItem.endX);
-      const by = Math.min(selectedItem.startY, selectedItem.endY);
-      const bw = Math.max(2, Math.abs(selectedItem.endX - selectedItem.startX));
-      const bh = Math.max(2, Math.abs(selectedItem.endY - selectedItem.startY));
-      b = { x: bx, y: by, width: bw, height: bh };
-      const pad = (Number(selectedItem.strokeWidth) || 4) * 0.6 + 6;
-      bVisual = { x: bx - pad, y: by - pad, width: bw + pad * 2, height: bh + pad * 2 };
-    } else if (selectedItem.tool === 'text') {
-      b = getItemBounds(selectedItem);
-      const pad = 10;
-      bVisual = { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
-    } else {
-      b = getItemBounds(selectedItem);
-      bVisual = b;
-    }
-    const handles = [
-      { id: 'nw', x: b.x, y: b.y, cursor: 'nwse-resize' },
-      { id: 'n', x: b.x + b.width / 2, y: b.y, cursor: 'ns-resize' },
-      { id: 'ne', x: b.x + b.width, y: b.y, cursor: 'nesw-resize' },
-      { id: 'e', x: b.x + b.width, y: b.y + b.height / 2, cursor: 'ew-resize' },
-      { id: 'se', x: b.x + b.width, y: b.y + b.height, cursor: 'nwse-resize' },
-      { id: 's', x: b.x + b.width / 2, y: b.y + b.height, cursor: 'ns-resize' },
-      { id: 'sw', x: b.x, y: b.y + b.height, cursor: 'nesw-resize' },
-      { id: 'w', x: b.x, y: b.y + b.height / 2, cursor: 'ew-resize' },
-    ];
-    const hs = 16; // هندل بزرگ‌تر برای گرفتن راحت‌تر
+  // فاز ۱: شنونده‌های fallback — فقط اگر والد onUndo/onRedo نداده باشد
+  // هیچ آرایه تاریخچه موازی نگه داشته نمی‌شود؛ Undo/Redo اصلی در والد است.
+  // این شنونده‌ها فقط برای سازگاری با تولبار قدیمی (حالت fallback) هستند.
+  useEffect(() => {
+    const onUndoFallback = () => {
+      // بدون تاریخچه داخلی، لایه نمی‌تواند Undo را خودش انجام دهد.
+      // والد (PdfViewer) مالک تاریخچه است و از طریق props آن را مدیریت می‌کند.
+      // این رویداد فقط زمانی به اینجا می‌رسد که تولبار در حالت fallback باشد.
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[AnnotationLayer] annotation:undo دریافت شد ولی تاریخچه در والد است.');
+      }
+    };
+    const onRedoFallback = () => {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[AnnotationLayer] annotation:redo دریافت شد ولی تاریخچه در والد است.');
+      }
+    };
+    const onClearFallback = () => {
+      // پاک‌سازی از طریق مسیر استاندارد کامیت — والد آن را در تاریخچه ثبت می‌کند
+      if (itemsRef.current.filter(Boolean).length === 0) return;
+      commit([]);
+    };
+    window.addEventListener('annotation:undo', onUndoFallback);
+    window.addEventListener('annotation:redo', onRedoFallback);
+    window.addEventListener('annotation:clear', onClearFallback);
+    return () => {
+      window.removeEventListener('annotation:undo', onUndoFallback);
+      window.removeEventListener('annotation:redo', onRedoFallback);
+      window.removeEventListener('annotation:clear', onClearFallback);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    return (
-      <g>
-        <rect
-          x={bVisual.x}
-          y={bVisual.y}
-          width={bVisual.width}
-          height={bVisual.height}
-          fill="rgba(34, 211, 238, 0.06)"
-          stroke="#22d3ee"
-          strokeWidth="2.5"
-          strokeDasharray="8 5"
-          pointerEvents="none"
-        />
-        {handles.map((h) => (
-          <g key={h.id}>
-            {/* ناحیه کلیک نامرئی بزرگ‌تر */}
-            <rect
-              x={h.x - 18}
-              y={h.y - 18}
-              width={36}
-              height={36}
-              fill="transparent"
-              data-handle={h.id}
-              style={{ cursor: h.cursor }}
-            />
-            {/* هندل بصری */}
-            <rect
-              x={h.x - hs / 2}
-              y={h.y - hs / 2}
-              width={hs}
-              height={hs}
-              rx="3"
-              fill="#0a0f13"
-              stroke="#22d3ee"
-              strokeWidth="2.5"
-              data-handle={h.id}
-              style={{ cursor: h.cursor, pointerEvents: 'none' }}
-            />
-          </g>
-        ))}
-      </g>
-    );
-  };
-
-  const hasAnyContent =
-    normalizedItems.length > 0 || Boolean(draftShape) || Boolean(textEditorState);
-  if (!isAnnotationActive && !hasAnyContent) {
-    return null;
+  if (!isAnnotationActive && uniformItems.length === 0) return null;
+  if (size.w === 0 || size.h === 0) {
+    return <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />;
   }
 
-  const stickyItems = normalizedItems.filter((it) => it.tool === 'sticky');
-  const selectedBounds = selectedItems.length > 1
-    ? getUnionBounds(selectedItems)
-    : selectedItem ? getItemBounds(selectedItem) : null;
+  const isEraser = annotationTool === 'eraser';
 
   return (
     <div
-      ref={wrapperRef}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
+      ref={containerRef}
       style={{
-        ...styles.overlayRoot,
+        position: 'absolute',
+        inset: 0,
+        width: '100%',
+        height: '100%',
+        zIndex: 18,
         pointerEvents: isAnnotationActive ? 'auto' : 'none',
-        cursor: !isAnnotationActive
-          ? 'default'
-          : annotationTool === 'select'
-          ? 'default'
-          : annotationTool === 'eraser'
-          ? 'cell'
-          : annotationTool === 'text'
-          ? 'text'
-          : 'crosshair',
+        touchAction: 'none',
       }}
     >
-      {/* ۱. لایه برداری SVG با مختصات نرمال‌شده 1000x1000 */}
-      <svg
-        viewBox={`0 0 ${VIEWBOX_SIZE} ${VIEWBOX_SIZE * pageAspect}`}
-        preserveAspectRatio="none"
-        style={styles.svgCanvas}
+      <Stage
+        ref={stageRef}
+        width={size.w}
+        height={size.h}
+        // فیکس #۱: فقط Pointer Events — بدون mouse/touch موازی
+        onPointerDown={handleDown}
+        onPointerMove={handleMove}
+        onPointerUp={handleUp}
+        onPointerLeave={handleUp}
+        onPointerCancel={handleUp}
+        style={{
+          cursor: !isAnnotationActive ? 'default' : isEraser ? 'cell' : 'crosshair',
+        }}
       >
-        <defs>
-          <filter id="hl-soft-edge" x="-30%" y="-30%" width="160%" height="160%">
-            <feGaussianBlur stdDeviation="2.2" />
-          </filter>
-        </defs>
-        <g>{normalizedItems.map((it) => renderVectorShape(it))}</g>
-        <g>{draftShape && renderVectorShape(draftShape)}</g>
-        <g>{isSelectedOnThisPage && renderSelectionGizmo()}</g>
-        {marquee && (marquee.width > 4 || marquee.height > 4) && (
-          <rect
-            x={marquee.x}
-            y={marquee.y}
-            width={marquee.width}
-            height={marquee.height}
-            fill="rgba(167, 139, 250, 0.08)"
-            stroke="#a78bfa"
-            strokeWidth="1.5"
-            strokeDasharray="6 4"
-            pointerEvents="none"
-          />
-        )}
-      </svg>
-
-      {/* ۲. کارت‌های استیکی‌نوت روی صفحه */}
-      {stickyItems.map((st) => {
-        const leftPct = `${((st.x ?? 100) / 10).toFixed(2)}%`;
-        const topPct = `${((st.y ?? 100) / (10 * pageAspect)).toFixed(2)}%`;
-        const widthPct = `${((st.width || 210) / 10).toFixed(2)}%`;
-        const heightPct = `${((st.height || 170) / (10 * pageAspect)).toFixed(2)}%`;
-
-        return (
-          <div
-            key={st.id}
-            style={{
-              ...styles.stickyCard,
-              left: leftPct,
-              top: topPct,
-              width: widthPct,
-              height: heightPct,
-              backgroundColor: st.color || '#fef08a',
-              opacity: st.opacity ?? 0.95,
-              pointerEvents: isAnnotationActive ? 'auto' : 'none',
-              // سلکت حرفه‌ای: outline روی خود المنت (تطابق پیکسلی تضمینی)
-              outline: selectedAnnotationIds.includes(st.id) && selectedAnnotationPage === pageNumber
-                ? '2.5px dashed #22d3ee'
-                : 'none',
-              outlineOffset: '4px',
-            }}
-            onPointerDown={(e) => {
-              if (!isAnnotationActive) return;
-              if (e.target.tagName === 'TEXTAREA') return;
-              e.stopPropagation();
-
-              if (annotationTool === 'eraser') {
-                const next = normalizedItems.filter((i) => i.id !== st.id);
-                commitItems(next);
-                return;
+        <Layer>
+          <Group scaleX={scaleX} scaleY={scaleY}>
+            {uniformItems.map((item) => {
+              // فاز ۲: باکس‌ها با کامپوننت اختصاصی رندر می‌شوند
+              if (item.tool === 'box') {
+                return (
+                  <CommittedBox
+                    key={item.id}
+                    item={item}
+                    onErase={handleEraseClick}
+                  />
+                );
               }
+              return (
+                <CommittedStroke
+                  key={item.id}
+                  item={item}
+                  onErase={handleEraseClick}
+                />
+              );
+            })}
 
-              setAnnotationTool('select');
-              setSelectedAnnotation(st.id, pageNumber, 'sticky');
-              syncToolbarWithSelectedItem(st);
-
-              const pt = getSvgCoords(e.clientX, e.clientY);
-              interactionRef.current = {
-                mode: 'move',
-                handle: null,
-                startPt: pt,
-                originalItem: JSON.parse(JSON.stringify(st)),
-                workingItems: normalizedItems,
-              };
-              try {
-                wrapperRef.current?.setPointerCapture(e.pointerId);
-              } catch (_) {}
-            }}
-          >
-            <div style={styles.stickyHeader}>
-              <div style={styles.stickyPinDot} />
-              <span style={styles.stickyHeaderTitle}>یادداشت</span>
-              {isAnnotationActive && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const next = normalizedItems.filter((i) => i.id !== st.id);
-                    if (selectedAnnotationId === st.id) setSelectedAnnotation(null, null);
-                    commitItems(next);
-                  }}
-                  style={styles.stickyDeleteBtn}
-                  title="حذف استیکی‌نوت"
-                >
-                  ×
-                </button>
-              )}
-            </div>
-            <textarea
-              value={stickyDrafts[st.id] ?? st.text ?? ''}
-              placeholder="نکته را بنویسید..."
-              onChange={(e) => handleStickyTextChange(st.id, e.target.value)}
-              onBlur={() => flushStickyDraft(st.id)}
-              style={styles.stickyTextarea}
+            <Shape
+              ref={draftShapeRef}
+              sceneFunc={draftSceneFunc}
+              visible={false}
+              listening={false}
+              perfectDrawEnabled={false}
+              shadowForStrokeEnabled={false}
             />
-          </div>
-        );
-      })}
 
-      {/* ۳. مینی‌داک عملیاتی شناور بالای شکل انتخاب‌شده */}
-      {isSelectedOnThisPage && selectedBounds && annotationTool === 'select' && (
-        <div
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            ...styles.contextPillMenu,
-            left: `${Math.min(88, Math.max(12, (selectedBounds.x + selectedBounds.width / 2) / 10))}%`,
-            top: `${
-              selectedBounds.y < 85 * pageAspect
-                ? Math.min(92, (selectedBounds.y + selectedBounds.height + 28) / (10 * pageAspect))
-                : Math.max(4, (selectedBounds.y - 16) / (10 * pageAspect))
-            }%`,
-          }}
-        >
-          <button
-            type="button"
-            onClick={handleDuplicateSelected}
-            style={styles.contextPillBtn}
-            title="تکثیر شکل (Ctrl + D)"
-          >
-            تکثیر
-          </button>
-          <button
-            type="button"
-            onClick={() => handleMoveLayer(1)}
-            style={styles.contextPillBtn}
-            title="آوردن به لایه رویی"
-          >
-            جلو
-          </button>
-          <button
-            type="button"
-            onClick={() => handleMoveLayer(-1)}
-            style={styles.contextPillBtn}
-            title="فرستادن به لایه زیرین"
-          >
-            عقب
-          </button>
-          <button
-            type="button"
-            onClick={handleDeleteSelected}
-            style={{ ...styles.contextPillBtn, ...styles.contextPillDanger }}
-            title="حذف شکل (Delete)"
-          >
-            حذف
-          </button>
-        </div>
-      )}
+            {/* فاز ۲: پیش‌نمایش زنده باکس حین رسم */}
+            <BoxLiveDraft
+              ref={draftBoxShapeRef}
+              boxRef={draftBoxRef}
+              boxStyleRef={boxStyleRef}
+              hasFillRef={hasFillRef}
+              colorRef={colorRef}
+              widthRef={widthRef}
+              opacityRef={opacityRef}
+            />
 
-      {/* ۴. ادیتور موضعی تایپ مستقیم متن روی صفحه */}
-      {textEditorState && (
-        <div
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => e.stopPropagation()}
-          style={{
-            ...styles.inlineEditorBox,
-            left: `${Math.min(74, Math.max(8, textEditorState.x / 10))}%`,
-            top: `${Math.min(82, Math.max(8, textEditorState.y / (10 * pageAspect)))}%`,
-          }}
-        >
-          <textarea
-            ref={textAreaRef}
-            rows={2}
-            value={textEditorState.value}
-            onChange={(e) =>
-              setTextEditorState((prev) => ({ ...prev, value: e.target.value }))
-            }
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                commitTextEditor();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                setTextEditorState(null);
-              }
-            }}
-            placeholder="متن را تایپ کنید (Enter = ثبت)..."
-            style={{
-              ...styles.inlineEditorTextarea,
-              color: textEditorState.color || annotationColor,
-            }}
-          />
-          <div style={styles.inlineEditorActions}>
-            <button
-              type="button"
-              onClick={() => setTextEditorState(null)}
-              style={styles.editorCancelBtn}
-            >
-              لغو
-            </button>
-            <button
-              type="button"
-              onClick={commitTextEditor}
-              style={styles.editorCommitBtn}
-            >
-              ثبت متن
-            </button>
-          </div>
-        </div>
-      )}
+            {eraserVisible && (
+              <Line
+                ref={eraserLineRef}
+                points={[]}
+                stroke="#ef4444"
+                strokeWidth={28}
+                opacity={0.25}
+                lineCap="round"
+                lineJoin="round"
+                listening={false}
+                perfectDrawEnabled={false}
+              />
+            )}
+          </Group>
+        </Layer>
+      </Stage>
     </div>
   );
 });
 
-const styles = {
-  overlayRoot: {
-    position: 'absolute',
-    inset: 0,
-    width: '100%',
-    height: '100%',
-    zIndex: 18,
-    userSelect: 'none',
-    touchAction: 'none',
-  },
-  svgCanvas: {
-    width: '100%',
-    height: '100%',
-    display: 'block',
-    overflow: 'visible',
-  },
-  stickyCard: {
-    position: 'absolute',
-    borderRadius: '10px',
-    padding: '8px',
-    boxShadow: '0 10px 28px rgba(0, 0, 0, 0.45)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '5px',
-    boxSizing: 'border-box',
-    cursor: 'move',
-    direction: 'rtl',
-    zIndex: 22,
-  },
-  stickyHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottom: '1px dashed rgba(0, 0, 0, 0.18)',
-    paddingBottom: '3px',
-  },
-  stickyPinDot: {
-    width: '8px',
-    height: '8px',
-    borderRadius: '50%',
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
-  },
-  stickyHeaderTitle: {
-    fontFamily: 'var(--font-fa)',
-    fontSize: '10px',
-    fontWeight: 800,
-    color: 'rgba(0, 0, 0, 0.55)',
-  },
-  stickyDeleteBtn: {
-    background: 'transparent',
-    border: 'none',
-    color: 'rgba(0, 0, 0, 0.6)',
-    fontSize: '14px',
-    fontWeight: 800,
-    cursor: 'pointer',
-    lineHeight: 1,
-    padding: '0 2px',
-  },
-  stickyTextarea: {
-    flex: 1,
-    width: '100%',
-    background: 'transparent',
-    border: 'none',
-    outline: 'none',
-    resize: 'none',
-    fontFamily: 'var(--font-fa)',
-    fontSize: '12px',
-    fontWeight: 600,
-    lineHeight: 1.5,
-    color: '#0f172a',
-    cursor: 'text',
-  },
-  contextPillMenu: {
-    position: 'absolute',
-    transform: 'translate(-50%, -100%)',
-    zIndex: 45,
-    display: 'flex',
-    alignItems: 'center',
-    gap: '4px',
-    padding: '4px 8px',
-    backgroundColor: 'rgba(13, 18, 24, 0.96)',
-    backdropFilter: 'blur(14px)',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'rgba(34, 211, 238, 0.4)',
-    borderRadius: '10px',
-    boxShadow: '0 10px 26px rgba(0, 0, 0, 0.7)',
-    direction: 'rtl',
-  },
-  contextPillBtn: {
-    height: '24px',
-    padding: '0 8px',
-    borderRadius: '6px',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'rgba(255, 255, 255, 0.08)',
-    backgroundColor: 'rgba(255, 255, 255, 0.04)',
-    color: '#e2e8f0',
-    fontFamily: 'var(--font-fa)',
-    fontSize: '11px',
-    fontWeight: 600,
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-  },
-  contextPillDanger: {
-    color: '#f85149',
-    borderColor: 'rgba(248, 81, 73, 0.3)',
-  },
-  inlineEditorBox: {
-    position: 'absolute',
-    width: '220px',
-    backgroundColor: 'rgba(13, 18, 24, 0.96)',
-    backdropFilter: 'blur(16px)',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: '#22d3ee',
-    borderRadius: '10px',
-    padding: '8px',
-    boxShadow: '0 14px 36px rgba(0, 0, 0, 0.8)',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '6px',
-    direction: 'rtl',
-    zIndex: 55,
-  },
-  inlineEditorTextarea: {
-    width: '100%',
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'rgba(255, 255, 255, 0.12)',
-    borderRadius: '7px',
-    padding: '6px 8px',
-    fontFamily: 'var(--font-fa)',
-    fontSize: '13px',
-    fontWeight: 700,
-    outline: 'none',
-    resize: 'none',
-    direction: 'rtl',
-  },
-  inlineEditorActions: {
-    display: 'flex',
-    justifyContent: 'flex-end',
-    gap: '6px',
-  },
-  editorCancelBtn: {
-    background: 'transparent',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'rgba(255, 255, 255, 0.14)',
-    color: '#94a3b8',
-    borderRadius: '6px',
-    padding: '3px 9px',
-    fontFamily: 'var(--font-fa)',
-    fontSize: '11px',
-    cursor: 'pointer',
-  },
-  editorCommitBtn: {
-    backgroundColor: '#22d3ee',
-    border: 'none',
-    color: '#0a0f13',
-    borderRadius: '6px',
-    padding: '3px 10px',
-    fontFamily: 'var(--font-fa)',
-    fontSize: '11px',
-    fontWeight: 700,
-    cursor: 'pointer',
-  },
-};
+export default KonvaAnnotationLayer;
 
-export default AnnotationLayer;
+// فاز ۱: اکسپورت نام‌دار برای سازگاری با ایمپورت‌های مختلف
+export const AnnotationLayer = KonvaAnnotationLayer;
+export { KonvaAnnotationLayer };
+
+export {
+  drawSmoothStroke,
+  midpoint,
+  streamline,
+  pointToSegmentDist,
+  getStrokeBBox,
+  getStrokeWidth,
+  eraserHitsStroke,
+};
