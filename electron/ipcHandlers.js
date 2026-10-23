@@ -412,6 +412,7 @@ module.exports = function(app) {
             type: 'folder',
             filePath: normalizedPath,
             items: folderImages,
+            chapters: directoryService.extractChapters(folderImages, path.basename(normalizedPath)),
             fileName: path.basename(normalizedPath),
             fileSize: `${folderImages.length} Image`,
             cover: coverBase64,
@@ -554,6 +555,7 @@ module.exports = function(app) {
             type: 'zip',
             filePath: normalizedPath,
             items: result.items,
+            chapters: result.chapters || [],
             fileName: path.basename(normalizedPath),
             fileSize: formatBytes(stat.size),
             cover: coverBase64,
@@ -764,7 +766,8 @@ module.exports = function(app) {
     const win = getWindowFromEvent(event);
     const dialogOptions = {
       properties: ['openFile'],
-      filters: [{ name: 'Comics & Documents', extensions: ['cbz', 'zip', 'cbr', 'pdf', 'rar', '7z', 'webp', 'jpg', 'png'] }]
+      filters: [{ name: 'Comics & Documents', extensions: ['cbz', 'zip', 'cbr', 'pdf', 'rar', 'webp', 'jpg', 'png'] }]
+      // NOTE: ‎'7z' تا فاز node-7z از فیلتر حذف شده چون استخراجش پشتیبانی نمی‌شود
     };
 
     const result = win

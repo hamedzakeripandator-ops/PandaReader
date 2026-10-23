@@ -11,7 +11,7 @@ function formatBytes(bytes) {
 
 class DirectoryService {
   constructor() {
-    this.supportedArchiveExtensions = new Set(['.cbz', '.zip', '.cbr', '.pdf', '.rar', '.7z']);
+    this.supportedArchiveExtensions = new Set(['.cbz', '.zip', '.cbr', '.pdf', '.rar']); // NOTE: ‎'.7z' تا فاز node-7z
     this.collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   }
 
@@ -68,7 +68,26 @@ class DirectoryService {
     return images;
   }
 
-  // ۲. بررسی اینکه آیا یک پوشه مستقیماً کمیک (حاوی عکس) است یا خیر
+  // ۲. استخراج لیست فصل‌ها از روی تصاویر اسکن‌شده: [{ name, startPage, endPage }]
+  // فصل = نام پوشه سطح‌اول؛ پوشه تخت (بدون زیرپوشه) = تک‌فصل با نام خود پوشه
+  extractChapters(images, fallbackName = '') {
+    const chapters = [];
+    let current = null;
+    for (let idx = 0; idx < images.length; idx++) {
+      const rel = (images[idx].relativePath || '').replace(/\\/g, '/');
+      const segs = rel.split('/').filter(Boolean);
+      const name = segs.length > 1 ? segs[0] : (fallbackName || '');
+      if (!current || current.name !== name) {
+        current = { name, startPage: idx, endPage: idx };
+        chapters.push(current);
+      } else {
+        current.endPage = idx;
+      }
+    }
+    return chapters;
+  }
+
+  // ۳. بررسی اینکه آیا یک پوشه مستقیماً کمیک (حاوی عکس) است یا خیر
   hasImagesRecursively(folderPath) {
     try {
       const entries = fs.readdirSync(folderPath, { withFileTypes: true });
@@ -83,19 +102,15 @@ class DirectoryService {
     return false;
   }
 
-  // ۳. اسکن و ناوبری بین پوشه‌ها یا فایل‌های کمیک همسایه
+  // ۴. اسکن و ناوبری بین پوشه‌ها یا فایل‌های کمیک همسایه
   scanAndSortDirectory(targetPath, sortBy = 'name_asc') {
     try {
       if (!targetPath) return this._getEmptyResult();
 
       const normalized = path.normalize(targetPath);
-      let isTargetDir = false;
-      try {
-        isTargetDir = fs.statSync(normalized).isDirectory();
-      } catch (_) {}
 
-      // اگر خود مسیر یک پوشه کمیک باشد، والد آن را اسکن می‌کنیم تا پوشه‌های فصل بعدی/قبلی پیدا شوند
-      const dirPath = isTargetDir ? path.dirname(normalized) : path.dirname(normalized);
+      // پوشه والد اسکن می‌شود تا آیتم‌های همسایه (فصل/کمیک بعدی و قبلی) پیدا شوند
+      const dirPath = path.dirname(normalized);
       const currentItemName = path.basename(normalized);
       const currentLower = currentItemName.toLowerCase().trim();
 

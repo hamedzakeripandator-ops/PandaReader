@@ -4,6 +4,10 @@ const path = require('path');
 const JSZip = require('jszip');
 
 const IMAGE_REGEX = /\.(jpg|jpeg|png|webp|gif|bmp|avif)$/i;
+const NESTED_ARCHIVE_REGEX = /\.(zip|cbz)$/i;
+// سقف عمق تودرتویی زیپ‌در‌زیپ — جلوگیری از بازگشت بی‌نهایت / بمب آرشیوی
+const MAX_NESTED_DEPTH = 3;
+const WRITE_BATCH_SIZE = 8;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 // فیلتر هوشمند فایل‌های مخفی مکینتاش، فایل‌های سیستمی و تصاویر بندانگشتی معیوب
@@ -33,7 +37,7 @@ function detectMimeFromBuffer(buffer) {
   return 'image/jpeg';
 }
 
-// استخراج فوق‌سریع ابعاد تصویر (Width & Height) مستقیماً از هدر باینری بافر در ۰.۰۱ میلی‌ثانیه
+// استخراج فوق‌سریع ابعاد تصویر (Width & Height) مستقیماً از هدر باینری بافر
 function extractImageDimensions(buffer) {
   try {
     if (!buffer || buffer.length < 30) return null;
@@ -149,38 +153,92 @@ function getArchiveType(filePath, headerBuf) {
   }
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.cbr' || ext === '.rar') return 'rar';
+  // NOTE: ‎.7z فعلاً پشتیبانی نمی‌شود (فاز node-7z) — به‌عنوان zip برمی‌گردد و خطای کنترل‌شده می‌دهد
   return 'zip';
 }
 
-// ۱. استخراج موازی و فوق‌سریع ZIP / CBZ همراه با ابعاد دقیق صفحات
-async function extractZip(fileContent, outputDir, coverOnly = false) {
-  const zip = await JSZip.loadAsync(fileContent);
-  const entries = [];
+function stripArchiveExt(name) {
+  return name.replace(/\.(zip|cbz)$/i, '');
+}
+
+// نام فصل هر آیتم = اولین سگمنت مسیر (پوشه سطح‌اول یا نام زیپ تودرتو)
+function chapterNameOf(relativePath, fallback) {
+  const segs = relativePath.split('/').filter(Boolean);
+  if (segs.length > 1) return stripArchiveExt(segs[0]);
+  return fallback;
+}
+
+// پیمایش بازگشتی زیپ: جمع‌آوری تصاویر + باز کردن زیپ‌های تودرتو
+// زیپ‌های تودرتو «ترتیبی» باز می‌شوند تا حافظه جهش نکند
+async function collectEntries(zip, prefix, depth, out) {
+  const nested = [];
 
   zip.forEach((relativePath, entry) => {
-    if (!entry.dir && isValidImageEntry(relativePath)) {
-      entries.push({ relativePath, entry });
+    if (entry.dir) return;
+    const norm = relativePath.replace(/\\/g, '/');
+    if (!norm) return;
+    const base = norm.split('/').pop();
+    if (base.startsWith('._') || base.startsWith('.')) return; // فایل سیستمی/مک
+    const fullRel = prefix ? `${prefix}/${norm}` : norm;
+
+    if (isValidImageEntry(norm)) {
+      out.push({ relativePath: fullRel, load: () => entry.async('nodebuffer') });
+    } else if (depth < MAX_NESTED_DEPTH && NESTED_ARCHIVE_REGEX.test(base)) {
+      nested.push({ norm, entry });
     }
   });
 
-  const totalFiles = entries.length;
-  if (totalFiles === 0) {
+  for (const { norm, entry } of nested) {
+    try {
+      const buf = await entry.async('nodebuffer');
+      const sub = await JSZip.loadAsync(buf);
+      const zipBase = stripArchiveExt(norm.split('/').pop());
+      const subPrefix = prefix ? `${prefix}/${zipBase}` : zipBase;
+      await collectEntries(sub, subPrefix, depth + 1, out);
+    } catch (_) {
+      // زیپ تودرتوی خراب نادیده گرفته می‌شود
+    }
+  }
+}
+
+// ساخت لیست فصل‌ها از روی آیتم‌های سورت‌شده: [{ name, startPage, endPage }]
+function buildChapters(sortedItems, fallbackName) {
+  const chapters = [];
+  let current = null;
+  sortedItems.forEach((item, idx) => {
+    const name = chapterNameOf(item.relativePath, fallbackName);
+    if (!current || current.name !== name) {
+      current = { name, startPage: idx, endPage: idx };
+      chapters.push(current);
+    } else {
+      current.endPage = idx;
+    }
+  });
+  return chapters;
+}
+
+// ۱. استخراج موازی ZIP / CBZ — با پشتیبانی از زیپ‌در‌زیپ و مرز فصل‌ها
+async function extractZip(fileContent, outputDir, coverOnly = false, archiveLabel = 'comic') {
+  const zip = await JSZip.loadAsync(fileContent);
+  const collected = [];
+  await collectEntries(zip, '', 0, collected);
+
+  if (collected.length === 0) {
     throw new Error('هیچ فایل تصویری معتبری در این فایل فشرده یافت نشد.');
   }
 
-  entries.sort((a, b) => hierarchicalCompare(a.relativePath, b.relativePath));
+  collected.sort((a, b) => hierarchicalCompare(a.relativePath, b.relativePath));
 
   if (coverOnly) {
-    const firstBuffer = await entries[0].entry.async('nodebuffer');
+    const firstBuffer = await collected[0].load();
     const mime = detectMimeFromBuffer(firstBuffer);
     return { coverBuffer: firstBuffer, mime };
   }
 
+  const totalFiles = collected.length;
   const imageFiles = new Array(totalFiles);
   let firstCoverBuffer = null;
   let firstCoverMime = 'image/jpeg';
-  let processed = 0;
-  const WRITE_BATCH_SIZE = 8;
 
   for (let batchStart = 0; batchStart < totalFiles; batchStart += WRITE_BATCH_SIZE) {
     const batchEnd = Math.min(totalFiles, batchStart + WRITE_BATCH_SIZE);
@@ -189,8 +247,8 @@ async function extractZip(fileContent, outputDir, coverOnly = false) {
     for (let i = batchStart; i < batchEnd; i++) {
       batchPromises.push(
         (async (idx) => {
-          const { relativePath, entry } = entries[idx];
-          const buffer = await entry.async('nodebuffer');
+          const { relativePath, load } = collected[idx];
+          const buffer = await load();
 
           if (idx === 0) {
             firstCoverBuffer = buffer;
@@ -202,6 +260,7 @@ async function extractZip(fileContent, outputDir, coverOnly = false) {
           const dirPart = path.dirname(normRel);
           const fileName = path.basename(normRel);
           const ext = path.extname(fileName).toLowerCase() || '.jpg';
+          // فرمت فیلد chapter دقیقاً مثل قبل حفظ شده (سازگاری با RightPanel)
           const chapterName = dirPart && dirPart !== '.' ? dirPart.replace(/\//g, ' - ') : '';
 
           const safeDiskFileName = `page_${String(idx + 1).padStart(5, '0')}${ext}`;
@@ -224,20 +283,21 @@ async function extractZip(fileContent, outputDir, coverOnly = false) {
     }
 
     await Promise.all(batchPromises);
-    processed = batchEnd;
-    const percent = Math.round((processed / totalFiles) * 100);
+    const percent = Math.round((batchEnd / totalFiles) * 100);
     parentPort.postMessage({ type: 'progress', percent });
   }
 
+  const items = imageFiles.filter(Boolean);
   return {
-    items: imageFiles.filter(Boolean),
+    items,
+    chapters: buildChapters(items, archiveLabel),
     coverBuffer: firstCoverBuffer,
     coverMime: firstCoverMime
   };
 }
 
 // ۲. استخراج موازی و ایمن RAR / CBR همراه با ابعاد دقیق صفحات
-async function extractRar(fileBuffer, outputDir, coverOnly = false) {
+async function extractRar(fileBuffer, outputDir, coverOnly = false, archiveLabel = 'comic') {
   let unrar;
   try {
     unrar = require('node-unrar-js');
@@ -289,8 +349,6 @@ async function extractRar(fileBuffer, outputDir, coverOnly = false) {
   const imageFiles = new Array(totalFiles);
   let firstCoverBuffer = null;
   let firstCoverMime = 'image/jpeg';
-  let processed = 0;
-  const WRITE_BATCH_SIZE = 8;
 
   for (let batchStart = 0; batchStart < totalFiles; batchStart += WRITE_BATCH_SIZE) {
     const batchEnd = Math.min(totalFiles, batchStart + WRITE_BATCH_SIZE);
@@ -336,13 +394,14 @@ async function extractRar(fileBuffer, outputDir, coverOnly = false) {
     }
 
     await Promise.all(batchPromises);
-    processed = batchEnd;
-    const percent = Math.round((processed / totalFiles) * 100);
+    const percent = Math.round((batchEnd / totalFiles) * 100);
     parentPort.postMessage({ type: 'progress', percent });
   }
 
+  const items = imageFiles.filter(Boolean);
   return {
-    items: imageFiles.filter(Boolean),
+    items,
+    chapters: buildChapters(items, archiveLabel),
     coverBuffer: firstCoverBuffer,
     coverMime: firstCoverMime
   };
@@ -359,11 +418,12 @@ parentPort.on('message', async (data) => {
 
     const fileBuffer = await fs.promises.readFile(filePath);
     const archiveType = getArchiveType(filePath, fileBuffer);
+    const archiveLabel = path.basename(filePath, path.extname(filePath)) || 'comic';
 
     if (coverOnly) {
       const res = archiveType === 'rar'
-        ? await extractRar(fileBuffer, null, true)
-        : await extractZip(fileBuffer, null, true);
+        ? await extractRar(fileBuffer, null, true, archiveLabel)
+        : await extractZip(fileBuffer, null, true, archiveLabel);
 
       parentPort.postMessage({
         type: 'done_cover',
@@ -381,12 +441,13 @@ parentPort.on('message', async (data) => {
     parentPort.postMessage({ type: 'progress', percent: 5 });
 
     const res = archiveType === 'rar'
-      ? await extractRar(fileBuffer, comicOutputDir, false)
-      : await extractZip(fileBuffer, comicOutputDir, false);
+      ? await extractRar(fileBuffer, comicOutputDir, false, archiveLabel)
+      : await extractZip(fileBuffer, comicOutputDir, false, archiveLabel);
 
     parentPort.postMessage({
       type: 'done',
       items: res.items,
+      chapters: res.chapters || [],
       extractedDir: comicOutputDir,
       coverBuffer: res.coverBuffer || null,
       coverMime: res.coverMime || 'image/jpeg'
