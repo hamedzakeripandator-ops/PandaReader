@@ -159,7 +159,7 @@ const useReaderStore = create((set, get) => ({
   setTargetPage: (pageNumber) => set({ targetPage: pageNumber }),
 
   jumpToPage: (pageNumber) => {
-    const valid = typeof pageNumber === 'number' && page > 0 ? pageNumber : 1;
+    const valid = typeof pageNumber === 'number' &&  pageNumber  > 0 ? pageNumber : 1;
     set({ targetPage: valid, currentPage: valid });
   },
 
