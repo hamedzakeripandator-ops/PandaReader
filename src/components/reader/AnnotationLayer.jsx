@@ -17,15 +17,18 @@ import {
   penPointsToOutlinePath,
   generateCurvedArrowGeometry,
   defaultCurveControl,
+  storageToUniformItem,
+  uniformToStorageItem,
 } from '../../utils/annotationEngine';
 
 // بازصادر کردن نوار ابزار برای سازگاری کامل با ایمپورت‌های PdfViewer و VerticalViewer
 export { AnnotationToolbar };
 
-const normalizeItem = (raw) => {
+// نرمالایز + تبدیل دیتابیس→یکنواخت (y در [0..1000*aspect])؛ فرمت DB دست نمی‌خورد
+const normalizeItem = (raw, aspect = 1) => {
   if (!raw) return null;
   const tool = raw.tool || raw.type || 'box';
-  return {
+  const base = {
     ...raw,
     tool: tool === 'rect' ? 'box' : tool === 'note' ? 'sticky' : tool,
     boxStyle: raw.boxStyle || (raw.type === 'rect' ? 'rect' : 'cloud'),
@@ -36,6 +39,7 @@ const normalizeItem = (raw) => {
     arrowStyle: raw.arrowStyle === 'curved' ? 'curved' : 'straight',
     fontFamily: raw.fontFamily || null,
   };
+  return storageToUniformItem(base, aspect);
 };
 
 const AnnotationLayer = React.memo(function AnnotationLayer({
@@ -77,7 +81,8 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     delete stickyDraftsRef.current[id];
     setStickyDrafts((prev) => { const n = { ...prev }; delete n[id]; return n; });
     const list = itemsRef.current.map((i) => (i.id === id ? { ...i, text: val } : i));
-    onCommitPageItems?.(pageNumber, list);
+    const storageList = (list || []).map((it) => uniformToStorageItem(it, pageAspectRef.current));
+    commitItems(storageList);
   }, [pageNumber, onCommitPageItems]);
 
   const handleStickyTextChange = useCallback((id, val) => {
@@ -91,6 +96,47 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   useEffect(() => () => { Object.values(stickyTimers.current).forEach(clearTimeout); }, []);
 
   const wrapperRef = useRef(null);
+  // نسبت ارتفاع به عرض صفحه — مبنای مختصات یکنواخت تطبیقی
+  const [pageAspect, setPageAspect] = useState(1);
+  const pageAspectRef = useRef(1);
+
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    const update = () => {
+      let r = 0;
+      const img = el.parentElement?.querySelector('img');
+      if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        r = img.naturalHeight / img.naturalWidth;
+      } else {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0) r = rect.height / rect.width;
+      }
+      if (r >= 0.05 && r <= 20) {
+        pageAspectRef.current = r;
+        setPageAspect((prev) => (Math.abs(prev - r) < 0.001 ? prev : r));
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    const img = el.parentElement?.querySelector('img');
+    if (img) img.addEventListener('load', update);
+    return () => {
+      ro.disconnect();
+      if (img) img.removeEventListener('load', update);
+    };
+  }, []);
+
+  // لاگ تشخیصی برای بررسی لود perfect-freehand (DevTools → Console)
+  useEffect(() => {
+    try {
+      const probe = penPointsToOutlinePath([{ x: 0, y: 0 }, { x: 10, y: 10 }], 4);
+      console.info('[annotation] perfect-freehand:', probe ? 'OK (' + probe.outline.length + ' pts)' : 'FALLBACK (smooth path)');
+    } catch (err) {
+      console.warn('[annotation] perfect-freehand probe failed:', err?.message);
+    }
+  }, []);
   const interactionRef = useRef({
     mode: null, // 'draw' | 'move' | 'resize' | 'erase_sweep'
     handle: null,
@@ -103,8 +149,8 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
   const normalizedItems = useMemo(() => {
     const source = liveItemsOverride || items || [];
-    return source.map(normalizeItem).filter(Boolean);
-  }, [items, liveItemsOverride]);
+    return source.map((it) => normalizeItem(it, pageAspect)).filter(Boolean);
+  }, [items, liveItemsOverride, pageAspect]);
   itemsRef.current = normalizedItems;
 
   const isSelectedOnThisPage =
@@ -127,6 +173,12 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     }
   }, [textEditorState]);
 
+  // کامیت یکپارچه: تبدیل مختصات یکنواخت به فرمت دیتابیس، بعد ارسال به والد
+  const commitItems = useCallback((list) => {
+    const storageList = (list || []).map((it) => uniformToStorageItem(it, pageAspectRef.current));
+    onCommitPageItems?.(pageNumber, storageList);
+  }, [onCommitPageItems, pageNumber]);
+
   // ۱. دریافت تغییرات زنده رنگ، ضخامت، شفافیت و نوع کادر از AnnotationToolbar برای شکل انتخاب‌شده
   useEffect(() => {
     if (!isSelectedOnThisPage || !selectedAnnotationId) return;
@@ -144,7 +196,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         return next;
       });
 
-      onCommitPageItems?.(pageNumber, updatedList);
+      commitItems(updatedList);
     };
 
     window.addEventListener('annotation:update-selected', handleUpdateSelected);
@@ -168,7 +220,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         opacity: annotationOpacity,
       };
       const next = [...normalizedItems, newImg];
-      onCommitPageItems?.(pageNumber, next);
+      commitItems(next);
       setAnnotationTool('select');
       setSelectedAnnotation(newImg.id, pageNumber, 'image');
     },
@@ -229,7 +281,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     if (!selectedItem) return;
     const next = normalizedItems.filter((it) => it.id !== selectedItem.id);
     setSelectedAnnotation(null, null);
-    onCommitPageItems?.(pageNumber, next);
+    commitItems(next);
   }, [selectedItem, normalizedItems, pageNumber, onCommitPageItems, setSelectedAnnotation]);
 
   const handleDuplicateSelected = useCallback(() => {
@@ -238,7 +290,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     cloned.id = `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const shifted = moveAnnotationByDelta(cloned, cloned, 28, 28);
     const next = [...normalizedItems, shifted];
-    onCommitPageItems?.(pageNumber, next);
+    commitItems(next);
     setSelectedAnnotation(shifted.id, pageNumber, shifted.tool);
   }, [selectedItem, normalizedItems, pageNumber, onCommitPageItems, setSelectedAnnotation]);
 
@@ -254,7 +306,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       const temp = copy[idx];
       copy[idx] = copy[targetIdx];
       copy[targetIdx] = temp;
-      onCommitPageItems?.(pageNumber, copy);
+      commitItems(copy);
     },
     [selectedItem, normalizedItems, pageNumber, onCommitPageItems]
   );
@@ -287,7 +339,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
         const moved = moveAnnotationByDelta(selectedItem, selectedItem, dx, dy);
         const next = normalizedItems.map((it) => (it.id === moved.id ? moved : it));
-        onCommitPageItems?.(pageNumber, next);
+        commitItems(next);
       }
     };
 
@@ -306,7 +358,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const getSvgCoords = useCallback((clientX, clientY) => {
     const el = wrapperRef.current;
     if (!el) return { x: 0, y: 0 };
-    return clientToSvgPoint(clientX, clientY, el.getBoundingClientRect());
+    return clientToSvgPoint(clientX, clientY, el.getBoundingClientRect(), pageAspectRef.current);
   }, []);
 
   // ۴. پاک‌کن جارویی و کلیکی بدون مسدود شدن توسط PointerCapture
@@ -321,7 +373,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         if (selectedAnnotationId && !remaining.some((r) => r.id === selectedAnnotationId)) {
           setSelectedAnnotation(null, null);
         }
-        onCommitPageItems?.(pageNumber, remaining);
+        commitItems(remaining);
       }
     },
     [normalizedItems, pageNumber, onCommitPageItems, selectedAnnotationId, setSelectedAnnotation]
@@ -417,7 +469,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         text: '',
       };
       const next = [...normalizedItems, newSticky];
-      onCommitPageItems?.(pageNumber, next);
+      commitItems(next);
       setAnnotationTool('select');
       setSelectedAnnotation(newSticky.id, pageNumber);
       return;
@@ -558,7 +610,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     } catch (_) {}
 
     if ((mode === 'move' || mode === 'resize') && interactionRef.current.workingItems) {
-      onCommitPageItems?.(pageNumber, interactionRef.current.workingItems);
+      commitItems(interactionRef.current.workingItems);
     }
 
     if (mode === 'draw' && draftRef.current) {
@@ -582,7 +634,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
           }
         }
         const next = [...normalizedItems, finalItem];
-        onCommitPageItems?.(pageNumber, next);
+        commitItems(next);
       }
     }
 
@@ -608,7 +660,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       const next = normalizedItems.map((it) =>
         it.id === textEditorState.editId ? { ...it, text: clean } : it
       );
-      onCommitPageItems?.(pageNumber, next);
+      commitItems(next);
     } else {
       const newText = {
         id: `txt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -623,7 +675,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         opacity: annotationOpacity,
       };
       const next = [...normalizedItems, newText];
-      onCommitPageItems?.(pageNumber, next);
+      commitItems(next);
       setAnnotationTool('select');
       setSelectedAnnotation(newText.id, pageNumber, 'text');
     }
@@ -640,9 +692,15 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     const fillHex = item.hasFill ? item.color : 'none';
     const fillAlpha = item.hasFill ? Math.max(0.08, opacity * 0.18) : 0;
 
-    // ۱. ماژیک هایلایت با ترکیب رنگی Multiply
+    // ۱. ماژیک هایلایت طبیعی با perfect-freehand و ترکیب رنگی Multiply
     if (item.tool === 'highlighter') {
-      const d = pointsToSmoothSvgPath(item.points);
+      const hlOutline = penPointsToOutlinePath(item.points, strokeW, {
+        thinning: 0,
+        size: Math.max(10, strokeW * 4.4),
+        smoothing: 0.7,
+        streamline: 0.6,
+      });
+      const d = hlOutline ? hlOutline.path : pointsToSmoothSvgPath(item.points);
       return (
         <g key={item.id} data-id={item.id}>
           <path
@@ -651,16 +709,25 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             stroke="transparent"
             strokeWidth={Math.max(22, strokeW * 5)}
           />
-          <path
-            d={d}
-            fill="none"
-            stroke={item.color}
-            strokeWidth={strokeW * 4.4}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            opacity={opacity * 0.45}
-            style={{ mixBlendMode: 'multiply' }}
-          />
+          {hlOutline ? (
+            <path
+              d={hlOutline.path}
+              fill={item.color}
+              opacity={opacity * 0.45}
+              style={{ mixBlendMode: 'multiply' }}
+            />
+          ) : (
+            <path
+              d={d}
+              fill="none"
+              stroke={item.color}
+              strokeWidth={strokeW * 4.4}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={opacity * 0.45}
+              style={{ mixBlendMode: 'multiply' }}
+            />
+          )}
         </g>
       );
     }
@@ -1035,7 +1102,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     >
       {/* ۱. لایه برداری SVG با مختصات نرمال‌شده 1000x1000 */}
       <svg
-        viewBox={`0 0 ${VIEWBOX_SIZE} ${VIEWBOX_SIZE}`}
+        viewBox={`0 0 ${VIEWBOX_SIZE} ${VIEWBOX_SIZE * pageAspect}`}
         preserveAspectRatio="none"
         style={styles.svgCanvas}
       >
@@ -1047,9 +1114,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       {/* ۲. کارت‌های استیکی‌نوت روی صفحه */}
       {stickyItems.map((st) => {
         const leftPct = `${((st.x ?? 100) / 10).toFixed(2)}%`;
-        const topPct = `${((st.y ?? 100) / 10).toFixed(2)}%`;
+        const topPct = `${((st.y ?? 100) / (10 * pageAspect)).toFixed(2)}%`;
         const widthPct = `${((st.width || 210) / 10).toFixed(2)}%`;
-        const heightPct = `${((st.height || 170) / 10).toFixed(2)}%`;
+        const heightPct = `${((st.height || 170) / (10 * pageAspect)).toFixed(2)}%`;
 
         return (
           <div
@@ -1071,7 +1138,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
               if (annotationTool === 'eraser') {
                 const next = normalizedItems.filter((i) => i.id !== st.id);
-                onCommitPageItems?.(pageNumber, next);
+                commitItems(next);
                 return;
               }
 
@@ -1102,7 +1169,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
                     e.stopPropagation();
                     const next = normalizedItems.filter((i) => i.id !== st.id);
                     if (selectedAnnotationId === st.id) setSelectedAnnotation(null, null);
-                    onCommitPageItems?.(pageNumber, next);
+                    commitItems(next);
                   }}
                   style={styles.stickyDeleteBtn}
                   title="حذف استیکی‌نوت"
@@ -1131,9 +1198,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             ...styles.contextPillMenu,
             left: `${Math.min(88, Math.max(12, (selectedBounds.x + selectedBounds.width / 2) / 10))}%`,
             top: `${
-              selectedBounds.y < 85
-                ? Math.min(92, (selectedBounds.y + selectedBounds.height + 28) / 10)
-                : Math.max(4, (selectedBounds.y - 16) / 10)
+              selectedBounds.y < 85 * pageAspect
+                ? Math.min(92, (selectedBounds.y + selectedBounds.height + 28) / (10 * pageAspect))
+                : Math.max(4, (selectedBounds.y - 16) / (10 * pageAspect))
             }%`,
           }}
         >
@@ -1180,7 +1247,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
           style={{
             ...styles.inlineEditorBox,
             left: `${Math.min(74, Math.max(8, textEditorState.x / 10))}%`,
-            top: `${Math.min(82, Math.max(8, textEditorState.y / 10))}%`,
+            top: `${Math.min(82, Math.max(8, textEditorState.y / (10 * pageAspect)))}%`,
           }}
         >
           <textarea

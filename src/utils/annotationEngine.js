@@ -13,16 +13,20 @@ export const PRESET_ANNOTATION_COLORS = [
   { hex: '#f97316', label: 'نارنجی گرم' },
 ];
 
-// ۱. تبدیل مختصات ماوس به فضای برداری نرمال‌شده [0..1000]
-export function clientToSvgPoint(clientX, clientY, boundsRect) {
+// ۱. تبدیل مختصات ماوس به فضای برداری یکنواخت [0..1000] × [0..1000*aspect]
+// aspect = نسبت ارتفاع به عرض صفحه؛ باعث می‌شود ۱ واحد در هر دو محور
+// دقیقاً معادل پیکسل باشد و هیچ اعوجاجی در ابر/پیکان/متن/ضخامت رخ ندهد
+export function clientToSvgPoint(clientX, clientY, boundsRect, aspect = 1) {
   if (!boundsRect || boundsRect.width <= 0 || boundsRect.height <= 0) {
     return { x: 0, y: 0 };
   }
+  const a = Number(aspect) > 0 ? Number(aspect) : 1;
+  const viewH = VIEWBOX_SIZE * a;
   const rawX = ((clientX - boundsRect.left) / boundsRect.width) * VIEWBOX_SIZE;
-  const rawY = ((clientY - boundsRect.top) / boundsRect.height) * VIEWBOX_SIZE;
+  const rawY = ((clientY - boundsRect.top) / boundsRect.height) * viewH;
   return {
     x: Number(Math.max(0, Math.min(VIEWBOX_SIZE, rawX)).toFixed(1)),
-    y: Number(Math.max(0, Math.min(VIEWBOX_SIZE, rawY)).toFixed(1)),
+    y: Number(Math.max(0, Math.min(viewH, rawY)).toFixed(1)),
   };
 }
 
@@ -564,7 +568,8 @@ export function defaultCurveControl(x1, y1, x2, y2, bendRatio = 0.18) {
 }
 
 // تبدیل نقاط قلم به چندضلعی پهنای متغیر perfect-freehand (خروجی: path آماده SVG)
-export function penPointsToOutlinePath(points, strokeWidth = 4) {
+// با opts می‌توان برای هایلایت (thinning: 0) ظاهر طبیعی ماژیک را ساخت
+export function penPointsToOutlinePath(points, strokeWidth = 4, opts = {}) {
   try {
     if (!Array.isArray(points) || points.length < 2) return null;
     const outline = getStroke(
@@ -576,12 +581,14 @@ export function penPointsToOutlinePath(points, strokeWidth = 4) {
         streamline: 0.55,
         simulatePressure: true,
         last: true,
+        ...opts,
       }
     );
     if (!outline || outline.length < 3) return null;
     const d = outline.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt[0].toFixed(1)} ${pt[1].toFixed(1)}`).join(' ');
     return { path: d + ' Z', outline };
-  } catch (_) {
+  } catch (err) {
+    if (typeof console !== 'undefined') console.warn('[annotation] perfect-freehand fallback:', err?.message);
     return null;
   }
 }
@@ -604,4 +611,39 @@ export function getPenOutlineBounds(points, strokeWidth = 4) {
     width: Math.max(20, maxX - minX + pad * 2),
     height: Math.max(20, maxY - minY + pad * 2),
   };
+}
+
+// ============================================================================
+// مختصات تطبیقی یکنواخت — تبدیل در مرز لایه (فرمت دیتابیس بدون تغییر می‌ماند)
+// ذخیره‌سازی: y در [0..1000] | رندر/تعامل: y در [0..1000*aspect]
+// ============================================================================
+
+// مقیاس Y یک آیتم با ضریب دلخواه (کپی جدید برمی‌گرداند، ورودی دست نمی‌خورد)
+export function scaleItemYCoords(item, factor) {
+  if (!item) return item;
+  const f = Number(factor);
+  const next = { ...item };
+  if (!Number.isFinite(f) || f <= 0) return next;
+  const sy = (v) => (Number.isFinite(v) ? Number((v * f).toFixed(2)) : v);
+  if (Number.isFinite(next.y)) next.y = sy(next.y);
+  if (Number.isFinite(next.height)) next.height = sy(next.height);
+  if (Number.isFinite(next.startY)) next.startY = sy(next.startY);
+  if (Number.isFinite(next.endY)) next.endY = sy(next.endY);
+  if (Number.isFinite(next.cy)) next.cy = sy(next.cy);
+  if (Array.isArray(next.points)) {
+    next.points = next.points.map((pt) => ({ ...pt, y: sy(pt.y) }));
+  }
+  return next;
+}
+
+// دیتابیس → لایه (رندر و تعامل)
+export function storageToUniformItem(item, aspect) {
+  const a = Number(aspect) > 0 ? Number(aspect) : 1;
+  return scaleItemYCoords(item, a);
+}
+
+// لایه → دیتابیس (کامیت)
+export function uniformToStorageItem(item, aspect) {
+  const a = Number(aspect) > 0 ? Number(aspect) : 1;
+  return scaleItemYCoords(item, 1 / a);
 }
