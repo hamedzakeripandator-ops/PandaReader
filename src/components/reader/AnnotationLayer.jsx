@@ -19,6 +19,10 @@ import {
   defaultCurveControl,
   storageToUniformItem,
   uniformToStorageItem,
+  rectsIntersect,
+  getUnionBounds,
+  marqueeRect,
+  getBrushOutline,
 } from '../../utils/annotationEngine';
 
 // بازصادر کردن نوار ابزار برای سازگاری کامل با ایمپورت‌های PdfViewer و VerticalViewer
@@ -59,14 +63,19 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const annotationArrowStyle = useAppStore((state) => state.annotationArrowStyle || 'straight');
 
   const selectedAnnotationId = useAppStore((state) => state.selectedAnnotationId);
+  const selectedAnnotationIds = useAppStore((state) => state.selectedAnnotationIds || []);
   const selectedAnnotationPage = useAppStore((state) => state.selectedAnnotationPage);
   const setSelectedAnnotation = useAppStore((state) => state.setSelectedAnnotation);
+  const setSelectedAnnotations = useAppStore((state) => state.setSelectedAnnotations);
+  const toggleSelectedAnnotation = useAppStore((state) => state.toggleSelectedAnnotation);
+  const clearSelection = useAppStore((state) => state.clearSelection);
   const syncToolbarWithSelectedItem = useAppStore((state) => state.syncToolbarWithSelectedItem);
   const setAnnotationTool = useAppStore((state) => state.setAnnotationTool);
 
   const [draftShape, setDraftShape] = useState(null);
   const [liveItemsOverride, setLiveItemsOverride] = useState(null);
   const [textEditorState, setTextEditorState] = useState(null); // { x, y, value, editId, fontSize, color }
+  const [marquee, setMarquee] = useState(null); // { x, y, width, height } در مختصات یکنواخت
   const [stickyDrafts, setStickyDrafts] = useState({}); // متن تایپ‌شده ولی هنوز کامیت‌نشده
   const stickyTimers = useRef({});
   const stickyDraftsRef = useRef({});
@@ -81,7 +90,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     delete stickyDraftsRef.current[id];
     setStickyDrafts((prev) => { const n = { ...prev }; delete n[id]; return n; });
     const list = itemsRef.current.map((i) => (i.id === id ? { ...i, text: val } : i));
-    const storageList = (list || []).map((it) => uniformToStorageItem(it, pageAspectRef.current));
+    const storageList = (list || []).map((it) => uniformToStorageItem(it, aspectCache.current));
     commitItems(storageList);
   }, [pageNumber, onCommitPageItems]);
 
@@ -96,49 +105,62 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   useEffect(() => () => { Object.values(stickyTimers.current).forEach(clearTimeout); }, []);
 
   const wrapperRef = useRef(null);
-  // نسبت ارتفاع به عرض صفحه — مبنای مختصات یکنواخت تطبیقی
-  const [pageAspect, setPageAspect] = useState(1);
-  const pageAspectRef = useRef(1);
+  // نسبت ارتفاع به عرض صفحه — تک‌منبع حقیقت (ref) + tick برای رندر مجدد
+  // همه‌جا (رندر، پوینتر، کامیت) از همین مقدار استفاده می‌شود تا ناهماهنگی رخ ندهد
+  const aspectCache = useRef(1);
+  const [, setAspectTick] = useState(0);
+  const readAspect = useCallback(() => {
+    const el = wrapperRef.current;
+    if (!el) return aspectCache.current;
+    let r = 0;
+    const img = el.parentElement?.querySelector('img');
+    if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      r = img.naturalHeight / img.naturalWidth;
+    } else {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0) r = rect.height / rect.width;
+    }
+    if (r >= 0.05 && r <= 20) {
+      if (Math.abs(aspectCache.current - r) >= 0.001) {
+        aspectCache.current = r;
+        return 'changed';
+      }
+    }
+    return aspectCache.current;
+  }, []);
 
   useEffect(() => {
     const el = wrapperRef.current;
     if (!el) return;
-    const update = () => {
-      let r = 0;
-      const img = el.parentElement?.querySelector('img');
-      if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
-        r = img.naturalHeight / img.naturalWidth;
-      } else {
-        const rect = el.getBoundingClientRect();
-        if (rect.width > 0) r = rect.height / rect.width;
-      }
-      if (r >= 0.05 && r <= 20) {
-        pageAspectRef.current = r;
-        setPageAspect((prev) => (Math.abs(prev - r) < 0.001 ? prev : r));
-      }
-    };
-    update();
-    const ro = new ResizeObserver(update);
+    if (readAspect() === 'changed') setAspectTick((t) => t + 1);
+    const ro = new ResizeObserver(() => {
+      if (readAspect() === 'changed') setAspectTick((t) => t + 1);
+    });
     ro.observe(el);
     const img = el.parentElement?.querySelector('img');
-    if (img) img.addEventListener('load', update);
+    const onImgLoad = () => { if (readAspect() === 'changed') setAspectTick((t) => t + 1); };
+    if (img) img.addEventListener('load', onImgLoad);
     return () => {
       ro.disconnect();
-      if (img) img.removeEventListener('load', update);
+      if (img) img.removeEventListener('load', onImgLoad);
     };
-  }, []);
+  }, [readAspect]);
 
-  // لاگ تشخیصی برای بررسی لود perfect-freehand (DevTools → Console)
+  const pageAspect = aspectCache.current;
+
+  // لاگ نسخه و تشخیصی (DevTools → Console) — اگر این را نمی‌بینی، کد جدید اجرا نمی‌شود!
   useEffect(() => {
+    console.info('[annotation] layer v3.14 (fix double-coord-conversion)');
     try {
       const probe = penPointsToOutlinePath([{ x: 0, y: 0 }, { x: 10, y: 10 }], 4);
       console.info('[annotation] perfect-freehand:', probe ? 'OK (' + probe.outline.length + ' pts)' : 'FALLBACK (smooth path)');
+      console.info('[annotation] aspect:', aspectCache.current.toFixed(3));
     } catch (err) {
       console.warn('[annotation] perfect-freehand probe failed:', err?.message);
     }
   }, []);
   const interactionRef = useRef({
-    mode: null, // 'draw' | 'move' | 'resize' | 'erase_sweep'
+    mode: null, // 'draw' | 'move' | 'resize' | 'erase_sweep' | 'marquee'
     handle: null,
     startPt: null,
     originalItem: null,
@@ -148,7 +170,12 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const textAreaRef = useRef(null);
 
   const normalizedItems = useMemo(() => {
-    const source = liveItemsOverride || items || [];
+    // liveItemsOverride از قبل در مختصات یکنواخت است — تبدیل مجدد ممنوع!
+    // فقط items (مختصات ذخیره‌سازی) نیاز به تبدیل دارند
+    if (liveItemsOverride) {
+      return liveItemsOverride.filter(Boolean);
+    }
+    const source = items || [];
     return source.map((it) => normalizeItem(it, pageAspect)).filter(Boolean);
   }, [items, liveItemsOverride, pageAspect]);
   itemsRef.current = normalizedItems;
@@ -156,12 +183,15 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const isSelectedOnThisPage =
     isAnnotationActive &&
     selectedAnnotationPage === pageNumber &&
-    Boolean(selectedAnnotationId);
+    selectedAnnotationIds.length > 0;
 
-  const selectedItem = useMemo(() => {
-    if (!isSelectedOnThisPage) return null;
-    return normalizedItems.find((it) => it.id === selectedAnnotationId) || null;
-  }, [isSelectedOnThisPage, normalizedItems, selectedAnnotationId]);
+  const selectedItems = useMemo(() => {
+    if (!isSelectedOnThisPage) return [];
+    const idSet = new Set(selectedAnnotationIds);
+    return normalizedItems.filter((it) => idSet.has(it.id));
+  }, [isSelectedOnThisPage, normalizedItems, selectedAnnotationIds]);
+
+  const selectedItem = selectedItems.length ? selectedItems[selectedItems.length - 1] : null;
 
   useEffect(() => {
     setLiveItemsOverride(null);
@@ -175,7 +205,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
   // کامیت یکپارچه: تبدیل مختصات یکنواخت به فرمت دیتابیس، بعد ارسال به والد
   const commitItems = useCallback((list) => {
-    const storageList = (list || []).map((it) => uniformToStorageItem(it, pageAspectRef.current));
+    const storageList = (list || []).map((it) => uniformToStorageItem(it, aspectCache.current));
     onCommitPageItems?.(pageNumber, storageList);
   }, [onCommitPageItems, pageNumber]);
 
@@ -187,8 +217,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       const patch = e.detail;
       if (!patch) return;
 
+      const idSet = new Set(selectedAnnotationIds);
       const updatedList = normalizedItems.map((it) => {
-        if (it.id !== selectedAnnotationId) return it;
+        if (!idSet.has(it.id)) return it;
         const next = { ...it, ...patch };
         if (it.tool === 'text' && patch.strokeWidth) {
           next.fontSize = Math.max(14, patch.strokeWidth * 5);
@@ -278,41 +309,51 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
   // ۳. اکشن‌های شکل انتخاب‌شده (حذف، تکثیر، تغییر لایه و جابه‌جایی با کیبورد)
   const handleDeleteSelected = useCallback(() => {
-    if (!selectedItem) return;
-    const next = normalizedItems.filter((it) => it.id !== selectedItem.id);
-    setSelectedAnnotation(null, null);
+    if (selectedItems.length === 0) return;
+    const idSet = new Set(selectedItems.map((it) => it.id));
+    const next = normalizedItems.filter((it) => !idSet.has(it.id));
+    clearSelection();
     commitItems(next);
-  }, [selectedItem, normalizedItems, pageNumber, onCommitPageItems, setSelectedAnnotation]);
+  }, [selectedItems, normalizedItems, pageNumber, commitItems, clearSelection]);
 
   const handleDuplicateSelected = useCallback(() => {
-    if (!selectedItem) return;
-    const cloned = JSON.parse(JSON.stringify(selectedItem));
-    cloned.id = `ann_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const shifted = moveAnnotationByDelta(cloned, cloned, 28, 28);
-    const next = [...normalizedItems, shifted];
+    if (selectedItems.length === 0) return;
+    const clones = selectedItems.map((it, i) => {
+      const cloned = JSON.parse(JSON.stringify(it));
+      cloned.id = `ann_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
+      return moveAnnotationByDelta(cloned, cloned, 28, 28);
+    });
+    const next = [...normalizedItems, ...clones];
     commitItems(next);
-    setSelectedAnnotation(shifted.id, pageNumber, shifted.tool);
-  }, [selectedItem, normalizedItems, pageNumber, onCommitPageItems, setSelectedAnnotation]);
+    setSelectedAnnotations(clones.map((c) => c.id), pageNumber);
+  }, [selectedItems, normalizedItems, pageNumber, commitItems, setSelectedAnnotations]);
 
   const handleMoveLayer = useCallback(
     (dir) => {
-      if (!selectedItem) return;
-      const idx = normalizedItems.findIndex((it) => it.id === selectedItem.id);
-      if (idx < 0) return;
-      const targetIdx = idx + dir;
-      if (targetIdx < 0 || targetIdx >= normalizedItems.length) return;
-
+      if (selectedItems.length === 0) return;
+      const idSet = new Set(selectedItems.map((it) => it.id));
       const copy = [...normalizedItems];
-      const temp = copy[idx];
-      copy[idx] = copy[targetIdx];
-      copy[targetIdx] = temp;
+      // بلوک انتخاب‌شده را یک پله جلو/عقب می‌برد
+      if (dir > 0) {
+        for (let i = copy.length - 2; i >= 0; i--) {
+          if (idSet.has(copy[i].id) && !idSet.has(copy[i + 1].id)) {
+            const t = copy[i]; copy[i] = copy[i + 1]; copy[i + 1] = t;
+          }
+        }
+      } else {
+        for (let i = 1; i < copy.length; i++) {
+          if (idSet.has(copy[i].id) && !idSet.has(copy[i - 1].id)) {
+            const t = copy[i]; copy[i] = copy[i - 1]; copy[i - 1] = t;
+          }
+        }
+      }
       commitItems(copy);
     },
-    [selectedItem, normalizedItems, pageNumber, onCommitPageItems]
+    [selectedItems, normalizedItems, pageNumber, commitItems]
   );
 
   useEffect(() => {
-    if (!isSelectedOnThisPage || !selectedItem) return;
+    if (!isSelectedOnThisPage || selectedItems.length === 0) return;
 
     const handleKeyDown = (e) => {
       const tag = e.target?.tagName;
@@ -337,8 +378,10 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         if (e.key === 'ArrowLeft') dx = -step;
         if (e.key === 'ArrowRight') dx = step;
 
-        const moved = moveAnnotationByDelta(selectedItem, selectedItem, dx, dy);
-        const next = normalizedItems.map((it) => (it.id === moved.id ? moved : it));
+        const idSet = new Set(selectedItems.map((it) => it.id));
+        const next = normalizedItems.map((it) =>
+          idSet.has(it.id) ? moveAnnotationByDelta(it, it, dx, dy) : it
+        );
         commitItems(next);
       }
     };
@@ -347,10 +390,10 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, [
     isSelectedOnThisPage,
-    selectedItem,
+    selectedItems,
     normalizedItems,
     pageNumber,
-    onCommitPageItems,
+    commitItems,
     handleDeleteSelected,
     handleDuplicateSelected,
   ]);
@@ -358,7 +401,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   const getSvgCoords = useCallback((clientX, clientY) => {
     const el = wrapperRef.current;
     if (!el) return { x: 0, y: 0 };
-    return clientToSvgPoint(clientX, clientY, el.getBoundingClientRect(), pageAspectRef.current);
+    return clientToSvgPoint(clientX, clientY, el.getBoundingClientRect(), aspectCache.current);
   }, []);
 
   // ۴. پاک‌کن جارویی و کلیکی بدون مسدود شدن توسط PointerCapture
@@ -419,24 +462,71 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       return;
     }
 
-    // ج: حالت انتخاب و ویرایش شکل (Select Tool)
+    // ج: حالت انتخاب و ویرایش شکل (Select Tool) — کلیک، شیفت+کلیک، درگ مارکی
     if (annotationTool === 'select') {
-      const hitItem = findTopAnnotationAtPoint(normalizedItems, pt, 14);
+      const hitItem = findTopAnnotationAtPoint(normalizedItems, pt, 16);
       if (hitItem) {
-        setSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
-        syncToolbarWithSelectedItem(hitItem);
+        if (e.shiftKey) {
+          toggleSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
+          return;
+        }
+        const alreadySelected = selectedAnnotationIds.includes(hitItem.id);
+        if (!alreadySelected) {
+          setSelectedAnnotation(hitItem.id, pageNumber, hitItem.tool);
+          syncToolbarWithSelectedItem(hitItem);
+        }
+        const moveSnapshot = (alreadySelected && selectedItems.length > 1)
+          ? selectedItems.map((it) => JSON.parse(JSON.stringify(it)))
+          : [JSON.parse(JSON.stringify(hitItem))];
         interactionRef.current = {
           mode: 'move',
           handle: null,
           startPt: pt,
           originalItem: JSON.parse(JSON.stringify(hitItem)),
+          originalItems: moveSnapshot,
           workingItems: normalizedItems,
         };
         try {
           e.currentTarget.setPointerCapture(e.pointerId);
         } catch (_) {}
+      } else if (e.shiftKey) {
+        // شیفت+کلیک روی خالی: نگه داشتن انتخاب فعلی
+        return;
       } else {
-        setSelectedAnnotation(null, null);
+        // الگوی tldraw: اگر داخل کادر انتخاب بود → جابه‌جایی، وگرنه مارکی
+        let inBounds = false;
+        if (selectedItems.length > 0 && selectedAnnotationPage === pageNumber) {
+          const ub = getUnionBounds(selectedItems);
+          if (ub && pt.x >= ub.x - 10 && pt.x <= ub.x + ub.width + 10 &&
+              pt.y >= ub.y - 10 && pt.y <= ub.y + ub.height + 10) {
+            inBounds = true;
+          }
+        }
+        if (inBounds) {
+          // جابه‌جایی گروهی از داخل کادر
+          const snapshots = selectedItems.map((it) => JSON.parse(JSON.stringify(it)));
+          interactionRef.current = {
+            mode: 'move',
+            handle: null,
+            startPt: pt,
+            originalItem: snapshots[snapshots.length - 1],
+            originalItems: snapshots,
+            workingItems: normalizedItems,
+          };
+        } else {
+          // شروع مارکی (انتخاب چندتایی با درگ)
+          interactionRef.current = {
+            mode: 'marquee',
+            handle: null,
+            startPt: pt,
+            originalItem: null,
+            workingItems: normalizedItems,
+          };
+          setMarquee({ x: pt.x, y: pt.y, width: 0, height: 0 });
+        }
+        try {
+          e.currentTarget.setPointerCapture(e.pointerId);
+        } catch (_) {}
       }
       return;
     }
@@ -520,6 +610,11 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       return;
     }
 
+    if (mode === 'marquee' && interactionRef.current.startPt) {
+      setMarquee(marqueeRect(interactionRef.current.startPt, pt));
+      return;
+    }
+
     if (mode === 'resize' && selectedAnnotationId && interactionRef.current.originalItem) {
       const resized = resizeAnnotationWithHandle(
         selectedItem || interactionRef.current.originalItem,
@@ -535,18 +630,16 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       return;
     }
 
-    if (mode === 'move' && selectedAnnotationId && interactionRef.current.originalItem) {
+    if (mode === 'move' && interactionRef.current.originalItem) {
       const dx = pt.x - interactionRef.current.startPt.x;
       const dy = pt.y - interactionRef.current.startPt.y;
-      const moved = moveAnnotationByDelta(
-        selectedItem || interactionRef.current.originalItem,
-        interactionRef.current.originalItem,
-        dx,
-        dy
-      );
-      const nextList = normalizedItems.map((it) =>
-        it.id === selectedAnnotationId ? moved : it
-      );
+      const snapshots = interactionRef.current.originalItems || [interactionRef.current.originalItem];
+      const origMap = new Map(snapshots.map((o) => [o.id, o]));
+      const nextList = normalizedItems.map((it) => {
+        const o = origMap.get(it.id);
+        if (!o) return it;
+        return moveAnnotationByDelta(it, o, dx, dy);
+      });
       interactionRef.current.workingItems = nextList;
       setLiveItemsOverride(nextList);
       return;
@@ -567,12 +660,23 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
           return;
         }
 
-        const lastPt = currentDraft.points[currentDraft.points.length - 1];
-        if (Math.hypot(pt.x - lastPt.x, pt.y - lastPt.y) < 2) return;
+        // نقاط میانی coalesced برای نرمی حرفه‌ای (مثل Miro/tldraw)
+        const rawEvts = typeof e.nativeEvent?.getCoalescedEvents === 'function'
+          ? e.nativeEvent.getCoalescedEvents()
+          : [e.nativeEvent];
+        const newPts = [];
+        for (const cev of rawEvts) {
+          const cpt = getSvgCoords(cev.clientX, cev.clientY);
+          const lastPt = newPts.length > 0 ? newPts[newPts.length - 1] : currentDraft.points[currentDraft.points.length - 1];
+          if (Math.hypot(cpt.x - lastPt.x, cpt.y - lastPt.y) >= 1.2) {
+            newPts.push(cpt);
+          }
+        }
+        if (newPts.length === 0) return;
 
         const updated = {
           ...currentDraft,
-          points: [...currentDraft.points, pt],
+          points: [...currentDraft.points, ...newPts],
         };
         draftRef.current = updated;
         setDraftShape(updated);
@@ -611,6 +715,24 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
     if ((mode === 'move' || mode === 'resize') && interactionRef.current.workingItems) {
       commitItems(interactionRef.current.workingItems);
+    }
+
+    if (mode === 'marquee') {
+      const pt = getSvgCoords(e.clientX, e.clientY);
+      const mq = marqueeRect(interactionRef.current.startPt, pt);
+      setMarquee(null);
+      // کلیک ساده (بدون درگ) → پاک کردن انتخاب
+      if (mq.width < 6 && mq.height < 6) {
+        clearSelection();
+      } else {
+        const hits = normalizedItems.filter((it) => rectsIntersect(getItemBounds(it), mq));
+        if (hits.length > 0) {
+          setSelectedAnnotations(hits.map((h) => h.id), pageNumber);
+          syncToolbarWithSelectedItem(hits[hits.length - 1]);
+        } else {
+          clearSelection();
+        }
+      }
     }
 
     if (mode === 'draw' && draftRef.current) {
@@ -694,12 +816,7 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
 
     // ۱. ماژیک هایلایت طبیعی با perfect-freehand و ترکیب رنگی Multiply
     if (item.tool === 'highlighter') {
-      const hlOutline = penPointsToOutlinePath(item.points, strokeW, {
-        thinning: 0,
-        size: Math.max(10, strokeW * 4.4),
-        smoothing: 0.7,
-        streamline: 0.6,
-      });
+      const hlOutline = getBrushOutline(item);
       const d = hlOutline ? hlOutline.path : pointsToSmoothSvgPath(item.points);
       return (
         <g key={item.id} data-id={item.id}>
@@ -710,12 +827,14 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
             strokeWidth={Math.max(22, strokeW * 5)}
           />
           {hlOutline ? (
-            <path
-              d={hlOutline.path}
-              fill={item.color}
-              opacity={opacity * 0.45}
-              style={{ mixBlendMode: 'multiply' }}
-            />
+            <g filter="url(#hl-soft-edge)">
+              <path
+                d={hlOutline.path}
+                fill={item.color}
+                opacity={opacity * 0.45}
+                style={{ mixBlendMode: 'multiply' }}
+              />
+            </g>
           ) : (
             <path
               d={d}
@@ -732,9 +851,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       );
     }
 
-    // ۲. قلم نرم آزاد — رندر پهنای متغیر با perfect-freehand
+    // ۲. قلم نرم آزاد — با معماری جدید Brush Engine
     if (item.tool === 'pen') {
-      const outline = penPointsToOutlinePath(item.points, strokeW);
+      const outline = getBrushOutline(item);
       const d = outline ? outline.path : pointsToSmoothSvgPath(item.points);
       return (
         <g key={item.id} data-id={item.id}>
@@ -963,9 +1082,32 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
     return null;
   };
 
-  // ۱۰. رندر کادر انتخاب (Gizmo) با ۸ هندل تغییر سایز یا ۲ هندل سر و ته فلش
+  // ۱۰. رندر کادر انتخاب (Gizmo): تکی با هندل‌ها، چندتایی با کادر اجتماع
   const renderSelectionGizmo = () => {
-    if (!selectedItem || annotationTool !== 'select') return null;
+    if (!isSelectedOnThisPage || annotationTool !== 'select') return null;
+    // استیکی: سلکت با CSS روی خود div است (تطابق پیکسلی) — گیزموی SVG نمی‌خواهد
+    if (selectedItems.length > 0 && selectedItems.every((it) => it.tool === 'sticky')) return null;
+    // مولتی‌سلکت: فقط کادر اجتماع (بدون هندل تغییر سایز)
+    if (selectedItems.length > 1) {
+      const ub = getUnionBounds(selectedItems);
+      if (!ub) return null;
+      return (
+        <g>
+          <rect
+            x={ub.x}
+            y={ub.y}
+            width={ub.width}
+            height={ub.height}
+            fill="none"
+            stroke="#a78bfa"
+            strokeWidth="2"
+            strokeDasharray="7 5"
+            pointerEvents="none"
+          />
+        </g>
+      );
+    }
+    if (!selectedItem) return null;
 
     if (selectedItem.tool === 'arrow') {
       const curveX = Number.isFinite(selectedItem.cx)
@@ -974,8 +1116,24 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       const curveY = Number.isFinite(selectedItem.cy)
         ? selectedItem.cy
         : (selectedItem.startY + selectedItem.endY) / 2;
+      const ab = getItemBounds(selectedItem);
       return (
         <g>
+          {/* باکس دور فلش */}
+          {ab && (
+            <rect
+              x={ab.x}
+              y={ab.y}
+              width={ab.width}
+              height={ab.height}
+              fill="none"
+              stroke="#22d3ee"
+              strokeWidth="1.5"
+              strokeDasharray="6 4"
+              pointerEvents="none"
+              opacity="0.6"
+            />
+          )}
           <line
             x1={selectedItem.startX}
             y1={selectedItem.startY}
@@ -1026,7 +1184,26 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       );
     }
 
-    const b = getItemBounds(selectedItem);
+    // برای کادر: هندل‌ها روی لبه واقعی (بدون پد) تا ریسایز دقیق باشد
+    // باکس خط‌چین با پد کوچک برای دید بهتر
+    let b;
+    let bVisual;
+    if (selectedItem.tool === 'box') {
+      const bx = Math.min(selectedItem.startX, selectedItem.endX);
+      const by = Math.min(selectedItem.startY, selectedItem.endY);
+      const bw = Math.max(2, Math.abs(selectedItem.endX - selectedItem.startX));
+      const bh = Math.max(2, Math.abs(selectedItem.endY - selectedItem.startY));
+      b = { x: bx, y: by, width: bw, height: bh };
+      const pad = (Number(selectedItem.strokeWidth) || 4) * 0.6 + 6;
+      bVisual = { x: bx - pad, y: by - pad, width: bw + pad * 2, height: bh + pad * 2 };
+    } else if (selectedItem.tool === 'text') {
+      b = getItemBounds(selectedItem);
+      const pad = 10;
+      bVisual = { x: b.x - pad, y: b.y - pad, width: b.width + pad * 2, height: b.height + pad * 2 };
+    } else {
+      b = getItemBounds(selectedItem);
+      bVisual = b;
+    }
     const handles = [
       { id: 'nw', x: b.x, y: b.y, cursor: 'nwse-resize' },
       { id: 'n', x: b.x + b.width / 2, y: b.y, cursor: 'ns-resize' },
@@ -1037,35 +1214,47 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
       { id: 'sw', x: b.x, y: b.y + b.height, cursor: 'nesw-resize' },
       { id: 'w', x: b.x, y: b.y + b.height / 2, cursor: 'ew-resize' },
     ];
-    const hs = 11;
+    const hs = 16; // هندل بزرگ‌تر برای گرفتن راحت‌تر
 
     return (
       <g>
         <rect
-          x={b.x}
-          y={b.y}
-          width={b.width}
-          height={b.height}
-          fill="none"
+          x={bVisual.x}
+          y={bVisual.y}
+          width={bVisual.width}
+          height={bVisual.height}
+          fill="rgba(34, 211, 238, 0.06)"
           stroke="#22d3ee"
-          strokeWidth="1.8"
-          strokeDasharray="5 4"
+          strokeWidth="2.5"
+          strokeDasharray="8 5"
           pointerEvents="none"
         />
         {handles.map((h) => (
-          <rect
-            key={h.id}
-            x={h.x - hs / 2}
-            y={h.y - hs / 2}
-            width={hs}
-            height={hs}
-            rx="2.5"
-            fill="#0a0f13"
-            stroke="#22d3ee"
-            strokeWidth="2"
-            data-handle={h.id}
-            style={{ cursor: h.cursor }}
-          />
+          <g key={h.id}>
+            {/* ناحیه کلیک نامرئی بزرگ‌تر */}
+            <rect
+              x={h.x - 18}
+              y={h.y - 18}
+              width={36}
+              height={36}
+              fill="transparent"
+              data-handle={h.id}
+              style={{ cursor: h.cursor }}
+            />
+            {/* هندل بصری */}
+            <rect
+              x={h.x - hs / 2}
+              y={h.y - hs / 2}
+              width={hs}
+              height={hs}
+              rx="3"
+              fill="#0a0f13"
+              stroke="#22d3ee"
+              strokeWidth="2.5"
+              data-handle={h.id}
+              style={{ cursor: h.cursor, pointerEvents: 'none' }}
+            />
+          </g>
         ))}
       </g>
     );
@@ -1078,7 +1267,9 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
   }
 
   const stickyItems = normalizedItems.filter((it) => it.tool === 'sticky');
-  const selectedBounds = selectedItem ? getItemBounds(selectedItem) : null;
+  const selectedBounds = selectedItems.length > 1
+    ? getUnionBounds(selectedItems)
+    : selectedItem ? getItemBounds(selectedItem) : null;
 
   return (
     <div
@@ -1106,9 +1297,27 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
         preserveAspectRatio="none"
         style={styles.svgCanvas}
       >
+        <defs>
+          <filter id="hl-soft-edge" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="2.2" />
+          </filter>
+        </defs>
         <g>{normalizedItems.map((it) => renderVectorShape(it))}</g>
         <g>{draftShape && renderVectorShape(draftShape)}</g>
         <g>{isSelectedOnThisPage && renderSelectionGizmo()}</g>
+        {marquee && (marquee.width > 4 || marquee.height > 4) && (
+          <rect
+            x={marquee.x}
+            y={marquee.y}
+            width={marquee.width}
+            height={marquee.height}
+            fill="rgba(167, 139, 250, 0.08)"
+            stroke="#a78bfa"
+            strokeWidth="1.5"
+            strokeDasharray="6 4"
+            pointerEvents="none"
+          />
+        )}
       </svg>
 
       {/* ۲. کارت‌های استیکی‌نوت روی صفحه */}
@@ -1130,6 +1339,11 @@ const AnnotationLayer = React.memo(function AnnotationLayer({
               backgroundColor: st.color || '#fef08a',
               opacity: st.opacity ?? 0.95,
               pointerEvents: isAnnotationActive ? 'auto' : 'none',
+              // سلکت حرفه‌ای: outline روی خود المنت (تطابق پیکسلی تضمینی)
+              outline: selectedAnnotationIds.includes(st.id) && selectedAnnotationPage === pageNumber
+                ? '2.5px dashed #22d3ee'
+                : 'none',
+              outlineOffset: '4px',
             }}
             onPointerDown={(e) => {
               if (!isAnnotationActive) return;
@@ -1312,8 +1526,6 @@ const styles = {
   },
   stickyCard: {
     position: 'absolute',
-    minWidth: '130px',
-    minHeight: '105px',
     borderRadius: '10px',
     padding: '8px',
     boxShadow: '0 10px 28px rgba(0, 0, 0, 0.45)',

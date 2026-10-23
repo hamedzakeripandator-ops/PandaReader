@@ -145,43 +145,71 @@ export function pointsToSmoothSvgPath(points) {
 }
 
 // ۵. محاسبه دقیق کادر محاطی (Bounding Box) برای تطبیق ۱۰۰٪ گیزمو با تمام اشکال
+// کانوس singleton برای اندازه‌گیری دقیق متن
+let _textMeasureCanvas = null;
+export function getTextMeasureCanvas() {
+  if (!_textMeasureCanvas) {
+    if (typeof document !== 'undefined') {
+      _textMeasureCanvas = document.createElement('canvas');
+    } else {
+      throw new Error('no document');
+    }
+  }
+  return _textMeasureCanvas;
+}
+
 export function getItemBounds(item) {
   if (!item) return { x: 0, y: 0, width: 0, height: 0 };
   const strokeW = Number(item.strokeWidth) || 4;
 
-  // الف: استیکی‌نوت
+  // الف: استیکی‌نوت — دقیقاً مطابق HTML
   if (item.tool === 'sticky') {
     const x = Number(item.x ?? item.startX ?? 100);
     const y = Number(item.y ?? item.startY ?? 100);
-    const w = Math.max(120, Number(item.width) || 210);
-    const h = Math.max(100, Number(item.height) || 175);
+    const w = Number(item.width) || 210;
+    const h = Number(item.height) || 170;
     return { x, y, width: w, height: h };
   }
 
-  // ب: متن برداری
+  // ب: متن برداری — با پشتیبانی صحیح RTL
   if (item.tool === 'text') {
-    const fontSize = Math.max(14, Number(item.fontSize) || strokeW * 5 || 22);
+    const fontSize = Math.max(14, Number(item.fontSize) || 22);
     const rawText = String(item.text || 'متن');
     const lines = rawText.split('\n');
-    const maxChars = Math.max(2, ...lines.map((l) => l.length));
-    const estWidth = Math.max(64, maxChars * (fontSize * 0.58) + 20);
-    const estHeight = Math.max(fontSize + 14, lines.length * (fontSize * 1.32) + 10);
+    const fontFamily = item.fontFamily || "'Estedad', 'Vazirmatn', sans-serif";
+    let maxW = 0;
+    try {
+      const cv = getTextMeasureCanvas();
+      const ctx = cv.getContext('2d');
+      ctx.font = `800 ${fontSize}px ${fontFamily}`;
+      for (const ln of lines) {
+        const w = ctx.measureText(ln || ' ').width;
+        if (w > maxW) maxW = w;
+      }
+    } catch (_) {
+      const maxChars = Math.max(2, ...lines.map((l) => l.length));
+      maxW = maxChars * fontSize * 0.58;
+    }
     const sx = Number(item.startX ?? item.x ?? 100);
     const sy = Number(item.startY ?? item.y ?? 100);
-
+    // RTL: متن از لبه راست (sx) به سمت چپ گسترش می‌یابد
+    // y نقطه baseline است؛ متن بالا و پایین آن قرار می‌گیرد
+    // بدون پد — هندل‌ها روی لبه واقعی قرار می‌گیرند
+    const textW = Math.max(40, maxW + 16);
+    const lineH = fontSize * 1.3;
+    const textH = Math.max(fontSize + 8, lines.length * lineH);
     return {
-      x: sx - 8,
-      y: sy - fontSize,
-      width: estWidth,
-      height: estHeight,
+      x: sx - textW,
+      y: sy - fontSize * 0.85,
+      width: textW,
+      height: textH,
     };
   }
 
-  // ج: قلم نرم و ماژیک هایلایت
+  // ج: قلم نرم و ماژیک هایلایت — کرانه از همان کانتور رندر (تضمین تطابق)
   if (Array.isArray(item.points) && item.points.length > 0) {
-    // برای قلم نرم، کادر از روی outline پهنای متغیر perfect-freehand محاسبه می‌شود
-    if (item.tool === 'pen') {
-      const ob = getPenOutlineBounds(item.points, strokeW);
+    if (item.tool === 'pen' || item.tool === 'highlighter') {
+      const ob = getBrushBounds(item);
       if (ob) return ob;
     }
     let minX = Infinity;
@@ -217,8 +245,8 @@ export function getItemBounds(item) {
 
   const minX = Math.min(sx, ex);
   const minY = Math.min(sy, ey);
-  const w = Math.max(20, Math.abs(ex - sx));
-  const h = Math.max(20, Math.abs(ey - sy));
+  const w = Math.max(2, Math.abs(ex - sx));
+  const h = Math.max(2, Math.abs(ey - sy));
 
   if (item.tool === 'arrow') {
     const pad = Math.max(14, strokeW * 2.5);
@@ -233,6 +261,17 @@ export function getItemBounds(item) {
       y: ay1 - pad,
       width: Math.max(20, ax2 - ax1 + pad * 2),
       height: Math.max(20, ay2 - ay1 + pad * 2),
+    };
+  }
+
+  // بیضی و خط ساده (مثل Edge/Xodo)
+  if (item.tool === 'ellipse' || item.tool === 'line') {
+    const pad = Math.max(12, strokeW * 2);
+    return {
+      x: minX - pad,
+      y: minY - pad,
+      width: Math.max(24, w + pad * 2),
+      height: Math.max(24, h + pad * 2),
     };
   }
 
@@ -646,4 +685,112 @@ export function storageToUniformItem(item, aspect) {
 export function uniformToStorageItem(item, aspect) {
   const a = Number(aspect) > 0 ? Number(aspect) : 1;
   return scaleItemYCoords(item, 1 / a);
+}
+
+// ============================================================================
+// انتخاب چندتایی و مارکی (Marquee Selection)
+// ============================================================================
+
+// آیا دو مستطیل هم‌پوشانی دارند؟
+export function rectsIntersect(a, b) {
+  if (!a || !b) return false;
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
+}
+
+// کادر اجتماع چند آیتم (برای گیزمو مولتی‌سلکت)
+export function getUnionBounds(items) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const it of items) {
+    const b = getItemBounds(it);
+    if (!b) continue;
+    if (b.x < minX) minX = b.x;
+    if (b.y < minY) minY = b.y;
+    if (b.x + b.width > maxX) maxX = b.x + b.width;
+    if (b.y + b.height > maxY) maxY = b.y + b.height;
+  }
+  if (!Number.isFinite(minX)) return null;
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+// ساخت مستطیل مارکی نرمال‌شده از دو نقطه
+export function marqueeRect(p1, p2) {
+  const x = Math.min(p1.x, p2.x);
+  const y = Math.min(p1.y, p2.y);
+  return { x, y, width: Math.abs(p2.x - p1.x), height: Math.abs(p2.y - p1.y) };
+}
+
+// ============================================================================
+// معماری جدید قلم (Brush Engine) — تک‌منبع حقیقت برای رندر و کرانه
+// ============================================================================
+
+// پارامترهای دقیق هر ابزار — همین در رندر و همین در محاسبه کرانه استفاده می‌شود
+export function getBrushOptions(tool, strokeWidth = 4) {
+  const sw = Number(strokeWidth) || 4;
+  if (tool === 'highlighter') {
+    return {
+      size: Math.max(10, sw * 4.4),
+      thinning: 0,
+      smoothing: 0.7,
+      streamline: 0.6,
+      simulatePressure: false,
+      softEdge: true,
+    };
+  }
+  // pen — قلم دیجیتال خالص: هیچ تیپری، کاملاً نرم و روان
+  // thinning=0 (پهنای یکنواخت)، simulatePressure=false (بدون تغییر با سرعت)
+  // smoothing/streamline بالا برای نرمی حداکثری
+  return {
+    size: Math.max(3, sw * 2.2),
+    thinning: 0,
+    smoothing: 0.9,
+    streamline: 0.8,
+    simulatePressure: false,
+    softEdge: false,
+  };
+}
+
+// کانتور نهایی یک استروک — تنها تابعی که رندر و کرانه از آن استفاده می‌کنند
+export function getBrushOutline(item) {
+  if (!item || !Array.isArray(item.points) || item.points.length === 0) return null;
+  const opts = getBrushOptions(item.tool, item.strokeWidth);
+  return penPointsToOutlinePath(item.points, item.strokeWidth, opts);
+}
+
+// کرانه دقیق از روی همان کانتوری که رندر می‌شود (تضمین تطابق با گیزمو)
+export function getBrushBounds(item) {
+  const res = getBrushOutline(item);
+  if (!res || !res.outline || res.outline.length === 0) {
+    // فالبک: کرانه از نقاط خام
+    const pts = item.points || [];
+    if (pts.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const pad = 10;
+    return { x: minX - pad, y: minY - pad, width: Math.max(20, maxX - minX + pad*2), height: Math.max(20, maxY - minY + pad*2) };
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const pt of res.outline) {
+    if (pt[0] < minX) minX = pt[0];
+    if (pt[0] > maxX) maxX = pt[0];
+    if (pt[1] < minY) minY = pt[1];
+    if (pt[1] > maxY) maxY = pt[1];
+  }
+  const pad = 6;
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    width: Math.max(20, maxX - minX + pad * 2),
+    height: Math.max(20, maxY - minY + pad * 2),
+  };
 }

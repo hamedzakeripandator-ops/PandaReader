@@ -39,6 +39,7 @@ const useAppStore = create((set, get) => ({
   annotationFontSize: 22,
   annotationArrowStyle: 'straight', // 'straight' | 'curved'
   selectedAnnotationId: null,
+  selectedAnnotationIds: [], // مولتی‌سلکت (مارکی)
   selectedAnnotationPage: null,
   selectedAnnotationTool: null,
 
@@ -183,7 +184,7 @@ const useAppStore = create((set, get) => ({
       isContextMenuOpen: false,
       ...(next
         ? { isSnippingActive: false, isAreaZoomActive: false }
-        : { selectedAnnotationId: null, selectedAnnotationPage: null, selectedAnnotationTool: null }),
+        : { selectedAnnotationId: null, selectedAnnotationIds: [], selectedAnnotationPage: null, selectedAnnotationTool: null }),
     });
   },
 
@@ -196,7 +197,7 @@ const useAppStore = create((set, get) => ({
         isSnippingActive: false,
         isAreaZoomActive: false,
         ...(!nextActive
-          ? { selectedAnnotationId: null, selectedAnnotationPage: null, selectedAnnotationTool: null }
+          ? { selectedAnnotationId: null, selectedAnnotationIds: [], selectedAnnotationPage: null, selectedAnnotationTool: null }
           : {}),
       };
     }),
@@ -205,7 +206,7 @@ const useAppStore = create((set, get) => ({
     set((state) => ({
       annotationTool: tool || state.annotationTool,
       ...(tool !== 'select'
-        ? { selectedAnnotationId: null, selectedAnnotationPage: null }
+        ? { selectedAnnotationId: null, selectedAnnotationIds: [], selectedAnnotationPage: null, selectedAnnotationTool: null }
         : {}),
     })),
 
@@ -255,8 +256,45 @@ const useAppStore = create((set, get) => ({
   setSelectedAnnotation: (id, pageNumber = null, tool = null) =>
     set({
       selectedAnnotationId: id || null,
+      selectedAnnotationIds: id ? [id] : [],
       selectedAnnotationPage: id ? pageNumber : null,
       selectedAnnotationTool: id ? tool : null,
+    }),
+
+  // انتخاب چندتایی (مارکی)
+  setSelectedAnnotations: (ids, pageNumber = null) =>
+    set((state) => {
+      const list = Array.isArray(ids) ? ids.filter(Boolean) : [];
+      const lastId = list.length ? list[list.length - 1] : null;
+      return {
+        selectedAnnotationIds: list,
+        selectedAnnotationId: lastId,
+        selectedAnnotationPage: list.length ? pageNumber : null,
+        selectedAnnotationTool: list.length ? state.selectedAnnotationTool : null,
+      };
+    }),
+
+  // تاگل با Shift+کلیک
+  toggleSelectedAnnotation: (id, pageNumber = null, tool = null) =>
+    set((state) => {
+      const ids = state.selectedAnnotationIds || [];
+      const has = ids.includes(id);
+      const next = has ? ids.filter((x) => x !== id) : [...ids, id];
+      const lastId = next.length ? next[next.length - 1] : null;
+      return {
+        selectedAnnotationIds: next,
+        selectedAnnotationId: lastId,
+        selectedAnnotationPage: next.length ? pageNumber : null,
+        selectedAnnotationTool: next.length ? tool || state.selectedAnnotationTool : null,
+      };
+    }),
+
+  clearSelection: () =>
+    set({
+      selectedAnnotationId: null,
+      selectedAnnotationIds: [],
+      selectedAnnotationPage: null,
+      selectedAnnotationTool: null,
     }),
 
   // همگام‌سازی نوار ابزار بالا با ویژگی‌های شکل انتخاب‌شده (Two-Way Binding)
@@ -305,6 +343,7 @@ const useAppStore = create((set, get) => ({
             isAnnotationActive: false,
             isAreaZoomActive: false,
             selectedAnnotationId: null,
+            selectedAnnotationIds: [],
             selectedAnnotationPage: null,
             selectedAnnotationTool: null,
           }
