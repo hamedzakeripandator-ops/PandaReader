@@ -35,7 +35,10 @@ const useAppStore = create((set, get) => ({
   annotationColor: '#06b6d4',
   annotationStrokeWidth: 4,
   annotationOpacity: 0.85,
-  annotationFontFamily: "'Estedad', 'Vazirmatn', sans-serif",
+  // گام ۲ میانی: پیش‌فرضِ محلی (استعداد — مهم‌ترین فونتِ public/fonts).
+  // وزیرمتن فونتِ باندل‌شده نیست (هیچ woff2 و @font-faceای ندارد)، پس
+  // از پیش‌فرض حذف شد تا پیلِ استعداد از اول فعال باشد.
+  annotationFontFamily: "'Estedad', sans-serif",
   annotationFontSize: 22,
   annotationArrowStyle: 'straight', // 'straight' | 'curved'
   annotationHasStartDot: true, // Refinement Step 2: دایرهٔ مبدأِ فلشِ جدید
@@ -247,7 +250,7 @@ const useAppStore = create((set, get) => ({
   },
 
   setAnnotationFontFamily: (family) =>
-    set({ annotationFontFamily: family || "'Estedad', 'Vazirmatn', sans-serif" }),
+    set({ annotationFontFamily: family || "'Estedad', sans-serif" }),
 
   setAnnotationFontSize: (size) =>
     set({ annotationFontSize: Math.max(14, Math.min(76, Number(size) || 22)) }),

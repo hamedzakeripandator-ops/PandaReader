@@ -68,14 +68,17 @@ const ARROW_STYLES = [
   { id: 'curved', label: 'منحنی' },
 ];
 
-// فاز ۴: گزینه‌های فونت متن — دقیقاً طبق مشخصات TASK مرحلهٔ ۲.
-// توجه: رشتهٔ پیش‌فرضِ استور ("'Estedad', 'Vazirmatn', sans-serif")
-// با هیچ‌کدام از این سه گزینه دقیقاً برابر نیست، پس تا وقتی کاربر
-// یکی از پیل‌ها را نزند، هیچ پیلی فعال نشان داده نمی‌شود؛ با اولین
-// انتخاب، استور همان رشتهٔ انتخاب‌شده را می‌گیرد و پیل فعال می‌شود.
+// گام ۲ میانی: گزینه‌های فونت — دقیقاً برابرِ فونت‌های محلیِ پروژه
+// (public/fonts + @font-faceهای src/index.css): استعداد (فارسیِ اصلی،
+// ۵ وزن)، منروپ (لاتین) و جت‌برینز مونو (تک‌فاصله). وزیرمتن کنار گذاشته
+// شد، چون هیچ فایلِ woff2ای برایش در public/fonts نیست و @font-faceای
+// هم ندارد (فقط در متغیرِ --font-fa به‌عنوانِ fallbackِ سیستمی آمده بود،
+// نه فونتِ باندل‌شده). پیش‌فرضِ استور هم "'Estedad', sans-serif" است،
+// پس پیلِ استعداد از اول فعال نشان داده می‌شود (مشکلِ قدیمیِ «هیچ پیلی
+// فعال نیست» که در فاز ۴ مستند شده بود، با همین تغییر رفع می‌شود).
 const FONT_OPTIONS = [
   { id: "'Estedad', sans-serif", label: 'استعداد' },
-  { id: "'Vazirmatn', sans-serif", label: 'وزیرمتن' },
+  { id: "'Manrope', sans-serif", label: 'منروپ' },
   { id: "'JetBrains Mono', monospace", label: 'مونو' },
 ];
 
@@ -143,7 +146,7 @@ const btnBase = {
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
-  transition: 'background 0.15s, color 0.15s, outline 0.15s',
+  transition: 'background 0.15s, color 0.15s, outline 0.15s, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease',
 };
 
 export function AnnotationToolbar({
@@ -254,6 +257,15 @@ export function AnnotationToolbar({
     window.dispatchEvent(new CustomEvent('annotation:update-selected', { detail: patch }));
   }, []);
 
+  // گام ۲ میانی: پخش تغییر فونت/اندازه برای استیکیِ انتخاب‌شده — دقیقاً
+  // همان قراردادِ helperی متن (فقط وقتی انتخابی هست) تا تغییرِ فونت از
+  // تولبار، روی استیکی‌های انتخاب‌شده هم اعمال شود.
+  const broadcastSelectedStickyPatch = useCallback((patch) => {
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    if (!state.selectedAnnotationId) return;
+    window.dispatchEvent(new CustomEvent('annotation:update-selected', { detail: patch }));
+  }, []);
+
   // فاز ۵: تابعِ عمومیِ بایندینگِ دوطرفه — دقیقاً طبقِ TASK.
   // برخلافِ helperهای تخصصیِ باکس/فلش/متن که detail را بدونِ id
   // می‌فرستند، این تابع id را هم در detail می‌گذارد؛ شنوندهٔ لایه
@@ -269,6 +281,18 @@ export function AnnotationToolbar({
       detail: { id: sid, ...patch },
     }));
   }, []);
+
+  // گام ۲ میانی: انتخابِ helperی پخشِ تایپو بر اساسِ بافت — اگر ابزارِ
+  // فعال یا آیتمِ انتخاب‌شده استیکی باشد، helperی استیکی؛ وگرنه helperی
+  // متن. هر دو همان قرارداد را دارند و شنوندهٔ لایه، فونت را برای هر دو
+  // ابزار می‌پذیرد، پس در انتخابِ مخلوطِ متن+استیکی هم هر دو عوض می‌شوند.
+  const broadcastTypoPatch = useCallback((patch) => {
+    if (annotationTool === 'sticky' || selectedAnnotationTool === 'sticky') {
+      broadcastSelectedStickyPatch(patch);
+    } else {
+      broadcastSelectedTextPatch(patch);
+    }
+  }, [annotationTool, selectedAnnotationTool, broadcastSelectedStickyPatch, broadcastSelectedTextPatch]);
 
   // میانبرها — Refinement Step 2: مدیریتِ هوشمند در فازِ Capture.
   // - شنونده در فازِ Capture سوار می‌شود تا قبل از شنوندهٔ bubbleی
@@ -359,6 +383,12 @@ export function AnnotationToolbar({
   if (!isAnnotationActive) return null;
 
   const activeId = TOOLS.some((t) => t.id === annotationTool) ? annotationTool : 'pen';
+
+  // گام ۲ میانی: حالتِ تمرکزِ تایپوگرافی + فهرستِ ابزارهای ترسیمی که در
+  // این حالت مورف می‌شوند (text و sticky در مقیاسِ کامل می‌مانند).
+  const isTypoMode = annotationTool === 'text' || annotationTool === 'sticky'
+    || selectedAnnotationTool === 'text' || selectedAnnotationTool === 'sticky';
+  const DRAWING_TOOL_IDS = ['select', 'pen', 'box', 'arrow', 'highlighter', 'eraser'];
   const divider = <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />;
 
   // استایل دکمه غیرفعال
@@ -368,8 +398,16 @@ export function AnnotationToolbar({
   });
 
   return (
-    <div
-      dir="rtl"
+    <>
+      {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
+          که تازه mount شده اجرا نمی‌شود (مقدارِ اولیه همان مقدارِ نهایی
+          است)، پس ورودِ دقیقِ خواسته‌شده (opacity ‏0 به 1 و
+          translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
+          دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
+          (translateX(-50%)) را نگه می‌دارد. */}
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
+      <div
+        dir="rtl"
       style={{
         position: 'absolute',
         top: 12,
@@ -405,6 +443,14 @@ export function AnnotationToolbar({
             onClick={() => setAnnotationTool(id)}
             style={{
               ...btnBase,
+              // گام ۲ میانی: مورفِ تایپو — دکمه‌های ترسیمی در حالتِ تایپو
+              // کوچک (scale ‏0.88) و کم‌رنگ (opacity ‏0.65) می‌شوند؛ text و
+              // sticky در مقیاسِ کامل می‌مانند. ترنزیشن از btnBase می‌آید
+              // (transform با منحنیِ کشسان + opacity) و کلیک در حینِ
+              // انیمیشن مسدود نمی‌شود (pointerEvents دست نخورده است).
+              ...(isTypoMode && DRAWING_TOOL_IDS.includes(id)
+                ? { transform: 'scale(0.88)', opacity: 0.65 }
+                : {}),
               width: 38,
               height: 38,
               borderRadius: 11,
@@ -580,21 +626,23 @@ export function AnnotationToolbar({
       {/* فاز ۴: زیرمنوی متن — وقتی ابزار متن فعال است، یا آیتمِ انتخاب‌شده
           متنی است (شرطِ گستردهٔ قدیمی؛ چون تعویضِ ابزار، انتخاب را پاک
           می‌کند، شرطِ فقط-tool برای ویرایشِ متنِ انتخاب‌شده کافی نیست). */}
-      {(annotationTool === 'text' || selectedAnnotationTool === 'text') && (
+      {/* گام ۲ میانی: کنسولِ فونت برای متن و استیکی (isTypoMode) — ورود
+          با keyframesی typoConsoleIn، بدونِ انیمیتِ width/margin. */}
+      {isTypoMode && (
         <>
           {divider}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'typoConsoleIn 0.25s ease' }}>
             {FONT_OPTIONS.map((f) => {
               const active = annotationFontFamily === f.id;
               return (
                 <button
                   key={f.id}
-                  title={`فونت متن: ${f.label}`}
+                  title={`فونت: ${f.label}`}
                   onClick={() => {
                     if (typeof setAnnotationFontFamily === 'function') {
                       setAnnotationFontFamily(f.id);
                     }
-                    broadcastSelectedTextPatch({ fontFamily: f.id });
+                    broadcastTypoPatch({ fontFamily: f.id });
                   }}
                   style={{
                     ...btnBase,
@@ -629,7 +677,7 @@ export function AnnotationToolbar({
                   if (typeof setAnnotationFontSize === 'function') {
                     setAnnotationFontSize(val);
                   }
-                  broadcastSelectedTextPatch({ fontSize: val });
+                  broadcastTypoPatch({ fontSize: val });
                 }}
                 style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
               />
@@ -836,6 +884,7 @@ export function AnnotationToolbar({
         </button>
       )}
     </div>
+    </>
   );
 }
 

@@ -20,7 +20,7 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
-import { Stage, Layer, Shape, Group, Line, Rect, Text, Circle, Transformer } from 'react-konva';
+import { Stage, Layer, Shape, Group, Line, Rect, Text, Path, Transformer } from 'react-konva';
 import useAppStore from '../../store/useAppStore';
 // Cycle-fix (2026-10-25): این فایل، AnnotationToolbar را نه ایمپورت
 // می‌کند و نه re-export می‌کند (قبلاً هر دو را داشت و PdfViewer،
@@ -894,6 +894,14 @@ function getStickyTheme(color) {
   };
 }
 // ============================================================================
+// گام ۲ میانی — مسیرِ SVG آیکونِ Pin لوسید (viewBox ‏۲۴×۲۴، stroke-based).
+// منبع: تعریفِ رسمیِ آیکونِ pin در Lucide (fill: none, stroke-width: 2،
+// stroke-linecap/linejoin: round). در Konva به‌صورتِ <Path> کشیده می‌شود
+// تا با کارت مقیاس شود؛ در ویرایشگرِ HTML هم همان دو <path> در یک <svg>
+// می‌آیند. اگر روزی خواستید آیکون از Icons.jsx بیاید، همین مسیرها را
+// دارد (lucide-react، Pin).
+const LUCIDE_PIN_PATH = 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z';
+// ============================================================================
 const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onEdit, isEditing }) {
   const x = Number(item.x ?? item.startX ?? 0);
   const y = Number(item.y ?? item.startY ?? 0);
@@ -903,8 +911,8 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
   const pad = 12;
   const theme = useMemo(() => getStickyTheme(item.color), [item.color]);
   const textDir = detectTextDirection(item.text);
-  const pinX = w / 2;
-  const pinY = headerH / 2;
+  // گام ۲ میانی: پینِ لوسید با x = w/2 - 8 و y = 4 در خودِ <Path> مرکز
+  // می‌شود؛ دیگر به pinX/pinY نیازی نیست.
 
   const handleClick = useCallback(() => {
     onErase?.(item.id);
@@ -967,30 +975,23 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
         perfectDrawEnabled={false}
         shadowForStrokeEnabled={false}
       />
-      {/* پینِ وسطِ هدر: هاله + دیسکِ سفید + نقطهٔ رنگی. */}
-      <Circle
-        x={pinX}
-        y={pinY}
-        radius={10.5}
-        fill={colorWithAlpha(theme.text, 0.22) || theme.border}
-        listening={false}
-        perfectDrawEnabled={false}
-        shadowForStrokeEnabled={false}
-      />
-      <Circle
-        x={pinX}
-        y={pinY}
-        radius={6.5}
-        fill="#f8fafc"
-        listening={false}
-        perfectDrawEnabled={false}
-        shadowForStrokeEnabled={false}
-      />
-      <Circle
-        x={pinX}
-        y={pinY}
-        radius={3}
-        fill={theme.headerFill}
+      {/* گام ۲ میانی: آیکونِ پینِ لوسید در مرکزِ هدر (۱۶ پیکسل، مقیاسِ
+          ۲/۳ از viewBoxی ۲۴). stroke به رنگِ متنِ تم است تا روی هدرِ رنگی
+          در هر دو تم (روشن و تیره) خوانا بماند — همان منطقِ کنتراست که
+          در فاز ۲ برای هاله انتخاب شده بود. نشانگرِ قبلی (هاله + دیسکِ
+          سفید + نقطهٔ رنگی) حذف شد. fillEnabled خاموش است چون آیکونِ
+          لوسید stroke-based است، نه fill-based. */}
+      <Path
+        data={LUCIDE_PIN_PATH}
+        x={w / 2 - 8}
+        y={4}
+        scaleX={2 / 3}
+        scaleY={2 / 3}
+        stroke={theme.text}
+        strokeWidth={2}
+        lineCap="round"
+        lineJoin="round"
+        fillEnabled={false}
         listening={false}
         perfectDrawEnabled={false}
         shadowForStrokeEnabled={false}
@@ -1006,8 +1007,8 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
         ellipsis={true}
         align={textDir === 'rtl' ? 'right' : 'left'}
         text={item.text || 'برای نوشتن یادداشت دوبار کلیک کنید...'}
-        fontSize={13}
-        fontFamily="'Vazirmatn', sans-serif"
+        fontSize={Number(item.fontSize) || 13}
+        fontFamily={item.fontFamily || "'Estedad', sans-serif"}
         fill={theme.text}
         wrap="word"
         lineHeight={1.5}
@@ -1342,41 +1343,22 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
           justifyContent: 'center',
         }}
       >
-        <span
-          style={{
-            width: 21,
-            height: 21,
-            borderRadius: '50%',
-            background: colorWithAlpha(theme.text, 0.22) || theme.border,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
+        {/* گام ۲ میانی: همان آیکونِ پینِ لوسید (۱۶ پیکسل) در مرکزِ هدرِ
+            ویرایشگر، با stroke به رنگِ متنِ تم — هماهنگ با کارت. */}
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={theme.text}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
         >
-          <span
-            style={{
-              width: 13,
-              height: 13,
-              borderRadius: '50%',
-              background: '#f8fafc',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              flexShrink: 0,
-            }}
-          >
-            <span
-              style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: theme.headerFill,
-                flexShrink: 0,
-              }}
-            />
-          </span>
-        </span>
+          <path d="M12 17v5" />
+          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z" />
+        </svg>
       </div>
       <textarea
         autoFocus
@@ -1410,8 +1392,8 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
           outline: 'none',
           resize: 'none',
           padding: '10px 12px',
-          fontFamily: "'Vazirmatn', sans-serif",
-          fontSize: Math.max(11, 13 * scaleY),
+          fontFamily: item.fontFamily || "'Estedad', sans-serif",
+          fontSize: Math.max(11, (Number(item.fontSize) || 13) * scaleY),
           lineHeight: 1.5,
           color: theme.text,
           direction: textDir,
@@ -2505,6 +2487,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         text: '',
         color: colorRef.current,
         opacity: opacityRef.current,
+        fontFamily: fontFamilyRef.current,
+        fontSize: fontSizeRef.current || 22,
       };
       commit([...uniformItems, newSticky]);
       setActiveStickyEditorId(newSticky.id);
@@ -3143,9 +3127,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             itemPatch.cy = ctrl.cy;
           }
         }
-        if (target.tool === 'text') {
+        // گام ۲ میانی: فونت برای متن و استیکی (برابریِ تایپوگرافی)؛
+        // pillBackground فقط مالِ متن است و به استیکی نمی‌رسد.
+        if (target.tool === 'text' || target.tool === 'sticky') {
           if (patch.fontFamily !== undefined) itemPatch.fontFamily = patch.fontFamily;
           if (patch.fontSize !== undefined) itemPatch.fontSize = patch.fontSize;
+        }
+        if (target.tool === 'text') {
           if (patch.pillBackground !== undefined) itemPatch.pillBackground = patch.pillBackground;
         }
         if (patch.color !== undefined) itemPatch.color = patch.color;
