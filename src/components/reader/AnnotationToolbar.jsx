@@ -187,6 +187,42 @@ export function AnnotationToolbar({
   const setAnnotationFontSize = useAppStore((s) => s.setAnnotationFontSize);
   const selectedAnnotationTool = useAppStore((s) => s.selectedAnnotationTool);
 
+  // پولیش — اصلاحِ بحرانیِ قانونِ هوک‌ها: این دو selector باید اینجا،
+  // قبل از returnِ زودهنگامِ پایین باشند. قبلاً بعد از آن return بودند
+  // و با فعال شدنِ استودیو، تعدادِ هوک‌های رندر عوض می‌شد و ری‌اکت با
+  // خطای «Rendered more hooks than during the previous render» کرش
+  // می‌کرد (دقیقاً خطِ ۳۹۷). هیچ هوکی نباید بعد از آن return بیاید.
+  const toolbarOrientation = useAppStore((s) => s.toolbarOrientation || 'horizontal');
+  const setToolbarOrientation = useAppStore((s) => s.setToolbarOrientation);
+
+  // شناور (پولیشِ انقلابی) — موقعیتِ آزادِ تولبار: null یعنی داکِ
+  // پیش‌فرض (افقی: بالا وسط؛ عمودی: راست وسط)؛ بعد از اولین درگ،
+  // مختصاتِ style (نسبت به والدِ position‌دار) ذخیره می‌شود و با
+  // localStorage (کلیدِ annotationToolbarPosition) بینِ رفرش‌ها
+  // می‌ماند. لود، محافظت‌شده است و مختصات را در بازهٔ امنِ پنجره
+  // نگه می‌دارد تا دستگیره همیشه در دسترس بماند.
+  const [toolbarPos, setToolbarPos] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem('annotationToolbarPosition');
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+      const vw = window.innerWidth || 1024;
+      const vh = window.innerHeight || 768;
+      return {
+        x: Math.max(10, Math.min(p.x, Math.max(10, vw - 160))),
+        y: Math.max(10, Math.min(p.y, Math.max(10, vh - 80))),
+      };
+    } catch (_) {
+      return null;
+    }
+  });
+  const [isToolbarDragging, setIsToolbarDragging] = useState(false);
+  const [toggleSpinning, setToggleSpinning] = useState(false);
+  const toolbarWrapRef = useRef(null);
+  const toolbarDragRef = useRef(null);
+  const toolbarPosRef = useRef(null);
+
   // تایید دو مرحله‌ای برای پاک کردن همه (بدون window.confirm زشت)
   const [armClear, setArmClear] = useState(false);
   useEffect(() => {
@@ -380,6 +416,33 @@ export function AnnotationToolbar({
     return () => window.removeEventListener('keydown', onKey, true);
   }, [isAnnotationActive, setAnnotationTool, doUndo, doRedo, onUndo, onRedo]);
 
+  // شناور — کلمپِ دقیقِ موقعیتِ ذخیره‌شده بعد از mount (فقط یک بار):
+  // اگر پنجره کوچک‌تر شده باشد، تولبار را به داخلِ والد برمی‌گرداند
+  // تا دستگیره هرگز بیرون از دسترس نماند.
+  useEffect(() => {
+    if (!toolbarPos) return;
+    const el = toolbarWrapRef.current;
+    if (!el) return;
+    const parent = el.offsetParent;
+    const pw = parent ? parent.clientWidth : window.innerWidth;
+    const ph = parent ? parent.clientHeight : window.innerHeight;
+    const maxX = Math.max(10, pw - el.offsetWidth - 10);
+    const maxY = Math.max(10, ph - el.offsetHeight - 10);
+    const nx = Math.max(10, Math.min(toolbarPos.x, maxX));
+    const ny = Math.max(10, Math.min(toolbarPos.y, maxY));
+    if (nx !== toolbarPos.x || ny !== toolbarPos.y) {
+      const next = { x: nx, y: ny };
+      toolbarPosRef.current = next;
+      setToolbarPos(next);
+      try { window.localStorage.setItem('annotationToolbarPosition', JSON.stringify(next)); } catch (_) {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // قانونِ هوک‌های ری‌اکت — تغییرناپذیر: همهٔ هوک‌ها (useAppStore،
+  // useState، useEffect، useCallback، useRef) باید بالای این خط باشند
+  // و هیچ هوکی بعد از این return نیاید؛ وگرنه با فعال/غیرفعال شدنِ
+  // استودیو، ترتیب و تعدادِ هوک‌ها عوض می‌شود و کامپوننت کرش می‌کند.
   if (!isAnnotationActive) return null;
 
   const activeId = TOOLS.some((t) => t.id === annotationTool) ? annotationTool : 'pen';
@@ -388,8 +451,31 @@ export function AnnotationToolbar({
   // این حالت مورف می‌شوند (text و sticky در مقیاسِ کامل می‌مانند).
   const isTypoMode = annotationTool === 'text' || annotationTool === 'sticky'
     || selectedAnnotationTool === 'text' || selectedAnnotationTool === 'sticky';
+
+  // پولیشِ قطعی — مخفی‌سازیِ شرطیِ کنترل‌های ضخامت (دقیقاً فرمولِ تسک):
+  // اگر ابزارِ فعال یا آیتمِ انتخاب‌شده text/sticky/box/image باشد،
+  // بلوکِ «اندازه» (ضخامتِ نوکِ قلم) + جداکنندهٔ مجاورش از
+  // secondaryContent حذف می‌شوند. چون secondaryContent در هر دو شاخهٔ
+  // افقی و عمودی همان متغیر است، این شرط در هر دو حالت اعمال می‌شود.
+  // توجه: کنترلِ ضخامت در این کد، ردیفِ دکمه‌های SIZES است، نه اسلایدر؛
+  // تنها اسلایدرِ بجِ پیکسلی، اسلایدرِ اندازهٔ فونتِ کنسولِ تایپو است
+  // که عمداً می‌ماند (مخصوصِ text/sticky است).
+  const activeOrSelectedTool = selectedAnnotationTool || annotationTool;
+  const hideStrokeControls = ['text', 'sticky', 'box', 'image'].includes(activeOrSelectedTool);
   const DRAWING_TOOL_IDS = ['select', 'pen', 'box', 'arrow', 'highlighter', 'eraser'];
-  const divider = <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />;
+
+  // پولیشِ قطعی: قفلِ ابزارها کاملاً حذف شده است — هیچ دکمهٔ ابزاری
+  // disabled نمی‌شود و سوییچِ ابزار همیشه آزاد است. توجه: خودِ هوک‌های
+  // toolbarOrientation و setToolbarOrientation بالاتر، قبل از returnِ
+  // زودهنگام‌اند (قانونِ هوک‌های ری‌اکت) — اینجا فقط از مقدارشان
+  // استفاده می‌شود.
+  const isVertical = toolbarOrientation === 'vertical';
+  // پولیش: جداکنندهٔ جهت‌آگاه — در حالتِ افقی خطِ عمودی (۱×۲۴) و در
+  // حالتِ عمودی خطِ افقی (۲۴×۱) تا هم در ستونِ داک و هم در ستونِ فلای‌اوت
+  // درست دیده شود.
+  const divider = isVertical
+    ? <div style={{ width: 24, height: 1, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />
+    : <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.12)', flexShrink: 0 }} />;
 
   // استایل دکمه غیرفعال
   const disabledStyle = (disabled) => ({
@@ -397,42 +483,16 @@ export function AnnotationToolbar({
     cursor: disabled ? 'default' : 'pointer',
   });
 
-  return (
+
+  // پولیش: بلوک‌های JSXی تولبار به‌صورتِ متغیر جدا شدند تا در دو حالتِ
+  // افقی و عمودی، بدونِ تکرارِ کد، در جای درست رندر شوند:
+  // - toolsButtons: دکمه‌های TOOLS (با مورفِ بصری؛ بدونِ هیچ قفل و غیرفعال‌سازی).
+  // - secondaryContent: زیرمنوها (باکس/فلش/فونت) + رنگ + ضخامت + شفافیت.
+  // - actionsContent: Undo/Redo/پاک‌کردن.
+  // - orientationToggle: دکمهٔ سوییچِ جهت با آیکونِ Columns لوسید که در
+  //   حالتِ عمودی ۹۰ درجه می‌چرخد (ترنزیشن روی خودِ svg است).
+  const toolsButtons = (
     <>
-      {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
-          که تازه mount شده اجرا نمی‌شود (مقدارِ اولیه همان مقدارِ نهایی
-          است)، پس ورودِ دقیقِ خواسته‌شده (opacity ‏0 به 1 و
-          translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
-          دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
-          (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
-      <div
-        dir="rtl"
-      style={{
-        position: 'absolute',
-        top: 12,
-        left: '50%',
-        transform: 'translateX(-50%)',
-        zIndex: 30,
-        display: 'flex',
-        alignItems: 'center',
-        gap: 4,
-        padding: '6px 10px',
-        borderRadius: 16,
-        background: 'rgba(8, 12, 16, 0.92)',
-        border: '1px solid rgba(255,255,255,0.10)',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-        backdropFilter: 'blur(16px)',
-        WebkitBackdropFilter: 'blur(16px)',
-        userSelect: 'none',
-        maxWidth: 'calc(100% - 24px)',
-        overflowX: 'auto',
-        scrollbarWidth: 'none',
-      }}
-      onPointerDown={(e) => e.stopPropagation()}
-      onPointerMove={(e) => e.stopPropagation()}
-      onPointerUp={(e) => e.stopPropagation()}
-    >
       {/* ابزارها */}
       {TOOLS.map(({ id, label, Icon, danger }) => {
         const active = activeId === id;
@@ -446,11 +506,15 @@ export function AnnotationToolbar({
               // گام ۲ میانی: مورفِ تایپو — دکمه‌های ترسیمی در حالتِ تایپو
               // کوچک (scale ‏0.88) و کم‌رنگ (opacity ‏0.65) می‌شوند؛ text و
               // sticky در مقیاسِ کامل می‌مانند. ترنزیشن از btnBase می‌آید
-              // (transform با منحنیِ کشسان + opacity) و کلیک در حینِ
-              // انیمیشن مسدود نمی‌شود (pointerEvents دست نخورده است).
+              // (transform با منحنیِ کشسان + opacity). مورف، صرفاً افکتِ
+              // بصری است: قفلِ پولیش کاملاً حذف شده، پس مورف هرگز مانعِ
+              // کلیک نمی‌شود — همهٔ دکمه‌های ابزار، همیشه cursorِ
+              // pointer و pointerEventsِ auto دارند (دو خطِ پایین).
               ...(isTypoMode && DRAWING_TOOL_IDS.includes(id)
                 ? { transform: 'scale(0.88)', opacity: 0.65 }
                 : {}),
+              cursor: 'pointer',
+              pointerEvents: 'auto',
               width: 38,
               height: 38,
               borderRadius: 11,
@@ -468,7 +532,10 @@ export function AnnotationToolbar({
           </button>
         );
       })}
-
+    </>
+  );
+  const secondaryContent = (
+    <>
       {/* فاز ۲: زیرمنوی کادربندی — فقط وقتی ابزار box فعال است */}
       {annotationTool === 'box' && (
         <>
@@ -734,6 +801,8 @@ export function AnnotationToolbar({
         })}
       </div>
 
+      {!hideStrokeControls && (
+        <>
       {divider}
 
       {/* اندازه */}
@@ -779,6 +848,8 @@ export function AnnotationToolbar({
           );
         })}
       </div>
+        </>
+      )}
 
       {/* Refinement Step 2: اسلایدرِ شفافیت — کنارِ پالتِ اندازه‌ها.
           روی تغییر: هم استور به‌روز می‌شود (برای شکل‌های بعدی) و هم
@@ -821,9 +892,10 @@ export function AnnotationToolbar({
           {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
         </span>
       </div>
-
-      {divider}
-
+    </>
+  );
+  const actionsContent = (
+    <>
       {/* Undo — فاز ۱: prop با fallback */}
       <button
         title="برگردان (Ctrl+Z)"
@@ -883,9 +955,301 @@ export function AnnotationToolbar({
           {armClear ? 'مطمئنی؟' : <Icons.Trash size={17} />}
         </button>
       )}
-    </div>
     </>
   );
+  // شناور — منطقِ درگِ دستگیره. این‌ها تابع‌های معمولی‌اند، نه هوک؛
+  // پس بودنشان بعد از returnِ زودهنگام، قانونِ هوک‌ها را نمی‌شکند.
+  // نکتهٔ مهم: شنونده‌های window در فازِ capture نصب می‌شوند، چون
+  // هندلرهای stopPropagationیِ wrapper (فازِ bubble) وگرنه رویدادِ
+  // pointermove را قبل از رسیدن به window متوقف می‌کنند.
+  const clampToolbarToViewport = (vx, vy, w, h) => {
+    const vw = window.innerWidth || 1024;
+    const vh = window.innerHeight || 768;
+    return {
+      x: Math.max(10, Math.min(vx, Math.max(10, vw - w - 10))),
+      y: Math.max(10, Math.min(vy, Math.max(10, vh - h - 10))),
+    };
+  };
+  const handleToolbarDragMove = (e) => {
+    const d = toolbarDragRef.current;
+    if (!d) return;
+    const vx = d.origViewportX + (e.clientX - d.pointerX);
+    const vy = d.origViewportY + (e.clientY - d.pointerY);
+    const c = clampToolbarToViewport(vx, vy, d.w, d.h);
+    const next = { x: c.x - d.parentLeft, y: c.y - d.parentTop };
+    toolbarPosRef.current = next;
+    setToolbarPos(next);
+  };
+  const handleToolbarDragEnd = (e) => {
+    window.removeEventListener('pointermove', handleToolbarDragMove, true);
+    window.removeEventListener('pointerup', handleToolbarDragEnd, true);
+    window.removeEventListener('pointercancel', handleToolbarDragEnd, true);
+    toolbarDragRef.current = null;
+    setIsToolbarDragging(false);
+    const finalPos = toolbarPosRef.current;
+    if (finalPos) {
+      try { window.localStorage.setItem('annotationToolbarPosition', JSON.stringify(finalPos)); } catch (_) {}
+    }
+    if (e && e.currentTarget && typeof e.currentTarget.releasePointerCapture === 'function') {
+      try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
+    }
+  };
+  const handleToolbarDragStart = (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const el = toolbarWrapRef.current;
+    const parent = el ? el.offsetParent : null;
+    const parentRect = parent ? parent.getBoundingClientRect() : { left: 0, top: 0 };
+    const w = el ? el.offsetWidth : 320;
+    const h = el ? el.offsetHeight : 60;
+    // مبدأ به مختصاتِ viewport: اگر شناور است، از toolbarPos +
+    // parentRect؛ وگرنه از rectِ فعلیِ داک.
+    let origViewport;
+    if (toolbarPos) {
+      origViewport = { x: toolbarPos.x + parentRect.left, y: toolbarPos.y + parentRect.top };
+    } else if (el) {
+      const r = el.getBoundingClientRect();
+      origViewport = { x: r.left, y: r.top };
+    } else {
+      origViewport = { x: 10, y: 10 };
+    }
+    toolbarDragRef.current = {
+      pointerX: e.clientX, pointerY: e.clientY,
+      origViewportX: origViewport.x, origViewportY: origViewport.y,
+      parentLeft: parentRect.left, parentTop: parentRect.top, w, h,
+    };
+    toolbarPosRef.current = toolbarPos || null;
+    setIsToolbarDragging(true);
+    try { e.currentTarget.setPointerCapture?.(e.pointerId); } catch (_) {}
+    window.addEventListener('pointermove', handleToolbarDragMove, true);
+    window.addEventListener('pointerup', handleToolbarDragEnd, true);
+    window.addEventListener('pointercancel', handleToolbarDragEnd, true);
+  };
+  const handleToolbarDragReset = (e) => {
+    e.stopPropagation();
+    try { window.localStorage.removeItem('annotationToolbarPosition'); } catch (_) {}
+    toolbarPosRef.current = null;
+    setToolbarPos(null);
+  };
+
+  // شناور — استایلِ موقعیتِ آزاد (بعد از استایلِ داک می‌آید تا آن را
+  // override کند)؛ وقتی null است، داکِ پیش‌فرض برقرار می‌ماند.
+  const floatingStyle = toolbarPos
+    ? { left: toolbarPos.x, top: toolbarPos.y, right: 'auto', transform: 'none' }
+    : {};
+
+  // شناور — دستگیرهٔ درگ: در حالتِ افقی GripVertical، در حالتِ عمودی
+  // GripHorizontal (مسیرهای استانداردِ لوسید؛ مثلِ آیکونِ تاگل،
+  // به‌صورتِ SVGی خام آمده‌اند تا به Icons.jsx وابسته نباشیم —
+  // Icons.jsxی فاز ۱ این دو آیکون را ندارد). دوبارکلیک، تولبار را
+  // به داکِ پیش‌فرض برمی‌گرداند.
+  const dragHandle = (
+    <div
+      title="بکشید تا جابه‌جا شود — دوبارکلیک: بازگشت به جای پیش‌فرض"
+      onPointerDown={handleToolbarDragStart}
+      onDoubleClick={handleToolbarDragReset}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 26,
+        height: 26,
+        flexShrink: 0,
+        color: isToolbarDragging ? '#67e8f9' : 'rgba(255,255,255,0.45)',
+        cursor: isToolbarDragging ? 'grabbing' : 'grab',
+        touchAction: 'none',
+      }}
+    >
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {isVertical ? (
+          <>
+            <circle cx="12" cy="9" r="1" />
+            <circle cx="12" cy="15" r="1" />
+            <circle cx="5" cy="9" r="1" />
+            <circle cx="5" cy="15" r="1" />
+            <circle cx="19" cy="9" r="1" />
+            <circle cx="19" cy="15" r="1" />
+          </>
+        ) : (
+          <>
+            <circle cx="9" cy="12" r="1" />
+            <circle cx="9" cy="5" r="1" />
+            <circle cx="9" cy="19" r="1" />
+            <circle cx="15" cy="12" r="1" />
+            <circle cx="15" cy="5" r="1" />
+            <circle cx="15" cy="19" r="1" />
+          </>
+        )}
+      </svg>
+    </div>
+  );
+
+  const orientationToggle = (
+    <button
+      title={isVertical ? 'تغییر به تولبار افقی' : 'تغییر به تولبار عمودی'}
+      onClick={() => {
+        if (typeof setToolbarOrientation === 'function') {
+          setToolbarOrientation(isVertical ? 'horizontal' : 'vertical');
+        }
+        // چرخشِ نرمِ ۹۰ درجه حینِ کلیک: آیکون ۹۰ درجه می‌چرخد و بعد از
+        // ۲۶۰ میلی‌ثانیه به جای اولش برمی‌گردد، تا گلیفِ نهایی در هر
+        // حالت، سرراست بماند (Columns در افقی، Rows در عمودی).
+        setToggleSpinning(true);
+        window.setTimeout(() => setToggleSpinning(false), 260);
+      }}
+      style={{
+        ...btnBase,
+        width: 38,
+        height: 38,
+        borderRadius: 11,
+        background: 'transparent',
+        color: 'rgba(255,255,255,0.6)',
+      }}
+    >
+      <svg
+        width="18"
+        height="18"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        style={{ transform: toggleSpinning ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.25s ease' }}
+        aria-hidden="true"
+      >
+        <rect width="18" height="18" x="3" y="3" rx="2" />
+        {isVertical ? <path d="M3 12h18" /> : <path d="M12 3v18" />}
+      </svg>
+    </button>
+  );
+  return (
+    <>
+      {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
+          که تازه mount شده اجرا نمی‌شود (مقدارِ اولیه همان مقدارِ نهایی
+          است)، پس ورودِ دقیقِ خواسته‌شده (opacity ‏0 به 1 و
+          translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
+          دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
+          (translateX(-50%)) را نگه می‌دارد. */}
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
+      {isVertical ? (
+        // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
+        // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً
+        // طبقِ تسک)؛ داخلش فلای‌اوت (سمتِ چپ، به داخلِ صفحه) + داکِ ستونی.
+        // فلای‌اوت، خواهرِ داک است (نه فرزندِ آن) تا overflowی داک، آن را
+        // نبرد — برای همین wrap، خودش هندلرهای stopPropagation را دارد.
+        <div
+          dir="ltr"
+          ref={toolbarWrapRef}
+          style={{
+            position: 'absolute',
+            top: '50%',
+            right: '18px',
+            transform: 'translateY(-50%)',
+            ...floatingStyle,
+            zIndex: 30,
+            display: 'flex',
+            flexDirection: 'row',
+            gap: 10,
+            alignItems: 'flex-start',
+            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease',
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerMove={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+        >
+          <div
+            dir="rtl"
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 8,
+              padding: '10px 12px',
+              borderRadius: 16,
+              background: 'rgba(8, 12, 16, 0.92)',
+              border: '1px solid rgba(255,255,255,0.10)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              userSelect: 'none',
+              maxHeight: 'calc(100vh - 120px)',
+              overflowY: 'auto',
+              scrollbarWidth: 'none',
+            }}
+          >
+            {secondaryContent}
+          </div>
+          <div
+            dir="rtl"
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 4,
+              padding: '6px 10px',
+              borderRadius: 16,
+              background: 'rgba(8, 12, 16, 0.92)',
+              border: '1px solid rgba(255,255,255,0.10)',
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              userSelect: 'none',
+              maxHeight: 'calc(100vh - 120px)',
+              overflowY: 'auto',
+              scrollbarWidth: 'none',
+            }}
+          >
+            {dragHandle}
+            {toolsButtons}
+            {divider}
+            {actionsContent}
+            {orientationToggle}
+          </div>
+        </div>
+      ) : (
+        <div
+          dir="rtl"
+          ref={toolbarWrapRef}
+          style={{
+            position: 'absolute',
+            top: 26,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            ...floatingStyle,
+            zIndex: 30,
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            padding: '6px 10px',
+            borderRadius: 16,
+            background: 'rgba(8, 12, 16, 0.92)',
+            border: '1px solid rgba(255,255,255,0.10)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            backdropFilter: 'blur(16px)',
+            WebkitBackdropFilter: 'blur(16px)',
+            userSelect: 'none',
+            maxWidth: 'calc(100% - 24px)',
+            overflowX: 'auto',
+            scrollbarWidth: 'none',
+            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease',
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerMove={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+        >
+          {dragHandle}
+          {toolsButtons}
+          {secondaryContent}
+          {divider}
+          {actionsContent}
+          {orientationToggle}
+        </div>
+      )}
+    </>
+  );
+
 }
 
 export default AnnotationToolbar;

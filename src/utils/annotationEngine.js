@@ -1340,10 +1340,20 @@ export function getUnionBounds(items) {
  */
 export function hitTestAnnotationItem(item, pt, tolerance = 14) {
   if (!item || !pt) return false;
+  // پولیشِ قطعی — حاشیهٔ کلیکِ عریضِ فلش (تسک: ۳۰ پیکسل): فلش‌ها
+  // خط‌های نازک‌اند و با تلرانسِ ۱۴–۱۶، کلیکِ نزدیکِ بدنه یا شکمِ
+  // منحنی به‌اشتباه «فضای خالی» حساب می‌شد و انتخاب باطل می‌شد.
+  // این کفِ ۳۰، هم در ردِ سریعِ کرانه و هم در بدنه و بازوها اعمال
+  // می‌شود تا نقطه‌ای که در ۳۰ پیکسلیِ منحنی است، پشتِ کرانه رد نشود.
+  // (بدنهٔ منحنی از قبل با distanceToQuadraticBezier — نمونه‌برداریِ
+  // ۱۶ نقطه‌ای از بزیهٔ درجهٔ دو — محاسبه می‌شد و drawArrowCanvas هم
+  // از قبل با quadraticCurveTo رسم می‌کرد؛ کرانهٔ خمیده هم از قبل
+  // cx/cy را لحاظ می‌کرد؛ پس اینجا فقط کفِ تلرانس اضافه شد.)
+  const arrowTol = item.tool === 'arrow' ? Math.max(tolerance, 30) : tolerance;
   const b = getItemBounds(item);
   // ردِ سریعِ اولیه با کرانه + تلرانس.
-  if (pt.x < b.x - tolerance || pt.x > b.x + b.width + tolerance ||
-      pt.y < b.y - tolerance || pt.y > b.y + b.height + tolerance) {
+  if (pt.x < b.x - arrowTol || pt.x > b.x + b.width + arrowTol ||
+      pt.y < b.y - arrowTol || pt.y > b.y + b.height + arrowTol) {
     return false;
   }
 
@@ -1365,7 +1375,7 @@ export function hitTestAnnotationItem(item, pt, tolerance = 14) {
       return false;
     }
     const sw = Number(item.strokeWidth) || 4;
-    const tol = Math.max(tolerance, sw * 2.5);
+    const tol = Math.max(arrowTol, sw * 2.5);
     const g = resolveArrowGeometry(item);
     if (!g) {
       // تباه‌شده: فقط دایرهٔ مبدأ — اگر داشت — قابلِ انتخاب است.
@@ -1388,8 +1398,8 @@ export function hitTestAnnotationItem(item, pt, tolerance = 14) {
     }
     if (g.hasEndArrow && g.chevron) {
       const { tip, left, right } = g.chevron;
-      if (distToSegment(pt.x, pt.y, tip.x, tip.y, left.x, left.y) <= tolerance) return true;
-      if (distToSegment(pt.x, pt.y, tip.x, tip.y, right.x, right.y) <= tolerance) return true;
+      if (distToSegment(pt.x, pt.y, tip.x, tip.y, left.x, left.y) <= arrowTol) return true;
+      if (distToSegment(pt.x, pt.y, tip.x, tip.y, right.x, right.y) <= arrowTol) return true;
     }
     return false;
   }

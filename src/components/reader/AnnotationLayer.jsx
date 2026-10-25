@@ -20,7 +20,7 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
-import { Stage, Layer, Shape, Group, Line, Rect, Text, Path, Transformer } from 'react-konva';
+import { Stage, Layer, Shape, Group, Line, Rect, Text, Path, Circle, Transformer } from 'react-konva';
 import useAppStore from '../../store/useAppStore';
 // Cycle-fix (2026-10-25): این فایل، AnnotationToolbar را نه ایمپورت
 // می‌کند و نه re-export می‌کند (قبلاً هر دو را داشت و PdfViewer،
@@ -581,7 +581,10 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
       }
       const isCurved = item.arrowStyle === 'curved' &&
         Number.isFinite(item.cx) && Number.isFinite(item.cy);
-      const hitStrokeWidth = Math.max(24, sw * 3);
+      // پولیشِ قطعی — حاشیهٔ کلیکِ عریض (تسک: ۲۸ تا ۳۲ پیکسل): کفِ
+      // ۳۰، هم برای بدنه و هم برای بازوهای تیک (هر دو از همین
+      // متغیر می‌آیند) تا کلیکِ نزدیکِ خط، فلش را بگیرد.
+      const hitStrokeWidth = Math.max(30, sw * 3);
       // بدنه با ضخامت پهن
       ctx.beginPath();
       ctx.lineWidth = hitStrokeWidth;
@@ -640,7 +643,15 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
     [item, sw]
   );
 
-  const handleClick = useCallback(() => {
+  // پولیشِ قطعی — توقفِ کلیک روی بدنهٔ فلش: کلیک (و tap) روی فلش،
+  // به Stage یا کانتینرِ DOM نمی‌رسد تا ابزارِ select، انتخاب را
+  // به‌اشتباه باطل نکند. پاک‌کن، مثلِ قبل فقط با ابزارِ eraser از
+  // مسیرِ onErase کار می‌کند (handleEraseClick خودش گیت دارد).
+  const handleClick = useCallback((e) => {
+    if (e) {
+      e.cancelBubble = true;
+      if (e.evt && typeof e.evt.stopPropagation === 'function') e.evt.stopPropagation();
+    }
     onErase?.(item.id);
   }, [onErase, item.id]);
 
@@ -648,6 +659,7 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
     <Shape
       sceneFunc={sceneFunc}
       hitFunc={hitFunc}
+      hitStrokeWidth={30}
       // Refinement Phase 1 Step 2: selfRectFunc برای فلش — کادرِ
       // Transformer از getItemBounds می‌آید (شاملِ دایرهٔ مبدأ،
       // تیکِ باز و pad)، یعنی دقیقاً همان کادری که Rectِ فوکوسِ
@@ -1571,6 +1583,32 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // می‌شود، نه با prop — این state فقط برای اینکه effectِ اتصال،
   // نودهای فعلی را هم نگه دارد و در صورتِ نیاز در دسترس باشند.
   const [selectedNodes, setSelectedNodes] = useState([]);
+  // پولیشِ انقلابی — پیش‌نمایشِ زندهٔ درگِ هندل‌های فلش (بدونِ کامیت):
+  // در حینِ درگ، فلش از این کپی رندر می‌شود تا زنده بازطراحی شود؛
+  // فقط در dragEnd، یک کامیت (یک Undo) ثبت می‌شود.
+  const [arrowDragPreview, setArrowDragPreview] = useState(null);
+  // ماشینِ وضعیتِ یکپارچهٔ هندل‌های فلش (تسک): درگِ هندل، دیگر
+  // شنوندهٔ جداگانه ندارد؛ وضعیتش در arrowHandleEditRef زندگی
+  // می‌کند: { id, handle, initialItem, moved, lastPreview } —
+  // lastPreview آینهٔ refایِ arrowDragPreview است تا handleUp،
+  // بدونِ وابستگی به closureی state، تازه‌ترین پیش‌نمایش را کامیت
+  // کند. lastMidClickRef هم زمانِ آخرین کلیکِ روی هندلِ وسط را
+  // نگه می‌دارد تا دوبارکلیکِ زیرِ ۳۵۰ میلی‌ثانیه تشخیص داده شود.
+  // uniformItemsRef هم تازه‌ترین لیست را برای کامیتِ handleUp دارد.
+  const arrowHandleEditRef = useRef(null);
+  const lastMidClickRef = useRef(null);
+  const uniformItemsRef = useRef(null);
+  // بازمعماریِ قطعی — نوعِ هندلی که در حالِ درگ است (برای رنگِ
+  // تیره‌تر و cursorِ crosshair حینِ درگ؛ فقط در شروع/پایانِ درگ
+  // عوض می‌شود، نه در هر حرکت، پس رندرِ اضافه ندارد).
+  const [arrowHandleDraggingKind, setArrowHandleDraggingKind] = useState(null);
+  // معماریِ Adorner — refهای همگام‌سازیِ زندهٔ هندل‌های اورلی با
+  // درگِ گروهی: هندل‌ها دیگر فرزندِ Groupِ فلش نیستند، پس حینِ
+  // درگِ گروهی باید با همان دلتای یکنواخت، دستی جابه‌جا شوند
+  // (بدونِ تبدیلِ scale، چون اورلی هم در فضای یکنواخت است).
+  // مبنا فقط وقتی پیش‌نمایشِ درگِ هندل فعال نیست به‌روز می‌شود.
+  const arrowHandleNodeRefs = useRef(new Map());
+  const arrowHandleBaseRef = useRef(null);
   // نگاشتِ id آیتم → نودِ Konvaیِ Groupِ پوششیِ آن (به § رندر
   // مراجعه کنید: هر آیتم در یک <Group ref> قرار می‌گیرد، نه اینکه
   // Committed*ها به forwardRef تبدیل شوند — هر دو گزینه در TASK
@@ -1676,6 +1714,52 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     });
     commitFnRef.current?.(pageRef.current, storageList);
   }, []);
+
+  // پولیشِ انقلابی — فلشِ اصلیِ انتخاب‌شده (مثلِ Transformer، فقط
+  // آیتمِ اصلی هندل می‌گیرد) + نسخهٔ نمایشیِ حینِ درگِ هندل.
+  let primaryArrowItem = null;
+  if (isAnnotationActive && annotationTool === 'select') {
+    const pageOk = selectedAnnotationPage == null ||
+      Number(selectedAnnotationPage) === Number(pageNumber);
+    if (pageOk) {
+      const it = uniformItems.find((x) => x.id === selectedAnnotationId);
+      if (it && it.tool === 'arrow') primaryArrowItem = it;
+    }
+  }
+  const displayArrowItem = primaryArrowItem && arrowDragPreview &&
+    arrowDragPreview.id === primaryArrowItem.id
+    ? arrowDragPreview
+    : primaryArrowItem;
+  // بازمعماریِ قطعی — هندسهٔ هندل‌ها در فضای یکنواخت (برای رندرِ
+  // داخلِ Groupِ خودِ فلش): شروع/پایان دقیقاً روی نقاطِ آیتم؛
+  // وسط روی فلشِ صاف، نقطهٔ میانیِ وتر و روی فلشِ خمیده، قلهٔ
+  // منحنی (Apex) یعنی B(0.5) = (M + C) / 2 — نه خودِ نقطهٔ کنترل.
+  let arrowHandlePos = null;
+  if (displayArrowItem) {
+    const hsx = Number(displayArrowItem.startX);
+    const hsy = Number(displayArrowItem.startY);
+    const hex = Number(displayArrowItem.endX);
+    const hey = Number(displayArrowItem.endY);
+    const hCurved = displayArrowItem.arrowStyle === 'curved' &&
+      Number.isFinite(Number(displayArrowItem.cx)) &&
+      Number.isFinite(Number(displayArrowItem.cy));
+    const midX = (hsx + hex) / 2;
+    const midY = (hsy + hey) / 2;
+    arrowHandlePos = {
+      sx: hsx,
+      sy: hsy,
+      ex: hex,
+      ey: hey,
+      mx: hCurved ? (midX + Number(displayArrowItem.cx)) / 2 : midX,
+      my: hCurved ? (midY + Number(displayArrowItem.cy)) / 2 : midY,
+    };
+  }
+  // معماریِ Adorner — مبنای زندهٔ هندل‌های اورلی برای همگام‌سازیِ
+  // درگِ گروهی (فقط وقتی پیش‌نمایشِ درگِ هندل فعال نیست، تا درگِ
+  // هندل، مبنا را خراب نکند).
+  if (arrowHandlePos && !arrowDragPreview) {
+    arrowHandleBaseRef.current = { id: displayArrowItem.id, ...arrowHandlePos };
+  }
 
   // فاز ۴: ثبتِ متنِ ویرایشگر (جدید یا ویرایشِ موجود).
   // فاز ۴-مرحلهٔ ۳ (سناریو ۲): محافظِ دوباره‌کامیت با دو لایه:
@@ -1792,6 +1876,43 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // هم به همان dx,dy تنظیم می‌شود. تنظیمِ موقعیتِ نودها به‌صورتِ
   // برنامه‌ای، onDragMoveی آن‌ها را آتش نمی‌زند، پس حلقهٔ بازخورد
   // رخ نمی‌دهد. کامیت، فقط در onDragEnd انجام می‌شود، نه اینجا.
+  // بازمعماریِ قطعی: همگام‌سازیِ دستیِ مرحلهٔ قبل، دیگر لازم نیست
+  // — هندل‌ها حالا فرزندِ همان Groupِ فلش‌اند و با درگِ Group،
+  // خودبه‌خود و فریم‌به‌فریم همراهش حرکت می‌کنند (هم درگِ نودی و
+  // هم جابه‌جاییِ دستیِ گروه). پس helperهای sync/reset حذف شدند.
+
+  // Pointer-Capture: تازه‌نگه‌داشتنِ uniformItems برای کامیتِ pointerup
+  // (اگر حینِ درگ، Undo/Redo لیست را عوض کند، کامیت روی تازه‌ترین
+  // لیست انجام می‌شود، نه snapshotِ شروعِ درگ).
+  uniformItemsRef.current = uniformItems;
+
+  // معماریِ Adorner — همگام‌سازیِ زندهٔ هندل‌های اورلی با جابه‌جاییِ
+  // گروهی (Konva-level، بدونِ رندرِ دوباره): موقعِ درگِ نود،
+  // هندل‌ها با همان دلتای یکنواخت جابه‌جا می‌شوند تا فریم‌به‌فریم
+  // روی فلش بمانند. فقط با refها کار می‌کند، پس closureی کهنه ندارد.
+  const syncAdornerHandlesWithGroupDrag = (dx, dy) => {
+    const base = arrowHandleBaseRef.current;
+    if (!base) return;
+    const nodes = arrowHandleNodeRefs.current;
+    const start = nodes.get('start');
+    if (start) start.position({ x: base.sx + dx, y: base.sy + dy });
+    const end = nodes.get('end');
+    if (end) end.position({ x: base.ex + dx, y: base.ey + dy });
+    const mid = nodes.get('mid');
+    if (mid) mid.position({ x: base.mx + dx, y: base.my + dy });
+  };
+  const resetAdornerHandlesToBase = () => {
+    const base = arrowHandleBaseRef.current;
+    if (!base) return;
+    const nodes = arrowHandleNodeRefs.current;
+    const start = nodes.get('start');
+    if (start) start.position({ x: base.sx, y: base.sy });
+    const end = nodes.get('end');
+    if (end) end.position({ x: base.ex, y: base.ey });
+    const mid = nodes.get('mid');
+    if (mid) mid.position({ x: base.mx, y: base.my });
+  };
+
   const handleItemDragMove = useCallback((e) => {
     const node = e.target;
     if (!node) return;
@@ -1804,6 +1925,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // بقیهٔ نودها را با آن همگام نمی‌کنیم — وگرنه گروه، دنبالِ
     // نودی می‌رود که دیگر انتخاب‌شده نیست.
     if (!ids.includes(node.id())) return;
+    // معماریِ Adorner: اگر نودِ کشیده‌شده، خودِ فلشِ اصلی است یا
+    // فلشِ اصلی در گروهِ انتخاب‌شده است، هندل‌های اورلی با همان
+    // دلتا زنده جابه‌جا می‌شوند (تک‌درگ و گروه‌درگ، هر دو).
+    const adornerBase = arrowHandleBaseRef.current;
+    if (adornerBase && (node.id() === adornerBase.id || ids.includes(adornerBase.id))) {
+      syncAdornerHandlesWithGroupDrag(dx, dy);
+    }
     if (ids.length <= 1) return;
     for (const id of ids) {
       const other = itemNodeRefs.current.get(id);
@@ -1829,6 +1957,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const handleItemDragEnd = useCallback((e, item) => {
     const node = e.target;
     if (!node) return;
+    // بازمعماریِ قطعی — دفاعِ دوم در برابرِ حبابِ درگِ هندل: اگر
+    // هدفِ رویداد، خودِ Groupِ آیتم نیست (مثلاً درگِ هندل به Group
+    // حباب کرده)، این handler نباید کامیتِ جابه‌جایی ثبت کند؛
+    // وگرنه مختصاتِ هندل، به‌اشتباه جابه‌جاییِ کلِ گروه حساب می‌شد.
+    // (دفاعِ اول، cancelBubble در هر سه رویدادِ درگِ هندل است.)
+    if (node !== itemNodeRefs.current.get(item.id)) return;
     const dx = node.x();
     const dy = node.y();
     const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
@@ -1839,6 +1973,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // هیچ کامیتی ثبت نمی‌شود — نه حرکتِ تکی، نه حرکتِ گروهی.
     if (ids.length > 0 && !ids.includes(item.id)) {
       node.position({ x: 0, y: 0 });
+      // معماریِ Adorner: درگ لغو شد و کامیتی نیست، پس هندل‌های
+      // اورلی که حینِ درگ زنده جابه‌جا شده بودند هم به مبنا
+      // برمی‌گردند تا بعد از snap-backِ فلش، سرگردان نمانند.
+      resetAdornerHandlesToBase();
       layerRef.current?.batchDraw();
       return;
     }
@@ -1859,6 +1997,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     layerRef.current?.batchDraw();
   }, [commit, uniformItems]);
 
+  // پولیشِ انقلابی — هندل‌های برداریِ فلش (PowerPoint-style).
+  // مختصاتِ هندل‌ها در فضای Stage (پیکسلِ صفحه) است، چون هندل‌ها
+  // بیرونِ Groupِ مقیاس‌دار رندر می‌شوند تا قطرشان همیشه ~۱۲
+  // پیکسل بماند؛ تبدیل به فضای یکنواخت با تقسیم بر scale است.
+  // انحنا، همان مکانیزمِ موجودِ فاز ۳ است (arrowStyle: 'curved' +
+  // cx/cy) — نه فیلدِ تازه؛ پس drawArrowCanvas و hit و eraserِ
+  // انجین، بدونِ هیچ تغییری، منحنی را می‌فهمند.
   // فاز ۵: پایانِ تغییرِ اندازه با Transformer (تکی یا چندتایی).
   // این تابع هم از onTransformEndی Transformer و هم از
   // onTransformEndی Groupهای پوششی صدا زده می‌شود؛ محافظِ زمانیِ
@@ -1917,16 +2062,26 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // Refinement Step 2: Transformer فقط روی آیتمِ فعال
       // (selectedAnnotationId = آخرین آیتمِ انتخاب‌شده) وصل می‌شود،
       // نه روی همهٔ selectedAnnotationIds — تا کادرِ مشترکِ غول‌پیکر
-      // و دستگیره‌های سرگردان در فضای خالی ساخته نشود. کادرِ بقیهٔ
-      // آیتم‌های انتخاب‌شده، با Rectهای خط‌چینِ مجزا (پایین‌تر، در
-      // رندر) نشان داده می‌شود. بده‌بستان: درگِ دستگیره در
+      // و دستگیره‌های سرگردان در فضای خالی ساخته نشود. پولیش: کادرهای
+      // خط‌چینِ مجزا حذف شدند (Ghost Fix) — حالا تنها قاب، خودِ
+      // Transformer است، پس آیتم‌های غیرِ اصلی در چندانتخابی قابی
+      // ندارند. بده‌بستان: درگِ دستگیره در
       // چندانتخابی، فقط آیتمِ اصلی را تغییر می‌دهد، نه کلِ گروه را؛
       // جابه‌جاییِ گروهی (dragِ نود) همچنان گروهی می‌ماند.
       const primaryId = state.selectedAnnotationId;
       const primaryNode = primaryId
         ? itemNodeRefs.current.get(primaryId)
         : null;
-      const nodes = primaryNode ? [primaryNode] : [];
+      // پولیشِ انقلابی — خروجِ کاملِ فلش از Transformer: اگر آیتمِ
+      // اصلی، فلش است، هیچ نودی وصل نمی‌شود تا کادرِ مستطیلی دورِ
+      // فلش کشیده نشود؛ فلش‌ها حالا فقط هندل‌های برداریِ خودشان را
+      // دارند (پایین). سایرِ شکل‌ها مثلِ قبل به Transformer وصل‌اند.
+      const primaryItem = primaryId
+        ? uniformItems.find((it) => it.id === primaryId)
+        : null;
+      const nodes = primaryNode && primaryItem && primaryItem.tool !== 'arrow'
+        ? [primaryNode]
+        : [];
       tr.nodes(nodes);
       setSelectedNodes(nodes);
     }
@@ -2346,6 +2501,79 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       const clearSelection = state.clearSelection;
       const syncToolbar = state.syncToolbarWithSelectedItem;
       const currentIds = state.selectedAnnotationIds || [];
+      // ماشینِ وضعیتِ یکپارچه (§۲ تسک) — تشخیصِ هندل، در بالاترین
+      // اولویتِ شاخهٔ select: قبل از hitTest، مارکی و manualMove.
+      // هندل‌ها listening={false} هستند و هیچ رویدادِ جداگانه‌ای
+      // ندارند؛ پس کلیکِ روی آن‌ها به Stage می‌رسد و همین‌جا، با
+      // همان extractPointsی رسمِ فلش، تفسیر می‌شود. این، رقابتِ
+      // رویداد را از بین می‌برد: قبلاً pointerdownِ Stage زودتر از
+      // رویدادِ دایره شلیک می‌شد و کلیک را می‌ربود، و draggableی
+      // Group هم درگ را به نفعِ کلِ گروپ مصادره می‌کرد — با حذفِ
+      // هر دو، دیگر چیزی برای رقابت نیست.
+      const selPageOk = state.selectedAnnotationPage == null ||
+        Number(state.selectedAnnotationPage) === Number(pageNumber);
+      const selectedArrow = selPageOk && state.selectedAnnotationId
+        ? uniformItems.find((x) => x.id === state.selectedAnnotationId && x.tool === 'arrow')
+        : null;
+      if (selectedArrow) {
+        const sSX = Number(selectedArrow.startX);
+        const sSY = Number(selectedArrow.startY);
+        const sEX = Number(selectedArrow.endX);
+        const sEY = Number(selectedArrow.endY);
+        const sMidX = (sSX + sEX) / 2;
+        const sMidY = (sSY + sEY) / 2;
+        const sCurved = selectedArrow.arrowStyle === 'curved' && selectedArrow.cx != null;
+        const apexPt = sCurved
+          ? { x: (sMidX + selectedArrow.cx) / 2, y: (sMidY + selectedArrow.cy) / 2 }
+          : { x: sMidX, y: sMidY };
+        const handleHitRadius = 18 / (scaleRef.current?.scaleX || 1);
+        const dStart = Math.hypot(pt.x - sSX, pt.y - sSY);
+        const dEnd = Math.hypot(pt.x - sEX, pt.y - sEY);
+        const dMid = Math.hypot(pt.x - apexPt.x, pt.y - apexPt.y);
+        // نزدیک‌ترین هندلِ درونِ شعاع برنده است (نه ترتیبِ ثابت)،
+        // تا روی فلش‌های کوچک، کلیکِ دقیقِ روی نقطهٔ شروع/پایان،
+        // به‌جای هندلِ وسط تفسیر نشود — و دوبارکلیکِ دقیقِ روی قله
+        // هم، وسط شناخته شود.
+        let hitHandle = null;
+        let hitDist = Infinity;
+        if (dMid <= handleHitRadius && dMid < hitDist) { hitHandle = 'mid'; hitDist = dMid; }
+        if (dStart <= handleHitRadius && dStart < hitDist) { hitHandle = 'start'; hitDist = dStart; }
+        if (dEnd <= handleHitRadius && dEnd < hitDist) { hitHandle = 'end'; hitDist = dEnd; }
+        if (hitHandle) {
+          const now = (typeof performance !== 'undefined' && performance.now)
+            ? performance.now()
+            : Date.now();
+          const lastMid = lastMidClickRef.current;
+          // دوبارکلیکِ روی قله (کمتر از ۳۵۰ میلی‌ثانیه با کلیکِ
+          // قبلیِ روی وسط): فوراً صاف + کامیت + خروج. روی فلشِ
+          // از قبل صاف، کامیتی ساخته نمی‌شود تا ورودیِ Undoیِ
+          // بی‌تغییر نیفتد.
+          if (hitHandle === 'mid' && lastMid && lastMid.id === selectedArrow.id &&
+              now - lastMid.time < 350) {
+            lastMidClickRef.current = null;
+            if (selectedArrow.arrowStyle === 'curved') {
+              const nextItems = uniformItems.map((it) =>
+                it.id === selectedArrow.id ? { ...it, arrowStyle: 'straight', cx: null, cy: null } : it
+              );
+              commit(nextItems);
+              layerRef.current?.batchDraw();
+            }
+            return;
+          }
+          if (hitHandle === 'mid') {
+            lastMidClickRef.current = { id: selectedArrow.id, time: now };
+          }
+          arrowHandleEditRef.current = {
+            id: selectedArrow.id,
+            handle: hitHandle,
+            initialItem: { ...selectedArrow },
+            moved: false,
+            lastPreview: null,
+          };
+          setArrowHandleDraggingKind(hitHandle);
+          return;
+        }
+      }
       // Refinement Step 2: هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا
       // کلیکِ مستقیم روی شکل، بلافاصله انتخاب شود. capturePointer
       // برای select عمداً صدا زده نمی‌شود (بالای همین تابع) تا drag
@@ -2367,9 +2595,28 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           }
           if (typeof syncToolbar === 'function') syncToolbar(hit);
         }
+        // §۵ تسک — جابه‌جاییِ بدنهٔ فلش: چون Groupِ فلش دیگر
+        // draggable نیست (Konva درگش نمی‌کند)، کلیک و درگِ روی
+        // بدنهٔ فلش باید manualMove را شروع کند — وگرنه فلش اصلاً
+        // جابه‌جا نمی‌شد (شاخهٔ hit، قبلاً فقط انتخاب می‌کرد و
+        // برمی‌گشت؛ manualMove فقط از فضای خالیِ داخلِ کادرِ
+        // اجتماع شروع می‌شد). غیرِ فلش‌ها دست نخورده‌اند و مثلِ
+        // قبل با Konva درگ می‌شوند. اگر فلش از قبل انتخاب‌شده بود،
+        // کلِ انتخابِ فعلی حرکت می‌کند (مثلِ مسیرِ فضای خالی)؛
+        // اگر تازه انتخاب شد، فقط همین فلش.
+        if (!isShift && hit.tool === 'arrow') {
+          const moveIds = currentIds.includes(hit.id) ? currentIds : [hit.id];
+          const originals = new Map(
+            uniformItems.filter((it) => moveIds.includes(it.id)).map((it) => [it.id, it])
+          );
+          if (originals.size > 0) {
+            manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          }
+        }
         // اگر آیتم از قبل انتخاب‌شده بود (بدونِ Shift)، انتخاب
-        // دست نخورده می‌ماند تا dragِ گروهی با Konva (روی همان
-        // نود) یا با جابه‌جاییِ دستی، گروه را حرکت دهد؛ sync هم
+        // دست نخورده می‌ماند تا dragِ گروهی گروه را حرکت دهد
+        // (غیرِ فلش: Konva روی همان نود؛ فلش: manualMoveی بالا،
+        // چون Groupِ فلش دیگر draggable نیست)؛ sync هم
         // دوباره انجام نمی‌شود تا تولبارِ چندانتخابی به‌هم نریزد.
         return;
       }
@@ -2588,6 +2835,37 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [isAnnotationActive, getNative, shouldProcessEvent, capturePointer, extractPoints, getTextClickPoint, pushFilteredPoints, redrawDraft, commit, commitText, cancelTextEditor, uniformItems, pageNumber]);
 
   const handleMove = useCallback((e) => {
+    // ماشینِ وضعیتِ یکپارچه (§۳ تسک): اگر درگِ هندل فعال است،
+    // همین‌جا با همان extractPoints، پیش‌نمایش را زنده می‌کنیم و
+    // برمی‌گردیم — نه مارکی، نه manualMove، نه رسم.
+    if (arrowHandleEditRef.current) {
+      const edit = arrowHandleEditRef.current;
+      const nativeEdit = getNative(e);
+      const ptsEdit = nativeEdit ? extractPoints(nativeEdit) : [];
+      if (ptsEdit.length > 0) {
+        const pt = ptsEdit[ptsEdit.length - 1];
+        edit.moved = true;
+        const init = edit.initialItem;
+        let next;
+        if (edit.handle === 'start') {
+          next = { ...init, startX: pt.x, startY: pt.y };
+        } else if (edit.handle === 'end') {
+          next = { ...init, endX: pt.x, endY: pt.y };
+        } else {
+          const midX = (Number(init.startX) + Number(init.endX)) / 2;
+          const midY = (Number(init.startY) + Number(init.endY)) / 2;
+          const distToMid = Math.hypot(pt.x - midX, pt.y - midY);
+          if (distToMid < 6 / (scaleRef.current?.scaleX || 1)) {
+            next = { ...init, arrowStyle: 'straight', cx: null, cy: null };
+          } else {
+            next = { ...init, arrowStyle: 'curved', cx: 2 * pt.x - midX, cy: 2 * pt.y - midY };
+          }
+        }
+        edit.lastPreview = next;
+        setArrowDragPreview(next);
+      }
+      return;
+    }
     // فاز ۵: مارکی و جابه‌جاییِ دستیِ گروهی، قبل از محافظِ
     // isDrawingRef بررسی می‌شوند، چون handleDownی select،
     // isDrawingRef را تنظیم نمی‌کند (عمداً) — اگر این شاخه‌ها بعد
@@ -2612,6 +2890,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           for (const id of mm.originals.keys()) {
             const node = itemNodeRefs.current.get(id);
             if (node) node.position({ x: dx, y: dy });
+          }
+          // معماریِ Adorner: هندل‌های اورلی هم با همان دلتا زنده
+          // جابه‌جا می‌شوند (مثلِ درگِ نودی).
+          const mmAdornerBase = arrowHandleBaseRef.current;
+          if (mmAdornerBase && mm.originals.has(mmAdornerBase.id)) {
+            syncAdornerHandlesWithGroupDrag(dx, dy);
           }
           layerRef.current?.batchDraw();
           return;
@@ -2684,6 +2968,28 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [isAnnotationActive, getNative, extractPoints, pushFilteredPoints, redrawDraft]);
 
   const handleUp = useCallback((e) => {
+    // ماشینِ وضعیتِ یکپارچه (§۴ تسک): ثبتِ نهاییِ درگِ هندل با
+    // یک تراکنشِ واحد. کلیکِ بدونِ حرکت (moved=false) و فلشِ
+    // ناپدیدشده حینِ درگ، هیچ کامیتی نمی‌سازند. چون handleUp روی
+    // onPointerUp و onPointerLeave و onPointerCancelی Stage وصل
+    // است، رها کردنِ اشاره‌گر بیرونِ کادر هم همین‌جا حل می‌شود.
+    if (arrowHandleEditRef.current) {
+      const edit = arrowHandleEditRef.current;
+      arrowHandleEditRef.current = null;
+      setArrowDragPreview(null);
+      setArrowHandleDraggingKind(null);
+      if (edit.moved && edit.lastPreview) {
+        const current = uniformItemsRef.current || [];
+        if (current.some((it) => it.id === edit.id)) {
+          const nextItems = current.map((it) =>
+            it.id === edit.id ? edit.lastPreview : it
+          );
+          commit(nextItems);
+        }
+      }
+      layerRef.current?.batchDraw();
+      return;
+    }
     // فاز ۵: مارکی و جابه‌جاییِ دستی، قبل از محافظِ isDrawingRef
     // بررسی می‌شوند (دلیلش در handleMove نوشته شده است).
     if (isMarqueeRef.current || manualMoveRef.current) {
@@ -3264,7 +3570,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                   />
                 ) : item.tool === 'arrow' ? (
                   <CommittedArrow
-                    item={item}
+                    item={arrowDragPreview && arrowDragPreview.id === item.id ? arrowDragPreview : item}
                     onErase={handleEraseClick}
                   />
                 ) : item.tool === 'text' ? (
@@ -3298,7 +3604,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                       itemNodeRefs.current.delete(item.id);
                     }
                   }}
-                  draggable={isAnnotationActive && annotationTool === 'select'}
+                  draggable={isAnnotationActive && annotationTool === 'select' && item.tool !== 'arrow'}
                   onDragMove={handleItemDragMove}
                   onDragEnd={(e) => handleItemDragEnd(e, item)}
                   onTransformEnd={handleTransformEnd}
@@ -3319,37 +3625,16 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               (محدودیتِ شناخته‌شدهٔ دستگیرهٔ میانی برای متن؛ در
               گزارشِ پیاده‌سازی آمده است). rotateEnabled خاموش است،
               چون هیچ آیتمی میدانِ زاویه ندارد. */}
-            {/* کادرهای فوکوسِ مجزا برای همهٔ آیتم‌های انتخاب‌شده
-              (Refinement Step 2): به‌ازای هر id در
-              selectedAnnotationIds، یک Rectِ خط‌چینِ فیروزه‌ای با
-              listening={false} بر اساسِ getItemBounds(it) رسم
-              می‌شود تا هر آبجکت کادرِ مستقلِ خودش را داشته باشد و
-              کادرِ مشترکِ غول‌پیکرِ Konva حذف شود. چون این Rectها
-              داخلِ Groupِ مقیاس‌دارند، strokeWidth بر مقیاس تقسیم
-              می‌شود تا ضخامتِ خط در همهٔ زوم‌ها حدودِ ۱٫۵ پیکسل
-              دیده شود. برای آیتمِ اصلی، این کادر با کادرِ Transformer
-              هم‌پوشانی دارد (هر دو خط‌چینِ فیروزه‌ای‌اند) که عمدی
-              است و کادر را پررنگ‌تر نشان می‌دهد. */}
-            {isAnnotationActive && annotationTool === 'select' &&
-              uniformItems
-                .filter((it) => (selectedAnnotationIds || []).includes(it.id))
-                .map((it) => {
-                  const b = getItemBounds(it);
-                  return (
-                    <Rect
-                      key={`focus-${it.id}`}
-                      x={b.x}
-                      y={b.y}
-                      width={b.width}
-                      height={b.height}
-                      stroke="#06b6d4"
-                      strokeWidth={1.5 / (scaleX || 1)}
-                      dash={[4, 4]}
-                      fillEnabled={false}
-                      listening={false}
-                    />
-                  );
-                })}
+            {/* پولیش — حذفِ کادرهای فوکوسِ دستی (Ghost Bounding Box Fix):
+              قبلاً به‌ازای هر آیتمِ انتخاب‌شده، یک Rectِ خط‌چین از روی
+              getItemBounds (مختصاتِ استور) رسم می‌شد که تا dragEnd در
+              نقطهٔ قبلی می‌ماند و با حرکتِ زندهٔ نود + Transformer،
+              حسِ کادرِ دوتایی/شبح می‌ساخت. حالا تنها المانِ دربرگیرنده،
+              خودِ Transformer است که به نودِ زنده وصل است و با موس
+              حرکت می‌کند؛ پس هیچ کادری در نقطهٔ قبلی باقی نمی‌ماند.
+              پیامدِ آگاهانه: در چندانتخابی، آیتم‌های غیرِ اصلی دیگر
+              کادرِ مجزا ندارند (Transformer فقط روی اصلی است) ولی
+              درگِ گروهی همچنان همه را با هم می‌برد. */}
             <Transformer
               ref={transformerRef}
               rotateEnabled={false}
@@ -3428,7 +3713,85 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                 perfectDrawEnabled={false}
               />
             )}
+
+            {/* معماریِ Adorner — لایهٔ ناظرِ اختصاصیِ هندل‌های فلش:
+              جدا از رندرِ خودِ فلش، در بالاترین سطحِ بصریِ همان
+              صفحه (آخرین فرزندِ Groupِ مقیاس‌دار) تا هیچ شکلی
+              روی آن‌ها نیفتد. مختصات، یکنواخت است (مثلِ قبل) و
+              با درگِ گروهی، با syncِ دستیِ Konva-level همراهش
+              می‌آید (به helperهای syncAdorner مراجعه کنید). */}
+            {displayArrowItem && arrowHandlePos && (
+              <Group>
+                <Circle
+                  name="arrowHandle"
+                  listening={false}
+                  ref={(node) => {
+                    if (node) arrowHandleNodeRefs.current.set('start', node);
+                    else arrowHandleNodeRefs.current.delete('start');
+                  }}
+                  x={arrowHandlePos.sx}
+                  y={arrowHandlePos.sy}
+                  radius={6 / (scaleX || 1)}
+                  fill={arrowHandleDraggingKind === 'start' ? '#0891b2' : '#06b6d4'}
+                  stroke="rgba(255,255,255,0.9)"
+                  strokeWidth={2 / (scaleX || 1)}
+                  shadowColor="#06b6d4"
+                  shadowBlur={8 / (scaleX || 1)}
+                  shadowOpacity={0.5}
+                  hitFunc={(ctx) => {
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 14 / (scaleX || 1), 0, Math.PI * 2);
+                    ctx.fill();
+                  }}
+                />
+                <Circle
+                  name="arrowHandle"
+                  listening={false}
+                  ref={(node) => {
+                    if (node) arrowHandleNodeRefs.current.set('end', node);
+                    else arrowHandleNodeRefs.current.delete('end');
+                  }}
+                  x={arrowHandlePos.ex}
+                  y={arrowHandlePos.ey}
+                  radius={6 / (scaleX || 1)}
+                  fill={arrowHandleDraggingKind === 'end' ? '#0891b2' : '#06b6d4'}
+                  stroke="rgba(255,255,255,0.9)"
+                  strokeWidth={2 / (scaleX || 1)}
+                  shadowColor="#06b6d4"
+                  shadowBlur={8 / (scaleX || 1)}
+                  shadowOpacity={0.5}
+                  hitFunc={(ctx) => {
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 14 / (scaleX || 1), 0, Math.PI * 2);
+                    ctx.fill();
+                  }}
+                />
+                <Circle
+                  name="arrowHandle"
+                  listening={false}
+                  ref={(node) => {
+                    if (node) arrowHandleNodeRefs.current.set('mid', node);
+                    else arrowHandleNodeRefs.current.delete('mid');
+                  }}
+                  x={arrowHandlePos.mx}
+                  y={arrowHandlePos.my}
+                  radius={6 / (scaleX || 1)}
+                  fill={arrowHandleDraggingKind === 'mid' ? '#0891b2' : '#06b6d4'}
+                  stroke="rgba(255,255,255,0.9)"
+                  strokeWidth={2 / (scaleX || 1)}
+                  shadowColor="#06b6d4"
+                  shadowBlur={8 / (scaleX || 1)}
+                  shadowOpacity={0.5}
+                  hitFunc={(ctx) => {
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 14 / (scaleX || 1), 0, Math.PI * 2);
+                    ctx.fill();
+                  }}
+                />
+              </Group>
+            )}
           </Group>
+
         </Layer>
       </Stage>
 

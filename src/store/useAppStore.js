@@ -30,6 +30,15 @@ const useAppStore = create((set, get) => ({
   // =========================================================================
   isAnnotationActive: false,
   annotationTool: 'box',
+  // پولیش: جهتِ تولبار ('horizontal' | 'vertical') با خواندنِ اولیه از
+  // localStorage؛ guard دارد تا در محیطِ بدونِ storage هم کار کند.
+  toolbarOrientation: (() => {
+    try {
+      return typeof localStorage !== 'undefined' && localStorage.getItem('annotationToolbarOrientation') === 'vertical' ? 'vertical' : 'horizontal';
+    } catch {
+      return 'horizontal';
+    }
+  })(),
   annotationBoxStyle: 'cloud', // 'cloud' | 'rect' | 'round'
   annotationHasFill: true,
   annotationColor: '#06b6d4',
@@ -214,6 +223,17 @@ const useAppStore = create((set, get) => ({
         ? { selectedAnnotationId: null, selectedAnnotationIds: [], selectedAnnotationPage: null, selectedAnnotationTool: null }
         : {}),
     })),
+
+  // پولیش: تغییرِ جهتِ تولبار با اعتبارسنجی + پایداری در localStorage
+  // (نوشتن با try/catch تا اگر storage در دسترس نبود، state همچنان عوض
+  // شود؛ خواندنِ اولیه در فیلدِ toolbarOrientation انجام می‌شود).
+  setToolbarOrientation: (orientation) => {
+    const next = orientation === 'vertical' ? 'vertical' : 'horizontal';
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('annotationToolbarOrientation', next);
+    } catch { /* storage در دسترس نیست؛ فقط state عوض می‌شود */ }
+    set({ toolbarOrientation: next });
+  },
 
   selectAnnotationTool: (tool, color = null) =>
     set((state) => ({
