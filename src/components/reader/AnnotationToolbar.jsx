@@ -55,6 +55,65 @@ const COLORS = [
 
 const SIZES = [1, 2, 4, 7, 11];
 
+// فاز ۳ پالت — دسته‌بندی‌های تخصصیِ دراور (دقیقاً همان ۲۵ رنگِ
+// فهرست‌شده در تسک: پزشکی ۸ + نئون ۵ + سایبرپانک ۶ + پاستلی ۶.
+// توجهِ صادقانه: عنوانِ تسک «پالت ۳۰ رنگ» می‌گوید، ولی فهرستِ
+// دسته‌ها ۲۵ رنگ دارد؛ پس همان ۲۵ رنگِ فهرست‌شده پیاده شد و هیچ
+// رنگِ حدسی اضافه نشد — اگر ۵ رنگِ دیگر خواسته شود، همین‌جا
+// اضافه می‌شود.)
+const PALETTE_CATEGORIES = [
+  {
+    id: 'medical',
+    label: 'پزشکی و آناتومی',
+    colors: [
+      { hex: '#ef4444', label: 'قرمز شریانی' },
+      { hex: '#2563eb', label: 'آبی وریدی' },
+      { hex: '#eab308', label: 'زرد عصبی' },
+      { hex: '#16a34a', label: 'سبز لنفاوی' },
+      { hex: '#fde68a', label: 'استخوانی/بژ' },
+      { hex: '#9333ea', label: 'بنفش بافت' },
+      { hex: '#ec4899', label: 'صورتی موکوس' },
+      { hex: '#b45309', label: 'قهوه‌ای تاندون' },
+    ],
+  },
+  {
+    id: 'neon',
+    label: 'نئون',
+    colors: [
+      { hex: '#facc15', label: 'زرد فسفری' },
+      { hex: '#4ade80', label: 'سبز نئون' },
+      { hex: '#22d3ee', label: 'آبی فیروزه‌ای' },
+      { hex: '#f43f5e', label: 'سرخابی نئون' },
+      { hex: '#fb923c', label: 'نارنجی فسفری' },
+    ],
+  },
+  {
+    id: 'cyberpunk',
+    label: 'سایبرپانک و دارک',
+    colors: [
+      { hex: '#00f2fe', label: 'فیروزه‌ای درخشان' },
+      { hex: '#d946ef', label: 'ماژنتا نئون' },
+      { hex: '#38bdf8', label: 'آبی آسمانی' },
+      { hex: '#64748b', label: 'خاکستری اسلیتی' },
+      { hex: '#1e293b', label: 'سرمه‌ای تیره' },
+      { hex: '#000000', label: 'مشکی مطلق' },
+    ],
+  },
+  {
+    id: 'pastel',
+    label: 'پاستلی ملایم',
+    colors: [
+      { hex: '#fca5a5', label: 'رز پاستلی' },
+      { hex: '#fef08a', label: 'لیموعی ملایم' },
+      { hex: '#86efac', label: 'نعنایی روشن' },
+      { hex: '#93c5fd', label: 'آبی لطیف' },
+      { hex: '#d8b4fe', label: 'یاسی روشن' },
+      { hex: '#ffffff', label: 'سفید خالص' },
+    ],
+  },
+];
+
+
 // فاز ۲: استایل‌های کادربندی
 const BOX_STYLES = [
   { id: 'cloud', label: 'ابری' },
@@ -222,6 +281,67 @@ export function AnnotationToolbar({
   const toolbarWrapRef = useRef(null);
   const toolbarDragRef = useRef(null);
   const toolbarPosRef = useRef(null);
+
+  // فاز ۳ پالت — همهٔ هوک‌های دراور، این‌جا و قبل از returnِ
+  // زودهنگام‌اند (قانونِ هوک‌های ری‌اکت): وضعیتِ باز بودن، موقعیتِ
+  // ثابتِ دراور (با اندازه‌گیریِ دکمه در لحظهٔ باز شدن)، پالتِ شخصی،
+  // و refهای دکمه/پنل/ورودیِ رنگ برای بستن با کلیکِ بیرونی.
+  const [colorDrawerOpen, setColorDrawerOpen] = useState(false);
+  const [colorDrawerPos, setColorDrawerPos] = useState(null);
+  const [userPalette, setUserPalette] = useState(() => {
+    try {
+      const rawPalette = window.localStorage.getItem('annotationUserPalette');
+      if (!rawPalette) return [];
+      const arr = JSON.parse(rawPalette);
+      if (!Array.isArray(arr)) return [];
+      return arr.filter((c) => typeof c === 'string').slice(0, 4);
+    } catch (_) {
+      return [];
+    }
+  });
+  const paletteBtnRef = useRef(null);
+  const colorDrawerRef = useRef(null);
+  const colorInputRef = useRef(null);
+  // فاز ۳ پالت — پایداریِ پالتِ شخصی در localStorage.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('annotationUserPalette', JSON.stringify(userPalette));
+    } catch (_) {
+      // حافظهٔ محلی در دسترس نیست؛ پالت فقط تا رفرش می‌ماند.
+    }
+  }, [userPalette]);
+  // فاز ۳ پالت — بستنِ خودکار با کلیکِ بیرونی (تسک §۴): هر mousedownی
+  // که نه روی دکمهٔ پالت باشد و نه روی پنلِ دراور، دراور را می‌بندد.
+  // دکمه، خودش toggle می‌کند، پس از این بررسی مستثناست؛ و چون این
+  // شنونده روی mousedownی نیتیو است، stopPropagationی pointerdownی
+  // تولبار روی آن اثری ندارد — کلیک روی دکمه‌های دیگرِ تولبار هم
+  // دراور را می‌بندد (همان رفتارِ خواسته‌شده: بیرونِ دراور).
+  useEffect(() => {
+    if (!colorDrawerOpen) return undefined;
+    const onDown = (e) => {
+      const target = e && e.target;
+      if (!target) return;
+      if (paletteBtnRef.current && paletteBtnRef.current.contains(target)) return;
+      if (colorDrawerRef.current && colorDrawerRef.current.contains(target)) return;
+      setColorDrawerOpen(false);
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [colorDrawerOpen]);
+  // فاز ۳ پالت — دراور با position: fixed رندر می‌شود (تا overflowی
+  // نوارِ افقی، آن را نبرد)؛ پس هر اسکرول یا تغییرِ اندازهٔ پنجره،
+  // مختصاتش را کهنه می‌کند. به‌جای دنبال کردنِ مختصات، دراور بسته
+  // می‌شود — ارزان، قابلِ پیش‌بینی، و بدونِ شنوندهٔ پرهزینهٔ حرکت.
+  useEffect(() => {
+    if (!colorDrawerOpen) return undefined;
+    const close = () => setColorDrawerOpen(false);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [colorDrawerOpen]);
 
   // تایید دو مرحله‌ای برای پاک کردن همه (بدون window.confirm زشت)
   const [armClear, setArmClear] = useState(false);
@@ -534,6 +654,53 @@ export function AnnotationToolbar({
       })}
     </>
   );
+  // فاز ۳ پالت — منطقِ دراور (توابعِ ساده‌اند، نه هوک؛ پس این‌جا،
+  // بعد از returnِ زودهنگام، مشکلی ندارند — هوک‌هایشان بالاتر
+  // تعریف شده‌اند).
+  const applyDrawerColor = (hex) => {
+    setAnnotationColor(hex);
+    // مثلِ رنگ‌های دم‌دست: علاوه بر ساختِ ابزارِ بعدی، آیتمِ
+    // انتخاب‌شده هم به‌روز می‌شود؛ اگر انتخابی نباشد، این تابع
+    // هیچ رویدادی شلیک نمی‌کند. بعد، دراور خودکار بسته می‌شود.
+    broadcastSelectedPropertyPatch({ color: hex });
+    setColorDrawerOpen(false);
+  };
+  const addUserColor = (hex) => {
+    if (!hex || typeof hex !== 'string') return;
+    const h = hex.toLowerCase();
+    // تازه‌ترین، اول؛ تکراری، جابه‌جا می‌شود (نه دو بار)؛ سقف ۴ رنگ.
+    setUserPalette((prev) => [h, ...prev.filter((c) => c.toLowerCase() !== h)].slice(0, 4));
+  };
+  const toggleColorDrawer = () => {
+    if (colorDrawerOpen) {
+      setColorDrawerOpen(false);
+      return;
+    }
+    // دراور با position: fixed رندر می‌شود تا overflowی نوارِ افقی
+    // (overflowX: auto) آن را نبرد؛ پس مختصاتش در لحظهٔ باز شدن، از
+    // کادرِ دکمه اندازه‌گیری می‌شود. افقی: پایینِ دکمه، وسط‌چین، با
+    // clamp در لبه‌های پنجره (عرضِ دراور ۳۰۰ است). عمودی: کنارِ
+    // داک، هم‌سطحِ دکمه (یعنی هم‌سطحِ فلای‌اوتِ زیرمنوها)؛ اگر سمتِ
+    // چپ جا نبود (دکمه نزدیکِ لبهٔ چپ)، سمتِ راست باز می‌شود.
+    const rect = paletteBtnRef.current ? paletteBtnRef.current.getBoundingClientRect() : null;
+    if (!rect) {
+      setColorDrawerPos(isVertical
+        ? { top: '50%', left: 10, transform: 'translate(0, -50%)' }
+        : { top: 80, left: '50%', transform: 'translateX(-50%)' });
+    } else if (isVertical) {
+      const cy = rect.top + rect.height / 2;
+      if (rect.left >= 320) {
+        setColorDrawerPos({ top: cy, left: rect.left - 10, transform: 'translate(-100%, -50%)' });
+      } else {
+        setColorDrawerPos({ top: cy, left: rect.right + 10, transform: 'translate(0, -50%)' });
+      }
+    } else {
+      const cx = Math.max(160, Math.min(rect.left + rect.width / 2, window.innerWidth - 160));
+      setColorDrawerPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)' });
+    }
+    setColorDrawerOpen(true);
+  };
+
   const secondaryContent = (
     <>
       {/* فاز ۲: زیرمنوی کادربندی — فقط وقتی ابزار box فعال است */}
@@ -791,14 +958,58 @@ export function AnnotationToolbar({
                 height: active ? 24 : 20,
                 borderRadius: '50%',
                 background: c.hex,
-                border: c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
+                // فاز ۳ پالت — نشانگرِ رنگِ فعال (تسک §۱): به‌جای
+                // رینگِ فیروزه‌ایِ قبلی، بجِ سفید + درخششِ هم‌رنگ.
+                border: active
+                  ? '1.5px solid rgba(255,255,255,0.85)'
+                  : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
                 boxShadow: active
-                  ? '0 0 0 2px rgba(8,12,16,1), 0 0 0 4px #22d3ee'
+                  ? `0 0 8px ${c.hex}`
                   : '0 0 0 1px rgba(255,255,255,0.2)',
               }}
             />
           );
         })}
+        {/* فاز ۳ پالت — دکمهٔ دراورِ پالتِ تخصصی، کنارِ رنگ‌های
+          دم‌دست. آیکونِ Paletteی لوسید با SVGی خام است، چون
+          Icons.jsxی پروژه این آیکون را ندارد (الگوی Grip و
+          Columns/Rows در همین فایل)؛ مسیرها از بستهٔ jaspr_icons_pack
+          (همان منبعی که برای Pinی لوسید راستی‌آزمایی شده بود) گرفته
+          شده‌اند. */}
+        <button
+          ref={paletteBtnRef}
+          title="پالت رنگ تخصصی"
+          onClick={toggleColorDrawer}
+          style={{
+            ...btnBase,
+            width: 30,
+            height: 30,
+            borderRadius: '50%',
+            flexShrink: 0,
+            background: colorDrawerOpen ? 'rgba(34,211,238,0.22)' : 'transparent',
+            color: colorDrawerOpen ? '#67e8f9' : 'rgba(255,255,255,0.75)',
+            outline: colorDrawerOpen ? '1.5px solid #22d3ee' : '1px solid rgba(255,255,255,0.25)',
+            outlineOffset: -1,
+          }}
+        >
+          <svg
+            width="17"
+            height="17"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M12 22a1 1 0 0 1 0-20a10 9 0 0 1 10 9a5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" />
+            <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
+            <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
+            <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
+            <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
+          </svg>
+        </button>
       </div>
 
       {!hideStrokeControls && (
@@ -1123,6 +1334,139 @@ export function AnnotationToolbar({
       </svg>
     </button>
   );
+  // فاز ۳ پالت — دراورِ شیشه‌ایِ پالتِ تخصصی. لایهٔ بیرونی فقط
+  // موقعیتِ fixed را نگه می‌دارد و لایهٔ درونی، پنلِ شیشه‌ای است
+  // (تا انیمیشنِ ورودِ درونی، با transformی موقعیتِ بیرونی تداخل
+  // نکند — همان الگوی typoConsoleIn). پنل، stopPropagationی pointer
+  // دارد تا کلیک‌هایش به کانتینرِ حاشیه‌نویسی نرسد.
+  const colorDrawer = colorDrawerOpen && colorDrawerPos && (
+    <div
+      dir="rtl"
+      style={{
+        position: 'fixed',
+        top: colorDrawerPos.top,
+        left: colorDrawerPos.left,
+        transform: colorDrawerPos.transform,
+        zIndex: 40,
+      }}
+    >
+      <div
+        ref={colorDrawerRef}
+        style={{
+          width: 300,
+          maxHeight: 'calc(100vh - 40px)',
+          overflowY: 'auto',
+          scrollbarWidth: 'none',
+          padding: 12,
+          borderRadius: 16,
+          background: 'rgba(8, 12, 16, 0.92)',
+          border: '1px solid rgba(255,255,255,0.10)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          backdropFilter: 'blur(16px)',
+          WebkitBackdropFilter: 'blur(16px)',
+          userSelect: 'none',
+          animation: 'paletteDrawerIn 0.22s ease',
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerMove={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
+      >
+        {PALETTE_CATEGORIES.map((cat) => (
+          <div key={cat.id} style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>
+              {cat.label}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+              {cat.colors.map((c) => {
+                const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
+                return (
+                  <button
+                    key={c.hex}
+                    title={`${c.label} (${c.hex})`}
+                    onClick={() => applyDrawerColor(c.hex)}
+                    style={{
+                      ...btnBase,
+                      width: 26,
+                      height: 26,
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      background: c.hex,
+                      border: active
+                        ? '1.5px solid rgba(255,255,255,0.85)'
+                        : '1px solid rgba(255,255,255,0.25)',
+                      boxShadow: active ? `0 0 8px ${c.hex}` : 'none',
+                    }}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>
+            رنگ‌های من
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            {userPalette.map((hex) => {
+              const active = annotationColor.toLowerCase() === hex.toLowerCase();
+              return (
+                <button
+                  key={hex}
+                  title={hex}
+                  onClick={() => applyDrawerColor(hex)}
+                  style={{
+                    ...btnBase,
+                    width: 26,
+                    height: 26,
+                    borderRadius: '50%',
+                    flexShrink: 0,
+                    background: hex,
+                    border: active
+                      ? '1.5px solid rgba(255,255,255,0.85)'
+                      : '1px solid rgba(255,255,255,0.25)',
+                    boxShadow: active ? `0 0 8px ${hex}` : 'none',
+                  }}
+                />
+              );
+            })}
+            <button
+              title="افزودن رنگ دلخواه"
+              onClick={() => { if (colorInputRef.current) colorInputRef.current.click(); }}
+              style={{
+                ...btnBase,
+                width: 26,
+                height: 26,
+                borderRadius: '50%',
+                flexShrink: 0,
+                background: 'transparent',
+                border: '1px dashed rgba(255,255,255,0.4)',
+                color: 'rgba(255,255,255,0.75)',
+                fontSize: 18,
+                lineHeight: 1,
+              }}
+            >
+              +
+            </button>
+            <input
+              ref={colorInputRef}
+              type="color"
+              value={annotationColor}
+              onChange={(e) => addUserColor(e.target.value)}
+              style={{ display: 'none' }}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+          </div>
+          {userPalette.length === 0 && (
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 6 }}>
+              هنوز رنگی ذخیره نشده؛ با + یک رنگِ دلخواه اضافه کنید (حداکثر ۴ رنگِ اخیر نگه داشته می‌شود).
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <>
       {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
@@ -1131,7 +1475,7 @@ export function AnnotationToolbar({
           translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
           دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
           (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes paletteDrawerIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
       {isVertical ? (
         // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
         // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً
@@ -1247,6 +1591,7 @@ export function AnnotationToolbar({
           {orientationToggle}
         </div>
       )}
+      {colorDrawer}
     </>
   );
 
