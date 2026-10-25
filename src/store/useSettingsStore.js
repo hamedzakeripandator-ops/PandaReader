@@ -4,6 +4,104 @@ import { coreApi } from '../services/coreApi';
 const SETTINGS_STORAGE_KEY = 'comic_reader_master_settings_v4';
 
 export const DEFAULT_SHORTCUTS = {
+  // Refinement Final: کلیدهای پیش‌فرضِ ابزارهای استودیو ویرایش.
+  // با این ورودی‌ها، resolveStudioToolHotkeys در تولبار مستقیماً از
+  // تنظیمات می‌خواند (قبلاً این ورودی‌ها نبودند و تولبار به نگاشتِ
+  // پیش‌فرض برمی‌گشت). ساختارِ هر ورودی دقیقاً مثلِ بقیهٔ میانبرهاست
+  // (id/title/category/ctrl/shift/alt/code/key/label) تا در منطقِ
+  // ادغامِ تنظیماتِ ذخیره‌شده (merged) و در رابطِ ضبطِ میانبر هم
+  // خودبه‌خود دیده شوند. توجه به تداخلِ آگاهانه: toolArrow با
+  // prevChapter هر دو KeyAی ساده‌اند؛ اولویت با شاخهٔ ابزارِ
+  // useKeyboard است وقتی استودیو روشن است، و گیتِ KeyA در
+  // prevChapter، همان حالت را می‌بندد (به useKeyboard مراجعه کنید).
+  toolSelect: {
+    id: 'toolSelect',
+    title: 'ابزار انتخاب (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyV',
+    key: 'v',
+    label: 'V',
+  },
+  toolPen: {
+    id: 'toolPen',
+    title: 'ابزار قلم (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyP',
+    key: 'p',
+    label: 'P',
+  },
+  toolBox: {
+    id: 'toolBox',
+    title: 'ابزار کادربندی (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyB',
+    key: 'b',
+    label: 'B',
+  },
+  toolArrow: {
+    id: 'toolArrow',
+    title: 'ابزار فلش (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyA',
+    key: 'a',
+    label: 'A',
+  },
+  toolText: {
+    id: 'toolText',
+    title: 'ابزار متن (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyT',
+    key: 't',
+    label: 'T',
+  },
+  toolSticky: {
+    id: 'toolSticky',
+    title: 'ابزار استیکی‌نوت (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyN',
+    key: 'n',
+    label: 'N',
+  },
+  toolHighlighter: {
+    id: 'toolHighlighter',
+    title: 'ابزار هایلایت (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyH',
+    key: 'h',
+    label: 'H',
+  },
+  toolEraser: {
+    id: 'toolEraser',
+    title: 'ابزار پاک‌کن (استودیو ویرایش)',
+    category: 'استودیو ویرایش',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyE',
+    key: 'e',
+    label: 'E',
+  },
   openFile: {
     id: 'openFile',
     title: 'باز کردن فایل کمیک جدید',

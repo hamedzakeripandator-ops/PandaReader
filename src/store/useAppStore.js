@@ -38,6 +38,8 @@ const useAppStore = create((set, get) => ({
   annotationFontFamily: "'Estedad', 'Vazirmatn', sans-serif",
   annotationFontSize: 22,
   annotationArrowStyle: 'straight', // 'straight' | 'curved'
+  annotationHasStartDot: true, // Refinement Step 2: دایرهٔ مبدأِ فلشِ جدید
+  annotationHasEndArrow: true, // Refinement Step 2: تیکِ انتهای فلشِ جدید
   selectedAnnotationId: null,
   selectedAnnotationIds: [], // مولتی‌سلکت (مارکی)
   selectedAnnotationPage: null,
@@ -253,6 +255,14 @@ const useAppStore = create((set, get) => ({
   setAnnotationArrowStyle: (style) =>
     set({ annotationArrowStyle: style === 'curved' ? 'curved' : 'straight' }),
 
+  // Refinement Step 2: پرچم‌های ماژولارِ فلش برای فلش‌های جدید.
+  // مقدارِ غیرِ boolean، true فرض می‌شود (تا فراخوانیِ بدونِ
+  // آرگومان، حالتِ آناتومی را خاموش نکند).
+  setAnnotationHasStartDot: (value) =>
+    set({ annotationHasStartDot: value !== false }),
+  setAnnotationHasEndArrow: (value) =>
+    set({ annotationHasEndArrow: value !== false }),
+
   setSelectedAnnotation: (id, pageNumber = null, tool = null) =>
     set({
       selectedAnnotationId: id || null,
@@ -318,6 +328,12 @@ const useAppStore = create((set, get) => ({
         : {}),
       ...(item.arrowStyle
         ? { annotationArrowStyle: item.arrowStyle === 'curved' ? 'curved' : 'straight' }
+        : {}),
+      ...(typeof item.hasStartDot === 'boolean'
+        ? { annotationHasStartDot: item.hasStartDot }
+        : {}),
+      ...(typeof item.hasEndArrow === 'boolean'
+        ? { annotationHasEndArrow: item.hasEndArrow }
         : {}),
     }));
   },

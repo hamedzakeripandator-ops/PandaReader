@@ -6,8 +6,17 @@
 //   - در غیر این صورت → fallback به رویدادهای window
 // ============================================================================
 
-import { useCallback, useEffect, useState } from 'react';
+// Cycle-fix (2026-10-25) — قانونِ عدمِ چرخه: این فایل، هرگز نباید
+// چیزی از './AnnotationLayer' ایمپورت کند و هرگز نباید خودش را
+// re-export کند. تولبار، فقط از useAppStore و useSettingsStore و
+// annotationEngine تغذیه می‌شود؛ PdfViewer، تولبار و لایه را هر
+// کدام مستقیم از فایلِ خودشان ایمپورت می‌کنند. این کامنت، فقط
+// مستندسازی است؛ کدِ این فایل در این گام، دست نخورده است (چون
+// از قبل هم هیچ ارجاعی به لایه نداشت).
+
+import { useCallback, useEffect, useRef, useState } from 'react';
 import useAppStore from '../../store/useAppStore';
+import useSettingsStore from '../../store/useSettingsStore';
 import Icons from '../common/Icons';
 
 const TOOLS = [
@@ -70,6 +79,64 @@ const FONT_OPTIONS = [
   { id: "'JetBrains Mono', monospace", label: 'مونو' },
 ];
 
+// ============================================================================
+// Refinement Step 2: میانبرهای ابزار، خوانده‌شده از استورِ تنظیمات.
+// قرارداد: اگر کاربر در تنظیمات، ورودی‌ای برای ابزارِ استودیو تعریف
+// کرده باشد (کلیدهایی با شناسه‌های toolSelect/toolPen/toolBox/
+// toolArrow/toolText/toolSticky/toolHighlighter/toolEraser، هر کدام با
+// فیلدِ key یا code)، همان کلید استفاده می‌شود؛ وگرنه به نگاشتِ
+// پیش‌فرض (V/P/B/A/T/N/H/E، همان STUDIO_TOOL_HOTKEYSی useKeyboard)
+// برمی‌گردیم. توجه: در حالِ حاضر، DEFAULT_SHORTCUTSی تنظیمات هیچ
+// ورودیِ ابزارِ استودیو ندارد، پس در عمل نگاشتِ پیش‌فرض اعمال
+// می‌شود و این تابع، سازگاریِ رو به جلو برای وقتی است که کاربر
+// چنین میانبرهایی را در تنظیمات تعریف کند. این تابع عمداً در هر
+// keydown از getState خوانده می‌شود تا تغییرِ تنظیمات بدونِ
+// ری‌ماونتِ تولبار اعمال شود.
+// ============================================================================
+const DEFAULT_STUDIO_TOOL_KEYS = {
+  select: 'v',
+  pen: 'p',
+  box: 'b',
+  arrow: 'a',
+  text: 't',
+  sticky: 'n',
+  highlighter: 'h',
+  eraser: 'e',
+};
+const STUDIO_TOOL_SETTING_IDS = {
+  select: 'toolSelect',
+  pen: 'toolPen',
+  box: 'toolBox',
+  arrow: 'toolArrow',
+  text: 'toolText',
+  sticky: 'toolSticky',
+  highlighter: 'toolHighlighter',
+  eraser: 'toolEraser',
+};
+export function resolveStudioToolHotkeys() {
+  const out = { ...DEFAULT_STUDIO_TOOL_KEYS };
+  try {
+    const settingsState = typeof useSettingsStore.getState === 'function'
+      ? useSettingsStore.getState()
+      : null;
+    const shortcuts = settingsState?.shortcuts || null;
+    if (shortcuts) {
+      for (const [toolId, settingId] of Object.entries(STUDIO_TOOL_SETTING_IDS)) {
+        const entry = shortcuts[settingId];
+        if (!entry) continue;
+        if (typeof entry.key === 'string' && entry.key.length === 1) {
+          out[toolId] = entry.key.toLowerCase();
+        } else if (typeof entry.code === 'string' && entry.code.startsWith('Key')) {
+          out[toolId] = entry.code.slice(3).toLowerCase();
+        }
+      }
+    }
+  } catch (_) {
+    // اگر استورِ تنظیمات در دسترس نبود، نگاشتِ پیش‌فرض می‌ماند.
+  }
+  return out;
+}
+
 const btnBase = {
   border: 'none',
   cursor: 'pointer',
@@ -103,6 +170,13 @@ export function AnnotationToolbar({
   // فاز ۳: استیت‌های فلش
   const annotationArrowStyle = useAppStore((s) => s.annotationArrowStyle || 'straight');
   const setAnnotationArrowStyle = useAppStore((s) => s.setAnnotationArrowStyle);
+  // Refinement Step 2: شفافیت + پرچم‌های ماژولارِ فلش (پیش‌فرض: هر دو روشن).
+  const annotationOpacity = useAppStore((s) => (typeof s.annotationOpacity === 'number' ? s.annotationOpacity : 0.85));
+  const setAnnotationOpacity = useAppStore((s) => s.setAnnotationOpacity);
+  const annotationHasStartDot = useAppStore((s) => (s.annotationHasStartDot ?? true));
+  const setAnnotationHasStartDot = useAppStore((s) => s.setAnnotationHasStartDot);
+  const annotationHasEndArrow = useAppStore((s) => (s.annotationHasEndArrow ?? true));
+  const setAnnotationHasEndArrow = useAppStore((s) => s.setAnnotationHasEndArrow);
   // فاز ۴: استیت‌های متن
   const annotationFontFamily = useAppStore((s) => s.annotationFontFamily || "'Estedad', sans-serif");
   const setAnnotationFontFamily = useAppStore((s) => s.setAnnotationFontFamily);
@@ -196,39 +270,90 @@ export function AnnotationToolbar({
     }));
   }, []);
 
-  // میانبرها — هماهنگ با onUndo/onRedo
+  // میانبرها — Refinement Step 2: مدیریتِ هوشمند در فازِ Capture.
+  // - شنونده در فازِ Capture سوار می‌شود تا قبل از شنوندهٔ bubbleی
+  //   PdfViewer اجرا شود؛ برای Ctrl+Z/Y، stopImmediatePropagation
+  //   می‌کند تا Undo/Redoی والد دوباره اعمال نشود (رفعِ باگِ Undoی
+  //   مضاعفِ گزارشِ ممیزی، §۱٫۳: قبلاً هم تولبار و هم PdfViewer،
+  //   هر دو handleUndoAnnotation را صدا می‌زدند).
+  // - فقط کلیدهایی که در نگاشتِ ابزار (resolveStudioToolHotkeys)
+  //   هستند مهار می‌شوند؛ بقیهٔ کلیدها کاملاً آزاد می‌مانند (بدونِ
+  //   preventDefault و بدونِ stopPropagation) تا به ناوبری یا جستجو
+  //   برسند.
+  // - تشخیصِ توالیِ تایپ (Typing Sequence Detection): با
+  //   lastCharTimeRef، زمانِ آخرین کلیدِ کاراکتری ثبت می‌شود؛ اگر
+  //   کلیدِ جدید کمتر از ۱۰۰۰ میلی‌ثانیه بعد از کلیدِ کاراکتریِ
+  //   قبلی فشرده شود، به‌عنوانِ تایپِ کلمه/جستجو تفسیر می‌شود و
+  //   تعویضِ ابزار لغو می‌گردد (بدونِ مهارِ رویداد، تا کلید به
+  //   فیلدِ متنی یا جستجو برسد).
+  //   ⚠️ بده‌بستانِ مشخصات: همین قانون، تعویضِ سریعِ پشتِ سرِ همِ
+  //   دو ابزار (مثلاً V و بلافاصله B در کمتر از ۱ ثانیه) را هم لغو
+  //   می‌کند؛ تعویض با کلیک روی تولبار، از این قانون متأثر نمی‌شود.
+  //   همچنین توجه: در سیم‌کشیِ فعلیِ برنامه، شنوندهٔ captureی
+  //   useKeyboard (که در App سوار می‌شود) معمولاً زودتر از این
+  //   شنونده ثبت شده است و برای کلیدهای ابزار، خودش ابزار را عوض
+  //   و رویداد را متوقف می‌کند؛ پس این شنونده برای کلیدهای ابزار،
+  //   نقشِ پشتیبان دارد و برای Ctrl+Z/Y، نقشِ اصلیِ رفعِ تداخل را
+  //   بازی می‌کند (چون useKeyboard برای Ctrl+Z/Y در حالتِ استودیو
+  //   زود برمی‌گردد، بدونِ توقف، و رویداد به اینجا می‌رسد).
+  const lastCharTimeRef = useRef(0);
   useEffect(() => {
     if (!isAnnotationActive) return;
     const onKey = (e) => {
       const tag = e.target?.tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') return;
-      const k = e.key.toLowerCase();
-      if (k === 'v') setAnnotationTool('select');
-      else if (k === 'p') setAnnotationTool('pen');
-      else if (k === 'b') setAnnotationTool('box');
-      else if (k === 'a') setAnnotationTool('arrow');
-      else if (k === 't') setAnnotationTool('text');
-      else if (k === 'n') setAnnotationTool('sticky');
-      else if (k === 'h') setAnnotationTool('highlighter');
-      else if (k === 'e') setAnnotationTool('eraser');
-      else if ((e.ctrlKey || e.metaKey) && k === 'z') {
-        // فاز ۱-مرحله ۳: فقط وقتی هندلر والد موجود است
-        // (جلوگیری از تداخل با Undo/Redo نیتیو فیلدهای متنی)
-        if (typeof onUndo !== 'function' && typeof onRedo !== 'function') return;
-        e.preventDefault();
-        if (e.shiftKey) {
-          doRedo(); // Ctrl+Shift+Z → Redo
-        } else {
-          doUndo(); // Ctrl+Z → Undo
+      // Ctrl+Z / Ctrl+Y: فقط یک بار Undo/Redo، بدونِ رسیدن به PdfViewer.
+      if (e.ctrlKey || e.metaKey) {
+        const k = (e.key || '').toLowerCase();
+        if (k === 'z' || k === 'y') {
+          if (typeof onUndo !== 'function' && typeof onRedo !== 'function') return;
+          e.preventDefault();
+          if (typeof e.stopImmediatePropagation === 'function') {
+            e.stopImmediatePropagation();
+          } else if (typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          if (k === 'z') {
+            if (e.shiftKey) {
+              doRedo(); // Ctrl+Shift+Z → Redo
+            } else {
+              doUndo(); // Ctrl+Z → Undo
+            }
+          } else {
+            doRedo(); // Ctrl+Y → Redo
+          }
+          return;
         }
-      } else if ((e.ctrlKey || e.metaKey) && k === 'y') {
-        if (typeof onRedo !== 'function') return;
-        e.preventDefault();
-        doRedo(); // Ctrl+Y → Redo
+        return; // بقیهٔ ترکیب‌های Ctrl، به تولبار ربطی ندارند.
       }
+      if (e.altKey || e.metaKey) return;
+      const k = (e.key || '').toLowerCase();
+      if (k.length !== 1) return; // فقط کلیدهای کاراکتری
+      // تشخیصِ توالیِ تایپ: کلیدِ کاراکتریِ قبلی کمتر از ۱ ثانیه پیش.
+      const now = (typeof performance !== 'undefined' && performance.now)
+        ? performance.now()
+        : Date.now();
+      const prev = lastCharTimeRef.current || 0;
+      lastCharTimeRef.current = now;
+      if (prev && now - prev < 1000) {
+        // تایپِ کلمه/جستجو فرض می‌شود: ابزار عوض نمی‌شود و رویداد
+        // مهار نمی‌شود تا به مقصدِ خودش (فیلد/جستجو) برسد.
+        return;
+      }
+      const hotkeys = resolveStudioToolHotkeys();
+      const toolByKey = {};
+      for (const [toolId, key] of Object.entries(hotkeys)) {
+        toolByKey[key] = toolId;
+      }
+      const tool = toolByKey[k];
+      if (tool) {
+        e.preventDefault();
+        setAnnotationTool(tool);
+      }
+      // اگر کلید، ابزار نیست: هیچ‌کار نکن — کاملاً آزاد می‌ماند.
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [isAnnotationActive, setAnnotationTool, doUndo, doRedo, onUndo, onRedo]);
 
   if (!isAnnotationActive) return null;
@@ -362,8 +487,9 @@ export function AnnotationToolbar({
         </>
       )}
 
-      {/* فاز ۳: زیرمنوی فلش — فقط وقتی ابزار arrow فعال است */}
-      {annotationTool === 'arrow' && (
+      {/* فاز ۳ + Refinement Step 2: زیرمنوی فلش — وقتی ابزار arrow فعال است
+          یا آیتمِ انتخاب‌شده فلش است (طبقِ TASK: tool OR selectedAnnotationTool) */}
+      {(annotationTool === 'arrow' || selectedAnnotationTool === 'arrow') && (
         <>
           {divider}
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
@@ -397,6 +523,56 @@ export function AnnotationToolbar({
                 </button>
               );
             })}
+            <button
+              title="نقطهٔ مبدأ فلش: ته‌گرد یا ساده"
+              onClick={() => {
+                const next = !annotationHasStartDot;
+                if (typeof setAnnotationHasStartDot === 'function') {
+                  setAnnotationHasStartDot(next);
+                }
+                broadcastSelectedPropertyPatch({ hasStartDot: next });
+              }}
+              style={{
+                ...btnBase,
+                height: 32,
+                padding: '0 10px',
+                borderRadius: 9,
+                fontSize: 12,
+                fontFamily: 'inherit',
+                whiteSpace: 'nowrap',
+                background: annotationHasStartDot ? 'rgba(34,211,238,0.20)' : 'transparent',
+                color: annotationHasStartDot ? '#67e8f9' : 'rgba(255,255,255,0.6)',
+                outline: annotationHasStartDot ? '1.5px solid #22d3ee' : 'none',
+                outlineOffset: -1,
+              }}
+            >
+              {annotationHasStartDot ? '◉ ته‌گرد' : '○ ساده'}
+            </button>
+            <button
+              title="نوک فلش: با فلش یا خطِ ساده"
+              onClick={() => {
+                const next = !annotationHasEndArrow;
+                if (typeof setAnnotationHasEndArrow === 'function') {
+                  setAnnotationHasEndArrow(next);
+                }
+                broadcastSelectedPropertyPatch({ hasEndArrow: next });
+              }}
+              style={{
+                ...btnBase,
+                height: 32,
+                padding: '0 10px',
+                borderRadius: 9,
+                fontSize: 12,
+                fontFamily: 'inherit',
+                whiteSpace: 'nowrap',
+                background: annotationHasEndArrow ? 'rgba(34,211,238,0.20)' : 'transparent',
+                color: annotationHasEndArrow ? '#67e8f9' : 'rgba(255,255,255,0.6)',
+                outline: annotationHasEndArrow ? '1.5px solid #22d3ee' : 'none',
+                outlineOffset: -1,
+              }}
+            >
+              {annotationHasEndArrow ? '➤ با فلش' : '— خط'}
+            </button>
           </div>
         </>
       )}
@@ -554,6 +730,48 @@ export function AnnotationToolbar({
             </button>
           );
         })}
+      </div>
+
+      {/* Refinement Step 2: اسلایدرِ شفافیت — کنارِ پالتِ اندازه‌ها.
+          روی تغییر: هم استور به‌روز می‌شود (برای شکل‌های بعدی) و هم
+          broadcastSelectedPropertyPatch({ opacity }) برای اعمالِ زنده
+          روی تمامِ آیتم‌های انتخاب‌شده (شنوندهٔ لایه، opacity را
+          می‌پذیرد و بعد از مرحلهٔ ۳، به همهٔ انتخاب‌شده‌ها گسترش
+          می‌دهد). محدوده ۱۵٪ تا ۱۰۰٪ با گامِ ۵٪، مثلِ TASK. */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
+        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>
+          شفافیت:
+        </span>
+        <input
+          type="range"
+          min={15}
+          max={100}
+          step={5}
+          value={Math.round((Number(annotationOpacity) || 0.85) * 100)}
+          onChange={(e) => {
+            const pct = Math.max(15, Math.min(100, parseInt(e.target.value, 10) || 85));
+            const val = pct / 100;
+            if (typeof setAnnotationOpacity === 'function') {
+              setAnnotationOpacity(val);
+            }
+            broadcastSelectedPropertyPatch({ opacity: val });
+          }}
+          style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
+        />
+        <span
+          style={{
+            fontSize: 12,
+            color: '#67e8f9',
+            minWidth: 44,
+            textAlign: 'center',
+            background: 'rgba(34,211,238,0.12)',
+            borderRadius: 7,
+            padding: '2px 6px',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
+        </span>
       </div>
 
       {divider}

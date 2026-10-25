@@ -9,7 +9,11 @@ import { coreApi } from '../../services/coreApi';
 import thumbnailService from '../../services/thumbnailService';
 import hiDpiRenderService from '../../services/hiDpiRenderService';
 import Icons from '../common/Icons';
-import AnnotationLayer, { AnnotationToolbar } from './AnnotationLayer';
+// Cycle-fix (2026-10-25): هر ماژول، مستقیم از فایلِ خودش ایمپورت
+// می‌شود — تولبار دیگر از طریقِ لایه re-export نمی‌شود، پس هیچ
+// مسیری بینِ لایه و تولبار (در هیچ جهتی) وجود ندارد.
+import AnnotationLayer from './AnnotationLayer';
+import AnnotationToolbar from './AnnotationToolbar';
 
 // ============================================================================
 // ۱. پکیج جامع پلی‌فیل‌های ES2025/ES2026 برای سازگاری ۱۰۰٪ pdfjs-dist با الکترون
@@ -468,6 +472,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             pageNumber={pageNumber}
             items={pageAnnotations}
             onCommitPageItems={onCommitPageAnnotations}
+            rotation={rotation}
           />
         </div>
       ) : (
@@ -690,8 +695,18 @@ export default function PdfViewer({ filePath }) {
     showToast(`یادداشت‌های صفحه ${pageNum} پاک شد`, { type: 'info' });
   }, [handleCommitPageAnnotations, showToast]);
 
+  // Refinement Final: مالکیتِ Ctrl+Z/Y وارونه شد تا Undoی مضاعف
+  // رفع شود. قبلاً این شنونده فقط وقتی استودیو روشن بود ثبت می‌شد
+  // و هم‌زمان با شنوندهٔ تولبار، هر دو handleUndoAnnotation را صدا
+  // می‌زدند (تولبار هم از طریقِ prop، همان تابع را صدا می‌زد).
+  // حالا: وقتی استودیو روشن است، مدیریتِ Undo منحصراً با تولبار است
+  // (که در Capture با stopImmediatePropagation جلوی بقیه را هم
+  // می‌گیرد) و این شنونده اصلاً ثبت نمی‌شود؛ وقتی استودیو خاموش
+  // است، این شنونده ثبت می‌شود تا کاربر بعد از بستنِ استودیو هم
+  // بتواند با Ctrl+Z/Y، آخرین حاشیه‌نویسی را برگرداند/جلو ببرد.
+  // پس در هیچ حالتی، دو شنونده هم‌زمان برای Ctrl+Z/Y فعال نیستند.
   useEffect(() => {
-    if (!isAnnotationActive) return;
+    if (isAnnotationActive) return;
     const onKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         if (e.shiftKey) {

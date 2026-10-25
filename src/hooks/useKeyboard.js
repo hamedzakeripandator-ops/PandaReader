@@ -129,7 +129,14 @@ export default function useKeyboard(callbacks = {}) {
       // =========================================================================
       // مدیریت اختصاصی کلیدهای استودیو ویرایش (فقط زمانی که از TopBar روشن شده باشد)
       // =========================================================================
-      if (appState.isAnnotationActive && comicData) {
+      // Refinement Final: اولویتِ مطلقِ کلیدهای ابزار وقتی استودیو
+      // روشن است. قبلاً این شاخه به comicData هم وابسته بود؛ حالا فقط
+      // isAnnotationActive گیت است تا هیچ بخشِ بعدی (ناوبریِ فصل‌ها
+      // یا Type-to-Search) نتواند کلیدِ ابزار را برباید. در جریانِ
+      // عادی، وقتی استودیو روشن است comicData هم هست (و با عوض شدنِ
+      // نما، isAnnotationActive خاموش می‌شود)، پس این تغییر فقط حالتِ
+      // مرزی را می‌بندد، نه رفتارِ عادی را.
+      if (appState.isAnnotationActive) {
         const lowerKey = (e.key || '').toLowerCase();
 
         // واگذاری Undo / Redo به کامپوننت ریدر
@@ -434,6 +441,16 @@ export default function useKeyboard(callbacks = {}) {
         comicData &&
         (settingsState.matchesShortcut?.('prevChapter', e) || e.key === 'PageUp')
       ) {
+        // Refinement Final: کلیدِ سادهٔ A (prevChapter) وقتی استودیو
+        // روشن است، هرگز فصلِ قبلی را باز نمی‌کند — چون A ابزارِ فلش
+        // است و شاخهٔ ابزار (بالا) وقتی comicData باشد آن را گرفته
+        // است؛ این گیت، حالتِ مرزیِ بدونِ comicData و هر مسیرِ دیگری
+        // را هم می‌بندد. PageUp در حالتِ استودیو همچنان فصلِ قبلی را
+        // می‌آورد (فقط KeyA گیت شده است، طبقِ TASK).
+        const isPlainA =
+          (e.code === 'KeyA' || (e.key || '').toLowerCase() === 'a') &&
+          !e.ctrlKey && !e.altKey && !e.metaKey;
+        if (!(appState.isAnnotationActive && isPlainA)) {
         const prevComic = comicData.prevComic;
         if (prevComic?.path) {
           e.preventDefault();
@@ -449,6 +466,7 @@ export default function useKeyboard(callbacks = {}) {
           appState.showToast('این اولین فایل در پوشه جاری است', { type: 'info' });
         }
         return;
+        } // پایانِ گیتِ KeyA (Refinement Final)
       }
 
       // =========================================================================
@@ -462,11 +480,22 @@ export default function useKeyboard(callbacks = {}) {
         e.key === ' ' ||
         e.isComposing;
 
+      // Refinement Final: کلیدهای ابزارِ حاشیه‌نویسی، حتی در صورتِ
+      // ابهام، هرگز به اینپوتِ جستجو تزریق نمی‌شوند. قبلاً این بخش
+      // فقط با !isAnnotationActive گیت شده بود؛ حالا صراحتاً چک
+      // می‌شود که کلید در STUDIO_TOOL_HOTKEYS نباشد. با این گیت،
+      // وقتی استودیو خاموش است، فشردنِ V/P/B/A/T/N/H/E به‌جای
+      // اینکه حرف را در جستجو بنویسد، هیچ‌کاری نمی‌کند (باز کردنِ
+      // استودیو با میانبر، در این گام خواسته نشده است و همچنان با
+      // دکمهٔ TopBar انجام می‌شود).
+      const lowerKeyForSearch = (e.key || '').toLowerCase();
+      const isStudioToolKey = Boolean(STUDIO_TOOL_HOTKEYS[lowerKeyForSearch]);
       if (
         !isInputFocused &&
         !isControlOrNavKey &&
         !appState.isAnnotationActive &&
-        !appState.isAreaZoomActive
+        !appState.isAreaZoomActive &&
+        !isStudioToolKey
       ) {
         e.preventDefault();
         e.stopPropagation();

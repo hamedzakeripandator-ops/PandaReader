@@ -472,46 +472,73 @@ export function distanceToQuadraticBezier(pt, p0, pc, p2, samples = 16) {
 
 /** اندازه نوک پیکان بر پایه ضخامت خط: clamp(14 + strokeW × 2.5, 16, 38) */
 function getArrowHeadSize(strokeW = 4) {
-  const sw = Number(strokeW) || 4;
-  return Math.min(38, Math.max(16, 14 + sw * 2.5));
+  return Math.max(16, Math.min(38, 14 + (Number(strokeW) || 4) * 2.5));
 }
 
 /**
- * هندسه نوک پیکان بال‌دار مقعر (Swept-back Barbed Chevron Arrowhead).
- * @param {number} tipX - مختصات X رأس نوک (نقطه پایان فلش)
- * @param {number} tipY - مختصات Y رأس نوک
- * @param {number} angle - زاویه مماس (θ) در انتها، بر حسب رادیان
- * @param {number} strokeWidth - ضخامت خط (تأثیر در اندازه نوک)
- * @returns {{headSize: number, tip: {x:number,y:number}, left: {x:number,y:number}, notch: {x:number,y:number}, right: {x:number,y:number}, points: Array<{x:number,y:number}>, headPoints: string}}
- * چندضلعی به ترتیب [tip, leftWing, notch, rightWing] است؛ نقطه فرورفته
- * (notch) روی محور فلش و ۰٫۷۲ × headSize عقب‌تر از نوک قرار دارد، پس
- * چندضلعی مقعر است، نه یک مثلث محدب ساده.
+ * شعاعِ دایرهٔ مبدأ در سبکِ ماژولار (Refinement Step 2).
+ * طبقِ TASK: r = max(4, strokeWidth × 1.5).
  */
-export function getArrowHeadGeometry(tipX, tipY, angle, strokeWidth = 4) {
-  const headSize = getArrowHeadSize(strokeWidth);
-  const alpha = Math.PI / 6.4; // ≈ ۲۸٫۱ درجه پخش هر بال
+export function getOriginDotRadius(strokeWidth = 4) {
+  const sw = Number(strokeWidth) || 4;
+  return Math.max(4, sw * 1.5);
+}
+
+/**
+ * طولِ بازوی تیکِ باز در سبکِ ماژولار (Refinement Step 2).
+ * طبقِ TASK: headLen = max(12, strokeWidth × 2.2)، و برشِ بدنه
+ * cutback = headLen × 0.62 است.
+ */
+export function getChevronHeadLength(strokeWidth = 4) {
+  const sw = Number(strokeWidth) || 4;
+  return Math.max(12, sw * 2.2);
+}
+
+/**
+ * هندسهٔ تیکِ دوخطیِ باز (Open Two-Line Chevron).
+ * برمی‌گرداند: tip (نوک)، left/right (انتهای دو بازو)،
+ * armLength (= headLen)، cutback (= headLen × 0.62) و alpha.
+ * زاویهٔ angle باید همان مماسِ انتهاییِ C¹ باشد: برای فلشِ صاف،
+ * زاویهٔ وتر؛ برای منحنی، زاویهٔ B'(1) = 2(P2 − Pc).
+ */
+export function getChevronGeometry(tipX, tipY, angle, strokeWidth = 4) {
+  const headLen = getChevronHeadLength(strokeWidth);
+  const cutback = headLen * 0.62;
+  const alpha = Math.PI / 6.4; // ≈ ۲۸٫۱ درجه، مثلِ پخشِ بالِ قدیمی
   const tip = { x: tipX, y: tipY };
   const left = {
-    x: tipX - Math.cos(angle - alpha) * headSize,
-    y: tipY - Math.sin(angle - alpha) * headSize,
+    x: tipX - Math.cos(angle - alpha) * headLen,
+    y: tipY - Math.sin(angle - alpha) * headLen,
   };
   const right = {
-    x: tipX - Math.cos(angle + alpha) * headSize,
-    y: tipY - Math.sin(angle + alpha) * headSize,
+    x: tipX - Math.cos(angle + alpha) * headLen,
+    y: tipY - Math.sin(angle + alpha) * headLen,
   };
+  return { headLen, cutback, armLength: headLen, alpha, tip, left, right };
+}
+
+export function getArrowHeadGeometry(tipX, tipY, angle, strokeWidth = 4) {
+  // سازگاریِ رو به عقب (Refinement Step 2): قبلاً این تابع چندضلعیِ
+  // توپرِ [tip, left, notch, right] برمی‌گرداند. حالا تیکِ باز است و
+  // points فقط سه نقطهٔ [tip, left, right] دارد — یعنی چندضلعیِ بسته
+  // نیست و نباید با fill() رسم شود. notch برای سازگاری نگه داشته
+  // شده و برابرِ نقطهٔ پایانِ برش‌خوردهٔ بدنه است.
+  const chev = getChevronGeometry(tipX, tipY, angle, strokeWidth);
+  const headSize = getArrowHeadSize(strokeWidth);
   const notch = {
-    x: tipX - Math.cos(angle) * (headSize * 0.72),
-    y: tipY - Math.sin(angle) * (headSize * 0.72),
+    x: tipX - Math.cos(angle) * chev.cutback,
+    y: tipY - Math.sin(angle) * chev.cutback,
   };
-  const points = [tip, left, notch, right];
+  const points = [chev.tip, chev.left, chev.right];
   return {
     headSize,
-    tip,
-    left,
+    tip: chev.tip,
+    left: chev.left,
     notch,
-    right,
+    right: chev.right,
     points,
-    headPoints: points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '),
+    headPoints: points.map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' '),
+    chevron: chev,
   };
 }
 
@@ -538,6 +565,25 @@ export function getArrowHeadGeometry(tipX, tipY, angle, strokeWidth = 4) {
  * در این حالت نادر، زاویه از بردارِ کلیِ شروع تا پایان گرفته
  * می‌شود تا نوک ناگهان به افق نچرخد.
  */
+/**
+ * حل هندسه کامل یک آیتم فلشِ ماژولار (داخلی، مشترک بین رسم،
+ * هیت‌تست و پاک‌کن) — Refinement Step 2.
+ * فیلدهای ماژولارِ آیتم:
+ *   hasStartDot: boolean — دایرهٔ توپر در مبدأ (پیش‌فرض برای آیتمِ
+ *     قدیمیِ بدونِ فیلد: false، تا آیتم‌های قدیمی ناگهان نقطه نگیرند).
+ *   hasEndArrow: boolean — تیکِ باز در انتها (پیش‌فرض برای آیتمِ
+ *     قدیمیِ بدونِ فیلد: true، تا فلش‌های قدیمی سرشان را از دست
+ *     ندهند؛ فقط سبکِ سر از توپر به باز عوض می‌شود).
+ * برمی‌گرداند: isCurved، angle (مماسِ انتهاییِ C¹)، head (هندسهٔ
+ * تیکِ باز)، chevron، dotRadius، headLen، cutback (برشِ انتها؛ اگر
+ * نوک نباشد صفر است)، shaftStartX/Y (شروعِ برش‌خوردهٔ بدنه)،
+ * cutX/cutY (پایانِ برش‌خوردهٔ بدنه)، shaftVisible و مماس‌های واحد.
+ * اگر فلش تباه‌شده باشد (شروع = پایان)، null برمی‌گردد — به‌جز
+ * حالتِ دایرهٔ تنها که drawArrowCanvas جداگانه با آن کنار می‌آید.
+ * اصلاح‌های مرحلهٔ ۳-فاز ۳ حفظ شده‌اند: آستانهٔ مماسِ تباه‌شده
+ * (مربعِ فاصله < ۰٫۰۱ → برگشت به وتر) و shaftVisible برای جلوگیری
+ * از خطِ معکوس.
+ */
 function resolveArrowGeometry(item) {
   if (!item) return null;
   const sx = Number(item.startX);
@@ -556,10 +602,7 @@ function resolveArrowGeometry(item) {
     tx = ex - Number(item.cx);
     ty = ey - Number(item.cy);
     if (tx * tx + ty * ty < 0.01) {
-      // فاز ۳-مرحله ۳ (سناریو ۲): مماسِ منحنی تباه‌شده یا نویزی
-      // → برگشت به راستای مستقیم (وترِ شروع تا پایان)، با همان
-      // ساختار خروجی. آستانهٔ قبلی (1e-6) بردارهای بسیار کوچک ولی
-      // غیرصفر را هم مماسِ معتبر می‌دانست و زاویهٔ نوک را خراب می‌کرد.
+      // مماسِ منحنی تباه‌شده یا نویزی → برگشت به وتر.
       isCurved = false;
       tx = ex - sx;
       ty = ey - sy;
@@ -570,15 +613,73 @@ function resolveArrowGeometry(item) {
   }
   if (Math.hypot(tx, ty) < 1e-6) return null;
   const angle = Math.atan2(ty, tx);
-  const head = getArrowHeadGeometry(ex, ey, angle, sw);
-  const cutback = head.headSize * 0.62;
-  const cutX = ex - Math.cos(angle) * cutback;
-  const cutY = ey - Math.sin(angle) * cutback;
-  // فاز ۳-مرحله ۳ (سناریو ۱): پرتاب معکوسِ برش
+  // مماسِ واحد در شروع: برای منحنی، B'(0) = 2(Pc − P0)؛ برای صاف، وتر.
+  let stx, sty;
+  if (isCurved) {
+    stx = Number(item.cx) - sx;
+    sty = Number(item.cy) - sy;
+    if (stx * stx + sty * sty < 0.01) {
+      stx = ex - sx;
+      sty = ey - sy;
+    }
+  } else {
+    stx = ex - sx;
+    sty = ey - sy;
+  }
+  const slen = Math.hypot(stx, sty) || 1;
+  stx /= slen;
+  sty /= slen;
+  const etx = Math.cos(angle);
+  const ety = Math.sin(angle);
+
+  const hasStartDot = item.hasStartDot === true;
+  const hasEndArrow = item.hasEndArrow !== false;
+  const dotRadius = getOriginDotRadius(sw);
+  const headLen = getChevronHeadLength(sw);
+  const cutback = hasEndArrow ? headLen * 0.62 : 0;
+  const shaftStartX = sx + stx * (hasStartDot ? dotRadius : 0);
+  const shaftStartY = sy + sty * (hasStartDot ? dotRadius : 0);
+  const cutX = ex - etx * cutback;
+  const cutY = ey - ety * cutback;
   const chordLength = Math.hypot(ex - sx, ey - sy);
-  const shaftVisible = chordLength > cutback;
-  return { isCurved, angle, head, cutX, cutY, cutback, chordLength, shaftVisible, sx, sy, ex, ey, sw };
+  // برشِ دوطرفه: بدنه فقط وقتی رسم می‌شود که طولِ وتر از مجموعِ
+  // دو برش بیشتر باشد، وگرنه نقطهٔ شروعِ برش‌خورده از پایانِ
+  // برش‌خورده جلوتر می‌افتد و خطِ معکوس ساخته می‌شود.
+  const shaftVisible = chordLength > (hasStartDot ? dotRadius : 0) + cutback;
+  const chevron = hasEndArrow ? getChevronGeometry(ex, ey, angle, sw) : null;
+  const head = chevron
+    ? {
+        headSize: headLen,
+        tip: chevron.tip,
+        left: chevron.left,
+        notch: { x: cutX, y: cutY },
+        right: chevron.right,
+        points: [chevron.tip, chevron.left, chevron.right],
+        headPoints: [chevron.tip, chevron.left, chevron.right]
+          .map((pt) => `${pt.x.toFixed(1)},${pt.y.toFixed(1)}`).join(' '),
+        chevron,
+      }
+    : {
+        headSize: headLen,
+        tip: { x: ex, y: ey },
+        left: { x: ex, y: ey },
+        notch: { x: ex, y: ey },
+        right: { x: ex, y: ey },
+        points: [{ x: ex, y: ey }],
+        headPoints: '',
+        chevron: null,
+      };
+  return {
+    isCurved, angle, head, chevron, cutX, cutY, cutback, chordLength,
+    shaftVisible, sx, sy, ex, ey, sw,
+    hasStartDot, hasEndArrow, dotRadius, headLen,
+    shaftStartX, shaftStartY,
+    startTangent: { x: stx, y: sty },
+    endTangent: { x: etx, y: ety },
+  };
 }
+
+export { resolveArrowGeometry };
 
 /**
  * رسم یکپارچه فلش در Canvas نیتیو (برای Konva Shape sceneFunc).
@@ -593,6 +694,22 @@ function resolveArrowGeometry(item) {
  * Konva یا پیش‌نمایش زنده با globalAlpha) آن را اعمال می‌کند تا
  * شفافیت دو بار ضرب نشود.
  */
+/**
+ * رسم یکپارچه فلشِ ماژولار در Canvas نیتیو (برای Konva Shape sceneFunc).
+ * سه گذر، به ترتیب:
+ *  ۱) دایرهٔ مبدأ (فقط اگر hasStartDot): دایرهٔ توپر با fill، شعاعِ
+ *     r = max(4, strokeWidth × 1.5) در (startX, startY).
+ *  ۲) بدنهٔ برش‌خورده (فقط اگر shaftVisible): از shaftStart تا cut،
+ *     با lineCap/lineJoin گرد. برای منحنی، بزیه با همان نقطهٔ کنترل
+ *     ولی با نقاطِ انتهاییِ برش‌خورده رسم می‌شود (تقریبِ نزدیک به
+ *     برشِ دقیقِ بزیه؛ برای فلشِ صاف، دقیق است).
+ *  ۳) تیکِ دوخطیِ باز (فقط اگر hasEndArrow): دو پاره‌خطِ tip→left و
+ *     tip→right با همان strokeWidthی بدنه و lineCap گرد، و هیچ
+ *     دستورِ fill()ای برای تیک اجرا نمی‌شود.
+ * شفافیت (opacity) در این تابع دست نمی‌خورد؛ فراخواننده (Shape در
+ * Konva یا پیش‌نمایش زنده با globalAlpha) آن را اعمال می‌کند تا
+ * شفافیت دو بار ضرب نشود.
+ */
 export function drawArrowCanvas(ctx, item) {
   const g = resolveArrowGeometry(item);
   if (!g || !ctx) return;
@@ -600,13 +717,15 @@ export function drawArrowCanvas(ctx, item) {
   const sw = g.sw;
 
   ctx.save();
-  // گذر اول: بدنه — فقط وقتی طولِ فلش از برش بیشتر است.
-  // فاز ۳-مرحله ۳ (سناریو ۱): اگر L ≤ ۰٫۶۲ × headSize، بدنه اصلاً
-  // رسم نمی‌شود و فقط نوک پیکان کشیده می‌شود؛ در غیر این صورت
-  // نقطهٔ برش از نقطه شروع عقب‌تر می‌افتاد و خطی معکوس و زشت
-  // در خلاف جهت پرتاب فلش رسم می‌شد (مثلاً فلشِ ۱۵ پیکسلی با
-  // ضخامت ۱۱، قبل از اصلاح، بدنه‌اش تا x=۹۱٫۴۴ برمی‌گشت در حالی
-  // که شروعش x=۱۰۰ بود).
+  // گذر اول: دایرهٔ مبدأ (توپر — fill فقط برای دایره است، نه تیک).
+  if (g.hasStartDot) {
+    ctx.beginPath();
+    ctx.arc(g.sx, g.sy, g.dotRadius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  // گذر دوم: بدنهٔ برش‌خوردهٔ دوطرفه.
   if (g.shaftVisible) {
     ctx.beginPath();
     ctx.strokeStyle = color;
@@ -614,34 +733,35 @@ export function drawArrowCanvas(ctx, item) {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     if (g.isCurved) {
-      ctx.moveTo(g.sx, g.sy);
+      ctx.moveTo(g.shaftStartX, g.shaftStartY);
       ctx.quadraticCurveTo(Number(item.cx), Number(item.cy), g.cutX, g.cutY);
     } else {
-      ctx.moveTo(g.sx, g.sy);
+      ctx.moveTo(g.shaftStartX, g.shaftStartY);
       ctx.lineTo(g.cutX, g.cutY);
     }
     ctx.stroke();
   }
 
-  // گذر دوم: نوک پیکان مقعر
-  const { tip, left, notch, right } = g.head;
-  ctx.beginPath();
-  ctx.moveTo(tip.x, tip.y);
-  ctx.lineTo(left.x, left.y);
-  ctx.lineTo(notch.x, notch.y);
-  ctx.lineTo(right.x, right.y);
-  ctx.closePath();
-  ctx.fillStyle = color;
-  ctx.fill();
-  // stroke ملایم هم‌رنگ برای لبه‌های نرم و گرد (بدون تغییر رنگ ظاهری)
-  ctx.strokeStyle = color;
-  ctx.lineWidth = Math.max(1, sw * 0.5);
-  ctx.lineJoin = 'round';
-  ctx.stroke();
+  // گذر سوم: تیکِ باز — دو خط، بدونِ fill.
+  if (g.hasEndArrow && g.chevron) {
+    const { tip, left, right } = g.chevron;
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = sw;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(left.x, left.y);
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(right.x, right.y);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
-/** آیا نقطه داخل چندضلعی است؟ (روش پرتوافکنی) */
+/** آیا نقطه داخل چندضلعی است؟ (روش پرتوافکنی)
+ * توجه (Refinement Step 2): برای سرِ فلش دیگر استفاده نمی‌شود
+ * (تیکِ باز چندضلعی نیست)؛ برای سازگاری نگه داشته شده است. */
 function pointInPolygon(px, py, points) {
   let inside = false;
   for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -667,31 +787,50 @@ function pointInPolygon(px, py, points) {
  * نمونه‌برداری ۱۶ گامه از بزیه) + فاصله تا اضلاع چندضلعی نوک + داخل
  * بودن در چندضلعی نوک.
  */
+/**
+ * آیا پاک‌کن با فلشِ ماژولار برخورد می‌کند؟
+ * @param {Array} eraserPts - آرایه نقاط پاک‌کن [{x, y}, ...]
+ * @param {Object} arrowItem - آیتم فلش (فضای یکنواخت، مثل لایه)
+ * @param {number} radius - شعاع پاک‌کن (پیش‌فرض ۱۴)
+ * @returns {boolean}
+ * پیش‌فیلتر با Bounding Box شامل شروع، پایان، نقطه کنترل (برای منحنی)
+ * و حاشیهٔ max(headLen, dotRadius) + radius. سپس برای هر نقطه پاک‌کن:
+ * فاصله تا بدنه (پاره‌خط مستقیم یا نمونه‌برداری ۱۶ گامه از بزیه، با
+ * مسیرِ کامل — بخشنده‌تر از بدنهٔ برش‌خورده)، فاصله تا دایرهٔ مبدأ
+ * (فاصله تا مرکز ≤ dotRadius + radius)، و فاصله تا دو بازوی تیکِ باز.
+ * دیگر هیچ بررسیِ «داخلِ چندضلعی»ای نیست، چون تیکِ باز توپر نیست.
+ */
 export function eraserHitsArrow(eraserPts, arrowItem, radius = 14) {
   if (!eraserPts || eraserPts.length === 0 || !arrowItem) return false;
   const g = resolveArrowGeometry(arrowItem);
-  if (!g) return false;
+  if (!g) {
+    // فلشِ تباه‌شده (شروع = پایان): فقط دایرهٔ مبدأ — اگر داشت — پاک می‌شود.
+    if (arrowItem.hasStartDot === true) {
+      const r = getOriginDotRadius(Number(arrowItem.strokeWidth) || 4);
+      const sx = Number(arrowItem.startX);
+      const sy = Number(arrowItem.startY);
+      if (Number.isFinite(sx) && Number.isFinite(sy)) {
+        for (const pt of eraserPts) {
+          if (Math.hypot(pt.x - sx, pt.y - sy) <= r + radius) return true;
+        }
+      }
+    }
+    return false;
+  }
   const sx = g.sx, sy = g.sy, ex = g.ex, ey = g.ey;
   const isCurved = g.isCurved;
   const cx = Number(arrowItem.cx);
   const cy = Number(arrowItem.cy);
-  const margin = radius + g.head.headSize;
+  const margin = radius + Math.max(g.headLen, g.hasStartDot ? g.dotRadius : 0);
   const minX = Math.min(sx, ex, isCurved ? cx : Infinity) - margin;
   const maxX = Math.max(sx, ex, isCurved ? cx : -Infinity) + margin;
   const minY = Math.min(sy, ey, isCurved ? cy : Infinity) - margin;
   const maxY = Math.max(sy, ey, isCurved ? cy : -Infinity) + margin;
-  const headPts = g.head.points;
-  const headEdges = [
-    [headPts[0], headPts[1]],
-    [headPts[1], headPts[2]],
-    [headPts[2], headPts[3]],
-    [headPts[3], headPts[0]],
-  ];
 
   for (const pt of eraserPts) {
     const px = pt.x, py = pt.y;
     if (px < minX || px > maxX || py < minY || py > maxY) continue;
-    // فاصله تا بدنه
+    // فاصله تا بدنه (مسیرِ کامل، بخشنده)
     let d;
     if (isCurved) {
       d = distanceToQuadraticBezier(
@@ -705,11 +844,15 @@ export function eraserHitsArrow(eraserPts, arrowItem, radius = 14) {
       d = distToSegment(px, py, sx, sy, ex, ey);
     }
     if (d <= radius) return true;
-    // داخل چندضلعی نوک؟
-    if (pointInPolygon(px, py, headPts)) return true;
-    // فاصله تا اضلاع چندضلعی نوک
-    for (const [a, b] of headEdges) {
-      if (distToSegment(px, py, a.x, a.y, b.x, b.y) <= radius) return true;
+    // دایرهٔ مبدأ
+    if (g.hasStartDot && Math.hypot(px - sx, py - sy) <= g.dotRadius + radius) {
+      return true;
+    }
+    // دو بازوی تیکِ باز
+    if (g.hasEndArrow && g.chevron) {
+      const { tip, left, right } = g.chevron;
+      if (distToSegment(px, py, tip.x, tip.y, left.x, left.y) <= radius) return true;
+      if (distToSegment(px, py, tip.x, tip.y, right.x, right.y) <= radius) return true;
     }
   }
   return false;
@@ -754,6 +897,159 @@ export function getTextMeasureCanvas() {
  * محیطِ بدونِ document)، از تقریبِ قدیمیِ ۰٫۵۸ × fontSize به ازای
  * هر کاراکتر استفاده می‌شود تا تابع هیچ‌وقت خطا ندهد.
  */
+/**
+ * Refinement Phase 1 Step 2: تشخیصِ خودکارِ جهتِ متن.
+ * اولین کاراکترِ «قوی» (strong) تعیین‌کننده است؛ کاراکترهای خنثی
+ * (فاصله، عدد، نقطه‌گذاری) رد می‌شوند تا «۱۲: DNA» لاتین و «۱۲:
+ * پروتئین» فارسی، درست تشخیص داده شوند.
+ * - بازه‌های خطِ عربی (فارسی/عربی): U+0600–U+06FF، U+0750–U+077F،
+ *   U+08A0–U+08FF، U+FB50–U+FDFF، U+FE70–U+FEFF → 'rtl'
+ * - حروفِ لاتین A–Z/a–Z (و حروفِ لاتینِ توسعه‌یافتهٔ U+00C0–U+024F) → 'ltr'
+ * - اگر هیچ کاراکترِ قوی‌ای نبود (متنِ خالی یا فقط عدد/نشانه):
+ *   'rtl' برمی‌گردد تا رفتارِ قبلی (که همیشه rtl بود) برای کاربرِ
+ *   فارسی حفظ شود.
+ * عرضِ اندازه‌گیری به جهت وابسته نیست، ولی ترازِ رندر (align) و
+ * جهتِ بومِ اندازه‌گیری به آن وابسته‌اند؛ پس این تابع، ورودیِ هر
+ * دوی آن‌هاست.
+ */
+export function detectTextDirection(text) {
+  const str = String(text || '');
+  for (const ch of str) {
+    const code = ch.codePointAt(0);
+    if (
+      (code >= 0x0600 && code <= 0x06ff) ||
+      (code >= 0x0750 && code <= 0x077f) ||
+      (code >= 0x08a0 && code <= 0x08ff) ||
+      (code >= 0xfb50 && code <= 0xfdff) ||
+      (code >= 0xfe70 && code <= 0xfeff)
+    ) {
+      return 'rtl';
+    }
+    if (
+      (code >= 0x0041 && code <= 0x005a) ||
+      (code >= 0x0061 && code <= 0x007a) ||
+      (code >= 0x00c0 && code <= 0x024f)
+    ) {
+      return 'ltr';
+    }
+  }
+  return 'rtl';
+}
+
+/**
+ * Refinement Phase 1 Step 2: کادرِ کپسولیِ (Pill) متن.
+ * از getTextBoundsی خالص ساخته می‌شود، به‌علاوهٔ padding در هر چهار
+ * سمت؛ گوشه‌ها کاملاً گردند (cornerRadius = نصفِ ارتفاعِ کپسول) تا
+ * شکل، کپسولِ واقعی باشد، نه مستطیلِ گوشه‌گردِ معمولی.
+ * - padX = max(8, round(fontSize × 0.45)) — برای fontSize=22 می‌شود 10
+ * - padY = max(6, round(fontSize × 0.30)) — برای fontSize=22 می‌شود 7
+ * fontSize با همان clampِ getTextBounds (۱۴ تا ۷۶) محاسبه می‌شود تا
+ * Pill و متن، همیشه از یک اندازه حرف بزنند.
+ * توجهِ طراحی (مهم): getTextBounds خودش، padding را شامل نمی‌شود
+ * و نمی‌شود — چون کرانهٔ متن در هیت‌تست، پاک‌کن، مارکی و ترنسفورم
+ * استفاده می‌شود و اگر padding داخلش بود، همهٔ آن‌ها باد می‌کردند.
+ * پس Pill یک تابعِ جداگانه است که از getTextBounds مشتق می‌شود.
+ */
+export function getTextPillBounds(item) {
+  const b = getTextBounds(item);
+  const fontSize = Math.max(14, Math.min(76, Number(item && item.fontSize) || 22));
+  const padX = Math.max(8, Math.round(fontSize * 0.45));
+  const padY = Math.max(6, Math.round(fontSize * 0.3));
+  const height = b.height + padY * 2;
+  return {
+    x: b.x - padX,
+    y: b.y - padY,
+    width: b.width + padX * 2,
+    height,
+    cornerRadius: Math.round(height / 2),
+    padX,
+    padY,
+  };
+}
+
+// ============================================================================
+// Forensic Step 4 — کنتراستِ پویای کپسولِ متن (Dynamic Callout Pill Contrast)
+// مسئله: متنِ تیره (مشکی/سرمه‌ای) روی کپسولِ تیرهٔ پیش‌فرض، عملاً
+// نامرئی می‌شد — یکی از توضیح‌های محتملِ «متن ساخته می‌شود ولی
+// دیده نمی‌شود». راه‌حل: رنگِ کپسول در لحظهٔ رندر، از روشناییِ
+// رنگِ قلم مشتق می‌شود، نه از مقدارِ ذخیره‌شدهٔ قدیمی:
+//  • قلمِ تیره (luminance < 0.5) → کپسولِ روشن
+//    'rgba(248, 250, 252, 0.9)' با حاشیهٔ ظریفِ تیره.
+//  • قلمِ روشن/فسفری (luminance ≥ 0.5) یا رنگِ ناشناخته → کپسولِ
+//    تیرهٔ 'rgba(15, 23, 42, 0.85)'.
+// چرا resolvePillFill به‌جای خواندنِ مستقیمِ pillBackground؟ چون
+// آیتم‌های قدیمی، مقدارِ تیرهٔ 'rgba(13, 18, 24, 0.75)' را ذخیره
+// کرده‌اند و اگر رندر همان را مصرف می‌کرد، متنِ تیرهٔ قدیمی
+// همچنان نامرئی می‌ماند. پس:
+//  • pillBackground === null/false/'' → بدونِ کپسول (خاموشِ صریح).
+//  • رشتهٔ سفارشی (غیر از 'auto' و مقادیرِ تیرهٔ قدیمی) → همان
+//    رنگ، بدونِ تغییر (انتخابِ صریحِ کاربر از update-selected،
+//    محترم می‌ماند).
+//  • 'auto' یا مقادیرِ تیرهٔ قدیمی (۰٫۷۲/۰٫۷۵) → مشتقِ پویا از
+//    رنگِ قلم. متن‌های جدید با 'auto' ذخیره می‌شوند، پس مقدارِ
+//    ذخیره‌شده، دیگر «رنگ» نیست، بلکه «روشن بودنِ کپسول» است.
+// آستانهٔ ۰٫۵، نقطهٔ میانیِ روشناییِ نسبی (Rec. 709) است؛ محاسبه
+// با خطی‌سازیِ sRGB انجام می‌شود، نه میانگینِ خامِ RGB، تا
+// رنگ‌هایی مثلِ زرد (روشنِ واقعی) و سرمه‌ای (تیرهٔ واقعی) درست
+// طبقه‌بندی شوند.
+// ============================================================================
+const LEGACY_DARK_PILL_FILLS = [
+  'rgba(13, 18, 24, 0.75)',
+  'rgba(13,18,24,0.75)',
+  'rgba(13, 18, 24, 0.72)',
+  'rgba(13,18,24,0.72)',
+];
+
+export function getColorLuminance(color) {
+  if (typeof color !== 'string') return null;
+  const c = color.trim().toLowerCase();
+  let r = null;
+  let g = null;
+  let b = null;
+  let m = /^#([0-9a-f]{3})$/.exec(c);
+  if (m) {
+    r = parseInt(m[1][0] + m[1][0], 16);
+    g = parseInt(m[1][1] + m[1][1], 16);
+    b = parseInt(m[1][2] + m[1][2], 16);
+  } else if ((m = /^#([0-9a-f]{6})$/.exec(c))) {
+    r = parseInt(m[1].slice(0, 2), 16);
+    g = parseInt(m[1].slice(2, 4), 16);
+    b = parseInt(m[1].slice(4, 6), 16);
+  } else if ((m = /^rgba?\(\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)/.exec(c))) {
+    const conv = (v, pct) => (pct ? (Number(v) * 255) / 100 : Number(v));
+    r = conv(m[1], m[2]);
+    g = conv(m[3], m[4]);
+    b = conv(m[5], m[6]);
+  } else {
+    return null;
+  }
+  if (![r, g, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) return null;
+  const lin = (v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+export function getPillStyleForColor(textColor) {
+  const lum = getColorLuminance(textColor || '#22d3ee');
+  if (lum !== null && lum < 0.5) {
+    return { background: 'rgba(248, 250, 252, 0.9)', border: 'rgba(15, 23, 42, 0.35)' };
+  }
+  return { background: 'rgba(15, 23, 42, 0.85)', border: null };
+}
+
+export function resolvePillFill(item) {
+  if (!item) return null;
+  const pb = item.pillBackground;
+  if (pb === null || pb === false || pb === '') return null;
+  if (typeof pb === 'string' && pb.trim() !== '' && pb.trim() !== 'auto'
+    && !LEGACY_DARK_PILL_FILLS.includes(pb.trim())) {
+    return { background: pb, border: null };
+  }
+  return getPillStyleForColor(item.color);
+}
+
 export function getTextBounds(item) {
   if (!item) return { x: 0, y: 0, width: 0, height: 0 };
   const fontSize = Math.max(14, Math.min(76, Number(item.fontSize) || 22));
@@ -765,7 +1061,11 @@ export function getTextBounds(item) {
     const cv = getTextMeasureCanvas();
     const ctx = cv.getContext('2d');
     ctx.font = `bold ${fontSize}px ${fontFamily}`;
-    ctx.direction = 'rtl';
+    // Refinement Phase 1 Step 2: جهتِ بومِ اندازه‌گیری از تشخیصِ
+    // خودکار می‌آید، نه از 'rtl'ی ثابت. عرضِ اندازه‌گیری عملاً به
+    // جهت وابسته نیست، ولی برای متنِ لاتین، شکل‌دهیِ صحیح با جهتِ
+    // درست انجام می‌شود.
+    ctx.direction = detectTextDirection(rawText);
     ctx.textBaseline = 'alphabetic';
     for (const ln of lines) {
       const m = ctx.measureText(ln || ' ');
@@ -875,8 +1175,18 @@ export function getItemBounds(item) {
     return b || { x: 0, y: 0, width: 0, height: 0 };
   }
 
-  // متن: تفویض مستقیم به getTextBounds (لنگرِ بالا-چپِ فاز ۴).
+  // متن: اگر Pill فعال باشد (pillBackground رشته‌ای و غیرِ خالی)،
+  // کرانه، کادرِ کپسول است تا کادرِ فوکوس و مارکی، خودِ Pill را هم
+  // بگیرند، نه فقط حروف را؛ در غیرِ این صورت، کرانهٔ خالصِ متن
+  // (لنگرِ بالا-چپِ فاز ۴). توجه: getTextPillBounds، فیلدهای اضافه
+  // (cornerRadius/padX/padY) هم دارد که اینجا دور ریخته می‌شوند تا
+  // شکلِ خروجیِ getItemBounds مثلِ قبل، فقط x/y/width/height باشد.
+  // Refinement Phase 1 Step 2.
   if (item.tool === 'text') {
+    if (typeof item.pillBackground === 'string' && item.pillBackground) {
+      const pb = getTextPillBounds(item);
+      return { x: pb.x, y: pb.y, width: pb.width, height: pb.height };
+    }
     return getTextBounds(item);
   }
 
@@ -908,11 +1218,12 @@ export function getItemBounds(item) {
     return { x: bx, y: by, width: bw, height: bh };
   }
 
-  // فلش: دربرگیرندهٔ شروع، پایان و (در صورتِ منحنی بودن) نقطهٔ
-  // کنترل، به‌علاوهٔ حاشیهٔ امنِ pad. نوکِ فلش در جهتِ جلو، از
-  // نقطهٔ پایان جلوتر نمی‌رود و پهنای جانبیِ آن (headSize ×
-  // sin(28.1°) ≈ حداکثر ۱۸) از pad (حداقل ۱۴ در ضخامتِ ۴، و ۲۷٫۵
-  // در ضخامتِ ۱۱) بزرگ‌تر نیست، پس همین pad برای نوک هم کافی است.
+  // فلشِ ماژولار (Refinement Step 2): دربرگیرندهٔ شروع، پایان،
+  // نقطهٔ کنترل (در صورتِ منحنی بودن)، گسترهٔ دایرهٔ مبدأ در سمتِ
+  // شروع و انتهای دو بازوی تیک در سمتِ پایان، به‌علاوهٔ حاشیهٔ امنِ
+  // pad. برای آیتمِ قدیمیِ بدونِ فیلد، hasStartDot=false و
+  // hasEndArrow=true فرض می‌شود (مثلِ resolveArrowGeometry)، پس
+  // کرانهٔ فلش‌های قدیمی فقط به اندازهٔ تیکِ باز گسترش می‌یابد.
   if (item.tool === 'arrow') {
     const sx = Number(item.startX);
     const sy = Number(item.startY);
@@ -922,18 +1233,42 @@ export function getItemBounds(item) {
         !Number.isFinite(ex) || !Number.isFinite(ey)) {
       return { x: 0, y: 0, width: 0, height: 0 };
     }
+    const sw = Number(item.strokeWidth) || 4;
+    const pad = Math.max(14, sw * 2.5);
+    const g = resolveArrowGeometry(item);
+    if (!g) {
+      // تباه‌شده (شروع = پایان): فقط دایرهٔ مبدأ — اگر داشت — کرانه دارد.
+      const r = item.hasStartDot === true ? getOriginDotRadius(sw) : 0;
+      return {
+        x: sx - r - pad,
+        y: sy - r - pad,
+        width: (r + pad) * 2,
+        height: (r + pad) * 2,
+      };
+    }
     let minX = Math.min(sx, ex);
     let minY = Math.min(sy, ey);
     let maxX = Math.max(sx, ex);
     let maxY = Math.max(sy, ey);
-    if (item.arrowStyle === 'curved' &&
-        Number.isFinite(item.cx) && Number.isFinite(item.cy)) {
+    if (g.isCurved && Number.isFinite(item.cx) && Number.isFinite(item.cy)) {
       minX = Math.min(minX, item.cx);
       minY = Math.min(minY, item.cy);
       maxX = Math.max(maxX, item.cx);
       maxY = Math.max(maxY, item.cy);
     }
-    const pad = Math.max(14, (item.strokeWidth || 4) * 2.5);
+    if (g.hasStartDot) {
+      minX = Math.min(minX, sx - g.dotRadius);
+      minY = Math.min(minY, sy - g.dotRadius);
+      maxX = Math.max(maxX, sx + g.dotRadius);
+      maxY = Math.max(maxY, sy + g.dotRadius);
+    }
+    if (g.hasEndArrow && g.chevron) {
+      const { left, right } = g.chevron;
+      minX = Math.min(minX, left.x, right.x);
+      minY = Math.min(minY, left.y, right.y);
+      maxX = Math.max(maxX, left.x, right.x);
+      maxY = Math.max(maxY, left.y, right.y);
+    }
     return {
       x: minX - pad,
       y: minY - pad,
@@ -1018,7 +1353,8 @@ export function hitTestAnnotationItem(item, pt, tolerance = 14) {
     return hitTestStroke(item, pt, tolerance);
   }
 
-  // فلش: فاصله تا بدنه (پاره‌خط یا بزیه) + چندضلعیِ نوک.
+  // فلشِ ماژولار: فاصله تا بدنه (مسیرِ کامل، بخشنده) + دایرهٔ
+  // مبدأ + دو بازوی تیکِ باز. دیگر چندضلعیِ توپر بررسی نمی‌شود.
   if (item.tool === 'arrow') {
     const sx = Number(item.startX);
     const sy = Number(item.startY);
@@ -1030,8 +1366,16 @@ export function hitTestAnnotationItem(item, pt, tolerance = 14) {
     }
     const sw = Number(item.strokeWidth) || 4;
     const tol = Math.max(tolerance, sw * 2.5);
-    const isCurved = item.arrowStyle === 'curved' &&
-      Number.isFinite(item.cx) && Number.isFinite(item.cy);
+    const g = resolveArrowGeometry(item);
+    if (!g) {
+      // تباه‌شده: فقط دایرهٔ مبدأ — اگر داشت — قابلِ انتخاب است.
+      if (item.hasStartDot === true) {
+        const r = getOriginDotRadius(sw);
+        return Math.hypot(pt.x - sx, pt.y - sy) <= r + tol;
+      }
+      return false;
+    }
+    const isCurved = g.isCurved;
     let d;
     if (isCurved) {
       d = distanceToQuadraticBezier(pt, { x: sx, y: sy }, { x: item.cx, y: item.cy }, { x: ex, y: ey });
@@ -1039,30 +1383,13 @@ export function hitTestAnnotationItem(item, pt, tolerance = 14) {
       d = distToSegment(pt.x, pt.y, sx, sy, ex, ey);
     }
     if (d <= tol) return true;
-    // چندضلعیِ نوک: زاویه با همان منطقِ resolveArrowGeometry
-    // (برگشت به وتر وقتی مماسِ منحنی تباه‌شده است: مربعِ فاصله < ۰٫۰۱).
-    let angle;
-    if (isCurved) {
-      const txc = ex - Number(item.cx);
-      const tyc = ey - Number(item.cy);
-      if (txc * txc + tyc * tyc < 0.01) {
-        angle = Math.atan2(ey - sy, ex - sx);
-      } else {
-        angle = Math.atan2(tyc, txc);
-      }
-    } else {
-      angle = Math.atan2(ey - sy, ex - sx);
+    if (g.hasStartDot && Math.hypot(pt.x - sx, pt.y - sy) <= g.dotRadius + tol) {
+      return true;
     }
-    const head = getArrowHeadGeometry(ex, ey, angle, sw);
-    const poly = head.points;
-    // تابعِ pointInPolygon(px, py, points) از قبل در همین انجین
-    // وجود داشت (برای پاک‌کنِ فلش) و دوباره تعریف نشد تا خطای
-    // اعلانِ تکراری ندهد؛ همان تابع با همان امضا استفاده می‌شود.
-    if (pointInPolygon(pt.x, pt.y, poly)) return true;
-    for (let i = 0; i < poly.length; i++) {
-      const a = poly[i];
-      const c = poly[(i + 1) % poly.length];
-      if (distToSegment(pt.x, pt.y, a.x, a.y, c.x, c.y) <= tolerance) return true;
+    if (g.hasEndArrow && g.chevron) {
+      const { tip, left, right } = g.chevron;
+      if (distToSegment(pt.x, pt.y, tip.x, tip.y, left.x, left.y) <= tolerance) return true;
+      if (distToSegment(pt.x, pt.y, tip.x, tip.y, right.x, right.y) <= tolerance) return true;
     }
     return false;
   }

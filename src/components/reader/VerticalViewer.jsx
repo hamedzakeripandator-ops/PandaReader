@@ -6,7 +6,8 @@ import useVirtualScroll from '../../hooks/useVirtualScroll';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
 import Icons from '../common/Icons';
-import AnnotationLayer, { AnnotationToolbar } from './AnnotationLayer';
+import AnnotationLayer from './AnnotationLayer';
+import AnnotationToolbar from './AnnotationToolbar';
 
 // تولید آدرس استاندارد و مطلق برای پروتکل امن comic://
 function buildComicImageUrl(filePath) {

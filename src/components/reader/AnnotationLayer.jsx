@@ -20,9 +20,14 @@ import React, {
   useCallback,
   useMemo,
 } from 'react';
-import { Stage, Layer, Shape, Group, Line, Rect, Text, Transformer } from 'react-konva';
+import { Stage, Layer, Shape, Group, Line, Rect, Text, Circle, Transformer } from 'react-konva';
 import useAppStore from '../../store/useAppStore';
-import { AnnotationToolbar } from './AnnotationToolbar';
+// Cycle-fix (2026-10-25): این فایل، AnnotationToolbar را نه ایمپورت
+// می‌کند و نه re-export می‌کند (قبلاً هر دو را داشت و PdfViewer،
+// تولبار را از طریقِ لایه می‌گرفت). لایه، تولبار را اصلاً رندر
+// نمی‌کند — تولبار را فقط PdfViewer رندر می‌کند — پس حذفِ هر دو
+// خط، هیچ رفتاری را عوض نمی‌کند و یالِ لایه→تولبار را کاملاً
+// حذف می‌کند. این فایل را هرگز دوباره به تولبار وصل نکنید.
 import {
   storageToUniform,
   uniformToStorage,
@@ -34,9 +39,19 @@ import {
   defaultCurveControl,
   drawArrowCanvas,
   eraserHitsArrow,
-  getArrowHeadGeometry,
+  getChevronGeometry,
+  getOriginDotRadius,
   eraserHitsText,
   eraserHitsSticky,
+  // Refinement Phase 1 Step 2: اندازهٔ متن، کپسول و جهتِ خودکار
+  getTextBounds,
+  getTextPillBounds,
+  // Forensic Step 4: کنتراستِ پویای کپسول
+  resolvePillFill,
+  // Refinement Phase 2: روشناییِ رنگ برای تمِ استیکی
+  getColorLuminance,
+  detectTextDirection,
+  getStrokeBounds,
   // فاز ۵: توابعِ انتخاب، مارکی و جابه‌جایی
   getItemBounds,
   findTopAnnotationAtPoint,
@@ -45,8 +60,6 @@ import {
   getUnionBounds,
   moveAnnotationByDelta,
 } from '../../utils/annotationEngine';
-
-export { AnnotationToolbar };
 
 // ============================================================================
 // بخش ۱: ریاضیات
@@ -264,6 +277,15 @@ const CommittedStroke = React.memo(function CommittedStroke({ item, onErase }) {
     <Shape
       sceneFunc={sceneFunc}
       hitFunc={hitFunc}
+      // Refinement Phase 1 Step 2: selfRectFunc برای استروک — کادرِ
+      // یکپارچهٔ کلِ مسیر از getStrokeBoundsی انجین، یعنی دقیقاً
+      // همان کادری که Rectِ فوکوسِ مجزا هم از آن ساخته می‌شود.
+      // getStrokeBounds برای آیتمِ بدونِ نقطه، null برمی‌گرداند؛
+      // پس fallbackی صفر برگردانده می‌شود تا Konva خطا ندهد.
+      // اتریبیوتِ _bboxی قبلی، فقط دادهٔ پاک‌کن بود و Transformer
+      // هرگز آن را نمی‌خواند — حالا کادرِ واقعی، از این مسیر
+      // می‌رسد.
+      selfRectFunc={() => getStrokeBounds(item) || { x: 0, y: 0, width: 0, height: 0 }}
       onClick={handleClick}
       onTap={handleClick}
       perfectDrawEnabled={false}
@@ -357,7 +379,7 @@ const BoxLiveDraft = React.forwardRef(function BoxLiveDraft(
 // نسخه نهایی دقیقاً یک هندسه داشته باشند.
 // ============================================================================
 const ArrowLiveDraft = React.forwardRef(function ArrowLiveDraft(
-  { arrowRef, arrowStyleRef, colorRef, widthRef, opacityRef },
+  { arrowRef, arrowStyleRef, colorRef, widthRef, opacityRef, hasStartDotRef, hasEndArrowRef },
   ref
 ) {
   const sceneFunc = useCallback(
@@ -386,10 +408,14 @@ const ArrowLiveDraft = React.forwardRef(function ArrowLiveDraft(
         color,
         strokeWidth: sw,
         opacity,
+        // Refinement Step 2: پرچم‌های ماژولار از استور (از طریقِ ref،
+        // تا پیش‌نمایشِ زنده با هر batchDraw به‌روز شود).
+        hasStartDot: hasStartDotRef ? hasStartDotRef.current !== false : true,
+        hasEndArrow: hasEndArrowRef ? hasEndArrowRef.current !== false : true,
       });
       ctx.restore();
     },
-    [arrowRef, arrowStyleRef, colorRef, widthRef, opacityRef]
+    [arrowRef, arrowStyleRef, colorRef, widthRef, opacityRef, hasStartDotRef, hasEndArrowRef]
   );
 
   return (
@@ -477,6 +503,19 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
     [item.x, item.y, item.width, item.height, sw]
   );
 
+  // Refinement Phase 1 Step 2: selfRectFunc برای باکسِ ابری.
+  // Konva کادرِ Shape را فقط از width/heightی اتریبیوت می‌گیرد و
+  // sceneFunc را اندازه نمی‌گیرد (به گزارشِ اسکن، §۳٫۲ مراجعه
+  // کنید)؛ پس بدونِ این تابع، Transformerِ باکسِ ابری به نقطه
+  // تبدیل می‌شد. این تابع، کادرِ واقعیِ مستطیل را برمی‌گرداند.
+  // توجه: بیرون‌زدگیِ کمانِ ابری (حدودِ bulb/2) بیرونِ این کادر
+  // می‌ماند — دقیقاً طبقِ فرمولِ TASK — پس دستگیره‌ها روی خودِ
+  // مستطیل‌اند، نه روی نوکِ کمان‌ها.
+  const cloudSelfRectFunc = useCallback(
+    () => ({ x: item.x, y: item.y, width: item.width, height: item.height }),
+    [item.x, item.y, item.width, item.height]
+  );
+
   const cloudHitFunc = useCallback(
     (ctx, shape) => {
       // فاز ۲-مرحله ۳ (سناریو ۲): حاشیه قبلی ±۱۰ پیکسل، لبه بیرونی
@@ -497,6 +536,7 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
     <Shape
       sceneFunc={cloudSceneFunc}
       hitFunc={cloudHitFunc}
+      selfRectFunc={cloudSelfRectFunc}
       stroke={color}
       strokeWidth={sw}
       opacity={opacity}
@@ -514,8 +554,9 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
 // فاز ۳: کامپوننت رندر فلش ذخیره‌شده
 // رندر یکپارچه با <Shape> و sceneFunc: همان drawArrowCanvas که پیش‌نمایش
 // هم از آن استفاده می‌کند، پس نسخه نهایی و پیش‌نمایش یک هندسه دارند.
-// hitFunc: بدنه با ضخامت پهن (برای کلیکِ تمیز) + چندضلعی نوک، تا
-// کلیکِ پاک‌کن روی بدنه و روی نوک، هر دو کار کند.
+// hitFunc (Refinement Step 2): بدنه با ضخامت پهن (برای کلیکِ تمیز)
+// + دایرهٔ مبدأ (اگر hasStartDot) + دو بازوی تیکِ باز (اگر
+// hasEndArrow) — هماهنگ با drawArrowCanvasی ماژولار، بدونِ fillِ نوک.
 // ============================================================================
 const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
   const sw = Number(item.strokeWidth) || 4;
@@ -574,16 +615,26 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
       } else {
         angle = Math.atan2(ey - sy, ex - sx);
       }
-      if (Number.isFinite(angle)) {
-        const head = getArrowHeadGeometry(ex, ey, angle, sw);
-        const pts = head.points;
+      // Refinement Step 2: hitِ ماژولار — دایرهٔ مبدأ + دو بازوی تیکِ باز.
+      // چندضلعیِ توپرِ قدیمی دیگر وجود ندارد، پس fillِ چندضلعی حذف
+      // شده است. برای hit، بازوها با همان ضخامتِ پهنِ بدنه
+      // (hitStrokeWidth) کشیده می‌شوند تا کلیک روی تیک، راحت بگیرد.
+      if (item.hasStartDot === true) {
         ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.lineTo(pts[2].x, pts[2].y);
-        ctx.lineTo(pts[3].x, pts[3].y);
-        ctx.closePath();
+        ctx.arc(sx, sy, getOriginDotRadius(sw), 0, Math.PI * 2);
         ctx.fill();
+      }
+      if (item.hasEndArrow !== false && Number.isFinite(angle)) {
+        const chev = getChevronGeometry(ex, ey, angle, sw);
+        ctx.beginPath();
+        ctx.lineWidth = hitStrokeWidth;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.moveTo(chev.tip.x, chev.tip.y);
+        ctx.lineTo(chev.left.x, chev.left.y);
+        ctx.moveTo(chev.tip.x, chev.tip.y);
+        ctx.lineTo(chev.right.x, chev.right.y);
+        ctx.stroke();
       }
     },
     [item, sw]
@@ -597,6 +648,12 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
     <Shape
       sceneFunc={sceneFunc}
       hitFunc={hitFunc}
+      // Refinement Phase 1 Step 2: selfRectFunc برای فلش — کادرِ
+      // Transformer از getItemBounds می‌آید (شاملِ دایرهٔ مبدأ،
+      // تیکِ باز و pad)، یعنی دقیقاً همان کادری که Rectِ فوکوسِ
+      // مجزا هم از آن ساخته می‌شود؛ پس موقعِ وصل شدنِ Transformer،
+      // کادر نمی‌پرد.
+      selfRectFunc={() => getItemBounds(item)}
       opacity={opacity}
       onClick={handleClick}
       onTap={handleClick}
@@ -617,66 +674,237 @@ const CommittedArrow = React.memo(function CommittedArrow({ item, onErase }) {
 // از کرانهٔ پاک‌کن می‌شد.
 // onDblClick → ویرایشِ مجدد؛ onClick/onTap → پاک‌کنِ کلیکی.
 // ============================================================================
-const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit }) {
+// ============================================================================
+// Refinement Phase 1 Step 2: کامپوننت رندر متن ذخیره‌شده — با Callout Pill
+// تغییرات نسبت به فاز ۴:
+//  ۱) رندر حالا یک <Group> است (نه <Text>ی تنها) که دو فرزند دارد:
+//     یک <Rect>ی کپسولی (فقط وقتی pillBackground رشته‌ای و غیرِ
+//     خالی باشد و متن هم خالی نباشد) و همان <Text>ی قبلی روی آن.
+//     چون Groupِ داخلی در (0,0) است و فرزندان با مختصاتِ مطلق‌اند،
+//     کادرِ Groupِ پوششیِ بیرونی (که Transformer به آن وصل است)
+//     اجتماعِ Pill و متن می‌شود — یعنی کادرِ Transformer، خودِ
+//     Pill را هم می‌گیرد، نه فقط حروف را.
+//  ۲) ترازِ خودکار: align از detectTextDirectionی متن می‌آید
+//     (فارسی → 'right'، لاتین → 'left')، به‌جای 'right'ی ثابت.
+//     <Text> مثلِ قبل، عرض ندارد (Konva عرض را از بلندترین خط
+//     می‌گیرد) تا wrapِ ناخواسته رخ ندهد؛ align، خطوطِ کوتاه‌تر را
+//     داخلِ همان کادر، به سمتِ درست می‌چسباند.
+//  ۳) همگام‌سازیِ فونت: بعد از mount (و با تغییرِ فونت/اندازه)،
+//     document.fonts.load صدا زده می‌شود و با آماده شدنِ فونت، یک
+//     رندرِ دوباره انجام می‌شود تا Pill و کرانه، با فونتِ واقعی
+//     (نه فونتِ جایگزینِ لحظهٔ اول) محاسبه شوند. همهٔ دسترسی‌ها
+//     guard دارند تا در محیطِ بدونِ document/fonts خطا ندهد.
+// لنگر همچنان گوشهٔ بالا-چپ است و lineHeight=1.3 حفظ شده تا
+// ارتفاعِ رندر با getTextBounds یکی بماند. onDblClick → ویرایشِ
+// مجدد؛ onClick/onTap روی Group → پاک‌کنِ کلیکی (مثلِ قبل، فقط
+// وقتی ابزار eraser باشد کاری می‌کند).
+// ============================================================================
+const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit, isEditing }) {
   const x = Number(item.x ?? item.startX ?? 0);
   const y = Number(item.y ?? item.startY ?? 0);
   const fontSize = Number(item.fontSize) || 22;
-
+  const fontFamily = item.fontFamily || "'Estedad', sans-serif";
+  const [, setFontReadyTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    try {
+      const fonts = typeof document !== 'undefined' ? document.fonts : null;
+      const promise = fonts && typeof fonts.load === 'function'
+        ? fonts.load(`bold ${fontSize}px ${fontFamily}`)
+        : null;
+      if (promise && typeof promise.then === 'function') {
+        promise.then(() => {
+          if (alive) setFontReadyTick((t) => t + 1);
+        }).catch(() => {});
+      }
+    } catch {
+      // محیطِ بدونِ Font Loading API: رندرِ اول کافی است.
+    }
+    return () => { alive = false; };
+  }, [fontFamily, fontSize]);
+  const bounds = useMemo(
+    () => getTextBounds(item),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [item.text, item.fontSize, item.fontFamily, item.x, item.startX, item.y, item.startY]
+  );
+  const pill = useMemo(
+    () => (typeof item.pillBackground === 'string' && item.pillBackground && item.text
+      ? getTextPillBounds(item)
+      : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [item.text, item.fontSize, item.fontFamily, item.x, item.startX, item.y, item.startY, item.pillBackground]
+  );
+  // Forensic Step 4 — کنتراستِ پویا: رنگِ کپسول، از رنگِ قلمِ
+  // همین آیتم مشتق می‌شود (resolvePillFill در انجین)، نه از
+  // مقدارِ تیرهٔ ذخیره‌شدهٔ قدیمی؛ پس متنِ تیره روی کپسولِ تیره،
+  // دیگر نامرئی نمی‌شود. رشتهٔ سفارشیِ صریح، دست نخورده می‌ماند.
+  const pillFill = useMemo(
+    () => (pill ? resolvePillFill(item) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pill, item.pillBackground, item.color]
+  );
+  const textDir = detectTextDirection(item.text);
   const handleClick = useCallback(() => {
     onErase?.(item.id);
   }, [onErase, item.id]);
-
   const handleDblClick = useCallback(() => {
     onEdit?.(item);
   }, [onEdit, item]);
-
   return (
-    <Text
-      x={Number.isFinite(x) ? x : 0}
-      y={Number.isFinite(y) ? y : 0}
-      text={item.text || ''}
-      fontSize={fontSize}
-      fontFamily={item.fontFamily || "'Estedad', sans-serif"}
-      fill={item.color || '#22d3ee'}
-      opacity={item.opacity ?? 0.9}
-      fontStyle="bold"
-      lineHeight={1.3}
-      // فاز ۴-مرحلهٔ ۳ (سناریو ۴): ترازِ راست‌به‌چپ برای فارسی.
-      // بدونِ align="right"، خطوطِ کوتاه‌ترِ متنِ چندخطی به لبهٔ
-      // چپِ کادر می‌چسبیدند و شروعِ پاراگراف‌ها ناهماهنگ بود.
-      // توجه: چون عرضِ <Text> در اینجا تنظیم نشده است، Konva عرض
-      // را از بلندترین خط می‌گیرد و align="right" خطوطِ کوتاه‌تر را
-      // داخلِ همان کادر به راست می‌چسباند؛ کادرِ کلی (x/y/width/
-      // height) عوض نمی‌شود، پس کرانهٔ پاک‌کن در getTextBounds با
-      // رندر همچنان می‌خواند (به سناریو ۶ مراجعه کنید).
-      align="right"
+    // Forensic Step 4 — Anti-Ghosting: وقتی همین آیتم، داخلِ کارتِ
+    // شناور در حالِ ویرایش است، نودِ اصلی مخفی می‌شود تا متنِ
+    // قبلی، زیرِ کارت سایه نیندازد؛ بعد از ثبت، دوباره آشکار
+    // می‌شود. isEditing فقط وقتی true است که editIdی باز، برابرِ
+    // idی همین آیتم باشد (متنِ جدید، editId ندارد و چیزی را مخفی
+    // نمی‌کند).
+    <Group
+      visible={!isEditing}
       onClick={handleClick}
       onTap={handleClick}
       onDblClick={handleDblClick}
-      perfectDrawEnabled={false}
-      shadowForStrokeEnabled={false}
-    />
+    >
+      {pill && (
+        <Rect
+          x={pill.x}
+          y={pill.y}
+          width={pill.width}
+          height={pill.height}
+          cornerRadius={pill.cornerRadius}
+          fill={pillFill ? pillFill.background : item.pillBackground}
+          stroke={pillFill && pillFill.border ? pillFill.border : undefined}
+          strokeWidth={pillFill && pillFill.border ? 1 : 0}
+          opacity={item.opacity ?? 0.9}
+          perfectDrawEnabled={false}
+          shadowForStrokeEnabled={false}
+        />
+      )}
+      <Text
+        x={Number.isFinite(x) ? x : 0}
+        y={Number.isFinite(y) ? y : 0}
+        text={item.text || ''}
+        fontSize={fontSize}
+        fontFamily={fontFamily}
+        fill={item.color || '#22d3ee'}
+        opacity={item.opacity ?? 0.9}
+        fontStyle="bold"
+        lineHeight={1.3}
+        align={textDir === 'rtl' ? 'right' : 'left'}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+    </Group>
   );
 });
 
 // ============================================================================
-// فاز ۴: کامپوننت رندر یادداشت چسبان ذخیره‌شده
-// رندر با <Group> در Konva (طبق مشخصاتِ TASK)، نه کارتِ HTMLِ قدیمی:
-// کارتِ پس‌زمینه + نوارِ هدر + متنِ چندخطی با wrap. رنگ‌های کارت
-// دقیقاً طبق مشخصاتِ TASK ثابت‌اند (#fef9c3 و #fef08a)؛ یعنی میدانِ
-// colorِ آیتم در رندرِ کارت استفاده نمی‌شود، ولی ذخیره می‌شود (برای
-// سازگاری با ساختارِ قدیمی و استفاده‌های آینده). opacityِ آیتم روی
-// کلِ Group اعمال می‌شود تا شفافیتِ ذخیره‌شده بی‌اثر نماند.
+// Refinement Phase 2 — کارتِ استیکیِ مدرن و شیشه‌ای (Glassmorphism)
+// جایگزینِ کارتِ زردِ ثابتِ فاز ۴ (#fef9c3/#fef08a). از این گام،
+// رنگِ کارت ۱۰۰٪ از item.color (رنگِ انتخابیِ تولبار) تبعیت می‌کند
+// و دیگر هیچ رنگِ ثابتی در کارت نیست:
+//  • بدنه: دو لایهٔ روی هم — زیرهٔ مات (تیره یا روشن، بسته به
+//    روشناییِ رنگِ انتخابی) + شست‌وشوی رنگی با آلفای ۰٫۱۶. تینتِ
+//    خالصِ ۰٫۱۶ روی صفحهٔ شلوغ، به‌تنهایی خوانا نبود (روی صفحهٔ
+//    تیره، تیره می‌شد)؛ پس زیرهٔ مات، خوانایی را روی هر صفحه‌ای
+//    (تیره یا روشن) تضمین می‌کند و تینت، فقط هویتِ رنگی می‌دهد.
+//  • هدر: نوارِ ۲۴ پیکسلی (در بازهٔ ۲۲–۲۶ تسک) با خودِ item.color
+//    و گوشه‌های بالاییِ گردِ ۱۴.
+//  • حاشیه: ۱ پیکسل با رنگِ انتخابی در آلفای ۰٫۵۵، به‌صورتِ یک
+//    Rectِ جداگانهٔ بدونِ fill که بعد از هدر کشیده می‌شود تا دورِ
+//    کلِ کارت (از جمله هدر) خطِ یکدستی داشته باشد.
+//  • سایه: فقط روی زیره (نه روی لایه‌ها و هدر، تا سایه دو برابر
+//    نشود): shadowColor '#000000'، shadowBlur 16، shadowOpacity
+//    0.22، shadowOffset {x: 0, y: 6} — دقیقاً طبقِ تسک.
+//  • پین: وسطِ هدر — هاله (رنگِ متن در آلفای ۰٫۲۲) + دیسکِ سفیدِ
+//    ۱۳ پیکسلی + نقطهٔ ۶ پیکسلی به رنگِ انتخابی. هاله، عامدانه
+//    از رنگِ متن ساخته شده، نه از رنگِ انتخابی: هالهٔ هم‌رنگِ
+//    هدر، روی هدرِ مات محو می‌شد، ولی رنگِ متن در هر دو تم،
+//    مخالفِ هدر است و همیشه دیده می‌شود.
+//  • متن: رنگش از getColorLuminanceی رنگِ انتخابی می‌آید (تمِ
+//    روشن → متنِ تیرهٔ #0f172a، تمِ تیره → متنِ روشنِ #f8fafc)،
+//    ترازش از detectTextDirection (فارسی → راست، لاتین → چپ)،
+//    و مثلِ قبل با height + ellipsis از کارت بیرون نمی‌زند.
+//  • isEditing (جدید، مثلِ متن): وقتی همین آیتم داخلِ ویرایشگرِ
+//    شناور باز است، نودِ اصلی مخفی می‌شود — چون بدنهٔ جدید
+//    نیمه‌شفاف است، بدونِ این مخفی‌سازی، کارتِ قدیمی از زیرِ
+//    کارتِ ویرایشگر دیده می‌شد و متن، دوبار (سایه‌دار) به نظر
+//    می‌رسید. این، همان الگوی Anti-Ghostingی متن است.
 // onDblClick → باز شدنِ ویرایشگرِ استیکی؛ onClick/onTap → پاک‌کن.
-// فاز ۴-مرحلهٔ ۳: بیرون‌زدگیِ متنِ بلند از کارت با height و ellipsis
-// رفع شد (به کامنتِ روی <Text> مراجعه کنید)؛ محدودیتِ شناخته‌شدهٔ
-// قبلی دیگر برقرار نیست.
+// opacityِ آیتم روی کلِ Group اعمال می‌شود (مثلِ قبل)؛ پس آلفاهای
+// بالا در عمل در opacity ضرب می‌شوند (مثلاً زیرهٔ ۰٫۹۲ با opacityی
+// ۰٫۹۵، حدودِ ۰٫۸۷ می‌شود) — هنوز در محدودهٔ شیشه‌ایِ خواناست.
 // ============================================================================
-const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onEdit }) {
+// تبدیلِ رنگ به rgba با آلفای تازه (آلفای قبلیِ رنگ نادیده گرفته
+// می‌شود). ورودی‌های #rgb ،#rrggbb و rgb()/rgba() پشتیبانی
+// می‌شوند؛ رنگِ ناشناخته (مثلِ نامِ رنگ) → null تا فراخواننده،
+// رنگِ خنثی بگذارد. (نسخهٔ محلیِ همین فایل است، چون تسک فقط
+// همین فایل را در دامنه گذاشته و انجین دست نخورده است.)
+function colorWithAlpha(color, alpha) {
+  if (typeof color !== 'string') return null;
+  const c = color.trim().toLowerCase();
+  let r = null;
+  let g = null;
+  let b = null;
+  let m = /^#([0-9a-f]{3})$/.exec(c);
+  if (m) {
+    r = parseInt(m[1][0] + m[1][0], 16);
+    g = parseInt(m[1][1] + m[1][1], 16);
+    b = parseInt(m[1][2] + m[1][2], 16);
+  } else if ((m = /^#([0-9a-f]{6})$/.exec(c))) {
+    r = parseInt(m[1].slice(0, 2), 16);
+    g = parseInt(m[1].slice(2, 4), 16);
+    b = parseInt(m[1].slice(4, 6), 16);
+  } else if ((m = /^rgba?\(\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)/.exec(c))) {
+    const conv = (v, pct) => (pct ? (Number(v) * 255) / 100 : Number(v));
+    r = conv(m[1], m[2]);
+    g = conv(m[3], m[4]);
+    b = conv(m[5], m[6]);
+  } else {
+    return null;
+  }
+  if (![r, g, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) return null;
+  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${alpha})`;
+}
+
+// تمِ استیکی از روی رنگِ انتخابی. آستانه، همان ۰٫۵ی
+// getColorLuminance است: رنگِ روشن → کارتِ روشن با متنِ تیره،
+// رنگِ تیره یا ناشناخته → کارتِ تیره با متنِ روشن (پیش‌فرضِ امن،
+// چون کارتِ تیره روی صفحهٔ روشن هم همیشه خواناست).
+function getStickyTheme(color) {
+  const c = color || '#22d3ee';
+  const lum = getColorLuminance(c);
+  const isLight = lum !== null && lum >= 0.5;
+  const border = colorWithAlpha(c, 0.55) || (isLight ? 'rgba(15, 23, 42, 0.35)' : 'rgba(248, 250, 252, 0.35)');
+  if (isLight) {
+    return {
+      isLight: true,
+      bodyBase: 'rgba(248, 250, 252, 0.92)',
+      tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+      text: '#0f172a',
+      border,
+      headerFill: c,
+    };
+  }
+  return {
+    isLight: false,
+    bodyBase: 'rgba(13, 18, 24, 0.85)',
+    tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+    text: '#f8fafc',
+    border,
+    headerFill: c,
+  };
+}
+// ============================================================================
+const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onEdit, isEditing }) {
   const x = Number(item.x ?? item.startX ?? 0);
   const y = Number(item.y ?? item.startY ?? 0);
   const w = Number(item.width) || 210;
   const h = Number(item.height) || 170;
+  const headerH = 24;
+  const pad = 12;
+  const theme = useMemo(() => getStickyTheme(item.color), [item.color]);
+  const textDir = detectTextDirection(item.text);
+  const pinX = w / 2;
+  const pinY = headerH / 2;
 
   const handleClick = useCallback(() => {
     onErase?.(item.id);
@@ -691,54 +919,104 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
       x={Number.isFinite(x) ? x : 0}
       y={Number.isFinite(y) ? y : 0}
       opacity={item.opacity ?? 0.95}
+      visible={!isEditing}
       onClick={handleClick}
       onTap={handleClick}
       onDblClick={handleDblClick}
     >
+      {/* زیرهٔ مات + سایهٔ چندلایه (سایه فقط همین‌جاست). */}
       <Rect
         width={w}
         height={h}
-        fill="#fef9c3"
-        stroke="#facc15"
-        strokeWidth={1}
-        cornerRadius={8}
-        shadowBlur={8}
-        shadowOpacity={0.15}
-        shadowColor="black"
+        fill={theme.bodyBase}
+        cornerRadius={14}
+        shadowColor="#000000"
+        shadowBlur={16}
+        shadowOpacity={0.22}
+        shadowOffsetX={0}
+        shadowOffsetY={6}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
       />
+      {/* شست‌وشوی رنگیِ ۱۶٪ روی زیره. */}
       <Rect
         width={w}
-        height={26}
-        fill="#fef08a"
-        cornerRadius={[8, 8, 0, 0]}
+        height={h}
+        fill={theme.tint}
+        cornerRadius={14}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+      {/* نوارِ هدر با رنگِ انتخابی و گوشه‌های بالاییِ گرد. */}
+      <Rect
+        width={w}
+        height={headerH}
+        fill={theme.headerFill}
+        cornerRadius={[14, 14, 0, 0]}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+      {/* حاشیهٔ ۱ پیکسلیِ دورِ کلِ کارت (بعد از هدر تا دورِ هدر را هم بگیرد). */}
+      <Rect
+        width={w}
+        height={h}
+        fillEnabled={false}
+        stroke={theme.border}
+        strokeWidth={1}
+        cornerRadius={14}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+      {/* پینِ وسطِ هدر: هاله + دیسکِ سفید + نقطهٔ رنگی. */}
+      <Circle
+        x={pinX}
+        y={pinY}
+        radius={10.5}
+        fill={colorWithAlpha(theme.text, 0.22) || theme.border}
+        listening={false}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+      <Circle
+        x={pinX}
+        y={pinY}
+        radius={6.5}
+        fill="#f8fafc"
+        listening={false}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
+      />
+      <Circle
+        x={pinX}
+        y={pinY}
+        radius={3}
+        fill={theme.headerFill}
+        listening={false}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
       />
       <Text
-        x={12}
-        y={36}
-        width={w - 24}
-        // فاز ۴-مرحلهٔ ۳ (سناریو ۳): جلوگیری از بیرون‌زدگیِ متن از کارت.
-        // قبلاً هیچ heightای تنظیم نشده بود و متنِ ۶ خط یا بیشتر از
-        // لبهٔ پایینِ کارت بیرون می‌زد. حالا ارتفاعِ متن به ارتفاعِ
-        // کارت منهای ۴۸ محدود می‌شود (۳۶ پیکسلِ هدر و بالای متن +
-        // ۱۲ پیکسلِ حاشیهٔ پایین) و با ellipsis={true}، متنِ اضافه
-        // با «...» بریده می‌شود تا ظاهرِ کارت همیشه آراسته بماند.
-        // محافظِ Math.max(20, ...) برای این است که اگر ارتفاعِ کارت
-        // در دادهٔ قدیمی کمتر از ۴۸ بود، height منفی به Konva نرسد.
-        // فاز ۴-مرحلهٔ ۳ (سناریو ۴): ترازِ راست‌به‌چپ برای فارسی.
-        height={Math.max(20, h - 48)}
+        x={pad}
+        y={headerH + 10}
+        width={w - pad * 2}
+        // ارتفاعِ متن: ارتفاعِ کارت منهای هدر (۲۴) و پدینگِ بالا و
+        // پایین (۱۰ + ۱۰)؛ با ellipsis، متنِ اضافه با «...» بریده
+        // می‌شود تا از کارت بیرون نزند (ادامهٔ فیکسِ فاز ۴-مرحلهٔ ۳).
+        height={Math.max(20, h - headerH - 20)}
         ellipsis={true}
-        align="right"
+        align={textDir === 'rtl' ? 'right' : 'left'}
         text={item.text || 'برای نوشتن یادداشت دوبار کلیک کنید...'}
         fontSize={13}
         fontFamily="'Vazirmatn', sans-serif"
-        fill="#713f12"
+        fill={theme.text}
         wrap="word"
-        lineHeight={1.4}
+        lineHeight={1.5}
+        perfectDrawEnabled={false}
+        shadowForStrokeEnabled={false}
       />
     </Group>
   );
 });
-
 
 // ============================================================================
 // فاز ۴: ویرایشگرِ موقتِ متن (HTML) — TextEditorOverlay
@@ -756,44 +1034,188 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
 // Blur ندهد و متن را ثبت نکند (بدونِ آن، «لغو» عملاً به «ثبت»
 // تبدیل می‌شد).
 // ============================================================================
+// ============================================================================
+// Refinement Phase 1 Step 3: کارتِ شناورِ ویرایشگرِ متن — TextEditorOverlay
+// بازنویسیِ کامل طبقِ TASK («تعمیرِ قطعیِ ابزارِ متن»)، با این
+// مشخصاتِ دقیق:
+//  • موقعیتِ مطلق، نزدیکِ نقطهٔ کلیک ولی با clampِ هوشمند
+//    (Forensic Step 4): left/top از فرمولِ
+//    max(12, min(نقطه × مقیاس, اندازهٔ Stage − ۲۸۰/۱۲۰ − ۱۲))
+//    می‌آیند، پس کارت هرگز از صفحه بیرون نمی‌زند. در گامِ قبل،
+//    عمداً clamp نبود و کارت نزدیکِ لبه، بیرون می‌افتاد — TASKِ
+//    جدید، صراحتاً clamp را برگردانده است.
+//  • استایلِ کارت: background rgba(15, 23, 42, 0.95) +
+//    backdropFilter blur(8px) + border 1.5px solid #06b6d4 +
+//    borderRadius 10px + padding 8 + boxShadow
+//    0 10px 25px rgba(0,0,0,0.5) + zIndex 9999.
+//  • هدر: عنوانِ «درج متن» + دو دکمه: ثبت (تیکِ فیروزه‌ای) و
+//    انصراف (ضربدر). دکمه‌ها mousedownِ preventDefault دارند تا
+//    کلیک روی آن‌ها، فوکوس را از textarea نگیرد.
+//  • textarea: عرضِ مؤثر ۲۶۴ پیکسل (کارتِ ۲۸۰ منهای padding) که
+//    از حداقلِ ۲۲۰ پیکسلِ TASK بیشتر است، minHeight 60، رنگِ قلمِ
+//    انتخابی، placeholder «متن خود را بنویسید...»، جهتِ خودکار
+//    (detectTextDirectionی مقدارِ فعلی).
+//  • مهارِ کامل: rootِ کارت، pointerdown/pointermove/pointerup/
+//    click را stopPropagation می‌کند و keydown را stopPropagation
+//    + stopImmediatePropagationی نیتیو می‌کند؛ textarea هم همان
+//    مهارها را دارد. پس هیچ رویدادی از کارت به Stage یا شنونده‌های
+//    window نمی‌رسد.
+//  • فوکوس: autoFocus + setTimeout(() => focus(), 50) در باز شدنِ
+//    هر ویرایشگرِ تازه (کلیدِ effect، editId:x:y است، نه هر
+//    keystroke). rAFِ گامِ قبل، طبقِ TASK با همین setTimeout
+//    جایگزین شده است.
+//  • قانونِ بستن (مهم‌ترین تغییر نسبت به فاز ۴): ویرایشگر به هیچ
+//    وجه با Blur بسته نمی‌شود — هیچ onBlurای روی textarea نیست.
+//    بستن فقط در دو حالت مجاز است: (۱) دکمهٔ ثبت یا Enter بدونِ
+//    Shift، (۲) دکمهٔ انصراف یا Escape. کلیکِ بیرون از کارت،
+//    ویرایشگر را باز نگه می‌دارد، ولی handleDown در Forensic
+//    Step 4، کلیکِ بیرونی را به «بستن» تبدیل کرده است (خالی →
+//    لغو، تایپ‌شده → کامیت) — پس بوم دیگر قفل نمی‌شود. این،
+//    بازگشتِ Blur نیست؛ Blur هنوز هیچ کاری نمی‌کند.
+//  • استثنای teardown: effectِ «بستنِ ویرایشگرها با خاموش شدنِ
+//    استودیو» (در بدنهٔ کامپوننتِ اصلی) همچنان هست، چون رها کردنِ
+//    textarea روی صفحهٔ بدونِ حاشیه‌نویسی، بدتر از بستنِ آن است؛
+//    این، «بستن با Blur» نیست، بلکه جمع کردنِ حالت با عوض شدنِ
+//    مود است.
+// ویرایشگرِ استیکی، در این گام دست نخورده است و همچنان با Blur
+//    ثبت می‌کند (TASK فقط ویرایشگرِ متن را بازنویسی خواسته است).
+// ============================================================================
 function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onCommit, onCancel }) {
+  const textareaRef = useRef(null);
+  const prevEditorKeyRef = useRef(null);
+  const editorKey = editor ? `${editor.editId ?? 'new'}:${editor.x}:${editor.y}` : null;
+  useEffect(() => {
+    if (!editor) {
+      prevEditorKeyRef.current = null;
+      return;
+    }
+    if (prevEditorKeyRef.current === editorKey) return;
+    prevEditorKeyRef.current = editorKey;
+    // فوکوسِ خودکار بعد از رندر، دقیقاً طبقِ TASK.
+    const timer = setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [editor, editorKey]);
   if (!editor) return null;
+  const textareaDir = detectTextDirection(editor.value);
+  // Forensic Step 4 — Smart Viewport Clamping (برگشتِ آگاهانه از
+  // تصمیمِ «بدونِ clamp»ی گامِ قبل، طبقِ TASKِ جدید): نقطهٔ کلیک
+  // همچنان دقیق ذخیره می‌شود، ولی «نمایشِ» کارت، داخلِ صفحه نگه
+  // داشته می‌شود تا نزدیکِ لبهٔ راست/پایین، کارت به بیرون پرتاب
+  // نشود و نامرئی به نظر نرسد. ابعادِ کارت، ۲۸۰×۱۲۰ و حاشیهٔ ۱۲
+  // پیکسل است (مطابقِ فرمولِ TASK). توجه: با راهنمای کلیدها،
+  // ارتفاعِ واقعیِ کارت چند پیکسل از ۱۲۰ بیشتر است، پس در لبهٔ
+  // پایینیِ مطلق، چند پیکسل سرریزِ جزئی ممکن است — بسیار بهتر از
+  // پرتابِ کاملِ کارت به بیرون.
+  // Cycle-fix (2026-10-25) — گاردِ عددیِ قطعیِ کارت (فرمولِ دقیقِ
+  // TASK): مختصاتِ ویرایشگر اول با isFinite سنجیده می‌شود (اگر
+  // editor.x/y از مسیرِ ویرایشِ آیتمِ قدیمی، NaN شده باشند، به
+  // ۱۰۰ برمی‌گردند)، بعد با (scaleX||1) ضرب می‌شود (NaN و ۰ و
+  // undefined، هر سه falsyاند و به ۱ می‌رسند)، و در نهایت با
+  // ۲۹۲ = ۲۸۰+۱۲ و ۱۳۲ = ۱۲۰+۱۲ داخلِ صفحه clamp می‌شود. تنها
+  // تفاوت با فرمولِ TASK، `size?.w` به‌جای `size.w` است تا اگر
+  // size به هر دلیلی null شد، به‌جای throw، مقدارِ ۱۰۰۰ بنشیند.
+  // توجه: Math.max با ورودیِ NaN، خودش NaN برمی‌گرداند — پس
+  // بدونِ این guardها، clampِ قبلی در برابرِ NaN بی‌دفاع بود.
+  const safeX = Number.isFinite(editor.x) ? editor.x : 100;
+  const safeY = Number.isFinite(editor.y) ? editor.y : 100;
+  const leftPx = Math.max(12, Math.min(safeX * (scaleX || 1), (size?.w || 1000) - 292));
+  const topPx = Math.max(12, Math.min(safeY * (scaleY || 1), (size?.h || 1000) - 132));
+  const stopAll = (e) => {
+    e.stopPropagation();
+    if (e.nativeEvent && typeof e.nativeEvent.stopImmediatePropagation === 'function') {
+      e.nativeEvent.stopImmediatePropagation();
+    }
+  };
   return (
     <div
       onPointerDown={(e) => e.stopPropagation()}
+      onPointerMove={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
+      onKeyDown={stopAll}
       style={{
         position: 'absolute',
-        left: Math.max(0, Math.min(editor.x * scaleX, Math.max(0, size.w - 280))),
-        top: Math.max(0, Math.min(editor.y * scaleY, Math.max(0, size.h - 130))),
-        zIndex: 25,
+        left: leftPx,
+        top: topPx,
+        // Forensic Step 4: دسترسیِ تعاملیِ صریح — کارت باید روی
+        // همه‌چیز باشد و کلیک/فوکوس بگیرد، نه اینکه زیرِ لایه‌ای
+        // (مثلِ textLayerی PDF) گیر کند.
+        pointerEvents: 'auto',
+        zIndex: 999999,
+        visibility: 'visible',
         width: 280,
-        backgroundColor: 'rgba(13, 18, 24, 0.96)',
-        border: '1px solid rgba(34,211,238,0.4)',
+        background: 'rgba(15, 23, 42, 0.95)',
+        backdropFilter: 'blur(8px)',
+        border: '1.5px solid #06b6d4',
         borderRadius: 10,
         padding: 8,
-        boxShadow: '0 14px 36px rgba(0, 0, 0, 0.8)',
+        boxShadow: '0 10px 25px rgba(0,0,0,0.5)',
         direction: 'rtl',
         display: 'flex',
         flexDirection: 'column',
         gap: 6,
       }}
     >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 8,
+        }}
+      >
+        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.85)', fontFamily: 'inherit' }}>
+          درج متن
+        </span>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            type="button"
+            title="ثبت (Enter)"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onCommit()}
+            style={{
+              border: 'none',
+              cursor: 'pointer',
+              borderRadius: 7,
+              width: 28,
+              height: 28,
+              fontSize: 14,
+              lineHeight: 1,
+              background: 'rgba(34,211,238,0.25)',
+              color: '#67e8f9',
+            }}
+          >
+            ✓
+          </button>
+          <button
+            type="button"
+            title="انصراف (Escape)"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onCancel()}
+            style={{
+              border: 'none',
+              cursor: 'pointer',
+              borderRadius: 7,
+              width: 28,
+              height: 28,
+              fontSize: 14,
+              lineHeight: 1,
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.6)',
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
       <textarea
+        ref={textareaRef}
         autoFocus
         value={editor.value}
         onChange={(e) => onChangeValue(e.target.value)}
         onKeyDown={(e) => {
-          // فاز ۴-مرحلهٔ ۳ (سناریو ۵): مسدودسازیِ کاملِ کیبورد.
-          // فقط stopPropagationِ React کافی نبود، چون شنوندهٔ
-          // window در PdfViewer در فازِ حباب روی همان رویداد نشسته
-          // است و stopPropagationِ مصنوعیِ React در بعضی مسیرها
-          // (مثلاً شنونده‌های روی همان هدف) جلوی همه را نمی‌گیرد.
-          // stopImmediatePropagationِ نیتیو، هم انتشار به window را
-          // قطع می‌کند و هم بقیهٔ شنونده‌های همان هدف را، پس
-          // Ctrl+Z داخلِ ویرایشگر دیگر نمی‌تواند Undoیِ صفحه را
-          // شکار کند. guard برای این است که در تستِ Node یا
-          // محیطِ بدونِ nativeEvent، خطا ندهد.
           e.stopPropagation();
           if (e.nativeEvent && typeof e.nativeEvent.stopImmediatePropagation === 'function') {
             e.nativeEvent.stopImmediatePropagation();
@@ -806,12 +1228,11 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
             onCancel();
           }
         }}
-        onBlur={() => onCommit()}
         onPointerDown={(e) => e.stopPropagation()}
-        placeholder="متن را تایپ کنید (Enter = ثبت، Shift+Enter = خط جدید)..."
+        placeholder="متن خود را بنویسید..."
         style={{
           width: '100%',
-          minHeight: 72,
+          minHeight: 60,
           background: 'transparent',
           border: 'none',
           outline: 'none',
@@ -820,50 +1241,22 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
           fontSize: Math.max(12, editor.fontSize * scaleY),
           lineHeight: 1.3,
           color: editor.color,
-          direction: 'rtl',
+          direction: textareaDir,
         }}
       />
-      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-start' }}>
-        <button
-          type="button"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => onCommit()}
-          style={{
-            border: 'none',
-            cursor: 'pointer',
-            borderRadius: 7,
-            padding: '6px 12px',
-            fontSize: 12,
-            fontFamily: 'inherit',
-            background: 'rgba(34,211,238,0.25)',
-            color: '#67e8f9',
-          }}
-        >
-          ثبت متن
-        </button>
-        <button
-          type="button"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => onCancel()}
-          style={{
-            border: 'none',
-            cursor: 'pointer',
-            borderRadius: 7,
-            padding: '6px 12px',
-            fontSize: 12,
-            fontFamily: 'inherit',
-            background: 'transparent',
-            color: 'rgba(255,255,255,0.6)',
-          }}
-        >
-          لغو
-        </button>
+      <div
+        style={{
+          fontSize: 11,
+          color: 'rgba(255,255,255,0.55)',
+          lineHeight: 1.4,
+        }}
+      >
+        Enter: ثبت | Shift+Enter: سطر جدید | Esc: انصراف
       </div>
     </div>
   );
 }
 
-// ============================================================================
 // فاز ۴: ویرایشگرِ موقتِ استیکی (HTML) — StickyEditorOverlay
 // روی همان کارتِ Konva، با همان ابعادِ پیکسلیِ کارت. textarea به‌صورتِ
 // کنترل‌نشده (defaultValue) است تا تایپ، رندرِ لایه را درگیر نکند؛
@@ -872,43 +1265,127 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
 // شود). Escape، بدونِ ثبت لغو می‌کند. Enter در استیکی، خطِ جدید
 // است و ثبت نمی‌کند (برخلافِ متن).
 // ============================================================================
+// ============================================================================
+// Refinement Phase 2 — ویرایشگرِ شناورِ استیکی، هماهنگ با کارتِ جدید
+// بازنویسیِ استایلِ StickyEditorOverlay (فاز ۴) تا ۱۰۰٪ منطبق بر
+// کارتِ CommittedStickyی جدید باشد؛ رفتار (ثبت با Blur، لغو با
+// Escape، خطِ جدید با Enter) دست نخورده است:
+//  • همان تمِ getStickyThemeی رنگِ انتخابی: زیرهٔ مات + تینتِ
+//    ۰٫۱۶ + هدرِ ۲۴ پیکسلی با همان رنگ + پینِ وسطِ هدر (هاله +
+//    دیسکِ سفید + نقطهٔ رنگی) + حاشیهٔ ۱ پیکسلیِ هم‌رنگ.
+//  • گوشه‌های ۱۴ پیکسل با overflow hidden تا هدر، گوشه‌های کارت را
+//    دقیق بگیرد؛ سایهٔ ۰ ۶px ۱۶px rgba(0,0,0,0.22) مثلِ کارتِ Konva.
+//  • بدونِ بوردرهای پیش‌فرضِ مرورگر: textarea با border و outlineی
+//    none و پس‌زمینهٔ شفاف، دقیقاً روی پدینگِ کارت می‌نشیند.
+//  • ترازِ خودکارِ زنده: جهتِ textarea از detectTextDirectionی
+//    مقدارِ فعلی می‌آید و با هر keystroke به‌روز می‌شود (فارسی →
+//    راست، لاتین → چپ). برای این کار، overlay یک stateی محلیِ
+//    جهت دارد؛ چون textarea کنترل‌نشده (defaultValue) است،
+//    رندرِ مجددِ overlay مقدارِ تایپ‌شده را پاک نمی‌کند (React،
+//    defaultValue را فقط در mount اعمال می‌کند). والد هم overlay را
+//    با keyی idی آیتم رندر می‌کند تا با عوض شدنِ آیتم (دوبارکلیکِ
+//    مستقیم از یک استیکی به استیکیِ دیگر)، هم متن و هم جهت، تازه
+//    شوند — بدونِ key، textareaی mountمانده، متنِ استیکیِ قبلی را
+//    نشان می‌داد (باگِ نهفتهٔ فاز ۴).
+//  • zIndex 999999 و pointerEvents auto برای هم‌ترازی با کارتِ متن
+//    (قبلاً ۲۵ بود؛ داخلِ کانتینر، هر دو بالای بوم‌اند، ولی عددِ
+//    یکسان، تقدمِ لایه‌ها را قابلِ پیش‌بینی نگه می‌دارد).
+// ============================================================================
 function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCancel }) {
+  const [textDir, setTextDir] = useState(() => detectTextDirection(item ? item.text || '' : ''));
   if (!item) return null;
+  const theme = getStickyTheme(item.color);
+  const itemX = Number(item.x ?? item.startX ?? 0);
+  const itemY = Number(item.y ?? item.startY ?? 0);
+  const itemW = Number(item.width) || 210;
+  const itemH = Number(item.height) || 170;
   return (
     <div
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
       style={{
         position: 'absolute',
-        left: Math.max(0, Math.min((Number(item.x ?? item.startX ?? 0)) * scaleX, Math.max(0, size.w - 100))),
-        top: Math.max(0, Math.min((Number(item.y ?? item.startY ?? 0)) * scaleY, Math.max(0, size.h - 60))),
-        zIndex: 25,
-        width: Math.max(100, (Number(item.width) || 210) * scaleX),
-        height: Math.max(60, (Number(item.height) || 170) * scaleY),
-        backgroundColor: '#fef9c3',
-        border: '1px solid #facc15',
-        borderRadius: 8,
-        boxShadow: '0 10px 28px rgba(0, 0, 0, 0.45)',
+        left: Math.max(0, Math.min(itemX * scaleX, Math.max(0, size.w - 100))),
+        top: Math.max(0, Math.min(itemY * scaleY, Math.max(0, size.h - 60))),
+        zIndex: 999999,
+        pointerEvents: 'auto',
+        visibility: 'visible',
+        width: Math.max(100, itemW * scaleX),
+        height: Math.max(60, itemH * scaleY),
+        backgroundColor: theme.bodyBase,
+        border: `1px solid ${theme.border}`,
+        borderRadius: 14,
+        boxShadow: '0 6px 16px rgba(0, 0, 0, 0.22)',
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
         direction: 'rtl',
       }}
     >
+      {/* تینتِ رنگیِ روی زیره (زیرِ محتوا، بالای پس‌زمینه). */}
       <div
         style={{
-          height: 26,
-          flexShrink: 0,
-          backgroundColor: '#fef08a',
-          borderBottom: '1px dashed rgba(0, 0, 0, 0.18)',
+          position: 'absolute',
+          inset: 0,
+          background: theme.tint,
+          pointerEvents: 'none',
         }}
       />
+      <div
+        style={{
+          height: 24,
+          flexShrink: 0,
+          position: 'relative',
+          backgroundColor: theme.headerFill,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <span
+          style={{
+            width: 21,
+            height: 21,
+            borderRadius: '50%',
+            background: colorWithAlpha(theme.text, 0.22) || theme.border,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}
+        >
+          <span
+            style={{
+              width: 13,
+              height: 13,
+              borderRadius: '50%',
+              background: '#f8fafc',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: theme.headerFill,
+                flexShrink: 0,
+              }}
+            />
+          </span>
+        </span>
+      </div>
       <textarea
         autoFocus
         defaultValue={item.text || ''}
+        onChange={(e) => {
+          setTextDir(detectTextDirection(e.target.value));
+        }}
         onKeyDown={(e) => {
-          // فاز ۴-مرحلهٔ ۳ (سناریو ۵): همان مسدودسازیِ کاملِ
-          // TextEditorOverlay — stopPropagation +
+          // همان مسدودسازیِ کاملِ TextEditorOverlay — stopPropagation +
           // stopImmediatePropagationِ نیتیو — تا Ctrl+Z داخلِ
           // ویرایشگرِ استیکی هم به شنوندهٔ window در PdfViewer
           // نرسد.
@@ -925,18 +1402,20 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
         onPointerDown={(e) => e.stopPropagation()}
         placeholder="نکته را بنویسید..."
         style={{
+          position: 'relative',
           flex: 1,
           width: '100%',
           background: 'transparent',
           border: 'none',
           outline: 'none',
           resize: 'none',
-          padding: '8px 12px',
+          padding: '10px 12px',
           fontFamily: "'Vazirmatn', sans-serif",
           fontSize: Math.max(11, 13 * scaleY),
-          lineHeight: 1.4,
-          color: '#713f12',
-          direction: 'rtl',
+          lineHeight: 1.5,
+          color: theme.text,
+          direction: textDir,
+          textAlign: textDir === 'rtl' ? 'right' : 'left',
         }}
       />
     </div>
@@ -965,7 +1444,23 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
 //   ۱۰ را تضمین می‌کند).
 // - فلش: شروع، پایان و (در صورتِ وجود) نقطهٔ کنترل، هر سه با
 //   فرمولِ نقطه‌ای — تبدیلِ آفینِ بزیهٔ درجهٔ دو، هنوز بزیهٔ درجهٔ
-//   دو است، پس شکلِ منحنی حفظ می‌شود.
+//   دو است، پس شکلِ منحنی حفظ می‌شود. پرچم‌های hasStartDot و
+//   hasEndArrow با ...item حفظ می‌شوند (Refinement Step 2)؛ شعاعِ
+//   دایره و طولِ تیک از strokeWidth ساخته می‌شوند، پس با مقیاس
+//   کش نمی‌آیند و نیازی به تبدیل ندارند.
+// - دستگیره‌های میانی (Refinement Step 2): چون Konva برای آن‌ها
+//   scaleY را ۱ می‌گذارد، باکس/استیکی فقط در عرض، و استروک/فلش
+//   فقط در x تغییر می‌کنند؛ متن فقط جابه‌جا می‌شود (fontSize از
+//   scaleY می‌آید و ثابت می‌ماند).
+// - دستگیره‌های بالا/پایین‌وسط (Refinement Phase 1 Step 2): Konva
+//   برای آن‌ها scaleX را ۱ می‌گذارد و scaleY را عوض می‌کند (و
+//   موقعیتِ نود را طوری جابه‌جا می‌کند که لبهٔ مقابل ثابت بماند).
+//   پس با همین فرمولِ فعلی، بدونِ هیچ تغییری در منطق: باکس/استیکی
+//   فقط ارتفاعشان عوض می‌شود (width × ۱)، متن fontSizeاش عوض
+//   می‌شود (fontSize × scaleY با clamp)، فلش/استروک فقط در y کش
+//   می‌آیند. یعنی «تغییرِ مستقلِ ارتفاع بدونِ تغییرِ عرض»، از قبل
+//   در این تابع بوده است و این گام، فقط دستگیره‌ها را فعال کرده
+//   است، نه ریاضی را عوض کرده است (اثبات با تستِ عددی در گزارش).
 // - استروک: همهٔ نقاط با فرمولِ نقطه‌ای؛ strokeWidth عوض نمی‌شود
 //   (ضخامتِ خط نباید با مقیاس کش بیاید).
 // ============================================================================
@@ -1030,6 +1525,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageNumber,
   items = [],
   onCommitPageItems,
+  // Refinement Final: زاویهٔ چرخشِ صفحه (۰/۹۰/۱۸۰/۲۷۰) که PdfViewer
+  // از useReaderStore می‌خواند و به لایه می‌دهد. پیش‌فرض ۰ است تا
+  // لایهٔ قدیمیِ بدونِ این prop، دقیقاً مثلِ قبل کار کند.
+  rotation = 0,
 }) {
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
@@ -1117,8 +1616,15 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const boxStyleRef = useRef(annotationBoxStyle);
   const hasFillRef = useRef(annotationHasFill);
   const arrowStyleRef = useRef(annotationArrowStyle);
+  // Refinement Step 2: پرچم‌های ماژولارِ فلش از استور (پیش‌فرض: هر دو روشن).
+  const annotationHasStartDot = useAppStore((s) => (s.annotationHasStartDot ?? true));
+  const annotationHasEndArrow = useAppStore((s) => (s.annotationHasEndArrow ?? true));
   const fontFamilyRef = useRef(annotationFontFamily);
   const fontSizeRef = useRef(annotationFontSize);
+  const hasStartDotRef = useRef(true);
+  const hasEndArrowRef = useRef(true);
+  hasStartDotRef.current = annotationHasStartDot;
+  hasEndArrowRef.current = annotationHasEndArrow;
   toolRef.current = annotationTool;
   colorRef.current = annotationColor;
   widthRef.current = annotationStrokeWidth;
@@ -1165,6 +1671,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const scaleY = size.h > 0 ? size.h / (1000 * aspect) : 1;
   const scaleRef = useRef({ scaleX: 1, scaleY: 1 });
   scaleRef.current = { scaleX, scaleY };
+  // Refinement Final: اندازهٔ Stage و زاویهٔ چرخش برای extractPoints
+  // (که useCallback با وابستگیِ خالی است و فقط از طریقِ ref به
+  // مقادیرِ تازه می‌رسد).
+  const sizeRef = useRef({ w: 0, h: 0 });
+  sizeRef.current = size;
+  const rotationRef = useRef(rotation);
+  rotationRef.current = rotation;
 
   const uniformItems = useMemo(() => {
     return (items || []).filter(Boolean).map((it) => {
@@ -1232,6 +1745,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           fontFamily: ed.fontFamily,
           color: ed.color,
           opacity: ed.opacity,
+          pillBackground: ed.pillBackground ?? it.pillBackground ?? null,
         };
       }));
     } else {
@@ -1247,6 +1761,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         fontFamily: ed.fontFamily,
         color: ed.color,
         opacity: ed.opacity,
+        // Refinement Phase 1 Step 2: Pillِ پیش‌فرضِ ویرایشگرِ جدید.
+        pillBackground: ed.pillBackground ?? 'auto',
       };
       commit([...uniformItems, newText]);
     }
@@ -1416,10 +1932,19 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       tr.nodes([]);
       setSelectedNodes([]);
     } else {
-      const ids = state.selectedAnnotationIds || [];
-      const nodes = ids
-        .map((id) => itemNodeRefs.current.get(id))
-        .filter(Boolean);
+      // Refinement Step 2: Transformer فقط روی آیتمِ فعال
+      // (selectedAnnotationId = آخرین آیتمِ انتخاب‌شده) وصل می‌شود،
+      // نه روی همهٔ selectedAnnotationIds — تا کادرِ مشترکِ غول‌پیکر
+      // و دستگیره‌های سرگردان در فضای خالی ساخته نشود. کادرِ بقیهٔ
+      // آیتم‌های انتخاب‌شده، با Rectهای خط‌چینِ مجزا (پایین‌تر، در
+      // رندر) نشان داده می‌شود. بده‌بستان: درگِ دستگیره در
+      // چندانتخابی، فقط آیتمِ اصلی را تغییر می‌دهد، نه کلِ گروه را؛
+      // جابه‌جاییِ گروهی (dragِ نود) همچنان گروهی می‌ماند.
+      const primaryId = state.selectedAnnotationId;
+      const primaryNode = primaryId
+        ? itemNodeRefs.current.get(primaryId)
+        : null;
+      const nodes = primaryNode ? [primaryNode] : [];
       tr.nodes(nodes);
       setSelectedNodes(nodes);
     }
@@ -1485,7 +2010,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // ویرایش، ویژگی‌های قبلیِ متن را حفظ کند.
   const openTextEditorForItem = useCallback((item) => {
     if (!isAnnotationActive || toolRef.current === 'eraser') return;
-    setTextEditor({
+    const editEditor = {
       x: Number(item.x ?? item.startX ?? 0),
       y: Number(item.y ?? item.startY ?? 0),
       value: item.text || '',
@@ -1494,7 +2019,14 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       fontFamily: item.fontFamily || "'Estedad', sans-serif",
       color: item.color || '#22d3ee',
       opacity: item.opacity ?? 0.9,
-    });
+      // Refinement Phase 1 Step 2: Pillِ موجود حفظ می‌شود؛ آیتمِ
+      // قدیمیِ بدونِ Pill، با ویرایش هم Pill نمی‌گیرد (تغییرِ
+      // ناگهانیِ ظاهرِ آیتم‌های قدیمی، غافلگیرکننده است). افزودنِ
+      // Pill به آیتمِ قدیمی، از طریقِ update-selected ممکن است.
+      pillBackground: item.pillBackground ?? null,
+    };
+    textEditorRef.current = editEditor;
+    setTextEditor(editEditor);
   }, [isAnnotationActive]);
 
   // فاز ۴: باز کردنِ ویرایشگرِ استیکی (دوبارکلیک روی کارت).
@@ -1571,10 +2103,33 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     drawSmoothStroke(ctx, pts, style);
   }, []);
 
+  // Refinement Final: چرخشِ معکوس در extractPoints.
+  // چرا لازم است؟ PdfPageItem روی کادرِ صفحه، transform:
+  // rotate(rotation) می‌گذارد (چرخش حولِ مرکز، در جهتِ عقربه‌های
+  // ساعت در مختصاتِ صفحه که y رو به پایین است). getBoundingClientRect
+  // کادرِ محاطِ محورموازیِ عنصرِ چرخیده را برمی‌گرداند، نه مختصاتِ
+  // محلیِ Stage را؛ پس (clientX − rect.left, clientY − rect.top)
+  // مختصاتِ «کادرِ محاط» (bx, by) است، نه مختصاتِ محلیِ Stage
+  // (lx, ly) که آیتم‌ها با آن رندر می‌شوند. تبدیلِ معکوس، با
+  // SW = size.w و SH = size.h (ابعادِ محلیِ Stage):
+  //   ۰ درجه:   lx = bx,          ly = by
+  //   ۹۰ درجه:  lx = by,          ly = SH − bx
+  //   ۱۸۰ درجه: lx = SW − bx,     ly = SH − by
+  //   ۲۷۰ درجه: lx = SW − by,     ly = bx
+  // (مشتق‌شده از چرخشِ بردارِ (dx, dy) حولِ مرکز: در جهتِ ساعت،
+  // (dx, dy) → (−dy, dx) و در خلافِ جهت، (dx, dy) → (dy, −dx).)
+  // این تبدیل روی هر دو شاخه (rect و fallbackِ getPointerPosition)
+  // اعمال می‌شود، چون getPointerPosition هم عملاً همان مختصاتِ
+  // کادرِ محاط را برمی‌گرداند. بعد از تبدیل، تقسیم بر scaleX/scaleY
+  // مثلِ قبل، نقطهٔ یکنواخت را می‌دهد؛ پس هیت‌تستِ سلکت، رسم،
+  // پاک‌کن و مارکی روی صفحهٔ چرخیده هم دقیق می‌شوند. اسکرول قبلاً
+  // درست بود (rect با اسکرول جابه‌جا می‌شود) و زوم هم با scale
+  // خنثی می‌شود؛ فقط چرخش جا مانده بود.
   const extractPoints = useCallback((nativeEvent) => {
     const stage = stageRef.current;
     if (!stage || !nativeEvent) return [];
     const { scaleX: sx, scaleY: sy } = scaleRef.current;
+    const { w: SW, h: SH } = sizeRef.current || {};
 
     const coalesced = (nativeEvent.getCoalescedEvents && typeof nativeEvent.getCoalescedEvents === 'function')
       ? nativeEvent.getCoalescedEvents()
@@ -1584,27 +2139,104 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     const out = [];
     const content = stage.content;
     const rect = content ? content.getBoundingClientRect() : null;
+    const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
 
     for (const ce of events) {
       if (!ce) continue;
-      let px, py;
+      let bx, by;
       if (rect && ce.clientX !== undefined) {
-        px = ce.clientX - rect.left;
-        py = ce.clientY - rect.top;
+        bx = ce.clientX - rect.left;
+        by = ce.clientY - rect.top;
       } else {
         const pos = stage.getPointerPosition();
         if (!pos) continue;
-        px = pos.x;
-        py = pos.y;
+        bx = pos.x;
+        by = pos.y;
       }
+      // چرخشِ معکوس: (bx, by)ی کادرِ محاط → (lx, ly)ی محلیِ Stage.
+      let lx = bx;
+      let ly = by;
+      if (rot === 90) {
+        lx = by;
+        ly = (SH || 0) - bx;
+      } else if (rot === 180) {
+        lx = (SW || 0) - bx;
+        ly = (SH || 0) - by;
+      } else if (rot === 270) {
+        lx = (SW || 0) - by;
+        ly = bx;
+      }
+      // هر زاویهٔ دیگری (از جمله ۰): بدونِ تبدیل (رفتارِ قبلی).
       out.push({
-        x: px / sx,
-        y: py / sy,
+        x: lx / sx,
+        y: ly / sy,
         time: ce.timeStamp || performance.now(),
       });
     }
     return out;
   }, []);
+
+  // Refinement Phase 1 Step 3: نقطهٔ کلیکِ ابزارِ متن، از
+  // stage.getPointerPosition() — طبقِ TASK — ولی با حفظِ چرخشِ
+  // معکوسِ Refinement Final. چرا تبدیل لازم است؟ خروجیِ خامِ
+  // Konva از getPointerPosition، مختصاتِ کادرِ محاطِ محورموازیِ
+  // عنصرِ چرخیده است، نه مختصاتِ محلیِ Stage؛ پس اگر بدونِ
+  // تبدیل مصرف می‌شد، روی صفحهٔ چرخیده (۹۰/۲۷۰ درجه) نقطهٔ
+  // اشتباه می‌داد و رفعِ چرخشِ گامِ نهایی پسرفت می‌کرد. پس
+  // خروجیِ getPointerPosition از همان تبدیلِ معکوسِ extractPoints
+  // می‌گذرد و بعد بر scale تقسیم می‌شود تا مختصاتِ یکنواخت
+  // (۰ تا ۱۰۰۰ در x) به دست آید. اگر Konva موقعیتی نداشت
+  // (مثلاً رویداد خارج از Stage)، از extractPointsی موجود به‌عنوانِ
+  // fallback استفاده می‌شود که همان تبدیل را روی مختصاتِ رویداد
+  // انجام می‌دهد.
+  const getTextClickPoint = useCallback((nativeEvent) => {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    const pos = typeof stage.getPointerPosition === 'function'
+      ? stage.getPointerPosition()
+      : null;
+    if (pos) {
+      const { scaleX: sx, scaleY: sy } = scaleRef.current;
+      const { w: SW, h: SH } = sizeRef.current || {};
+      const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
+      let lx = pos.x;
+      let ly = pos.y;
+      if (rot === 90) {
+        lx = pos.y;
+        ly = (SH || 0) - pos.x;
+      } else if (rot === 180) {
+        lx = (SW || 0) - pos.x;
+        ly = (SH || 0) - pos.y;
+      } else if (rot === 270) {
+        lx = (SW || 0) - pos.y;
+        ly = pos.x;
+      }
+      // Forensic Step 4 — NaN Guard: اگر مقیاس یا ابعاد، نامعتبر
+      // باشند (مثلاً تقسیم بر صفر)، خروجی Infinity/NaN می‌شود و
+      // مرورگر، left/topی NaNpx را نادیده می‌گیرد — کارت، در جای
+      // نامعلوم (یا اصلاً) رندر می‌شود. پس هر خروجیِ غیرِ متناهی،
+      // بلافاصله با fallbackِ پایدارِ ۱۰۰/۱۰۰ (مختصاتِ یکنواخت،
+      // نزدیکِ گوشهٔ بالا-چپ) جایگزین می‌شود تا مقدارِ پیکسلی،
+      // هرگز NaNpx نشود.
+      const rawX = lx / sx;
+      const rawY = ly / sy;
+      const safeX = Number.isFinite(rawX) ? rawX : 100;
+      const safeY = Number.isFinite(rawY) ? rawY : 100;
+      if (safeX !== rawX || safeY !== rawY) {
+        try {
+          console.warn('[TEXT_TOOL_CLICK] NaN point from getPointerPosition, fallback to 100,100');
+        } catch { /* کنسول در دسترس نیست */ }
+      }
+      return { x: safeX, y: safeY };
+    }
+    const pts = extractPoints(nativeEvent);
+    if (pts.length === 0) return null;
+    const p0 = pts[0];
+    return {
+      x: Number.isFinite(p0.x) ? p0.x : 100,
+      y: Number.isFinite(p0.y) ? p0.y : 100,
+    };
+  }, [extractPoints]);
 
   const getNative = useCallback((e) => e?.evt || e?.nativeEvent || e, []);
 
@@ -1677,18 +2309,39 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
   const handleDown = useCallback((e) => {
     if (!isAnnotationActive) return;
-    // فاز ۴: وقتی ویرایشگری باز است، کلیک روی استیج نادیده گرفته
-    // می‌شود تا نه استروکِ قلم ساخته شود، نه ویرایشگرِ جدید؛ ثبتِ
-    // متنِ باز، با Blurِ textarea (که قبل از این هندلر رخ می‌دهد)
-    // یا با Enter/دکمهٔ ثبت انجام می‌شود، نه با این کلیک.
-    if (textEditorRef.current || activeStickyEditorRef.current) return;
+    // Forensic Step 4 — رفتارِ هوشمندِ کلیکِ بیرونی (جایگزینِ
+    // قانونِ گامِ قبل که کلیکِ بیرونی را کاملاً نادیده می‌گرفت):
+    // اگر ویرایشگرِ متن باز است، هر pointerdown روی Stage، اول
+    // آن را می‌بندد — فیلدِ خالی → لغو، متنِ تایپ‌شده → کامیت —
+    // و بعد برمی‌گردد، بدونِ اینکه اکشنِ جدیدی بسازد. دلیل: در
+    // گامِ قبل، چون نه Blur می‌بست و نه کلیکِ بیرونی، کاربری که
+    // دکمه‌های کارت را نمی‌دید، بوم را «قفل‌شده/فریز» حس می‌کرد.
+    // توجه: این، بازگشتِ Blur نیست — Blur هنوز هیچ کاری
+    // نمی‌کند؛ فقط کلیکِ صریح روی بوم، بسته‌شدن را تریگر
+    // می‌کند. ویرایشگرِ استیکی از این مسیر مستثناست، چون خودش
+    // با Blur ثبت می‌کند (کلیکِ روی بوم، Blurِ آن را شلیک
+    // می‌کند و commitStickyText همان‌جا اجرا می‌شود).
+    if (textEditorRef.current) {
+      const openEd = textEditorRef.current;
+      if (!openEd.value || !openEd.value.trim()) {
+        cancelTextEditor();
+      } else {
+        commitText();
+      }
+      return;
+    }
+    if (activeStickyEditorRef.current) return;
     const native = getNative(e);
     if (!shouldProcessEvent(native)) return; // فیکس #۱
     // فاز ۵: capture فقط برای ابزارهای غیرِ select انجام می‌شود،
     // چون capture روی stage.content می‌تواند dragِ نودهای Konva
     // را مختل کند؛ برای select، drag با نودها و مارکی/جابه‌جاییِ
     // دستی با pointermove/upی خودِ Stage مدیریت می‌شود.
-    if (toolRef.current !== 'select') capturePointer(native);
+    // Refinement Phase 1 Step 2: استثنای متن از capturePointer،
+    // دقیقاً طبقِ TASK. قبلاً بوم، اشاره‌گر را capture می‌کرد و
+    // همین، در ترکیب با mount شدنِ textarea با autoFocus در همان
+    // ژست، فوکوس را ناپایدار می‌کرد. select از قبل مستثنا بود.
+    if (toolRef.current !== 'select' && toolRef.current !== 'text') capturePointer(native);
 
     const pts = extractPoints(native);
     if (pts.length === 0) return;
@@ -1711,7 +2364,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       const clearSelection = state.clearSelection;
       const syncToolbar = state.syncToolbarWithSelectedItem;
       const currentIds = state.selectedAnnotationIds || [];
-      const hit = findTopAnnotationAtPoint(uniformItems, pt);
+      // Refinement Step 2: هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا
+      // کلیکِ مستقیم روی شکل، بلافاصله انتخاب شود. capturePointer
+      // برای select عمداً صدا زده نمی‌شود (بالای همین تابع) تا drag
+      // در همان کلیکِ اول کار کند، نه از کلیکِ دوم.
+      const hit = findTopAnnotationAtPoint(uniformItems, pt, 16);
       const isShift = Boolean(native.shiftKey);
 
       if (hit) {
@@ -1766,17 +2423,69 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // می‌شوند تا تغییرِ تولبار در حینِ باز بودنِ ویرایشگر، متنِ
     // در حالِ تایپ را عوض نکند.
     if (toolRef.current === 'text') {
-      const p0 = pts[0];
-      setTextEditor({
-        x: p0.x,
-        y: p0.y,
+      // Refinement Phase 1 Step 3: نقطهٔ کلیک از
+      // getTextClickPoint می‌آید (stage.getPointerPosition + چرخشِ
+      // معکوس + مقیاس)، نه از pts[0]ی extractPoints — با fallback
+      // به pts[0] اگر Konva موقعیتی نداشت.
+      const clickPt = getTextClickPoint(native) || pts[0];
+      // Forensic Step 4 — لاگِ تشخیصیِ کامل (فقط برای ابزارِ متن،
+      // نه برای همهٔ کلیک‌ها، تا کنسول شلوغ نشود): اگر با ابزارِ
+      // متن کلیک کردی و این لاگ اصلاً ظاهر نشد، یعنی کلیک، هرگز
+      // به handleDown نرسیده است (استودیو غیرفعال است، لایه
+      // mount نشده، یا لایه‌ای بالاتر رویداد را بلعیده) — در این
+      // صورت، مشکل در «رسیدنِ کلیک» است، نه در رندرِ ویرایشگر.
+      // اگر لاگ ظاهر شد ولی کارت دیده نشد، مقادیرِ زیر (به‌ویژه
+      // Pointer raw و Uniform pt) نشان می‌دهند که نقطه، NaN است
+      // یا خارج از صفحه.
+      try {
+        console.group('[TEXT_TOOL_CLICK]');
+        console.log('Tool:', toolRef.current, 'Active:', isAnnotationActive);
+        console.log('Pointer raw:', stageRef.current ? stageRef.current.getPointerPosition() : null);
+        console.log('Scale:', scaleX, scaleY, 'Rotation:', rotation);
+        console.log('Uniform pt:', clickPt, 'Stage size:', size);
+        console.groupEnd();
+      } catch { /* کنسول در دسترس نیست: تشخیص، اختیاری است */ }
+      if (!clickPt) {
+        try {
+          console.warn('[TEXT_TOOL_CLICK] No point: stage or event missing, editor not opened');
+        } catch { /* کنسول در دسترس نیست */ }
+        return;
+      }
+      // NaN Guardِ دوم (علاوه بر guardِ داخلِ getTextClickPoint):
+      // مسیرِ fallbackی pts[0] را هم پوشش می‌دهد.
+      const safePtX = Number.isFinite(clickPt.x) ? clickPt.x : 100;
+      const safePtY = Number.isFinite(clickPt.y) ? clickPt.y : 100;
+      if (safePtX !== clickPt.x || safePtY !== clickPt.y) {
+        try {
+          console.warn('[TEXT_TOOL_CLICK] NaN point, fallback to 100,100');
+        } catch { /* کنسول در دسترس نیست */ }
+      }
+      const newEditor = {
+        x: safePtX,
+        y: safePtY,
         value: '',
         editId: null,
-        fontSize: fontSizeRef.current,
-        fontFamily: fontFamilyRef.current,
-        color: colorRef.current,
-        opacity: opacityRef.current,
-      });
+        // شکلِ state دقیقاً طبقِ TASK، به‌علاوهٔ pillBackground
+        // (از §۳ همان TASK: ذخیره با کپسول) که در snippetِ §۱
+        // نیامده بود ولی §۳ آن را الزام کرده است.
+        fontSize: fontSizeRef.current || 22,
+        fontFamily: fontFamilyRef.current || "'Estedad', sans-serif",
+        color: colorRef.current || '#22d3ee',
+        opacity: opacityRef.current ?? 1,
+        // توجه: opacityRef همیشه مقدار دارد (استور، پیش‌فرضِ
+        // ۰٫۹ دارد)، پس ‎?? 1‎ در عمل، فقط یک guard است و مقدارِ
+        // واقعی، همان شفافیتِ تولبار است، نه ۱.
+        // Forensic Step 4: 'auto' یعنی «رنگِ کپسول را در رندر،
+        // از رنگِ قلم مشتق کن» (resolvePillFill در انجین) — نه
+        // تیرهٔ ثابتِ قدیمی که متنِ تیره را نامرئی می‌کرد.
+        pillBackground: 'auto',
+      };
+      // همگام‌سازیِ فوریِ ref (رفعِ پنجرهٔ کهنهٔ گزارشِ اسکن،
+      // §۱٫۵ موردِ ۳): ref فقط در رندر همگام می‌شد، پس هندلرِ
+      // همان ژست، ویرایشگر را «باز» نمی‌دید. حالا هم ref و هم
+      // state، هم‌زمان تنظیم می‌شوند.
+      textEditorRef.current = newEditor;
+      setTextEditor(newEditor);
       return;
     }
 
@@ -1892,7 +2601,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // قدیمی می‌ماند و ساختِ استیکیِ دوم، آیتم‌های قبلی را از دست می‌داد.
   // شاخه‌های باکس/فلش در handleDown کامیت نمی‌کنند، پس این اضافه
   // روی رفتارِ آن‌ها اثری ندارد.
-  }, [isAnnotationActive, getNative, shouldProcessEvent, capturePointer, extractPoints, pushFilteredPoints, redrawDraft, commit, uniformItems, pageNumber]);
+  }, [isAnnotationActive, getNative, shouldProcessEvent, capturePointer, extractPoints, getTextClickPoint, pushFilteredPoints, redrawDraft, commit, commitText, cancelTextEditor, uniformItems, pageNumber]);
 
   const handleMove = useCallback((e) => {
     // فاز ۵: مارکی و جابه‌جاییِ دستیِ گروهی، قبل از محافظِ
@@ -2156,10 +2865,17 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         ? defaultCurveControl(startX, startY, currentX, currentY)
         : null;
       const newId = uid('arrow');
+      // Refinement Step 2: پرچم‌های ماژولار از استور در لحظهٔ
+      // نهایی‌شدن (پیش‌فرض: هر دو روشن، مثلِ تولبار).
+      const storeState = typeof useAppStore.getState === 'function'
+        ? useAppStore.getState()
+        : {};
       const newArrow = {
         id: newId,
         tool: 'arrow',
         arrowStyle: isCurved ? 'curved' : 'straight',
+        hasStartDot: storeState.annotationHasStartDot ?? true,
+        hasEndArrow: storeState.annotationHasEndArrow ?? true,
         startX: Math.round(startX * 100) / 100,
         startY: Math.round(startY * 100) / 100,
         endX: Math.round(currentX * 100) / 100,
@@ -2365,6 +3081,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         patch.arrowStyle = detail.arrowStyle;
       }
       if (typeof detail.hasFill === 'boolean') patch.hasFill = detail.hasFill;
+      // Refinement Step 2: پرچم‌های ماژولارِ فلش (boolean).
+      if (typeof detail.hasStartDot === 'boolean') patch.hasStartDot = detail.hasStartDot;
+      if (typeof detail.hasEndArrow === 'boolean') patch.hasEndArrow = detail.hasEndArrow;
       // فاز ۴: فونت و اندازهٔ متن — فقط مقادیرِ معتبر، با همان
       // clamp استور برای اندازه (۱۴ تا ۷۶).
       if (typeof detail.fontFamily === 'string' && detail.fontFamily) {
@@ -2372,6 +3091,14 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       }
       if (typeof detail.fontSize === 'number' && detail.fontSize > 0) {
         patch.fontSize = Math.max(14, Math.min(76, detail.fontSize));
+      }
+      // Refinement Phase 1 Step 2: Pill — رشتهٔ رنگ، Pill را
+      // می‌گذارد و null، آن را برمی‌دارد (تا تولبارِ آینده بتواند
+      // Pill را خاموش کند، نه فقط روشن).
+      if (detail.pillBackground === null) {
+        patch.pillBackground = null;
+      } else if (typeof detail.pillBackground === 'string' && detail.pillBackground) {
+        patch.pillBackground = detail.pillBackground;
       }
       if (typeof detail.color === 'string' && detail.color) patch.color = detail.color;
       if (typeof detail.strokeWidth === 'number' && detail.strokeWidth > 0) {
@@ -2396,8 +3123,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           if (patch.boxStyle !== undefined) itemPatch.boxStyle = patch.boxStyle;
           if (patch.hasFill !== undefined) itemPatch.hasFill = patch.hasFill;
         }
-        if (target.tool === 'arrow' && patch.arrowStyle !== undefined) {
-          itemPatch.arrowStyle = patch.arrowStyle;
+        if (target.tool === 'arrow') {
+          if (patch.arrowStyle !== undefined) itemPatch.arrowStyle = patch.arrowStyle;
+          if (patch.hasStartDot !== undefined) itemPatch.hasStartDot = patch.hasStartDot;
+          if (patch.hasEndArrow !== undefined) itemPatch.hasEndArrow = patch.hasEndArrow;
+          // توجه: بلوکِ زیر (ساختِ cx/cy برای تبدیلِ مستقیم → منحنی)
+          // فقط وقتی arrowStyle به 'curved' عوض شده باشد اجرا می‌شود؛
+          // پرچم‌های بالا مستقل از آن‌اند.
           // فاز ۳: تبدیل مستقیم → منحنی بدون cx/cy، به‌ظاهر
           // بی‌اثر می‌شود (رندر منحنی، cx/cy متناهی می‌خواهد)؛
           // پس برای همین آیتم، نقطهٔ کنترلِ پیش‌فرض ساخته
@@ -2414,6 +3146,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         if (target.tool === 'text') {
           if (patch.fontFamily !== undefined) itemPatch.fontFamily = patch.fontFamily;
           if (patch.fontSize !== undefined) itemPatch.fontSize = patch.fontSize;
+          if (patch.pillBackground !== undefined) itemPatch.pillBackground = patch.pillBackground;
         }
         if (patch.color !== undefined) itemPatch.color = patch.color;
         if (patch.strokeWidth !== undefined) itemPatch.strokeWidth = patch.strokeWidth;
@@ -2438,6 +3171,27 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const isEraser = annotationTool === 'eraser';
   // فاز ۵: ابزارِ انتخاب، کرسرِ default دارد، نه crosshair.
   const isSelect = annotationTool === 'select';
+  // Refinement Final: دستگیره‌های Transformer بر اساسِ ابزارِ آیتمِ
+  // اصلی. اگر آیتمِ اصلی متن باشد، فقط ۴ گوشه نشان داده می‌شود،
+  // چون دستگیرهٔ میانی برای متن بی‌اثر است (fontSize از scaleY
+  // می‌آید و برای دستگیرهٔ میانی scaleY = ۱ است، پس متن فقط
+  // جابه‌جا می‌شد، نه اینکه عرضش عوض شود). برای بقیهٔ ابزارها،
+  // همان ۶ دستگیرهٔ گامِ قبل فعال می‌ماند. توجه: چون Transformer
+  // فقط روی آیتمِ اصلی است، در چندانتخابی با آیتمِ اصلیِ متنی،
+  // بقیهٔ آیتم‌ها هم دستگیرهٔ میانی نمی‌گیرند — این، پیامدِ
+  // معماریِ «Transformer فقط روی اصلی» است، نه باگِ جداگانه.
+  // Refinement Phase 1 Step 2: دستگیره‌های پویا — ۸ کامل / ۶ برای متن.
+  // برای متن، فقط دستگیره‌های میانیِ چپ/راست پنهان‌اند (چون
+  // scaleY=1 دارند و fontSize را عوض نمی‌کنند)؛ ولی دستگیره‌های
+  // بالا/پایین‌وسط برای متن نگه داشته شده‌اند، چون scaleY دارند
+  // و fontSize را عوض می‌کنند (به گزارشِ اسکن، §۲٫۳ مراجعه کنید).
+  // برای بقیهٔ ابزارها، هر ۸ دستگیرهٔ استاندارد فعال است.
+  const primaryItemForAnchors =
+    uniformItems.find((it) => it.id === selectedAnnotationId) || null;
+  const transformerAnchors =
+    primaryItemForAnchors && primaryItemForAnchors.tool === 'text'
+      ? ['top-left', 'top-center', 'top-right', 'bottom-right', 'bottom-center', 'bottom-left']
+      : ['top-left', 'top-center', 'top-right', 'middle-right', 'bottom-right', 'bottom-center', 'bottom-left', 'middle-left'];
 
   // فاز ۴: آیتمِ استیکیِ در حالِ ویرایش (برای ویرایشگرِ HTML).
   const stickyEditorItem = activeStickyEditorId
@@ -2452,7 +3206,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         inset: 0,
         width: '100%',
         height: '100%',
-        zIndex: 18,
+        // Forensic Step 4: وقتی استودیو فعال است، کانتینر با
+        // zIndex 50 بالای لایه‌های دیگرِ صفحه (مثلِ textLayerی
+        // PDF) می‌نشیند تا رویدادهای اشاره‌گر را نبلعند؛ وقتی
+        // غیرفعال است، ۱۸ برمی‌گردد (و pointerEvents هم 'none'
+        // است، پس هیچ تداخلی با تعاملِ عادیِ صفحه ندارد).
+        zIndex: isAnnotationActive ? 50 : 18,
         pointerEvents: isAnnotationActive ? 'auto' : 'none',
         touchAction: 'none',
       }}
@@ -2525,12 +3284,14 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                     item={item}
                     onErase={handleEraseClick}
                     onEdit={openTextEditorForItem}
+                    isEditing={!!(textEditor && textEditor.editId === item.id)}
                   />
                 ) : item.tool === 'sticky' ? (
                   <CommittedSticky
                     item={item}
                     onErase={handleEraseClick}
                     onEdit={openStickyEditor}
+                    isEditing={activeStickyEditorId === item.id}
                   />
                 ) : (
                   <CommittedStroke
@@ -2559,18 +3320,52 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               );
             })}
 
-            {/* فاز ۵: Transformer — داخلِ همان Groupِ مقیاس‌دار قرار
-              می‌گیرد تا سیستمِ مختصاتش با نودها یکی باشد (نودها
-              در فضای یکنواخت‌اند؛ اگر Transformer بیرونِ Groupِ
-              مقیاس‌دار بود، کادرش در فضای پیکسل بود و با نودها
-              نمی‌خواند). enabledAnchors فقط گوشه‌ها را نشان
-              می‌دهد (طبقِ لیستِ TASK): تغییرِ اندازه فقط از گوشه،
-              نه از وسطِ ضلع‌ها. rotateEnabled خاموش است، چون هیچ
-              آیتمی میدانِ زاویه ندارد. */}
+            {/* Refinement Step 2: Transformer — داخلِ همان Groupِ مقیاس‌دار
+              قرار می‌گیرد تا سیستمِ مختصاتش با نودها یکی باشد.
+              enabledAnchors حالا ۶ دستگیره است: ۴ گوشه + ۲ میانیِ
+              چپ و راست (طبقِ TASK). برای دستگیره‌های میانی، Konva
+              scaleY را ۱ نگه می‌دارد، پس در transformItemByNode:
+              باکس/استیکی فقط عرضشان عوض می‌شود، استروک و فلش فقط
+              در x کش می‌آیند، و متن — چون fontSize از scaleY ساخته
+              می‌شود — اندازه‌اش عوض نمی‌شود و فقط جابه‌جا می‌شود
+              (محدودیتِ شناخته‌شدهٔ دستگیرهٔ میانی برای متن؛ در
+              گزارشِ پیاده‌سازی آمده است). rotateEnabled خاموش است،
+              چون هیچ آیتمی میدانِ زاویه ندارد. */}
+            {/* کادرهای فوکوسِ مجزا برای همهٔ آیتم‌های انتخاب‌شده
+              (Refinement Step 2): به‌ازای هر id در
+              selectedAnnotationIds، یک Rectِ خط‌چینِ فیروزه‌ای با
+              listening={false} بر اساسِ getItemBounds(it) رسم
+              می‌شود تا هر آبجکت کادرِ مستقلِ خودش را داشته باشد و
+              کادرِ مشترکِ غول‌پیکرِ Konva حذف شود. چون این Rectها
+              داخلِ Groupِ مقیاس‌دارند، strokeWidth بر مقیاس تقسیم
+              می‌شود تا ضخامتِ خط در همهٔ زوم‌ها حدودِ ۱٫۵ پیکسل
+              دیده شود. برای آیتمِ اصلی، این کادر با کادرِ Transformer
+              هم‌پوشانی دارد (هر دو خط‌چینِ فیروزه‌ای‌اند) که عمدی
+              است و کادر را پررنگ‌تر نشان می‌دهد. */}
+            {isAnnotationActive && annotationTool === 'select' &&
+              uniformItems
+                .filter((it) => (selectedAnnotationIds || []).includes(it.id))
+                .map((it) => {
+                  const b = getItemBounds(it);
+                  return (
+                    <Rect
+                      key={`focus-${it.id}`}
+                      x={b.x}
+                      y={b.y}
+                      width={b.width}
+                      height={b.height}
+                      stroke="#06b6d4"
+                      strokeWidth={1.5 / (scaleX || 1)}
+                      dash={[4, 4]}
+                      fillEnabled={false}
+                      listening={false}
+                    />
+                  );
+                })}
             <Transformer
               ref={transformerRef}
               rotateEnabled={false}
-              enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+              enabledAnchors={transformerAnchors}
               anchorSize={9}
               anchorFill="#ffffff"
               anchorStroke="#06b6d4"
@@ -2628,6 +3423,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               colorRef={colorRef}
               widthRef={widthRef}
               opacityRef={opacityRef}
+              hasStartDotRef={hasStartDotRef}
+              hasEndArrowRef={hasEndArrowRef}
             />
 
             {eraserVisible && (
@@ -2660,6 +3457,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         onCancel={cancelTextEditor}
       />
       <StickyEditorOverlay
+        key={stickyEditorItem ? stickyEditorItem.id : 'none'}
         item={stickyEditorItem}
         scaleX={scaleX}
         scaleY={scaleY}
