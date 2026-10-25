@@ -343,6 +343,164 @@ export function AnnotationToolbar({
     };
   }, [colorDrawerOpen]);
 
+  // معماریِ قطعی — هوک‌های جدید، همه این‌جا و قبل از returnِ
+  // زودهنگام: هاورِ Done و هگزِ کاربر (§۵)، عرضِ پنجره برای
+  // آینه‌ای (§۱)، و سلکتورهای Done (§۵). استور، هر دو setter را
+  // از قبل دارد (setIsAnnotationActive و clearSelection)، پس هیچ
+  // تغییری در useAppStore لازم نیست.
+  // میکروانیمیشن‌ها — حالت‌های جدید، همه این‌جا و قبل از returnِ
+  // زودهنگام: بستنِ پنل با دوبار کلیک، هاورِ ابزار و رنگ، کپسولِ
+  // راهنما و حالتِ تنفس. collapsedToolMenuی مرحلهٔ قبل، کاملاً با
+  // panelClosed جایگزین شد (تک‌کلیک دیگر پنل را نمی‌بندد).
+  const [panelClosed, setPanelClosed] = useState(false);
+  const [hoverToolId, setHoverToolId] = useState(null);
+  const [hoverSwatch, setHoverSwatch] = useState(null);
+  const [tooltip, setTooltip] = useState(null);
+  const [toolbarIdle, setToolbarIdle] = useState(false);
+  const selectedAnnotationId = useAppStore((s) => s.selectedAnnotationId);
+  const selectedAnnotationIds = useAppStore((s) => s.selectedAnnotationIds);
+  const toolClickRef = useRef(null);
+  const tooltipTimerRef = useRef(null);
+  const tooltipAnchorRef = useRef(null);
+  const idleTimerRef = useRef(null);
+  const toolGlowRef = useRef(null);
+  const toolsWrapRef = useRef(null);
+  // ابزارِ انتخاب‌شدهٔ واقعی: هر سه نشانه، چون لایه در مسیرهای
+  // مختلف، idی تکی، فهرستِ چندتایی یا نوعِ آیتم را می‌نویسد.
+  const hasSelection = selectedAnnotationId != null
+    || (Array.isArray(selectedAnnotationIds) && selectedAnnotationIds.length > 0)
+    || selectedAnnotationTool != null;
+  // بستنِ پنل با دوبار کلیک، فقط وقتی ابزار عوض شود یا انتخابی
+  // تازه ظاهر شود، ریست می‌شود (تغییرِ ابزار از راهِ کیبورد را هم
+  // پوشش می‌دهد، چون کلیک‌هنلدر فقط کلیک‌ها را می‌بیند).
+  useEffect(() => { setPanelClosed(false); }, [annotationTool]);
+  useEffect(() => { if (hasSelection) setPanelClosed(false); }, [hasSelection]);
+  // بسته شدنِ دراورِ رنگ وقتی پنلِ فرعی پنهان می‌شود (دکمهٔ پالت
+  // خودش داخلِ همان پنل است، پس دراورِ باز، بی‌صاحب می‌ماند).
+  // فرمول، همان showSecondary است که پایین‌تر تعریف می‌شود.
+  useEffect(() => {
+    if (!((annotationTool !== 'select' || hasSelection) && !panelClosed)) setColorDrawerOpen(false);
+  }, [annotationTool, hasSelection, panelClosed]);
+  // تنفس: درگ یا دراورِ باز، کم‌نور شدن را لغو می‌کند؛ و پاک‌سازیِ
+  // تایمرها هنگامِ unmount.
+  useEffect(() => {
+    if (colorDrawerOpen || isToolbarDragging) {
+      if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
+      setToolbarIdle(false);
+    }
+  }, [colorDrawerOpen, isToolbarDragging]);
+  useEffect(() => () => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+  }, []);
+
+  // رفعِ TDZ (خطای ۱۲۹۱): این توابعِ کمکی، عمداً این‌جا، قبل از
+  // returnِ زودهنگام و قبل از همهٔ بلوک‌های JSX، تعریف شده‌اند.
+  // علت: actionsContent، hideTooltip را به‌صورتِ bare (بدونِ
+  // تابعِ واسط) در onMouseLeave می‌گذارد و مقدارِ prop، همان
+  // لحظهٔ ساختِ JSX خوانده می‌شود؛ پس اگر تعریف، پایین‌تر از
+  // actionsContent باشد، رندر با ReferenceError می‌میرد. ارجاع
+  // داخلِ بدنهٔ هندلرها (closure) دیرتر اجرا می‌شود و به‌تنهایی
+  // خطا نمی‌دهد، ولی ارجاعِ bare حتماً باید بعد از تعریف باشد.
+  // این بلوک را هرگز پایین‌تر از actionsContent نبرید.
+  // میکروانیمیشن‌ها §۴ — اسپات‌لایت: موقعیتِ ماوس را بدونِ
+  // بازرندر، در متغیرهای سی‌اس‌اسِ همان پنل می‌نویسد؛ گرادیانِ
+  // پس‌زمینه از همین متغیرها می‌خواند.
+  const handleSpotMove = (e) => {
+    const el = e.currentTarget;
+    const r = el.getBoundingClientRect();
+    el.style.setProperty('--spot-x', `${e.clientX - r.left}px`);
+    el.style.setProperty('--spot-y', `${e.clientY - r.top}px`);
+  };
+  const handleSpotLeave = (e) => {
+    e.currentTarget.style.setProperty('--spot-x', '50%');
+    e.currentTarget.style.setProperty('--spot-y', '50%');
+  };
+  // تنفس (§۴٫۳): ورود، تایمر را پاک و شفافیت را کامل می‌کند؛
+  // خروج، پس از ۳ ثانیه کم‌نور می‌کند.
+  const handleToolbarEnter = () => {
+    if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
+    setToolbarIdle(false);
+  };
+  const handleToolbarLeave = () => {
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => setToolbarIdle(true), 3000);
+  };
+  // کپسولِ راهنما (§۴٫۴): پس از نیم ثانیه مکث، از روی کادرِ
+  // دکمهٔ ذخیره‌شده، جای کپسول را حساب می‌کند (بالای دکمه، یا
+  // اگر نزدیکِ بالای صفحه بود، پایینِ آن) و در لبه‌ها clamp می‌کند.
+  const showTooltipDelayed = (e, text) => {
+    if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+    tooltipAnchorRef.current = e.currentTarget;
+    tooltipTimerRef.current = window.setTimeout(() => {
+      const el = tooltipAnchorRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const left = Math.max(90, Math.min(r.left + r.width / 2, window.innerWidth - 90));
+      const above = r.top >= 60;
+      setTooltip({ text, left, top: above ? r.top - 12 : r.bottom + 12, above });
+    }, 500);
+  };
+  const hideTooltip = () => {
+    if (tooltipTimerRef.current) { clearTimeout(tooltipTimerRef.current); tooltipTimerRef.current = null; }
+    tooltipAnchorRef.current = null;
+    setTooltip(null);
+  };
+  // هالهٔ لغزندهٔ زیرِ ابزارها (§۱٫۱): جای هاله را مستقیم روی
+  // DOM می‌نویسد تا با هر هاور، بازرندر و مختصاتِ کهنه پیش نیاید.
+  // مختصات، نسبت به کانتینرِ ابزارها (dock یا نوارِ افقی) است که
+  // هاله، فرزندِ همان‌هاست.
+  const positionToolGlow = (btnEl) => {
+    const glow = toolGlowRef.current;
+    const wrap = toolsWrapRef.current;
+    if (!glow || !wrap || !btnEl) return;
+    const b = btnEl.getBoundingClientRect();
+    const c = wrap.getBoundingClientRect();
+    glow.style.left = `${b.left - c.left}px`;
+    glow.style.top = `${b.top - c.top}px`;
+    glow.style.width = `${b.width}px`;
+    glow.style.height = `${b.height}px`;
+    glow.style.opacity = '1';
+  };
+  const hideToolGlow = () => {
+    const glow = toolGlowRef.current;
+    if (glow) glow.style.opacity = '0';
+  };
+  // هاله، یک المانِ واحد است که فقط در شاخهٔ فعال (عمودی یا افقی)
+  // رندر می‌شود؛ چون فقط یک شاخه mount است، ref همیشه همانِ فعال
+  // را می‌گیرد. روی دکمه‌ها، یک شستشوی نوریِ نیمه‌شفاف است (نه
+  // زیرِ آن‌ها، چون دکمه‌ها position ندارند)؛ با pointerEvents
+  // none، هیچ کلیکی را نمی‌گیرد.
+  const toolGlow = (
+    <div
+      ref={toolGlowRef}
+      aria-hidden="true"
+      style={{
+        position: 'absolute',
+        left: 0,
+        top: 0,
+        width: 38,
+        height: 38,
+        borderRadius: 11,
+        background: 'rgba(34, 211, 238, 0.14)',
+        boxShadow: '0 0 16px rgba(34, 211, 238, 0.18)',
+        pointerEvents: 'none',
+        opacity: 0,
+        transition: 'left 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), top 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease',
+      }}
+    />
+  );
+  const [doneHover, setDoneHover] = useState(false);
+  const [hoverUserHex, setHoverUserHex] = useState(null);
+  const [viewportW, setViewportW] = useState(() => window.innerWidth);
+  const setIsAnnotationActive = useAppStore((s) => s.setIsAnnotationActive);
+  const clearSelection = useAppStore((s) => s.clearSelection);
+  useEffect(() => {
+    const onResize = () => setViewportW(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
   // تایید دو مرحله‌ای برای پاک کردن همه (بدون window.confirm زشت)
   const [armClear, setArmClear] = useState(false);
   useEffect(() => {
@@ -590,6 +748,26 @@ export function AnnotationToolbar({
   // زودهنگام‌اند (قانونِ هوک‌های ری‌اکت) — اینجا فقط از مقدارشان
   // استفاده می‌شود.
   const isVertical = toolbarOrientation === 'vertical';
+  // معماریِ قطعی §۱ — آینه‌ای: xی داک (شناور: toolbarPos.x؛ داکِ
+  // عمودی: لبهٔ راست؛ داکِ افقی: مرکز) با نیمهٔ صفحه سنجیده
+  // می‌شود. اگر داک در نیمهٔ چپ باشد، فلای‌اوت و دراورِ پالت به
+  // سمتِ راست باز می‌شوند (به سمتِ مرکز)؛ وگرنه به سمتِ چپ.
+  const dockX = toolbarPos ? toolbarPos.x : (isVertical ? viewportW - 80 : viewportW / 2);
+  const isDockOnLeft = dockX < viewportW / 2;
+  // میکروانیمیشن‌ها §۲ و §۳ — نمایان بودنِ پنلِ فرعی: وقتی ابزار،
+  // انتخاب نیست، یا در حالتِ انتخاب، آیتمی انتخاب شده، و پنل با
+  // دوبار کلیک بسته نشده باشد. در غیر این صورت، فقط داکِ جمع‌وجور
+  // دیده می‌شود (ابزارها + بازگردانی + جهت + Done).
+  const showSecondary = (annotationTool !== 'select' || hasSelection) && !panelClosed;
+  // هم‌رنگ‌سازیِ مرز و درخشش با رنگِ فعال (§۴٫۲): hexی ۶رقمی را
+  // به rgba با آلفای خواسته‌شده تبدیل می‌کند؛ اگر رنگ، hex نبود،
+  // همان مقدار برگردانده می‌شود تا چیزی خراب نشود.
+  const withAlpha = (hex, a) => {
+    const m = /^#([0-9a-fA-F]{6})$/.exec(hex || '');
+    if (!m) return hex;
+    const n = parseInt(m[1], 16);
+    return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+  };
   // پولیش: جداکنندهٔ جهت‌آگاه — در حالتِ افقی خطِ عمودی (۱×۲۴) و در
   // حالتِ عمودی خطِ افقی (۲۴×۱) تا هم در ستونِ داک و هم در ستونِ فلای‌اوت
   // درست دیده شود.
@@ -619,8 +797,46 @@ export function AnnotationToolbar({
         return (
           <button
             key={id}
-            title={label}
-            onClick={() => setAnnotationTool(id)}
+            aria-label={label}
+            onMouseEnter={(e) => {
+              setHoverToolId(id);
+              positionToolGlow(e.currentTarget);
+              showTooltipDelayed(e, label);
+            }}
+            onMouseLeave={() => {
+              setHoverToolId(null);
+              hideToolGlow();
+              hideTooltip();
+            }}
+            onClick={() => {
+              // میکروانیمیشن‌ها §۳ — منطقِ پنل: کلیک روی ابزارِ
+              // دیگر، یا کلیکِ تکی روی ابزارِ فعالی که پنلش بسته
+              // است، پنل را باز می‌کند؛ کلیکِ تکی روی ابزارِ فعالِ
+              // باز، پنل را نمی‌بندد (بستن فقط با دوبار کلیک است).
+              // رکوردِ کلیک، فقط وقتی تازه می‌شود که این کلیک،
+              // دومین کلیکِ سریعِ همان ابزار نباشد تا onDoubleClick
+              // بتواند تشخیص دهد ابزار از قبلِ این جفت‌کلیک فعال
+              // بوده است یا تازه با کلیکِ اول فعال شده است.
+              const now = Date.now();
+              const prev = toolClickRef.current;
+              if (!prev || prev.id !== id || now - prev.time >= 350) {
+                toolClickRef.current = { id, time: now, wasActive: id === activeId, wasPanelClosed: panelClosed };
+              }
+              if (id !== activeId || panelClosed) setPanelClosed(false);
+              hideTooltip();
+              setAnnotationTool(id);
+            }}
+            onDoubleClick={() => {
+              // بستن/باز کردن با دوبار کلیک، فقط برای ابزاری که
+              // از قبلِ این جفت‌کلیک فعال بوده است؛ دوبار کلیک روی
+              // ابزارِ تازه‌فعال‌شده، فقط آن را فعال نگه می‌دارد و
+              // پنل باز می‌ماند. اگر پنل از قبل بسته بود، دوبار
+              // کلیک آن را باز می‌کند (نه بسته‌تر).
+              const rec = toolClickRef.current;
+              if (rec && rec.id === id && rec.wasActive) {
+                setPanelClosed(!rec.wasPanelClosed);
+              }
+            }}
             style={{
               ...btnBase,
               // گام ۲ میانی: مورفِ تایپو — دکمه‌های ترسیمی در حالتِ تایپو
@@ -630,7 +846,7 @@ export function AnnotationToolbar({
               // بصری است: قفلِ پولیش کاملاً حذف شده، پس مورف هرگز مانعِ
               // کلیک نمی‌شود — همهٔ دکمه‌های ابزار، همیشه cursorِ
               // pointer و pointerEventsِ auto دارند (دو خطِ پایین).
-              ...(isTypoMode && DRAWING_TOOL_IDS.includes(id)
+              ...(isTypoMode && !active && DRAWING_TOOL_IDS.includes(id)
                 ? { transform: 'scale(0.88)', opacity: 0.65 }
                 : {}),
               cursor: 'pointer',
@@ -646,9 +862,36 @@ export function AnnotationToolbar({
                 : 'rgba(255,255,255,0.6)',
               outline: active ? `1.5px solid ${danger ? '#f43f5e' : '#22d3ee'}` : 'none',
               outlineOffset: -1,
+              // معماریِ قطعی §۳ — دکمهٔ فعال: اسکیلِ نرمِ ۱٫۰۸ +
+              // درخششِ هم‌رنگ + ترنزیشنِ تسک. (ترنزیشن، بعد از
+              // btnBase می‌آید تا آن را override کند.)
+              ...(active
+                ? {
+                    transform: 'scale(1.08)',
+                    // میکروانیمیشن‌ها §۴٫۲ — درخششِ دکمهٔ فعال،
+                    // هم‌رنگِ رنگِ فعالِ کاربر است (به‌جای فیروزه‌ایِ
+                    // ثابت؛ حاشیهٔ قرمزِ پاک‌کن دست نخورده مانده است).
+                    boxShadow: `0 0 12px ${withAlpha(annotationColor, 0.55)}`,
+                  }
+                : {}),
+              // میکروانیمیشن‌ها §۱٫۱ — جهشِ هاور: دکمه زیرِ ماوس،
+              // کمی بالا می‌پرد و بزرگ‌تر می‌شود؛ روی دکمهٔ فعال،
+              // با اسکیلِ فعال ترکیب می‌شود (نه جایگزینِ آن).
+              ...(hoverToolId === id
+                ? { transform: active ? 'translateY(-3px) scale(1.15)' : 'translateY(-3px) scale(1.12)' }
+                : {}),
+              transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
             }}
           >
-            <Icon size={18} />
+            <span
+              style={{
+                display: 'inline-flex',
+                transform: hoverToolId === id && ['pen', 'box', 'arrow', 'highlighter'].includes(id) ? 'rotate(-4deg)' : 'none',
+                transition: 'transform 0.2s ease',
+              }}
+            >
+              <Icon size={18} />
+            </span>
           </button>
         );
       })}
@@ -679,9 +922,10 @@ export function AnnotationToolbar({
     // دراور با position: fixed رندر می‌شود تا overflowی نوارِ افقی
     // (overflowX: auto) آن را نبرد؛ پس مختصاتش در لحظهٔ باز شدن، از
     // کادرِ دکمه اندازه‌گیری می‌شود. افقی: پایینِ دکمه، وسط‌چین، با
-    // clamp در لبه‌های پنجره (عرضِ دراور ۳۰۰ است). عمودی: کنارِ
-    // داک، هم‌سطحِ دکمه (یعنی هم‌سطحِ فلای‌اوتِ زیرمنوها)؛ اگر سمتِ
-    // چپ جا نبود (دکمه نزدیکِ لبهٔ چپ)، سمتِ راست باز می‌شود.
+    // clamp در لبه‌های پنجره (عرضِ دراور ۳۰۰ است). عمودی: سمتِ
+    // باز شدن، همان سمتِ فلای‌اوت است (قانونِ آینه‌ایِ §۱: داک در
+    // نیمهٔ چپ → سمتِ راستِ دکمه؛ وگرنه سمتِ چپ)، با fallback به
+    // سمتِ دیگر اگر سمتِ خواسته‌شده جا نداشت، و clamp در لبه‌ها.
     const rect = paletteBtnRef.current ? paletteBtnRef.current.getBoundingClientRect() : null;
     if (!rect) {
       setColorDrawerPos(isVertical
@@ -689,10 +933,13 @@ export function AnnotationToolbar({
         : { top: 80, left: '50%', transform: 'translateX(-50%)' });
     } else if (isVertical) {
       const cy = rect.top + rect.height / 2;
-      if (rect.left >= 320) {
-        setColorDrawerPos({ top: cy, left: rect.left - 10, transform: 'translate(-100%, -50%)' });
+      const fitsLeft = rect.left - 10 >= 300;
+      const fitsRight = viewportW - rect.right - 10 >= 300;
+      const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
+      if (openRight) {
+        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 300)), transform: 'translate(0, -50%)' });
       } else {
-        setColorDrawerPos({ top: cy, left: rect.right + 10, transform: 'translate(0, -50%)' });
+        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 300), transform: 'translate(-100%, -50%)' });
       }
     } else {
       const cx = Math.max(160, Math.min(rect.left + rect.width / 2, window.innerWidth - 160));
@@ -705,7 +952,10 @@ export function AnnotationToolbar({
     <>
       {/* فاز ۲: زیرمنوی کادربندی — فقط وقتی ابزار box فعال است */}
       {annotationTool === 'box' && (
-        <>
+        <div
+          key="submenu-box"
+          style={{ display: 'flex', flexDirection: isVertical ? 'column' : 'row', gap: isVertical ? 8 : 4, alignItems: 'center', animation: 'submenuIn 0.2s ease' }}
+        >
           {divider}
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             {BOX_STYLES.map((bs) => {
@@ -713,6 +963,7 @@ export function AnnotationToolbar({
               return (
                 <button
                   key={bs.id}
+                  className="at-pill"
                   title={`استایل کادر: ${bs.label}`}
                   onClick={() => {
                     setAnnotationBoxStyle(bs.id);
@@ -738,6 +989,7 @@ export function AnnotationToolbar({
             })}
             {/* دکمه تاگل پر کردن داخل کادر */}
             <button
+              className="at-pill"
               title={annotationHasFill ? 'رنگ داخل: روشن (کلیک برای خاموش)' : 'رنگ داخل: خاموش (کلیک برای روشن)'}
               onClick={() => {
                 toggleAnnotationFill();
@@ -764,13 +1016,16 @@ export function AnnotationToolbar({
               {annotationHasFill ? '◉ توپر' : '○ توخالی'}
             </button>
           </div>
-        </>
+        </div>
       )}
 
       {/* فاز ۳ + Refinement Step 2: زیرمنوی فلش — وقتی ابزار arrow فعال است
           یا آیتمِ انتخاب‌شده فلش است (طبقِ TASK: tool OR selectedAnnotationTool) */}
       {(annotationTool === 'arrow' || selectedAnnotationTool === 'arrow') && (
-        <>
+        <div
+          key="submenu-arrow"
+          style={{ display: 'flex', flexDirection: isVertical ? 'column' : 'row', gap: isVertical ? 8 : 4, alignItems: 'center', animation: 'submenuIn 0.2s ease' }}
+        >
           {divider}
           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
             {ARROW_STYLES.map((as) => {
@@ -778,6 +1033,7 @@ export function AnnotationToolbar({
               return (
                 <button
                   key={as.id}
+                  className="at-pill"
                   title={`استایل فلش: ${as.label}`}
                   onClick={() => {
                     if (typeof setAnnotationArrowStyle === 'function') {
@@ -804,6 +1060,7 @@ export function AnnotationToolbar({
               );
             })}
             <button
+              className="at-pill"
               title="نقطهٔ مبدأ فلش: ته‌گرد یا ساده"
               onClick={() => {
                 const next = !annotationHasStartDot;
@@ -829,6 +1086,7 @@ export function AnnotationToolbar({
               {annotationHasStartDot ? '◉ ته‌گرد' : '○ ساده'}
             </button>
             <button
+              className="at-pill"
               title="نوک فلش: با فلش یا خطِ ساده"
               onClick={() => {
                 const next = !annotationHasEndArrow;
@@ -854,7 +1112,7 @@ export function AnnotationToolbar({
               {annotationHasEndArrow ? '➤ با فلش' : '— خط'}
             </button>
           </div>
-        </>
+        </div>
       )}
 
       {/* فاز ۴: زیرمنوی متن — وقتی ابزار متن فعال است، یا آیتمِ انتخاب‌شده
@@ -865,12 +1123,13 @@ export function AnnotationToolbar({
       {isTypoMode && (
         <>
           {divider}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'typoConsoleIn 0.25s ease' }}>
+          <div key={annotationTool} style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'typoConsoleIn 0.25s ease' }}>
             {FONT_OPTIONS.map((f) => {
               const active = annotationFontFamily === f.id;
               return (
                 <button
                   key={f.id}
+                  className="at-pill"
                   title={`فونت: ${f.label}`}
                   onClick={() => {
                     if (typeof setAnnotationFontFamily === 'function') {
@@ -913,6 +1172,7 @@ export function AnnotationToolbar({
                   }
                   broadcastTypoPatch({ fontSize: val });
                 }}
+                className="at-range"
                 style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
               />
               <span
@@ -937,13 +1197,15 @@ export function AnnotationToolbar({
       {divider}
 
       {/* رنگ‌ها */}
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
+      <div style={{ display: 'flex', gap: hoverSwatch && hoverSwatch.startsWith('q:') ? 8 : 6, alignItems: 'center', padding: '0 2px' }}>
         {COLORS.map((c) => {
           const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
           return (
             <button
               key={c.hex}
               title={c.label}
+              onMouseEnter={() => setHoverSwatch(`q:${c.hex}`)}
+              onMouseLeave={() => setHoverSwatch(null)}
               onClick={() => {
                 setAnnotationColor(c.hex);
                 // فاز ۵: بایندینگِ دوطرفهٔ رنگ — علاوه بر ساختِ
@@ -965,7 +1227,11 @@ export function AnnotationToolbar({
                   : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
                 boxShadow: active
                   ? `0 0 8px ${c.hex}`
-                  : '0 0 0 1px rgba(255,255,255,0.2)',
+                  : hoverSwatch === `q:${c.hex}`
+                    ? `0 6px 14px ${c.hex}`
+                    : '0 0 0 1px rgba(255,255,255,0.2)',
+                transform: hoverSwatch === `q:${c.hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
               }}
             />
           );
@@ -1024,6 +1290,7 @@ export function AnnotationToolbar({
           return (
             <button
               key={v}
+              className="at-pill"
               title={`ضخامت ${v}`}
               onClick={() => {
                 setAnnotationStrokeWidth(v);
@@ -1086,6 +1353,7 @@ export function AnnotationToolbar({
             }
             broadcastSelectedPropertyPatch({ opacity: val });
           }}
+          className="at-range"
           style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
         />
         <span
@@ -1103,13 +1371,21 @@ export function AnnotationToolbar({
           {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
         </span>
       </div>
+      {/* میکروانیمیشن‌ها §۳ — راهنمای ریزِ دوبار کلیک: در ستونِ
+          عمودی، آخرین آیتمِ فلای‌اوت (پایینِ پنل) و در نوارِ افقی،
+          آخرین المانِ ردیفِ گزینه‌های فرعی است. */}
+      <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', textAlign: 'center', whiteSpace: 'nowrap', fontFamily: 'inherit' }}>
+        بسته شدن با دوبار کلیک
+      </div>
     </>
   );
   const actionsContent = (
     <>
       {/* Undo — فاز ۱: prop با fallback */}
       <button
-        title="برگردان (Ctrl+Z)"
+        aria-label="برگردان (Ctrl+Z)"
+        onMouseEnter={(e) => showTooltipDelayed(e, 'برگردان (Ctrl+Z)')}
+        onMouseLeave={hideTooltip}
         onClick={doUndo}
         disabled={typeof onUndo !== 'function' || !canUndo}
         style={{
@@ -1127,7 +1403,9 @@ export function AnnotationToolbar({
 
       {/* Redo — فاز ۱: دکمه جدید */}
       <button
-        title="ازنو (Ctrl+Y)"
+        aria-label="ازنو (Ctrl+Y)"
+        onMouseEnter={(e) => showTooltipDelayed(e, 'ازنو (Ctrl+Y)')}
+        onMouseLeave={hideTooltip}
         onClick={doRedo}
         disabled={typeof onRedo !== 'function' || !canRedo}
         style={{
@@ -1181,6 +1459,7 @@ export function AnnotationToolbar({
       y: Math.max(10, Math.min(vy, Math.max(10, vh - h - 10))),
     };
   };
+
   const handleToolbarDragMove = (e) => {
     const d = toolbarDragRef.current;
     if (!d) return;
@@ -1208,6 +1487,7 @@ export function AnnotationToolbar({
   const handleToolbarDragStart = (e) => {
     e.stopPropagation();
     e.preventDefault();
+    hideTooltip();
     const el = toolbarWrapRef.current;
     const parent = el ? el.offsetParent : null;
     const parentRect = parent ? parent.getBoundingClientRect() : { left: 0, top: 0 };
@@ -1297,8 +1577,30 @@ export function AnnotationToolbar({
 
   const orientationToggle = (
     <button
-      title={isVertical ? 'تغییر به تولبار افقی' : 'تغییر به تولبار عمودی'}
+      aria-label={isVertical ? 'تغییر به تولبار افقی' : 'تغییر به تولبار عمودی'}
+      onMouseEnter={(e) => showTooltipDelayed(e, isVertical ? 'تغییر به تولبار افقی' : 'تغییر به تولبار عمودی')}
+      onMouseLeave={hideTooltip}
       onClick={() => {
+        // معماریِ قطعی §۴ — کلمپِ خودکارِ چرخش: فقط وقتی شناور است
+        // (داک، ذاتاً داخلِ صفحه است). ابعادِ تقریبیِ تسک: افقی
+        // ۶۵۰×۵۰، عمودی ۵۵×۴۵۰. موقعیتِ اصلاح‌شده، بلافاصله در
+        // استیت، ref و localStorage ذخیره می‌شود.
+        if (toolbarPos) {
+          const toVertical = !isVertical;
+          let nx = toolbarPos.x;
+          let ny = toolbarPos.y;
+          if (toVertical) {
+            if (ny + 450 > window.innerHeight - 16) ny = Math.max(16, window.innerHeight - 450 - 16);
+          } else {
+            if (nx + 650 > window.innerWidth - 16) nx = Math.max(16, window.innerWidth - 650 - 16);
+          }
+          if (nx !== toolbarPos.x || ny !== toolbarPos.y) {
+            const next = { x: nx, y: ny };
+            setToolbarPos(next);
+            toolbarPosRef.current = next;
+            try { window.localStorage.setItem('annotationToolbarPosition', JSON.stringify(next)); } catch (_) {}
+          }
+        }
         if (typeof setToolbarOrientation === 'function') {
           setToolbarOrientation(isVertical ? 'horizontal' : 'vertical');
         }
@@ -1334,6 +1636,45 @@ export function AnnotationToolbar({
       </svg>
     </button>
   );
+  // معماریِ قطعی §۵ — دکمهٔ تأییدِ نهایی (Done) در انتهای نوار:
+  // تیکِ لوسید با تمِ سبزِ زمردی (#10b981) و درخششِ هاور. کلیک:
+  // لغوِ انتخاب‌های فعال + بستنِ همهٔ پنل‌ها (دراورِ رنگ و زیرمنوی
+  // جمع‌شده) + خروج از مودِ ویرایش. آیکون از Icons.Check می‌آید
+  // (در Icons.jsxی فاز ۱ موجود است) و اگر نبود، SVGی خامِ لوسید
+  // (M20 6 9 17l-5-5) جایگزین می‌شود تا المانِ ناشناخته رندر نشود.
+  const doneButton = (
+    <button
+      aria-label="اتمام ویرایش — لغو انتخاب و خروج از حالت ویرایش"
+      onMouseEnter={(e) => showTooltipDelayed(e, 'اتمام ویرایش')}
+      onMouseLeave={hideTooltip}
+      onClick={() => {
+        if (typeof clearSelection === 'function') clearSelection();
+        setPanelClosed(false);
+        setColorDrawerOpen(false);
+        if (typeof setIsAnnotationActive === 'function') setIsAnnotationActive(false);
+      }}
+      onMouseEnter={() => setDoneHover(true)}
+      onMouseLeave={() => setDoneHover(false)}
+      style={{
+        ...btnBase,
+        width: 38,
+        height: 38,
+        borderRadius: 11,
+        background: 'rgba(16,185,129,0.18)',
+        color: '#6ee7b7',
+        outline: '1px solid rgba(16,185,129,0.45)',
+        outlineOffset: -1,
+        boxShadow: doneHover ? '0 0 14px rgba(16,185,129,0.55)' : 'none',
+        transition: 'all 0.2s ease',
+      }}
+    >
+      {Icons.Check ? <Icons.Check size={18} /> : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      )}
+    </button>
+  );
   // فاز ۳ پالت — دراورِ شیشه‌ایِ پالتِ تخصصی. لایهٔ بیرونی فقط
   // موقعیتِ fixed را نگه می‌دارد و لایهٔ درونی، پنلِ شیشه‌ای است
   // (تا انیمیشنِ ورودِ درونی، با transformی موقعیتِ بیرونی تداخل
@@ -1359,30 +1700,34 @@ export function AnnotationToolbar({
           scrollbarWidth: 'none',
           padding: 12,
           borderRadius: 16,
-          background: 'rgba(8, 12, 16, 0.92)',
-          border: '1px solid rgba(255,255,255,0.10)',
+          background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
+          border: '1px solid rgba(255,255,255,0.12)',
           boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-          backdropFilter: 'blur(16px)',
-          WebkitBackdropFilter: 'blur(16px)',
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
           userSelect: 'none',
           animation: 'paletteDrawerIn 0.22s ease',
         }}
         onPointerDown={(e) => e.stopPropagation()}
         onPointerMove={(e) => e.stopPropagation()}
         onPointerUp={(e) => e.stopPropagation()}
+        onMouseMove={handleSpotMove}
+        onMouseLeave={handleSpotLeave}
       >
         {PALETTE_CATEGORIES.map((cat) => (
-          <div key={cat.id} style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>
+          <div key={cat.id} style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
               {cat.label}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: hoverSwatch && hoverSwatch.startsWith(`d:${cat.id}:`) ? 10 : 8, alignItems: 'center' }}>
               {cat.colors.map((c) => {
                 const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
                 return (
                   <button
                     key={c.hex}
                     title={`${c.label} (${c.hex})`}
+                    onMouseEnter={() => setHoverSwatch(`d:${cat.id}:${c.hex}`)}
+                    onMouseLeave={() => setHoverSwatch(null)}
                     onClick={() => applyDrawerColor(c.hex)}
                     style={{
                       ...btnBase,
@@ -1394,7 +1739,9 @@ export function AnnotationToolbar({
                       border: active
                         ? '1.5px solid rgba(255,255,255,0.85)'
                         : '1px solid rgba(255,255,255,0.25)',
-                      boxShadow: active ? `0 0 8px ${c.hex}` : 'none',
+                      boxShadow: active ? `0 0 8px ${c.hex}` : hoverSwatch === `d:${cat.id}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
+                      transform: hoverSwatch === `d:${cat.id}:${c.hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                      transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                     }}
                   />
                 );
@@ -1403,30 +1750,39 @@ export function AnnotationToolbar({
           </div>
         ))}
         <div>
-          <div style={{ fontSize: 11, fontWeight: 600, color: 'rgba(255,255,255,0.55)', marginBottom: 6 }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
             رنگ‌های من
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: hoverSwatch && hoverSwatch.startsWith('u:') ? 10 : 8, alignItems: 'center' }}>
             {userPalette.map((hex) => {
               const active = annotationColor.toLowerCase() === hex.toLowerCase();
+              const hovered = hoverUserHex === hex;
               return (
-                <button
-                  key={hex}
-                  title={hex}
-                  onClick={() => applyDrawerColor(hex)}
-                  style={{
-                    ...btnBase,
-                    width: 26,
-                    height: 26,
-                    borderRadius: '50%',
-                    flexShrink: 0,
-                    background: hex,
-                    border: active
-                      ? '1.5px solid rgba(255,255,255,0.85)'
-                      : '1px solid rgba(255,255,255,0.25)',
-                    boxShadow: active ? `0 0 8px ${hex}` : 'none',
-                  }}
-                />
+                <div key={hex} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+                  <button
+                    title={hex}
+                    onClick={() => applyDrawerColor(hex)}
+                    onMouseEnter={() => { setHoverUserHex(hex); setHoverSwatch(`u:${hex}`); }}
+                    onMouseLeave={() => { setHoverUserHex(null); setHoverSwatch(null); }}
+                    style={{
+                      ...btnBase,
+                      width: 26,
+                      height: 26,
+                      borderRadius: '50%',
+                      flexShrink: 0,
+                      background: hex,
+                      border: active
+                        ? '1.5px solid rgba(255,255,255,0.85)'
+                        : '1px solid rgba(255,255,255,0.25)',
+                      boxShadow: active ? `0 0 8px ${hex}` : hoverSwatch === `u:${hex}` ? `0 6px 14px ${hex}` : hovered ? `0 0 10px ${hex}` : 'none',
+                      transform: hoverSwatch === `u:${hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                      transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                    }}
+                  />
+                  <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono', monospace", color: hovered ? '#ffffff' : 'rgba(255,255,255,0.5)', direction: 'ltr' }}>
+                    {hex}
+                  </span>
+                </div>
               );
             })}
             <button
@@ -1475,7 +1831,7 @@ export function AnnotationToolbar({
           translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
           دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
           (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes paletteDrawerIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } }`}</style>
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes paletteDrawerIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); }`}</style>
       {isVertical ? (
         // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
         // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً
@@ -1493,15 +1849,24 @@ export function AnnotationToolbar({
             ...floatingStyle,
             zIndex: 30,
             display: 'flex',
-            flexDirection: 'row',
+            // معماریِ قطعی §۱ — آینه‌ای: فلای‌اوت، خواهرِ flexیِ داک
+            // است (نه absolute)، پس آینه‌ای شدن یعنی وارونه شدنِ
+            // ترتیبِ ردیف: داک در نیمهٔ چپ → فلای‌اوت سمتِ راستِ داک
+            // (به سمتِ مرکز)؛ داک در نیمهٔ راست → فلای‌اوت سمتِ چپ.
+            flexDirection: isDockOnLeft ? 'row-reverse' : 'row',
             gap: 10,
             alignItems: 'flex-start',
-            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease',
+            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease, opacity 0.3s ease',
+            opacity: toolbarIdle ? 0.72 : 1,
           }}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerMove={(e) => e.stopPropagation()}
           onPointerUp={(e) => e.stopPropagation()}
+          onMouseMove={handleSpotMove}
+          onMouseEnter={handleToolbarEnter}
+          onMouseLeave={(e) => { handleSpotLeave(e); handleToolbarLeave(); }}
         >
+          {showSecondary && (
           <div
             dir="rtl"
             style={{
@@ -1511,8 +1876,9 @@ export function AnnotationToolbar({
               gap: 8,
               padding: '10px 12px',
               borderRadius: 16,
-              background: 'rgba(8, 12, 16, 0.92)',
-              border: '1px solid rgba(255,255,255,0.10)',
+              background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
+              border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
+              animation: 'submenuIn 0.25s ease',
               boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
               backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)',
@@ -1521,19 +1887,23 @@ export function AnnotationToolbar({
               overflowY: 'auto',
               scrollbarWidth: 'none',
             }}
+            onMouseMove={handleSpotMove}
+            onMouseLeave={handleSpotLeave}
           >
             {secondaryContent}
-          </div>
+          </div>)}
           <div
             dir="rtl"
+            ref={toolsWrapRef}
             style={{
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
               gap: 4,
               padding: '6px 10px',
+              position: 'relative',
               borderRadius: 16,
-              background: 'rgba(8, 12, 16, 0.92)',
+              background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
               border: '1px solid rgba(255,255,255,0.10)',
               boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
               backdropFilter: 'blur(16px)',
@@ -1543,18 +1913,22 @@ export function AnnotationToolbar({
               overflowY: 'auto',
               scrollbarWidth: 'none',
             }}
+            onMouseMove={handleSpotMove}
+            onMouseLeave={handleSpotLeave}
           >
+            {toolGlow}
             {dragHandle}
             {toolsButtons}
             {divider}
             {actionsContent}
             {orientationToggle}
+            {doneButton}
           </div>
         </div>
       ) : (
         <div
           dir="rtl"
-          ref={toolbarWrapRef}
+          ref={(el) => { toolbarWrapRef.current = el; toolsWrapRef.current = el; }}
           style={{
             position: 'absolute',
             top: 26,
@@ -1568,8 +1942,8 @@ export function AnnotationToolbar({
             gap: 4,
             padding: '6px 10px',
             borderRadius: 16,
-            background: 'rgba(8, 12, 16, 0.92)',
-            border: '1px solid rgba(255,255,255,0.10)',
+            background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
+            border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
             boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
             backdropFilter: 'blur(16px)',
             WebkitBackdropFilter: 'blur(16px)',
@@ -1577,21 +1951,54 @@ export function AnnotationToolbar({
             maxWidth: 'calc(100% - 24px)',
             overflowX: 'auto',
             scrollbarWidth: 'none',
-            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease',
+            transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease, opacity 0.3s ease',
+            opacity: toolbarIdle ? 0.72 : 1,
           }}
           onPointerDown={(e) => e.stopPropagation()}
           onPointerMove={(e) => e.stopPropagation()}
           onPointerUp={(e) => e.stopPropagation()}
+          onMouseMove={handleSpotMove}
+          onMouseEnter={handleToolbarEnter}
+          onMouseLeave={(e) => { handleSpotLeave(e); handleToolbarLeave(); }}
         >
+          {toolGlow}
           {dragHandle}
           {toolsButtons}
-          {secondaryContent}
+          {showSecondary && (<div style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'submenuIn 0.25s ease' }}>{secondaryContent}</div>)}
           {divider}
           {actionsContent}
           {orientationToggle}
+          {doneButton}
         </div>
       )}
       {colorDrawer}
+      {tooltip && (
+        <div
+          dir="rtl"
+          style={{
+            position: 'fixed',
+            left: tooltip.left,
+            top: tooltip.top,
+            transform: tooltip.above ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
+            zIndex: 60,
+            pointerEvents: 'none',
+            padding: '5px 10px',
+            borderRadius: 10,
+            background: 'rgba(10, 15, 24, 0.92)',
+            border: '1px solid rgba(255,255,255,0.14)',
+            boxShadow: '0 6px 20px rgba(0,0,0,0.45)',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+            color: 'rgba(255,255,255,0.9)',
+            fontSize: 12,
+            fontFamily: 'inherit',
+            whiteSpace: 'nowrap',
+            userSelect: 'none',
+          }}
+        >
+          {tooltip.text}
+        </div>
+      )}
     </>
   );
 
