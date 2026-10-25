@@ -49,10 +49,12 @@ import {
   SkipBack,
   Play,
   Bookmark,
+  BringToFront,
   Layers,
   MousePointer2,
   Cloud,
   ScanSearch,
+  SendToBack,
   ZoomIn,
   ZoomOut,
   Eye,
@@ -187,6 +189,8 @@ export const Icons = {
   Eraser: withBase(Eraser, 'Icons.Eraser'),
   Undo: withBase(Undo2, 'Icons.Undo'), // lucide: undo-2
   Redo: withBase(Redo2, 'Icons.Redo'), // lucide: redo-2
+  BringToFront: withBase(BringToFront, 'Icons.BringToFront'),
+  SendToBack: withBase(SendToBack, 'Icons.SendToBack'),
 
   // ۶. ابزارهای اسکرین‌شات، زوم و سیستم
   Camera: withBase(Camera, 'Icons.Camera'),

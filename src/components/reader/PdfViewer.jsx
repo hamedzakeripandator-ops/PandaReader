@@ -6,6 +6,7 @@ import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
+import annotationLocalBackup from '../../services/annotationLocalBackup';
 import thumbnailService from '../../services/thumbnailService';
 import hiDpiRenderService from '../../services/hiDpiRenderService';
 import Icons from '../common/Icons';
@@ -445,15 +446,27 @@ const PdfPageItem = React.memo(function PdfPageItem({
       }}
       onContextMenu={handleFrameContextMenu}
     >
-      {activeSrc ? (
-        <div
-          style={{
-            position: 'relative',
-            width: '100%',
-            height: '100%',
-            transform: rotation ? `rotate(${rotation}deg)` : 'none',
-          }}
-        >
+      {/* مانتِ دائمیِ لایهٔ حاشیه‌نویسی (رفعِ صفحاتِ مردهٔ PDF، بخش ۱ تسک):
+          قبلاً AnnotationLayer فقط وقتی activeSrc آماده بود مانت می‌شد؛
+          پس صفحه‌های در حالِ رندر، صفحه‌های با فاصلهٔ ۴ از صفحهٔ فعال
+          (بیرونِ RENDER_RADIUS=۳ ولی داخلِ پنجرهٔ DOM_OVERSCAN=۴) و
+          صفحه‌های رندرِ ناموفق، اصلاً لایه نداشتند و هیچ ورودی‌ای
+          نمی‌گرفتند (کرسر هم به حالتِ عادی برمی‌گشت). حالا لایه همیشه
+          مانت است و تا وقتی تصویر آماده نیست، روی placeholder می‌نشیند.
+          وقتی استودیو غیرفعال است، pointerEventsِ لایه none است، پس
+          دکمهٔ «تلاش مجدد» روی placeholder همچنان کلیک‌پذیر می‌ماند؛
+          وقتی فعال است، لایه با zIndex ۵۰ بالای تصویر/placeholder است
+          و رویدادها را خودش می‌گیرد. لایه آخرین فرزندِ wrapperِ چرخان
+          است تا روی تصویر رنگ شود و چرخشِ صفحه را هم به‌ارث ببرد. */}
+      <div
+        style={{
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          transform: rotation ? `rotate(${rotation}deg)` : 'none',
+        }}
+      >
+        {activeSrc ? (
           <img
             ref={imgRef}
             src={activeSrc}
@@ -466,41 +479,41 @@ const PdfPageItem = React.memo(function PdfPageItem({
               height: expectedHeight ? `${expectedHeight}px` : '100%',
             }}
           />
+        ) : (
+          <div style={styles.pagePlaceholder}>
+            {renderFailed ? (
+              <>
+                <span style={{ color: 'var(--danger)', display: 'flex' }}>
+                  <Icons.AlertTriangle size={22} />
+                </span>
+                <span style={styles.placeholderText}>خطا در ترسیم صفحه {pageNumber}</span>
+                <button
+                  type="button"
+                  onClick={() => setRetryTick((t) => t + 1)}
+                  style={styles.retryBtn}
+                >
+                  تلاش مجدد
+                </button>
+              </>
+            ) : (
+              <>
+                <div style={styles.spinnerBox}>
+                  <Icons.Loader size={24} />
+                </div>
+                <span style={styles.placeholderText}>صفحه {pageNumber}</span>
+              </>
+            )}
+          </div>
+        )}
 
-          {/* لایه تعاملی استودیو ویرایش روی صفحه */}
-          <AnnotationLayer
-            pageNumber={pageNumber}
-            items={pageAnnotations}
-            onCommitPageItems={onCommitPageAnnotations}
-            rotation={rotation}
-          />
-        </div>
-      ) : (
-        <div style={styles.pagePlaceholder}>
-          {renderFailed ? (
-            <>
-              <span style={{ color: 'var(--danger)', display: 'flex' }}>
-                <Icons.AlertTriangle size={22} />
-              </span>
-              <span style={styles.placeholderText}>خطا در ترسیم صفحه {pageNumber}</span>
-              <button
-                type="button"
-                onClick={() => setRetryTick((t) => t + 1)}
-                style={styles.retryBtn}
-              >
-                تلاش مجدد
-              </button>
-            </>
-          ) : (
-            <>
-              <div style={styles.spinnerBox}>
-                <Icons.Loader size={24} />
-              </div>
-              <span style={styles.placeholderText}>صفحه {pageNumber}</span>
-            </>
-          )}
-        </div>
-      )}
+        {/* لایه تعاملی استودیو ویرایش روی صفحه — همیشه مانت است */}
+        <AnnotationLayer
+          pageNumber={pageNumber}
+          items={pageAnnotations}
+          onCommitPageItems={onCommitPageAnnotations}
+          rotation={rotation}
+        />
+      </div>
     </div>
   );
 });
@@ -603,7 +616,14 @@ export default function PdfViewer({ filePath }) {
     setUndoStack([]);
     setRedoStack([]);
 
-    if (!filePath || !coreApi.isAvailable()) return;
+    if (!filePath) return;
+    if (!coreApi.isAvailable()) {
+      // فاز ۴، بخش ۳: بدونِ Electron، دیتابیس در دسترس نیست؛ فقط از
+      // پشتیبانِ localStorage بخوان تا حاشیه‌نویسی‌ها با بستنِ برنامه
+      // از بین نروند.
+      setAnnotationsByPage(annotationLocalBackup.restoreBackupsAsPages(filePath));
+      return;
+    }
 
     coreApi
       .dbAction({
@@ -611,8 +631,17 @@ export default function PdfViewer({ filePath }) {
         payload: { filePath },
       })
       .then((res) => {
-        if (isMounted && res?.annotations && typeof res.annotations === 'object') {
-          setAnnotationsByPage(res.annotations);
+        if (!isMounted) return;
+        const dbPages = res?.annotations && typeof res.annotations === 'object' ? res.annotations : {};
+        // فاز ۴، بخش ۳: آینهٔ localStorage فقط جاهای خالیِ دیتابیس را پر
+        // می‌کند (دیتابیس، حتی با آرایهٔ خالی، برنده است).
+        const merged = annotationLocalBackup.mergeBackupsIntoPages(filePath, dbPages);
+        setAnnotationsByPage(merged.pages);
+        // ترمیم: صفحه‌هایی که فقط در پشتیبان بودند، به دیتابیس هم برگردند.
+        if (coreApi.isAvailable()) {
+          merged.healed.forEach((({ pageNum, items }) => {
+            coreApi.savePageAnnotations(filePath, pageNum, items).catch(() => {});
+          }));
         }
       })
       .catch(() => {});
@@ -643,6 +672,9 @@ export default function PdfViewer({ filePath }) {
           .savePageAnnotations(filePath, pageNum, nextPageItems)
           .catch(() => {});
       }
+      // فاز ۴، بخش ۳: آینهٔ localStorage — هرگز throw نمی‌کند و روی
+      // مسیرِ دیتابیس اثر نمی‌گذارد.
+      annotationLocalBackup.writePageBackup(filePath, pageNum, nextPageItems);
     },
     [filePath]
   );
@@ -664,6 +696,7 @@ export default function PdfViewer({ filePath }) {
           .savePageAnnotations(filePath, lastAction.pageNum, lastAction.prevItems)
           .catch(() => {});
       }
+      annotationLocalBackup.writePageBackup(filePath, lastAction.pageNum, lastAction.prevItems);
       return prevUndo.slice(0, -1);
     });
   }, [filePath]);
@@ -685,6 +718,7 @@ export default function PdfViewer({ filePath }) {
           .savePageAnnotations(filePath, nextAction.pageNum, nextAction.nextItems)
           .catch(() => {});
       }
+      annotationLocalBackup.writePageBackup(filePath, nextAction.pageNum, nextAction.nextItems);
       return prevRedo.slice(0, -1);
     });
   }, [filePath]);

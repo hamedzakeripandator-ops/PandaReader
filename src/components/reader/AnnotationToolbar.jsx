@@ -370,6 +370,11 @@ export function AnnotationToolbar({
   const hasSelection = selectedAnnotationId != null
     || (Array.isArray(selectedAnnotationIds) && selectedAnnotationIds.length > 0)
     || selectedAnnotationTool != null;
+  // فاز ۴: فقط وقتی یک آیتم (تکی یا چندتایی) واقعاً انتخاب شده باشد،
+  // دکمه‌های ترتیب لایه نشان داده می‌شوند — انتخابِ صرفِ ابزار
+  // (selectedAnnotationTool) برای این کار کافی نیست.
+  const hasSelectedItem = selectedAnnotationId != null
+    || (Array.isArray(selectedAnnotationIds) && selectedAnnotationIds.length > 0);
   // بستنِ پنل با دوبار کلیک، فقط وقتی ابزار عوض شود یا انتخابی
   // تازه ظاهر شود، ریست می‌شود (تغییرِ ابزار از راهِ کیبورد را هم
   // پوشش می‌دهد، چون کلیک‌هنلدر فقط کلیک‌ها را می‌بیند).
@@ -593,6 +598,16 @@ export function AnnotationToolbar({
     if (!sid) return;
     window.dispatchEvent(new CustomEvent('annotation:update-selected', {
       detail: { id: sid, ...patch },
+    }));
+  }, []);
+
+  // فاز ۴: ترتیب لایه — رویداد سراسری بدون چرخهٔ ایمپورت (الگوی
+  // broadcastSelectedPropertyPatch). لایه، خودش صفحهٔ انتخاب را از
+  // استور می‌خواند و فقط همان یک لایه عمل می‌کند.
+  const dispatchLayerOrder = useCallback((direction) => {
+    hideTooltip();
+    window.dispatchEvent(new CustomEvent('annotation-layer-order', {
+      detail: { direction },
     }));
   }, []);
 
@@ -1197,7 +1212,7 @@ export function AnnotationToolbar({
       {divider}
 
       {/* رنگ‌ها */}
-      <div style={{ display: 'flex', gap: hoverSwatch && hoverSwatch.startsWith('q:') ? 8 : 6, alignItems: 'center', padding: '0 2px' }}>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
         {COLORS.map((c) => {
           const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
           return (
@@ -1216,24 +1231,45 @@ export function AnnotationToolbar({
               }}
               style={{
                 ...btnBase,
-                width: active ? 24 : 20,
-                height: active ? 24 : 20,
+                width: 28,
+                height: 28,
+                padding: 0,
+                boxSizing: 'border-box',
+                flexShrink: 0,
                 borderRadius: '50%',
-                background: c.hex,
+                background: 'transparent',
                 // فاز ۳ پالت — نشانگرِ رنگِ فعال (تسک §۱): به‌جای
                 // رینگِ فیروزه‌ایِ قبلی، بجِ سفید + درخششِ هم‌رنگ.
-                border: active
-                  ? '1.5px solid rgba(255,255,255,0.85)'
-                  : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
-                boxShadow: active
-                  ? `0 0 8px ${c.hex}`
-                  : hoverSwatch === `q:${c.hex}`
-                    ? `0 6px 14px ${c.hex}`
-                    : '0 0 0 1px rgba(255,255,255,0.2)',
-                transform: hoverSwatch === `q:${c.hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                border: 'none',
+                boxShadow: 'none',
+                transform: 'none',
                 transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
               }}
-            />
+            >
+              {/* فاز ۴ — Fixed Hitbox: دکمه ۲۸×۲۸ ثابت است و هیچ
+                transformای ندارد؛ دایرهٔ رنگ، spanی داخلی با
+                pointerEvents خنثی است تا Hitbox هرگز تکان نخورد. */}
+              <span
+                style={{
+                  display: 'block',
+                  width: 20,
+                  height: 20,
+                  borderRadius: '50%',
+                  pointerEvents: 'none',
+                  background: c.hex,
+                  border: active
+                    ? '1.5px solid rgba(255,255,255,0.85)'
+                    : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
+                  boxShadow: active
+                    ? `0 0 8px ${c.hex}`
+                    : hoverSwatch === `q:${c.hex}`
+                      ? `0 6px 14px ${c.hex}`
+                      : '0 0 0 1px rgba(255,255,255,0.2)',
+                  transform: hoverSwatch === `q:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
+                  transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                }}
+              />
+            </button>
           );
         })}
         {/* فاز ۳ پالت — دکمهٔ دراورِ پالتِ تخصصی، کنارِ رنگ‌های
@@ -1420,6 +1456,44 @@ export function AnnotationToolbar({
       >
         <Icons.Redo size={17} />
       </button>
+
+      {/* فاز ۴: ترتیب لایه — فقط وقتی آیتمی انتخاب شده است */}
+      {hasSelectedItem && (
+        <>
+          <button
+            aria-label="آوردن به رو"
+            onMouseEnter={(e) => showTooltipDelayed(e, 'آوردن به رو')}
+            onMouseLeave={hideTooltip}
+            onClick={() => dispatchLayerOrder('front')}
+            style={{
+              ...btnBase,
+              width: 38,
+              height: 38,
+              borderRadius: 11,
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.75)',
+            }}
+          >
+            <Icons.BringToFront size={17} />
+          </button>
+          <button
+            aria-label="فرستادن به پشت"
+            onMouseEnter={(e) => showTooltipDelayed(e, 'فرستادن به پشت')}
+            onMouseLeave={hideTooltip}
+            onClick={() => dispatchLayerOrder('back')}
+            style={{
+              ...btnBase,
+              width: 38,
+              height: 38,
+              borderRadius: 11,
+              background: 'transparent',
+              color: 'rgba(255,255,255,0.75)',
+            }}
+          >
+            <Icons.SendToBack size={17} />
+          </button>
+        </>
+      )}
 
       {/* پاک کردن همه — دو مرحله‌ای، فاز ۱: prop با fallback */}
       {pageItemCount > 0 && (
@@ -1719,7 +1793,7 @@ export function AnnotationToolbar({
             <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
               {cat.label}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: hoverSwatch && hoverSwatch.startsWith(`d:${cat.id}:`) ? 10 : 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
               {cat.colors.map((c) => {
                 const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
                 return (
@@ -1735,15 +1809,33 @@ export function AnnotationToolbar({
                       height: 26,
                       borderRadius: '50%',
                       flexShrink: 0,
-                      background: c.hex,
-                      border: active
-                        ? '1.5px solid rgba(255,255,255,0.85)'
-                        : '1px solid rgba(255,255,255,0.25)',
-                      boxShadow: active ? `0 0 8px ${c.hex}` : hoverSwatch === `d:${cat.id}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
-                      transform: hoverSwatch === `d:${cat.id}:${c.hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                      padding: 0,
+                      boxSizing: 'border-box',
+                      background: 'transparent',
+                      border: 'none',
+                      boxShadow: 'none',
+                      transform: 'none',
                       transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                     }}
-                  />
+                  >
+                    {/* فاز ۴ — Fixed Hitbox (مانند نوار اصلی). */}
+                    <span
+                      style={{
+                        display: 'block',
+                        width: 26,
+                        height: 26,
+                        borderRadius: '50%',
+                        pointerEvents: 'none',
+                        background: c.hex,
+                        border: active
+                          ? '1.5px solid rgba(255,255,255,0.85)'
+                          : '1px solid rgba(255,255,255,0.25)',
+                        boxShadow: active ? `0 0 8px ${c.hex}` : hoverSwatch === `d:${cat.id}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
+                        transform: hoverSwatch === `d:${cat.id}:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
+                        transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                      }}
+                    />
+                  </button>
                 );
               })}
             </div>
@@ -1753,7 +1845,7 @@ export function AnnotationToolbar({
           <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
             رنگ‌های من
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: hoverSwatch && hoverSwatch.startsWith('u:') ? 10 : 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
             {userPalette.map((hex) => {
               const active = annotationColor.toLowerCase() === hex.toLowerCase();
               const hovered = hoverUserHex === hex;
@@ -1770,15 +1862,33 @@ export function AnnotationToolbar({
                       height: 26,
                       borderRadius: '50%',
                       flexShrink: 0,
-                      background: hex,
-                      border: active
-                        ? '1.5px solid rgba(255,255,255,0.85)'
-                        : '1px solid rgba(255,255,255,0.25)',
-                      boxShadow: active ? `0 0 8px ${hex}` : hoverSwatch === `u:${hex}` ? `0 6px 14px ${hex}` : hovered ? `0 0 10px ${hex}` : 'none',
-                      transform: hoverSwatch === `u:${hex}` ? 'translateY(-3px) scale(1.25)' : 'none',
+                      padding: 0,
+                      boxSizing: 'border-box',
+                      background: 'transparent',
+                      border: 'none',
+                      boxShadow: 'none',
+                      transform: 'none',
                       transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                     }}
-                  />
+                  >
+                    {/* فاز ۴ — Fixed Hitbox (مانند نوار اصلی). */}
+                    <span
+                      style={{
+                        display: 'block',
+                        width: 26,
+                        height: 26,
+                        borderRadius: '50%',
+                        pointerEvents: 'none',
+                        background: hex,
+                        border: active
+                          ? '1.5px solid rgba(255,255,255,0.85)'
+                          : '1px solid rgba(255,255,255,0.25)',
+                        boxShadow: active ? `0 0 8px ${hex}` : hoverSwatch === `u:${hex}` ? `0 6px 14px ${hex}` : hovered ? `0 0 10px ${hex}` : 'none',
+                        transform: hoverSwatch === `u:${hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
+                        transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                      }}
+                    />
+                  </button>
                   <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono', monospace", color: hovered ? '#ffffff' : 'rgba(255,255,255,0.5)', direction: 'ltr' }}>
                     {hex}
                   </span>

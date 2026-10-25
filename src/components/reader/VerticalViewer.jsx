@@ -5,6 +5,7 @@ import useLibraryStore from '../../store/useLibraryStore';
 import useVirtualScroll from '../../hooks/useVirtualScroll';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
+import annotationLocalBackup from '../../services/annotationLocalBackup';
 import Icons from '../common/Icons';
 import AnnotationLayer from './AnnotationLayer';
 import AnnotationToolbar from './AnnotationToolbar';
@@ -285,7 +286,14 @@ export default function VerticalViewer() {
     setUndoStack([]);
     setRedoStack([]);
 
-    if (!currentFilePath || !coreApi.isAvailable()) return;
+    if (!currentFilePath) return;
+    if (!coreApi.isAvailable()) {
+      // فاز ۴، بخش ۳: بدونِ Electron، دیتابیس در دسترس نیست؛ فقط از
+      // پشتیبانِ localStorage بخوان تا حاشیه‌نویسی‌ها با بستنِ برنامه
+      // از بین نروند.
+      setAnnotationsByPage(annotationLocalBackup.restoreBackupsAsPages(currentFilePath));
+      return;
+    }
 
     coreApi
       .dbAction({
@@ -293,8 +301,17 @@ export default function VerticalViewer() {
         payload: { filePath: currentFilePath },
       })
       .then((res) => {
-        if (isMounted && res?.annotations && typeof res.annotations === 'object') {
-          setAnnotationsByPage(res.annotations);
+        if (!isMounted) return;
+        const dbPages = res?.annotations && typeof res.annotations === 'object' ? res.annotations : {};
+        // فاز ۴، بخش ۳: آینهٔ localStorage فقط جاهای خالیِ دیتابیس را پر
+        // می‌کند (دیتابیس، حتی با آرایهٔ خالی، برنده است).
+        const merged = annotationLocalBackup.mergeBackupsIntoPages(currentFilePath, dbPages);
+        setAnnotationsByPage(merged.pages);
+        // ترمیم: صفحه‌هایی که فقط در پشتیبان بودند، به دیتابیس هم برگردند.
+        if (coreApi.isAvailable()) {
+          merged.healed.forEach((({ pageNum, items }) => {
+            coreApi.savePageAnnotations(currentFilePath, pageNum, items).catch(() => {});
+          }));
         }
       })
       .catch(() => {});
@@ -325,6 +342,9 @@ export default function VerticalViewer() {
           .savePageAnnotations(currentFilePath, pageNum, nextPageItems)
           .catch(() => {});
       }
+      // فاز ۴، بخش ۳: آینهٔ localStorage — هرگز throw نمی‌کند و روی
+      // مسیرِ دیتابیس اثر نمی‌گذارد.
+      annotationLocalBackup.writePageBackup(currentFilePath, pageNum, nextPageItems);
     },
     [currentFilePath]
   );
@@ -350,6 +370,7 @@ export default function VerticalViewer() {
           )
           .catch(() => {});
       }
+      annotationLocalBackup.writePageBackup(currentFilePath, lastAction.pageNum, lastAction.prevItems);
       return prevUndo.slice(0, -1);
     });
   }, [currentFilePath]);
@@ -375,6 +396,7 @@ export default function VerticalViewer() {
           )
           .catch(() => {});
       }
+      annotationLocalBackup.writePageBackup(currentFilePath, nextAction.pageNum, nextAction.nextItems);
       return prevRedo.slice(0, -1);
     });
   }, [currentFilePath]);

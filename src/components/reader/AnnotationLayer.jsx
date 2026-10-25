@@ -17,6 +17,7 @@ import React, {
   useState,
   useRef,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
 } from 'react';
@@ -1515,6 +1516,42 @@ function transformItemByNode(item, nodeX, nodeY, scaleX, scaleY) {
 // بخش ۶: کامپوننت اصلی
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// کرسرهای اختصاصیِ ابزار (بخش ۲ تسک) — SVGهای ۲۴×۲۴ به‌صورتِ Data-URI.
+// - قلم/هایلایتر، رنگِ نوک/بدنه را از annotationColorی فعال می‌گیرند.
+// - همهٔ رشته‌ها با encodeURIComponent ساخته می‌شوند تا `#` (به %23)
+//   و `"` (به %22) داخلِ `url("...")` خراب نشوند.
+// - Hotspotها دقیقاً طبقِ تسک‌اند: قلم 2 22، هایلایتر 6 18، پاک‌کن 12 12.
+// - اندازهٔ ۲۴ زیرِ سقفِ مرسومِ کرسرِ سفارشیِ مرورگرها (۳۲) است.
+function svgCursor(svg, x, y, fallback) {
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, ${fallback}`;
+}
+function cursorColor(color) {
+  return (typeof color === 'string' && color.trim() !== '') ? color : '#22d3ee';
+}
+function penCursor(color) {
+  const c = cursorColor(color);
+  return svgCursor(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><path d="M19.6 2.4 L21.6 4.4 L8.2 17.8 L3 21 L6.2 15.8 Z" fill="${c}"/><path d="M19.6 2.4 L21.6 4.4 L18.4 7.6 L15.2 4.4 Z" fill="#ffffff" opacity="0.35"/></svg>`,
+    2, 22, 'crosshair');
+}
+function highlighterCursor(color) {
+  const c = cursorColor(color);
+  return svgCursor(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g transform="rotate(-45 12 12)"><rect x="3" y="9" width="18" height="7" rx="2" fill="${c}" opacity="0.55"/><rect x="3" y="9" width="18" height="7" rx="2" fill="none" stroke="${c}" stroke-width="1"/></g><path d="M5 17 L9 21" stroke="${c}" stroke-width="2" stroke-linecap="round"/></svg>`,
+    6, 18, 'crosshair');
+}
+function stickyCursor() {
+  return svgCursor(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><rect x="3" y="3" width="13" height="13" rx="2" fill="#fde68a" stroke="#b45309" stroke-width="1.2"/><path d="M6 7h7M6 10h5" stroke="#b45309" stroke-width="1" stroke-linecap="round"/><path d="M20 4v7M16.5 7.5h7" stroke="#0f172a" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+    4, 4, 'copy');
+}
+function eraserCursor() {
+  return svgCursor(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#ffffff" stroke-width="2.6"/><circle cx="12" cy="12" r="9" fill="none" stroke="#0f172a" stroke-width="1.3"/><circle cx="12" cy="12" r="1.4" fill="#0f172a"/></svg>`,
+    12, 12, 'cell');
+}
+
 const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageNumber,
   items = [],
@@ -1670,7 +1707,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageRef.current = pageNumber;
   commitFnRef.current = onCommitPageItems;
 
-  useEffect(() => {
+  // رفعِ باگِ صفر ماندنِ ابعادِ Stage (بخش ۱٫۳ تسک): اندازه‌گیری در
+  // useLayoutEffect (پیش از رنگ‌شدنِ فریم، نه بعد از آن) + خوانشِ
+  // دوباره در فریمِ بعد (اگر مانت وسطِ چیدمان رخ داده و خوانشِ اول
+  // صفر بوده باشد) + ResizeObserver برای تغییرهای بعدیِ ابعادِ والد.
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const update = () => {
@@ -1684,7 +1725,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
-    return () => ro.disconnect();
+    const rafId = requestAnimationFrame(update);
+    return () => { ro.disconnect(); cancelAnimationFrame(rafId); };
   }, []);
 
   const scaleX = size.w > 0 ? size.w / 1000 : 1;
@@ -1886,6 +1928,81 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // لیست انجام می‌شود، نه snapshotِ شروعِ درگ).
   uniformItemsRef.current = uniformItems;
 
+  // کرسرِ پایهٔ ابزار (بخش ۲ تسک) — روی سه سطح اعمال می‌شود تا Konva
+  // در هیچ صفحه‌ای آن را به default بازنگرداند: (۱) divِ کانتینرِ
+  // لایه (پایینِ فایل)، (۲) styleی Stage، (۳) افکتِ زیر که مستقیم
+  // روی stageRef.current.container().style.cursor می‌نویسد. کرسرهای
+  // هاور/درگِ select با نوشتنِ مستقیم روی DOM عوض می‌شوند (بدون
+  // setState، تا هر pointermove ری‌رندرِ کامل نسازد) و با هر تغییرِ
+  // ابزار/رنگ، همین افکت مقدارِ پایه را بازمی‌گرداند.
+  const baseCursor = useMemo(() => {
+    if (!isAnnotationActive) return 'default';
+    switch (annotationTool) {
+      case 'pen': return penCursor(annotationColor);
+      case 'highlighter': return highlighterCursor(annotationColor);
+      case 'text': return 'text';
+      case 'sticky': return stickyCursor();
+      case 'eraser': return eraserCursor();
+      case 'box':
+      case 'arrow': return 'crosshair';
+      case 'select': return 'default';
+      default: return 'default';
+    }
+  }, [isAnnotationActive, annotationTool, annotationColor]);
+  const baseCursorRef = useRef('default');
+  baseCursorRef.current = baseCursor;
+  useEffect(() => {
+    const c = stageRef.current?.container();
+    if (c) c.style.cursor = baseCursor;
+  }, [baseCursor]);
+  // نوشتنِ مستقیمِ کرسر روی containerِ Konva (بدون ری‌رندر) — برای
+  // هاور/درگِ select. این کال‌بک‌ها وابستگی ندارند (پایدارند)، پس
+  // صدا زدنشان از داخلِ handleMove/handleDown/handleUp بی‌خطر است.
+  const setStageCursor = useCallback((value) => {
+    const c = stageRef.current?.container();
+    if (c) c.style.cursor = value;
+  }, []);
+  const restoreStageCursor = useCallback(() => {
+    const c = stageRef.current?.container();
+    if (c) c.style.cursor = baseCursorRef.current || 'default';
+  }, []);
+  // طبقه‌بندیِ هندلِ فلش در یک نقطهٔ یکنواخت — همان ریاضیِ handleDown
+  // (نزدیک‌ترین هندلِ درونِ شعاعِ ۱۸/scaleX؛ ترتیبِ بررسی: mid، بعد
+  // start، بعد end تا در تساوی، mid برنده شود). هم handleDown و هم
+  // هاورِ select در handleMove از همین تابع استفاده می‌کنند تا دو
+  // نسخهٔ جدا از هم منحرف نشوند.
+  const classifyArrowHandleAtPoint = useCallback((pt) => {
+    if (!pt) return null;
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const selPageOk = state.selectedAnnotationPage == null ||
+      Number(state.selectedAnnotationPage) === Number(pageRef.current);
+    const list = uniformItemsRef.current || [];
+    const selectedArrow = selPageOk && state.selectedAnnotationId
+      ? list.find((x) => x.id === state.selectedAnnotationId && x.tool === 'arrow')
+      : null;
+    if (!selectedArrow) return null;
+    const sSX = Number(selectedArrow.startX);
+    const sSY = Number(selectedArrow.startY);
+    const sEX = Number(selectedArrow.endX);
+    const sEY = Number(selectedArrow.endY);
+    const sMidX = (sSX + sEX) / 2;
+    const sMidY = (sSY + sEY) / 2;
+    const sCurved = selectedArrow.arrowStyle === 'curved' && selectedArrow.cx != null;
+    const apexPt = sCurved
+      ? { x: (sMidX + selectedArrow.cx) / 2, y: (sMidY + selectedArrow.cy) / 2 }
+      : { x: sMidX, y: sMidY };
+    const handleHitRadius = 18 / (scaleRef.current?.scaleX || 1);
+    const dStart = Math.hypot(pt.x - sSX, pt.y - sSY);
+    const dEnd = Math.hypot(pt.x - sEX, pt.y - sEY);
+    const dMid = Math.hypot(pt.x - apexPt.x, pt.y - apexPt.y);
+    let hitHandle = null;
+    let hitDist = Infinity;
+    if (dMid <= handleHitRadius && dMid < hitDist) { hitHandle = 'mid'; hitDist = dMid; }
+    if (dStart <= handleHitRadius && dStart < hitDist) { hitHandle = 'start'; hitDist = dStart; }
+    if (dEnd <= handleHitRadius && dEnd < hitDist) { hitHandle = 'end'; hitDist = dEnd; }
+    return hitHandle ? { handle: hitHandle, arrow: selectedArrow } : null;
+  }, []);
+
   // معماریِ Adorner — همگام‌سازیِ زندهٔ هندل‌های اورلی با جابه‌جاییِ
   // گروهی (Konva-level، بدونِ رندرِ دوباره): موقعِ درگِ نود،
   // هندل‌ها با همان دلتای یکنواخت جابه‌جا می‌شوند تا فریم‌به‌فریم
@@ -1916,6 +2033,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const handleItemDragMove = useCallback((e) => {
     const node = e.target;
     if (!node) return;
+    setStageCursor('grabbing');
     const dx = node.x();
     const dy = node.y();
     const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
@@ -1962,7 +2080,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // حباب کرده)، این handler نباید کامیتِ جابه‌جایی ثبت کند؛
     // وگرنه مختصاتِ هندل، به‌اشتباه جابه‌جاییِ کلِ گروه حساب می‌شد.
     // (دفاعِ اول، cancelBubble در هر سه رویدادِ درگِ هندل است.)
-    if (node !== itemNodeRefs.current.get(item.id)) return;
+    if (node !== itemNodeRefs.current.get(item.id)) { restoreStageCursor(); return; }
     const dx = node.x();
     const dy = node.y();
     const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
@@ -1978,6 +2096,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // برمی‌گردند تا بعد از snap-backِ فلش، سرگردان نمانند.
       resetAdornerHandlesToBase();
       layerRef.current?.batchDraw();
+      restoreStageCursor();
       return;
     }
     const idsToMove = ids.includes(item.id) && ids.length > 0 ? ids : [item.id];
@@ -1988,6 +2107,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     }
     if (dx === 0 && dy === 0) {
       layerRef.current?.batchDraw();
+      restoreStageCursor();
       return;
     }
     const nextItems = uniformItems.map((it) =>
@@ -1995,6 +2115,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     );
     commit(nextItems);
     layerRef.current?.batchDraw();
+    restoreStageCursor();
   }, [commit, uniformItems]);
 
   // پولیشِ انقلابی — هندل‌های برداریِ فلش (PowerPoint-style).
@@ -2510,69 +2631,46 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // رویدادِ دایره شلیک می‌شد و کلیک را می‌ربود، و draggableی
       // Group هم درگ را به نفعِ کلِ گروپ مصادره می‌کرد — با حذفِ
       // هر دو، دیگر چیزی برای رقابت نیست.
-      const selPageOk = state.selectedAnnotationPage == null ||
-        Number(state.selectedAnnotationPage) === Number(pageNumber);
-      const selectedArrow = selPageOk && state.selectedAnnotationId
-        ? uniformItems.find((x) => x.id === state.selectedAnnotationId && x.tool === 'arrow')
-        : null;
-      if (selectedArrow) {
-        const sSX = Number(selectedArrow.startX);
-        const sSY = Number(selectedArrow.startY);
-        const sEX = Number(selectedArrow.endX);
-        const sEY = Number(selectedArrow.endY);
-        const sMidX = (sSX + sEX) / 2;
-        const sMidY = (sSY + sEY) / 2;
-        const sCurved = selectedArrow.arrowStyle === 'curved' && selectedArrow.cx != null;
-        const apexPt = sCurved
-          ? { x: (sMidX + selectedArrow.cx) / 2, y: (sMidY + selectedArrow.cy) / 2 }
-          : { x: sMidX, y: sMidY };
-        const handleHitRadius = 18 / (scaleRef.current?.scaleX || 1);
-        const dStart = Math.hypot(pt.x - sSX, pt.y - sSY);
-        const dEnd = Math.hypot(pt.x - sEX, pt.y - sEY);
-        const dMid = Math.hypot(pt.x - apexPt.x, pt.y - apexPt.y);
-        // نزدیک‌ترین هندلِ درونِ شعاع برنده است (نه ترتیبِ ثابت)،
-        // تا روی فلش‌های کوچک، کلیکِ دقیقِ روی نقطهٔ شروع/پایان،
-        // به‌جای هندلِ وسط تفسیر نشود — و دوبارکلیکِ دقیقِ روی قله
-        // هم، وسط شناخته شود.
-        let hitHandle = null;
-        let hitDist = Infinity;
-        if (dMid <= handleHitRadius && dMid < hitDist) { hitHandle = 'mid'; hitDist = dMid; }
-        if (dStart <= handleHitRadius && dStart < hitDist) { hitHandle = 'start'; hitDist = dStart; }
-        if (dEnd <= handleHitRadius && dEnd < hitDist) { hitHandle = 'end'; hitDist = dEnd; }
-        if (hitHandle) {
-          const now = (typeof performance !== 'undefined' && performance.now)
-            ? performance.now()
-            : Date.now();
-          const lastMid = lastMidClickRef.current;
-          // دوبارکلیکِ روی قله (کمتر از ۳۵۰ میلی‌ثانیه با کلیکِ
-          // قبلیِ روی وسط): فوراً صاف + کامیت + خروج. روی فلشِ
-          // از قبل صاف، کامیتی ساخته نمی‌شود تا ورودیِ Undoیِ
-          // بی‌تغییر نیفتد.
-          if (hitHandle === 'mid' && lastMid && lastMid.id === selectedArrow.id &&
-              now - lastMid.time < 350) {
-            lastMidClickRef.current = null;
-            if (selectedArrow.arrowStyle === 'curved') {
-              const nextItems = uniformItems.map((it) =>
-                it.id === selectedArrow.id ? { ...it, arrowStyle: 'straight', cx: null, cy: null } : it
-              );
-              commit(nextItems);
-              layerRef.current?.batchDraw();
-            }
-            return;
+      // تشخیصِ هندل از طریقِ classifyArrowHandleAtPoint (همان ریاضیِ
+      // قبل — فقط به تابعِ مشترک منتقل شده تا هاورِ select در handleMove
+      // هم دقیقاً همان طبقه‌بندی را ببیند).
+      const handleHit = classifyArrowHandleAtPoint(pt);
+      if (handleHit) {
+        const hitHandle = handleHit.handle;
+        const selectedArrow = handleHit.arrow;
+        const now = (typeof performance !== 'undefined' && performance.now)
+          ? performance.now()
+          : Date.now();
+        const lastMid = lastMidClickRef.current;
+        // دوبارکلیکِ روی قله (کمتر از ۳۵۰ میلی‌ثانیه با کلیکِ
+        // قبلیِ روی وسط): فوراً صاف + کامیت + خروج. روی فلشِ
+        // از قبل صاف، کامیتی ساخته نمی‌شود تا ورودیِ Undoیِ
+        // بی‌تغییر نیفتد.
+        if (hitHandle === 'mid' && lastMid && lastMid.id === selectedArrow.id &&
+            now - lastMid.time < 350) {
+          lastMidClickRef.current = null;
+          if (selectedArrow.arrowStyle === 'curved') {
+            const nextItems = uniformItems.map((it) =>
+              it.id === selectedArrow.id ? { ...it, arrowStyle: 'straight', cx: null, cy: null } : it
+            );
+            commit(nextItems);
+            layerRef.current?.batchDraw();
           }
-          if (hitHandle === 'mid') {
-            lastMidClickRef.current = { id: selectedArrow.id, time: now };
-          }
-          arrowHandleEditRef.current = {
-            id: selectedArrow.id,
-            handle: hitHandle,
-            initialItem: { ...selectedArrow },
-            moved: false,
-            lastPreview: null,
-          };
-          setArrowHandleDraggingKind(hitHandle);
           return;
         }
+        if (hitHandle === 'mid') {
+          lastMidClickRef.current = { id: selectedArrow.id, time: now };
+        }
+        arrowHandleEditRef.current = {
+          id: selectedArrow.id,
+          handle: hitHandle,
+          initialItem: { ...selectedArrow },
+          moved: false,
+          lastPreview: null,
+        };
+        setArrowHandleDraggingKind(hitHandle);
+        setStageCursor('crosshair');
+        return;
       }
       // Refinement Step 2: هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا
       // کلیکِ مستقیم روی شکل، بلافاصله انتخاب شود. capturePointer
@@ -2611,6 +2709,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           );
           if (originals.size > 0) {
             manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+            setStageCursor('grabbing');
           }
         }
         // اگر آیتم از قبل انتخاب‌شده بود (بدونِ Shift)، انتخاب
@@ -2637,6 +2736,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             pt.y >= ub.y - 10 && pt.y <= ub.y + ub.height + 10) {
           const originals = new Map(selectedItems.map((it) => [it.id, it]));
           manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          setStageCursor('grabbing');
           return;
         }
       }
@@ -2897,8 +2997,33 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           if (mmAdornerBase && mm.originals.has(mmAdornerBase.id)) {
             syncAdornerHandlesWithGroupDrag(dx, dy);
           }
+          setStageCursor('grabbing');
           layerRef.current?.batchDraw();
           return;
+        }
+        // کرسرِ هاور در حالتِ select — نوشتنِ مستقیم روی DOM (بدون
+        // setState) تا هر pointermove، ری‌رندرِ کامل نسازد. روی هندلِ
+        // فلش crosshair، روی آیتم move، روی فضای خالی default.
+        // (مارکی و manualMove بالاتر return می‌کنند و درگِ هندل هم
+        // بالاتر return می‌کند، پس این‌جا فقط هاورِ آزاد است.)
+        if (toolRef.current === 'select') {
+          const hoverHit = classifyArrowHandleAtPoint(cur);
+          if (hoverHit) {
+            setStageCursor('crosshair');
+          } else {
+            let n = e.target;
+            let overItem = false;
+            while (n && n !== stageRef.current) {
+              try {
+                if (typeof n.id === 'function' && itemNodeRefs.current.has(n.id())) {
+                  overItem = true;
+                  break;
+                }
+              } catch (_) { /* ignore */ }
+              n = typeof n.getParent === 'function' ? n.getParent() : null;
+            }
+            setStageCursor(overItem ? 'move' : 'default');
+          }
         }
       }
     }
@@ -2988,6 +3113,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         }
       }
       layerRef.current?.batchDraw();
+      restoreStageCursor();
       return;
     }
     // فاز ۵: مارکی و جابه‌جاییِ دستی، قبل از محافظِ isDrawingRef
@@ -3027,6 +3153,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           }
         }
         layerRef.current?.batchDraw();
+        restoreStageCursor();
         return;
       }
 
@@ -3049,6 +3176,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           commit(nextItems);
         }
         layerRef.current?.batchDraw();
+        restoreStageCursor();
         return;
       }
     }
@@ -3457,14 +3585,58 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     return () => window.removeEventListener('annotation:update-selected', onUpdateSelected);
   }, [commit]);
 
+  // فاز ۴: ترتیب لایه (Z-Index) — شنوندهٔ رویداد سراسری
+  // 'annotation-layer-order' که تولبار شلیک می‌کند (همان الگوی
+  // annotation:update-selected؛ بدون ایمپورتِ تولبار، پس چرخه‌ای
+  // در کار نیست). همهٔ لایه‌های مانت‌شده رویداد را می‌گیرند، ولی
+  // فقط لایهٔ صفحهٔ انتخاب‌شده عمل می‌کند و بقیه بی‌صدا برمی‌گردند.
+  // جابه‌جایی با یک کامیتِ واحد انجام می‌شود، پس دقیقاً یک ورودی
+  // Undo ساخته می‌شود؛ ترتیبِ نسبیِ آیتم‌های انتخاب‌شده و
+  // انتخاب‌نشده هر دو حفظ می‌شود.
+  useEffect(() => {
+    const onLayerOrder = (e) => {
+      const direction = e?.detail?.direction;
+      if (direction !== 'front' && direction !== 'back') return;
+      const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+      const selectedPage = state.selectedAnnotationPage;
+      const selectedIds = new Set([
+        ...(Array.isArray(state.selectedAnnotationIds) ? state.selectedAnnotationIds : []),
+        ...(state.selectedAnnotationId ? [state.selectedAnnotationId] : []),
+      ]);
+      if (selectedIds.size === 0) return;
+      if (selectedPage != null && Number(selectedPage) !== Number(pageRef.current)) return;
+      // بازسازی لیست یکنواخت از itemsRef تا closure قدیمی استفاده نشود
+      // (همان الگوی onUpdateSelected).
+      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) => {
+        const u = storageToUniform(it, aspectRef.current);
+        return { ...u, _bbox: getStrokeBBox(u.points, 15) };
+      });
+      // اگر صفحهٔ انتخاب در استور ثبت نشده بود، فقط وقتی این لایه
+      // دست‌کم یکی از آیتم‌های انتخاب‌شده را دارد عمل می‌کنیم.
+      const selected = uniformList.filter((it) => selectedIds.has(it.id));
+      if (selected.length === 0) return;
+      const others = uniformList.filter((it) => !selectedIds.has(it.id));
+      if (others.length === 0) return; // همه انتخاب‌اند؛ ترتیبی برای عوض‌شدن نیست
+      const nextList = direction === 'front' ? [...others, ...selected] : [...selected, ...others];
+      const before = uniformList.map((it) => it.id).join('|');
+      const after = nextList.map((it) => it.id).join('|');
+      if (before === after) return; // از قبل در جای درست‌اند؛ ورودی Undo خالی نساز
+      commit(nextList);
+    };
+    window.addEventListener('annotation-layer-order', onLayerOrder);
+    return () => window.removeEventListener('annotation-layer-order', onLayerOrder);
+  }, [commit]);
+
   if (!isAnnotationActive && uniformItems.length === 0) return null;
   if (size.w === 0 || size.h === 0) {
     return <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />;
   }
 
-  const isEraser = annotationTool === 'eraser';
-  // فاز ۵: ابزارِ انتخاب، کرسرِ default دارد، نه crosshair.
-  const isSelect = annotationTool === 'select';
+  // کرسرِ Stage از baseCursor می‌آید (تعریف‌شده پیش از شرطِ خروج،
+  // بالای فایل) — دیگر سه‌حالتهٔ قدیمیِ default/cell/crosshair نیست:
+  // قلم/هایلایتر SVGی اختصاصی، متن text، استیکی یادداشتِ +، پاک‌کن
+  // دایره، باکس/فلش crosshair و select در فضای خالی default دارند
+  // (هاور/درگِ select با نوشتنِ مستقیم روی DOM عوض می‌شود).
   // Refinement Final: دستگیره‌های Transformer بر اساسِ ابزارِ آیتمِ
   // اصلی. اگر آیتمِ اصلی متن باشد، فقط ۴ گوشه نشان داده می‌شود،
   // چون دستگیرهٔ میانی برای متن بی‌اثر است (fontSize از scaleY
@@ -3507,6 +3679,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         // است، پس هیچ تداخلی با تعاملِ عادیِ صفحه ندارد).
         zIndex: isAnnotationActive ? 50 : 18,
         pointerEvents: isAnnotationActive ? 'auto' : 'none',
+        // اعمالِ اولِ کرسرِ ابزار (اعمالِ دوم: styleی Stage؛ اعمالِ
+        // سوم: افکتِ stageRef.current.container().style.cursor) — وقتی
+        // استودیو فعال است، کانتینر بالاتر از تصویرِ صفحه و لایه‌های
+        // کمکی می‌نشیند و رویدادها را خودش می‌گیرد.
+        cursor: baseCursor,
         touchAction: 'none',
       }}
     >
@@ -3521,13 +3698,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         onPointerLeave={handleUp}
         onPointerCancel={handleUp}
         style={{
-          cursor: !isAnnotationActive
-            ? 'default'
-            : isEraser
-              ? 'cell'
-              : isSelect
-                ? 'default'
-                : 'crosshair',
+          // اعمالِ دومِ کرسر (اعمالِ اول: divِ کانتینرِ بالا؛ اعمالِ
+          // سوم: افکتِ stageRef.current.container().style.cursor) تا
+          // Konva در هیچ صفحه‌ای آن را به default بازنگرداند.
+          cursor: baseCursor,
         }}
       >
         <Layer ref={layerRef}>
