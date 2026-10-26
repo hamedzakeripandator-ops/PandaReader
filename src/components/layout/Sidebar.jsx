@@ -247,6 +247,10 @@ const styles = {
   },
   resumeBanner: {
     display: 'flex',
+    // مرحله ۴ — جهتِ صریحِ ردیف: آیکون چپ‌ترین، بعد اسم (چیدمانِ ردیف‌ها
+    // نباید از dir سند به‌ارث برسد؛ مرحله ۳ با rtl شدنِ سند، ردیف‌های
+    // بدونِ جهتِ صریح را برعکس کرده بود).
+    direction: 'ltr',
     alignItems: 'center',
     gap: '10px',
     padding: '10px 12px',
@@ -297,6 +301,8 @@ const styles = {
     width: '100%',
   },
   navItem: {
+    // مرحله ۴ — جهتِ صریحِ ردیف: آیکون چپ‌ترین، بعد اسم، بعد کادرِ عدد.
+    direction: 'ltr',
     padding: '10px 14px',
     borderRadius: '12px',
     borderWidth: '1px',
@@ -343,6 +349,8 @@ const styles = {
     direction: 'ltr',
   },
   profileCard: {
+    // مرحله ۴ — جهتِ صریحِ ردیف: آواتار چپ‌ترین، بعد اسم، بعد فلش.
+    direction: 'ltr',
     backgroundColor: 'var(--panel2)',
     borderRadius: '16px',
     padding: '10px 14px',
@@ -387,6 +395,9 @@ const styles = {
     flex: 1,
     overflow: 'hidden',
     gap: '2px',
+    // مرحله ۴ — با ltr شدنِ ردیف، زیرنویسِ فارسی باید راست‌چین بماند
+    // (نامِ لاتین، direction صریحِ خودش را دارد و چپ‌چین می‌ماند).
+    direction: 'rtl',
   },
   profileName: {
     fontFamily: 'var(--font-latin)',

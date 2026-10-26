@@ -1,10 +1,11 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import ComicCard from './ComicCard';
 import KineticHeroSlider from './KineticHeroSlider';
 import { coreApi } from '../../services/coreApi';
 import Icons from '../../components/common/Icons';
+import { normalizeSearchTextLoose, fuzzyScoreLibraryItem } from '../../utils/persianSearch';
 
 const FOLDER_COLORS = [
   '#22d3ee',
@@ -14,6 +15,48 @@ const FOLDER_COLORS = [
   '#facc15',
   '#fb923c',
 ];
+
+// مرحله ۴ — کارتِ تنبلِ کتابخانه: تا وقتی کارت (با حاشیهٔ امنِ ۴۰۰ پیکسل)
+// واردِ دید نشده، فقط یک اسکلتِ سبک با همان ساختارِ کارت رندر می‌شود و
+// هیچ getThumbnail صدا زده نمی‌شود. با خروج از دید، کارت آنمانت می‌شود و
+// پاک‌سازیِ ComicCard درخواستِ در صفِ آن را لغو می‌کند (مراجعه:
+// thumbnailService.js، مرحله ۴). مانتِ دوباره ارزان است چون کاور از کشِ
+// رم/دیسک برمی‌گردد، نه از استخراجِ دوباره.
+function LazyLibraryCard({ item, onOpenComic, onRemove }) {
+  const slotRef = useRef(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    const el = slotRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry) setIsVisible(entry.isIntersecting);
+      },
+      { root: null, rootMargin: '400px 0px', threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div ref={slotRef}>
+      {isVisible ? (
+        <ComicCard item={item} onOpenComic={onOpenComic} onRemove={onRemove} />
+      ) : (
+        <div style={styles.cardSkeleton}>
+          <div style={styles.skeletonCover} />
+          <div style={styles.skeletonLine} />
+          <div style={{ ...styles.skeletonLine, width: '60%' }} />
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function LibraryView({ onOpenComic }) {
   const library = useLibraryStore((state) => state.library);
@@ -87,15 +130,38 @@ export default function LibraryView({ onOpenComic }) {
     return counts;
   }, [effectiveLibrary, libraryFolders]);
 
+  // نام پوشهٔ هر آیتم (فیلدِ دومِ جستجوی فازی)
+  const folderNameById = useMemo(() => {
+    const m = new Map();
+    (libraryFolders || []).forEach((f) => {
+      if (f?.id) m.set(f.id, f.name || '');
+    });
+    return m;
+  }, [libraryFolders]);
+
   // ۳. فیلتر و مرتب‌سازی گرید کتابخانه (با حفظ اولویت ۱۰۰٪ آیتم‌های پین‌شده در صدر)
   const displayedLibrary = useMemo(() => {
-    const q = (searchQuery || '').trim().toLowerCase();
+    // مرحله ۴ — جستجوی فازی: به‌جای includes ساده، امتیاز چندفیلدی
+    // (نام ×۳، پوشه ×۲، مسیر ×۱، تگ‌ها ×۲) با نرمال‌سازی فارسی
+    // (ی/ي، ک/ك)، تطابق زیررشته/پیشوند، تحمل اشتباه تایپی و تطابق
+    // حروف پراکنده. وقتی عبارتی نیست، رفتار دقیقاً مثل قبل است.
+    const q = normalizeSearchTextLoose(searchQuery || '');
 
-    const filtered = effectiveLibrary.filter((item) => {
-      const name = (item.name || item.fileName || '').toLowerCase();
-      const path = (item.path || item.filePath || '').toLowerCase();
-      const matchesSearch = !q || name.includes(q) || path.includes(q);
-      if (!matchesSearch) return false;
+    const filtered = effectiveLibrary
+      .map((item) => ({
+        item,
+        score: q
+          ? fuzzyScoreLibraryItem(q, [
+              { text: item.name || item.fileName || '', weight: 3 },
+              { text: folderNameById.get(item.folderId) || '', weight: 2 },
+              { text: item.path || item.filePath || '', weight: 1 },
+              { text: (item.tags || []).join(' '), weight: 2 },
+            ])
+          : 0,
+      }))
+      .filter(({ item, score }) => {
+        if (q && score <= 0) return false;
+        const path = (item.path || item.filePath || '').toLowerCase();
 
       // فیلتر بر اساس پوشه انتخاب‌شده
       if (activeFolderId === 'PINNED' && !item.isPinned) return false;
@@ -123,23 +189,29 @@ export default function LibraryView({ onOpenComic }) {
       return true;
     });
 
-    return [...filtered].sort((a, b) => {
-      // آیتم‌های پین‌شده همیشه در بالای لیست قرار می‌گیرند
-      const aPin = a?.isPinned ? 1 : 0;
-      const bPin = b?.isPinned ? 1 : 0;
-      if (aPin !== bPin) return bPin - aPin;
+    return [...filtered]
+      .sort((a, b) => {
+        // آیتم‌های پین‌شده همیشه در بالای لیست قرار می‌گیرند
+        const aPin = a.item?.isPinned ? 1 : 0;
+        const bPin = b.item?.isPinned ? 1 : 0;
+        if (aPin !== bPin) return bPin - aPin;
 
-      if (sortBy === 'name') {
-        return (a.name || '').localeCompare(b.name || '', 'fa');
-      }
-      if (sortBy === 'progress') {
-        const pA = a.percentage ?? a.progress ?? 0;
-        const pB = b.percentage ?? b.progress ?? 0;
-        return pB - pA;
-      }
-      return new Date(b.addedAt || 0) - new Date(a.addedAt || 0);
-    });
-  }, [effectiveLibrary, favorites, searchQuery, activeFolderId, filterMode, sortBy]);
+        // مرحله ۴ — وقتی عبارتی هست، رتبهٔ فازی بعد از پین می‌آید؛
+        // در غیر این صورت، مرتب‌سازیِ قبلی دقیقاً حفظ می‌شود.
+        if (q && b.score !== a.score) return b.score - a.score;
+
+        if (sortBy === 'name') {
+          return (a.item.name || '').localeCompare(b.item.name || '', 'fa');
+        }
+        if (sortBy === 'progress') {
+          const pA = a.item.percentage ?? a.item.progress ?? 0;
+          const pB = b.item.percentage ?? b.item.progress ?? 0;
+          return pB - pA;
+        }
+        return new Date(b.item.addedAt || 0) - new Date(a.item.addedAt || 0);
+      })
+      .map(({ item }) => item);
+  }, [effectiveLibrary, favorites, searchQuery, activeFolderId, filterMode, sortBy, folderNameById]);
 
   const handleAddNewToLibrary = async () => {
     const res = await coreApi.openFile();
@@ -565,7 +637,7 @@ export default function LibraryView({ onOpenComic }) {
         ) : (
           <div style={styles.cardsGrid}>
             {displayedLibrary.map((item) => (
-              <ComicCard
+              <LazyLibraryCard
                 key={item.path || item.filePath || item.name}
                 item={item}
                 onOpenComic={onOpenComic}
@@ -860,6 +932,30 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(175px, 1fr))',
     gap: '16px',
+  },
+  // مرحله ۴ — اسکلتِ کارتِ خارج از دید: همان ساختارِ کارت (کاورِ ۳:۴ +
+  // دو خطِ متن) تا ارتفاعِ گرید هنگامِ مانتِ واقعی تقریباً تکان نخورد.
+  cardSkeleton: {
+    backgroundColor: 'var(--panel)',
+    borderRadius: '16px',
+    padding: '10px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+  },
+  skeletonCover: {
+    width: '100%',
+    aspectRatio: '3 / 4',
+    borderRadius: '12px',
+    backgroundColor: 'var(--panel2)',
+  },
+  skeletonLine: {
+    height: '13px',
+    borderRadius: '6px',
+    backgroundColor: 'var(--panel2)',
   },
   emptyBox: {
     padding: '48px 20px',

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
 import './index.css';
 
 // ۱. چیدمان اصلی و ساختار پنجره
@@ -16,26 +16,81 @@ import { coreApi } from './services/coreApi';
 import Icons from './components/common/Icons';
 
 // ۳. کامپوننت‌های رندر کمیک و PDF
-import VerticalViewer from './components/reader/VerticalViewer';
-import PdfViewer from './components/reader/PdfViewer';
+// مرحله ۳ ـ بخش الف: هر دو ویوورِ سنگین (شاملِ pdfjs-dist و konva)
+// lazy شدند تا در بوتِ اولیه بارگذاری نشوند؛ فقط با ورود به حالتِ
+// خواندن، چانکِ مربوطه خوانده می‌شود.
+const VerticalViewer = lazy(() => import('./components/reader/VerticalViewer'));
+const PdfViewer = lazy(() => import('./components/reader/PdfViewer'));
 import BottomControls from './components/reader/BottomControls';
 
 // ۴. لایه‌های تعاملی، مودال‌ها و ابزارهای شناور شیشه‌ای
 import ContextMenu from './components/common/ContextMenu';
-import ScreenshotWidget from './components/modals/ScreenshotWidget';
-import SnippingOverlay from './components/modals/SnippingOverlay';
-import AreaZoomOverlay from './components/modals/AreaZoomOverlay';
-import QuickSettingsModal from './components/modals/QuickSettingsModal';
+// مرحله ۳ ـ بخش الف: مودال‌های غیرفوری lazy شدند؛ چون در حالتِ
+// غیرفعال null رندر می‌کنند، fallback آن‌ها null است تا بارگذاریِ
+// چانک، هیچ‌چیزِ مرئی را مسدود نکند.
+const ScreenshotWidget = lazy(() => import('./components/modals/ScreenshotWidget'));
+const SnippingOverlay = lazy(() => import('./components/modals/SnippingOverlay'));
+const AreaZoomOverlay = lazy(() => import('./components/modals/AreaZoomOverlay'));
+const QuickSettingsModal = lazy(() => import('./components/modals/QuickSettingsModal'));
 import ToastHUD from './components/common/ToastHUD';
 
 // ۵. صفحات ماژولار برنامه
+// مرحله ۳ ـ بخش الف: HomeView عمداً eager می‌ماند (نمای فرودِ بوت)؛
+// باقیِ نماها lazy هستند تا هر نما فقط با رفتن به آن، بارگذاری شود.
 import HomeView from './views/home/HomeView';
-import LibraryView from './views/library/LibraryView';
-import RecentView from './views/recent/RecentView';
-import FavoritesView from './views/favorites/FavoritesView';
-import DownloadsView from './views/downloads/DownloadsView';
-import SettingsView from './views/settings/SettingsView';
-import ProfileView from './views/profile/ProfileView';
+const LibraryView = lazy(() => import('./views/library/LibraryView'));
+const RecentView = lazy(() => import('./views/recent/RecentView'));
+const FavoritesView = lazy(() => import('./views/favorites/FavoritesView'));
+const DownloadsView = lazy(() => import('./views/downloads/DownloadsView'));
+const SettingsView = lazy(() => import('./views/settings/SettingsView'));
+const ProfileView = lazy(() => import('./views/profile/ProfileView'));
+
+// مرحله ۳ ـ بخش ب: مرزِ خطای چانک. اگر بارگذاریِ یکی از چانک‌های
+// React.lazy در زمانِ اجرا شکست بخورد (مثلاً چانکِ قدیمی بعد از
+// به‌روزرسانی، یا قطعیِ لحظه‌ای)، به‌جای صفحهٔ سفید و کرشِ کاملِ
+// ری‌اکت، پیامِ فارسی با دکمهٔ تلاشِ مجدد (بارگذاریِ دوبارهٔ صفحه)
+// نشان داده می‌شود. کلاس است، چون مرزِ خطا فقط با کامپوننتِ کلاسی
+// ممکن است. styles در زمانِ رندر خوانده می‌شود، پس تعریفِ دیرترِ آن
+// در انتهای فایل مشکلی ندارد.
+class ChunkErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error) {
+    try {
+      console.error('Chunk load failed:', error);
+    } catch (_) {}
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={styles.chunkErrorOverlay}>
+          <div style={styles.chunkErrorCard}>
+            <div style={styles.chunkErrorTitle}>بارگذاریِ بخشی از برنامه ناموفق بود</div>
+            <div style={styles.chunkErrorText}>
+              به نظر می‌رسد فایلِ موردنیاز یافت نشد یا قدیمی است. با تلاشِ مجدد، برنامه دوباره بارگذاری می‌شود.
+            </div>
+            <button
+              type="button"
+              style={styles.chunkErrorButton}
+              onClick={() => window.location.reload()}
+            >
+              تلاش مجدد
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function App() {
   const comicData = useReaderStore((state) => state.comicData);
@@ -706,17 +761,13 @@ export default function App() {
             </div>
           </button>
 
+          {/* مرحله ۳ ـ بخش الف: prop تکراریِ style (ممیزی §۲.۱۱) ادغام شد؛
+              نسخهٔ اول مرده بود (pointerEvents/opacity نداشت) و نسخهٔ
+              کاملِ دوم نگه داشته شد. */}
           {isReadingMode && (
             <button
               type="button"
               onClick={handleToggleRightByButton}
-              style={{
-                ...styles.circleHandleBase,
-                right: isRightSidebarOpen ? '326px' : '10px',
-                transform: isRightSidebarOpen
-                  ? 'translateY(-50%) rotate(180deg)'
-                  : 'translateY(-50%) rotate(0deg)',
-              }}
               style={{
                 ...styles.circleHandleBase,
                 right: isRightSidebarOpen ? '326px' : '10px',
@@ -734,7 +785,11 @@ export default function App() {
             </button>
           )}
 
-          {renderCenterContent()}
+          <ChunkErrorBoundary>
+            <Suspense fallback={<div style={styles.centerLoadingFallback}>در حال بارگذاری…</div>}>
+              {renderCenterContent()}
+            </Suspense>
+          </ChunkErrorBoundary>
 
           {isReadingMode && <BottomControls />}
         </main>
@@ -777,10 +832,14 @@ export default function App() {
       )}
 
       <ContextMenu onOpenComic={processFiles} onOpenFile={handleSelectFile} />
-      <ScreenshotWidget />
-      <SnippingOverlay />
-      <AreaZoomOverlay />
-      <QuickSettingsModal />
+      <ChunkErrorBoundary>
+        <Suspense fallback={null}>
+          <ScreenshotWidget />
+          <SnippingOverlay />
+          <AreaZoomOverlay />
+          <QuickSettingsModal />
+        </Suspense>
+      </ChunkErrorBoundary>
       <ToastHUD />
     </div>
   );
@@ -812,6 +871,73 @@ const styles = {
     overflow: 'hidden',
     position: 'relative',
     borderRadius: 'var(--radius-lg)',
+  },
+  // مرحله ۳ ـ بخش الف: Fallback سبکِ Suspense برای محتوای مرکزی؛
+  // با تمِ تاریک هماهنگ است و چون داخلِ main با flex:1 می‌نشیند،
+  // پرشِ چیدمان ندارد.
+  centerLoadingFallback: {
+    flex: 1,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'var(--muted)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+  },
+  // مرحله ۳ ـ بخش ب: Fallback مرزِ خطای چانک؛ fixed است تا از هر دو
+  // جایِ مرز (مرکز و مودال‌ها) دیده شود، وگرنه در جایگاهِ مودال‌ها
+  // زیرِ main با overflow:hidden نامرئی می‌ماند.
+  chunkErrorOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 9999,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(10, 15, 19, 0.96)',
+    padding: '16px',
+  },
+  chunkErrorCard: {
+    maxWidth: '420px',
+    width: '100%',
+    backgroundColor: 'var(--panel)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    borderRadius: '16px',
+    padding: '24px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '12px',
+    textAlign: 'center',
+  },
+  chunkErrorTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '15px',
+    fontWeight: 800,
+    color: 'var(--text)',
+  },
+  chunkErrorText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    lineHeight: 2,
+  },
+  chunkErrorButton: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 700,
+    backgroundColor: 'var(--accent)',
+    color: '#0a0f13',
+    border: 'none',
+    borderRadius: '10px',
+    padding: '8px 22px',
+    cursor: 'pointer',
+    outline: 'none',
   },
   sidebarWrapper: {
     display: 'flex',

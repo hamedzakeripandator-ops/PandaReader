@@ -233,6 +233,11 @@ const useReaderStore = create((set, get) => ({
     set((state) => ({ hiDpiRenderTick: (state.hiDpiRenderTick + 1) % 100000 })),
 
   setZoomLevel: (zoom, options = {}) => {
+    // مرحله ۳ ـ بخش الف (ممیزی §۲.۵): محافظِ NaN. بدونِ این نگهبان،
+    // ورودیِ نامعتبر از Math.min/Max به‌صورتِ NaN بیرون می‌آمد و کلِ
+    // محاسباتِ ابعادِ صفحه را NaN می‌کرد. مقادیرِ نامتناهی هم نامعتبرند.
+    const numericZoom = Number(zoom);
+    if (!Number.isFinite(numericZoom)) return;
     const clamped = Math.max(MIN_ZOOM, Math.min(Number(Number(zoom).toFixed(2)), MAX_ZOOM));
     if (Math.abs(get().zoomLevel - clamped) < 0.005 && !options.force) return;
 
@@ -262,6 +267,11 @@ const useReaderStore = create((set, get) => ({
 
   // اعمال زوم ناحیه‌ای با کشیدن باکس و ثبت مختصات مرکز باکس
   applyAreaZoom: ({ targetZoom, normCenterX = 0.5, normCenterY = 0.5, rect = null }) => {
+    // مرحله ۳ ـ بخش الف (ممیزی §۲.۵): همان محافظِ NaN برای مسیرِ زومِ
+    // ناحیه‌ای؛ وگرنه targetZoom نامعتبر هم zoomLevel و هم
+    // areaZoomTarget.targetZoom را NaN می‌کرد.
+    const numericZoom = Number(targetZoom);
+    if (!Number.isFinite(numericZoom)) return;
     const currentZoom = get().zoomLevel || 1.0;
     const savedPreZoom = get().preAreaZoomLevel ?? currentZoom;
     const clampedTarget = Math.max(

@@ -154,6 +154,9 @@ export default function ComicCard({
 
     return () => {
       isMounted = false;
+      // مرحله ۴ — آنمانتِ کارت (خروج از دید در گریدِ تنبل) درخواستِ در
+      // صفِ این مسیر را لغو می‌کند تا صف زیرِ بارِ کارت‌های رفته قفل نشود.
+      thumbnailService.cancelThumbnailRequest?.(filePath);
     };
   }, [filePath, item?.cover, cachedCoverInStore]);
 

@@ -2,11 +2,17 @@ const { parentPort } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 
 // المسار الثابت لقاعدة البيانات المحلية في مجلد المستخدم
 const DB_DIR = path.join(os.homedir(), '.comic-reader');
 const DB_FILE = path.join(DB_DIR, 'db.json');
 const DB_BAK_FILE = path.join(DB_DIR, 'db.json.bak');
+// مرحله ۲ ـ بخش الف: پوشهٔ کاورهای روی دیسک + پیشوندِ URL آن‌ها.
+// کاورها دیگر به‌صورت Base64 در db.json نمی‌مانند؛ هر کاور یک فایل
+// در covers/ است و در db.json فقط همین مرجعِ سبک نگه داشته می‌شود.
+const COVERS_DIR = path.join(DB_DIR, 'covers');
+const COVER_URL_PREFIX = 'comic://covers/';
 // مرحله ۱ ـ بخش الف: فایلِ موقتِ نوشتنِ اتمیک (همیشه در همان دایرکتوری،
 // تا rename اتمیک بماند).
 const DB_TMP_FILE = DB_FILE + '.tmp';
@@ -53,7 +59,11 @@ function isPermanentCover(str) {
     s.startsWith('data:image/') ||
     s.startsWith('http://') ||
     s.startsWith('https://') ||
-    s.startsWith('blob:')
+    s.startsWith('blob:') ||
+    // مرحله ۲ ـ بخش الف: مرجعِ کاورِ روی دیسک هم دائمی است؛ بدونِ
+    // این خط، migrateSchema کاورهای comic:// را در بوتِ بعدی null
+    // می‌کرد.
+    s.startsWith('comic://')
   ) {
     return true;
   }
@@ -97,10 +107,16 @@ function migrateSchema(parsed) {
 
   Object.entries(rawCoverCache).forEach(([k, v]) => {
     const normKey = normalizePath(k) || k;
-    const dataUrl = typeof v === 'string' ? v : v?.dataUrl;
-    if (isPermanentCover(dataUrl)) {
+    // هر دو شکل پذیرفته می‌شود: شکلِ قدیمی (رشته یا {dataUrl}) و
+    // شکلِ جدید ({cover, file}). مقادیرِ data: قدیمی اینجا نگه
+    // داشته می‌شوند تا migrateCoversToDisk در readDB آن‌ها را به
+    // فایل تبدیل کند.
+    const rawCover = typeof v === 'string' ? v : v?.cover ?? v?.dataUrl;
+    const rawFile = typeof v === 'object' && v !== null ? v.file || null : null;
+    if (isPermanentCover(rawCover)) {
       cleanCoverCache[normKey] = {
-        dataUrl,
+        cover: rawCover,
+        file: rawFile,
         isCustom: Boolean(v?.isCustom),
         updatedAt: v?.updatedAt || new Date().toISOString()
       };
@@ -124,28 +140,28 @@ function migrateSchema(parsed) {
     item.isPinned = Boolean(item.isPinned);
     item.pinnedAt = item.isPinned ? item.pinnedAt || item.addedAt || new Date().toISOString() : null;
     item.folderId = item.folderId && validFolderIds.has(item.folderId) ? item.folderId : null;
-    if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.dataUrl)) {
-      item.cover = cleanCoverCache[norm].dataUrl;
+    if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.cover)) {
+      item.cover = cleanCoverCache[norm].cover;
       item.hasCustomCover = true;
     } else if (!isPermanentCover(item.cover)) {
-      item.cover = cleanCoverCache[norm]?.dataUrl || null;
+      item.cover = cleanCoverCache[norm]?.cover || null;
     }
   });
 
   favorites.forEach((item) => {
     const norm = normalizePath(item.path || item.filePath);
-    if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.dataUrl)) {
-      item.cover = cleanCoverCache[norm].dataUrl;
+    if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.cover)) {
+      item.cover = cleanCoverCache[norm].cover;
     } else if (!isPermanentCover(item.cover)) {
-      item.cover = cleanCoverCache[norm]?.dataUrl || null;
+      item.cover = cleanCoverCache[norm]?.cover || null;
     }
   });
 
   Object.keys(history).forEach((normKey) => {
-    if (cleanCoverCache[normKey]?.isCustom && isPermanentCover(cleanCoverCache[normKey]?.dataUrl)) {
-      history[normKey].cover = cleanCoverCache[normKey].dataUrl;
+    if (cleanCoverCache[normKey]?.isCustom && isPermanentCover(cleanCoverCache[normKey]?.cover)) {
+      history[normKey].cover = cleanCoverCache[normKey].cover;
     } else if (!isPermanentCover(history[normKey].cover)) {
-      history[normKey].cover = cleanCoverCache[normKey]?.dataUrl || null;
+      history[normKey].cover = cleanCoverCache[normKey]?.cover || null;
     }
   });
 
@@ -196,7 +212,16 @@ function pruneCoverCache(db) {
   entries.slice(0, MAX_COVER_CACHE_ENTRIES).forEach(([key, val]) => {
     pruned[key] = val;
   });
+  const dropped = entries.slice(MAX_COVER_CACHE_ENTRIES);
   db.coverCache = pruned;
+  // مرحله ۲ ـ بخش الف/ب: فایلِ ورودیِ هرس‌شده فقط وقتی پاک می‌شود که
+  // هیچ جدولِ کاربری به آن ارجاع ندهد؛ چون history/library معمولاً
+  // هنوز به همان فایل ارجاع می‌دهند، در عمل بیشترِ فایل‌ها می‌مانند
+  // و فقط یتیم‌های واقعی پاک می‌شوند. (ارجاعِ خودِ کش شمرده نمی‌شود.)
+  dropped.forEach(([, val]) => {
+    const file = val?.file || coverFileFromUrl(coverEntryToUrl(val));
+    if (file) deleteCoverFileIfUnreferenced(db, file);
+  });
 }
 
 let cachedDbInstance = null;
@@ -207,16 +232,65 @@ let needsAnotherWrite = false;
 // می‌کند و هر نوشتنِ موفقِ روی دیسک، false؛ تا FLUSH_SYNC بداند آیا
 // چیزی برای نوشتن هست یا نه.
 let dbDirty = false;
+// مرحله ۱ ـ بخش ب: شمارندهٔ نسلِ نوشتن — باگِ پیدا‌شده در ممیزیِ
+// عمیق: در بخش الف، performAsyncDiskWrite در انتها بی‌قیدوشرط
+// dbDirty=false می‌کرد؛ اگر حینِ نوشتنِ ناهمگام، تغییری از رندرر
+// می‌رسید (که writeDB را صدا می‌زد و dbDirty را true می‌کرد)،
+// تمام‌شدنِ نوشتنِ اول، پرچمِ تغییرِ جدید را پاک می‌کرد و اگر خروج
+// پیش از تایمرِ ۹۰۰ میلی‌ثانیه‌ای می‌رسید، FLUSH_SYNC که تایمر را
+// لغو می‌کند، تغییرِ جدید را گم می‌کرد. حالا هر writeDB نسل را یکی
+// زیاد می‌کند و dbDirty فقط وقتی false می‌شود که نسلِ نوشته‌شده روی
+// دیسک، برابرِ آخرین نسلِ تغییرِ حافظه باشد.
+let writeGeneration = 0;
+// مرحله ۲ ـ بخش الف: مهاجرتِ کاورها فقط یک بار در هر عمرِ ورکر اجرا
+// می‌شود (در اولینِ readDB)؛ چون readDB در ابتدای هر پیام هم صدا
+// زده می‌شود، بدونِ این نگهبان، هر پیام مهاجرت را تکرار می‌کرد.
+let coverMigrationDone = false;
+
+function runCoverMigrationOnce(db) {
+  if (coverMigrationDone || !db) return;
+  coverMigrationDone = true;
+  try {
+    const changed = migrateCoversToDisk(db);
+    // مرحله ۲ ـ بخش ب: پاک‌سازیِ ورودی‌های کشِ کتاب‌های کهنه (کتابی
+    // که در هیچ جدولِ کاربری نیست) پیش از جارو؛ وگرنه فایلِ آن‌ها
+    // یتیم شناخته نمی‌شد، و اگر فقط فایل جارو می‌شد، ورودیِ کش به
+    // URL مرده اشاره می‌کرد. ترتیب مهم است: اول ورودی، بعد فایل.
+    let purged = false;
+    Object.keys(db.coverCache || {}).forEach((normKey) => {
+      if (!isBookInUserTables(db, normKey)) {
+        delete db.coverCache[normKey];
+        purged = true;
+      }
+    });
+    sweepOrphanCoverFiles(db);
+    if (changed || purged) {
+      writeDB(db, true);
+    }
+  } catch (error) {
+    console.warn('Cover migration non-fatal error:', error?.message || error);
+  }
+}
 
 function initDB() {
   try {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
     }
-    // پاک‌سازیِ فایلِ موقتِ به‌جامانده از کرشِ قبلی: نوشتنِ اتمیکِ
-    // ناتمام، فقط همین tmp را جا می‌گذارد و db.json سالم می‌ماند.
+    // مرحله ۲ ـ بخش الف: پوشهٔ کاورها همیشه وجود دارد (حتی پیش از
+    // اولین کاور)، تا saveCoverFile و سروِ comic://covers هرگز به
+    //‌خاطرِ نبودِ پوشه شکست نخورند.
+    try {
+      if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
+    } catch (_) {}
+    // پاک‌سازیِ فایل‌های موقتِ به‌جامانده از کرشِ قبلی: نوشتنِ اتمیکِ
+    // ناتمام، فقط tmp را جا می‌گذارد و فایلِ اصلی سالم می‌ماند.
+    // مرحله ۱ ـ بخش ب: هر دو tmp پاک می‌شوند — چون هم db.json و هم
+    // db.json.bak اتمیک نوشته می‌شوند، کرش می‌تواند هر دو tmp را جا
+    // بگذارد (در بخش الف فقط tmpِ اصلی پاک می‌شد).
     try {
       if (fs.existsSync(DB_TMP_FILE)) fs.unlinkSync(DB_TMP_FILE);
+      if (fs.existsSync(DB_BAK_FILE + '.tmp')) fs.unlinkSync(DB_BAK_FILE + '.tmp');
     } catch (_) {}
     if (!fs.existsSync(DB_FILE)) {
       const initialJson = JSON.stringify(defaultDB, null, 2);
@@ -252,6 +326,7 @@ function readDB() {
     if (!raw || raw.trim().length === 0) throw new Error('Empty DB file');
     const parsed = JSON.parse(raw);
     cachedDbInstance = migrateSchema(parsed);
+    runCoverMigrationOnce(cachedDbInstance);
     return cachedDbInstance;
   } catch (primaryError) {
     console.warn('Primary DB read failed, attempting backup recovery...', primaryError.message);
@@ -260,6 +335,7 @@ function readDB() {
         const rawBak = fs.readFileSync(DB_BAK_FILE, 'utf8');
         const parsedBak = JSON.parse(rawBak);
         cachedDbInstance = migrateSchema(parsedBak);
+        runCoverMigrationOnce(cachedDbInstance);
         writeDB(cachedDbInstance, true);
         return cachedDbInstance;
       }
@@ -267,6 +343,72 @@ function readDB() {
     cachedDbInstance = JSON.parse(JSON.stringify(defaultDB));
     return cachedDbInstance;
   }
+}
+
+// مرحله ۱ ـ بخش ب: خوابِ همگامِ کوتاه برای فاصلهٔ بینِ تلاش‌های
+// مجددِ rename (در ورکر، Atomics.wait مجاز است؛ اگر در دسترس نبود،
+// حلقهٔ چرخشیِ کوتاه جایگزین می‌شود تا وابستگی به محیط نباشد).
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch (_) {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {}
+  }
+}
+
+function sleepAsync(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// مرحله ۱ ـ بخش ب: rename مقاوم در برابر قفلِ موقتِ ویندوز.
+// در NTFS، آنتی‌ویروس یا ایندکسر ممکن است برای چند میلی‌ثانیه روی
+// فایلِ مقصد قفل بگذارد و rename با EPERM/EBUSY/EACCES شکست بخورد.
+// پس تا ۳ بار تلاش می‌شود (با فاصلهٔ ۵۰ و ۱۰۰ میلی‌ثانیه) و اگر هر ۳
+// بار شکست خورد، Fallback امن اجرا می‌شود: کپیِ tmp روی مقصد + حذفِ
+// tmp. توجهٔ صادقانه: Fallback دیگر اتمیک نیست (کرش وسطِ کپی، مقصد
+// را نیمه‌کاره می‌گذارد) ولی فقط وقتی فعال می‌شود که rename در هر ۳
+// تلاش ناممکن بوده باشد؛ یعنی انتخاب بین «نوشتنِ غیراتمیک» و
+// «اصلاً ننوشتن» است، و اولی بهتر است. خطاهای دیگر (مثل ENOENT)
+// بی‌درنگ و بدونِ تلاشِ مجدد، پرتاب می‌شوند.
+function isRetryableRenameError(error) {
+  return error && (error.code === 'EPERM' || error.code === 'EBUSY' || error.code === 'EACCES');
+}
+
+function renameWithRetrySync(tmpPath, targetPath) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.renameSync(tmpPath, targetPath);
+      return;
+    } catch (error) {
+      // خطای غیرِ قابلِ تلاشِ مجدد (مثل ENOENT)، بی‌درنگ و بدونِ
+      // Fallback پرتاب می‌شود؛ Fallback فقط بعد از ۳ تلاشِ ناموفقِ
+      // قابلِ تلاشِ مجدد اجرا می‌شود.
+      if (!isRetryableRenameError(error)) throw error;
+      if (attempt === 2) break;
+      sleepSync(50 * (attempt + 1));
+    }
+  }
+  // Fallback: کپی + حذفِ tmp. اگر کپی هم شکست خورد، خطا بالا می‌رود
+  // تا لایهٔ بالاتر (dbDirty / تایمرِ دوباره / گزارشِ فلاش) آن را
+  // مدیریت کند؛ هرگز بی‌صدا قورت داده نمی‌شود.
+  fs.copyFileSync(tmpPath, targetPath);
+  try { fs.unlinkSync(tmpPath); } catch (_) {}
+}
+
+async function renameWithRetryAsync(tmpPath, targetPath) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await fs.promises.rename(tmpPath, targetPath);
+      return;
+    } catch (error) {
+      if (!isRetryableRenameError(error)) throw error;
+      if (attempt === 2) break;
+      await sleepAsync(50 * (attempt + 1));
+    }
+  }
+  await fs.promises.copyFile(tmpPath, targetPath);
+  try { await fs.promises.unlink(tmpPath); } catch (_) {}
 }
 
 // مرحله ۱ ـ بخش الف: نوشتنِ اتمیک (Write-to-Temp + Atomic Rename).
@@ -277,23 +419,42 @@ function readDB() {
 function atomicWriteFileSync(targetPath, content) {
   const tmpPath = targetPath + '.tmp';
   fs.writeFileSync(tmpPath, content, 'utf8');
+  // مرحله ۱ ـ بخش ب: فایل‌دیسکریپتور حتماً در finally بسته می‌شود و
+  // rename فقط بعد از بسته‌شدنِ قطعیِ هندل صدا زده می‌شود؛ در ویندوز،
+  // rename کردنِ فایلی که هندلِ باز دارد قطعاً EPERM می‌دهد. در نسخهٔ
+  // بخش الف، اگر closeSync خطا می‌داد، catch بیرونی آن را قورت می‌داد
+  // و rename با هندلِ باز انجام می‌شد.
+  let fd = null;
   try {
-    const fd = fs.openSync(tmpPath, 'r');
+    fd = fs.openSync(tmpPath, 'r');
     try { fs.fsyncSync(fd); } catch (_) {}
-    fs.closeSync(fd);
-  } catch (_) {}
-  fs.renameSync(tmpPath, targetPath);
+  } catch (_) {
+    // خطای بازکردن/fsync، مانعِ rename نمی‌شود؛ محتوای tmp کامل است.
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+  renameWithRetrySync(tmpPath, targetPath);
 }
 
 async function atomicWriteFileAsync(targetPath, content) {
   const tmpPath = targetPath + '.tmp';
   await fs.promises.writeFile(tmpPath, content, 'utf8');
+  // مرحله ۱ ـ بخش ب: مثلِ نسخهٔ همگام — بستنِ هندل در finally، و
+  // rename فقط بعد از بسته‌شدنِ قطعیِ آن (در نسخهٔ بخش الف، اگر
+  // close خطا می‌داد، rename با هندلِ باز انجام می‌شد).
+  let handle = null;
   try {
-    const handle = await fs.promises.open(tmpPath, 'r');
+    handle = await fs.promises.open(tmpPath, 'r');
     try { await handle.sync(); } catch (_) {}
-    await handle.close();
-  } catch (_) {}
-  await fs.promises.rename(tmpPath, targetPath);
+  } catch (_) {
+  } finally {
+    if (handle) {
+      try { await handle.close(); } catch (_) {}
+    }
+  }
+  await renameWithRetryAsync(tmpPath, targetPath);
 }
 
 // نوشتنِ هر دو فایل (اصلی + پشتیبان) با یک محتوا؛ ترتیب عمداً همین
@@ -318,12 +479,17 @@ async function performAsyncDiskWrite() {
 
   isWritingDisk = true;
   needsAnotherWrite = false;
+  // نسلِ لحظهٔ شروعِ نوشتن؛ فقط اگر در حینِ await هیچ تغییری
+  // نیامده باشد (نسل عوض نشده باشد)، پاک‌کردنِ dbDirty امن است.
+  const writtenGeneration = writeGeneration;
 
   try {
     pruneCoverCache(cachedDbInstance);
     const jsonString = JSON.stringify(cachedDbInstance, null, 2);
     await writeDbFilesAsync(jsonString);
-    dbDirty = false;
+    if (writeGeneration === writtenGeneration) {
+      dbDirty = false;
+    }
   } catch (error) {
     needsAnotherWrite = true;
   } finally {
@@ -337,6 +503,7 @@ async function performAsyncDiskWrite() {
 function writeDB(data, immediate = false) {
   cachedDbInstance = data;
   dbDirty = true;
+  writeGeneration += 1;
 
   if (immediate) {
     if (diskWriteTimer) {
@@ -352,11 +519,16 @@ function writeDB(data, immediate = false) {
       needsAnotherWrite = true;
       return false;
     }
+    const writtenGeneration = writeGeneration;
     try {
       pruneCoverCache(cachedDbInstance);
       const jsonString = JSON.stringify(cachedDbInstance, null, 2);
       writeDbFilesSync(jsonString);
-      dbDirty = false;
+      // نوشتنِ همگام، هیچ await ندارد، پس نسل نمی‌تواند وسطِ آن عوض
+      // شده باشد؛ ولی برای یکپارچگیِ انضباطِ نسل، همان شرط چک می‌شود.
+      if (writeGeneration === writtenGeneration) {
+        dbDirty = false;
+      }
       return true;
     } catch (_) {
       return false;
@@ -399,6 +571,9 @@ async function handleFlushSync() {
     pruneCoverCache(cachedDbInstance);
     const jsonString = JSON.stringify(cachedDbInstance, null, 2);
     writeDbFilesSync(jsonString);
+    // بینِ stringify و نوشتن، هیچ await نیست، پس هیچ تغییری
+    // نمی‌تواند وسطِ آن برسد؛ پاک‌کردنِ بی‌قیدِ پرچم اینجا امن است
+    // (برخلافِ مسیرِ ناهمگام که به نسل نیاز دارد).
     dbDirty = false;
     return { ok: true, flushed: true };
   } catch (_) {
@@ -406,37 +581,260 @@ async function handleFlushSync() {
   }
 }
 
-function syncCoverAcrossTables(db, normPath, dataUrl, forceCustom = false) {
-  if (!normPath || !isPermanentCover(dataUrl)) return;
+
+// مرحله ۲ ـ بخش الف: ابزارهای کاورِ روی دیسک.
+const COVER_MIME_TO_EXT = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/bmp': 'bmp',
+  'image/avif': 'avif',
+  'image/svg+xml': 'svg'
+};
+
+// نامِ فایلِ کاور از هشِ مسیرِ نرمال‌شدهٔ کتاب: برای یک کتاب همیشه
+// یکسان است (پس مهاجرت و ذخیرهٔ دوباره، idempotent اند) و برای
+// کتاب‌های مختلف، عملاً یکتا.
+function coverFileNameFor(normPath, ext) {
+  const hash = crypto.createHash('sha256').update(normPath).digest('hex').slice(0, 32);
+  return `${hash}.${ext}`;
+}
+
+// نوشتنِ اتمیکِ باینری (همان الگوی مرحله ۱، ولی برای Buffer نه
+// رشته): tmp + fsync + rename با تلاشِ مجددِ ویندوز.
+function atomicWriteBinaryFileSync(targetPath, buffer) {
+  const tmpPath = targetPath + '.tmp';
+  fs.writeFileSync(tmpPath, buffer);
+  let fd = null;
+  try {
+    fd = fs.openSync(tmpPath, 'r');
+    try { fs.fsyncSync(fd); } catch (_) {}
+  } catch (_) {
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+  renameWithRetrySync(tmpPath, targetPath);
+}
+
+// تبدیل یک Data URL تصویری به فایلِ روی دیسک؛ در صورتِ هر خطا null
+// برمی‌گردد تا فراخواننده، کاورِ قبلی را نگه دارد (نه اینکه کاور را
+// با هیچ‌چیز جایگزین کند).
+function saveCoverFile(normPath, dataUrl) {
+  try {
+    if (!normPath || typeof dataUrl !== 'string') return null;
+    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+)(?:;charset=[^;]+)?;base64,([A-Za-z0-9+/=\s]+)$/);
+    if (!match) return null;
+    const ext = COVER_MIME_TO_EXT[match[1].toLowerCase()] || 'png';
+    const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+    if (buffer.length === 0) return null;
+    if (!fs.existsSync(COVERS_DIR)) fs.mkdirSync(COVERS_DIR, { recursive: true });
+    const file = coverFileNameFor(normPath, ext);
+    atomicWriteBinaryFileSync(path.join(COVERS_DIR, file), buffer);
+    return { file, cover: COVER_URL_PREFIX + file };
+  } catch (_) {
+    return null;
+  }
+}
+
+// خواندنِ URL کاور از یک ورودیِ coverCache با پذیرشِ هر دو شکلِ
+// قدیمی ({dataUrl} یا رشته) و جدید ({cover, file}).
+function coverEntryToUrl(entry) {
+  if (!entry) return null;
+  if (typeof entry === 'string') return entry;
+  return entry.cover ?? entry.dataUrl ?? null;
+}
+
+// مرحله ۲ ـ بخش ب: Query String کش‌باست (?v=...) پیش از استخراجِ
+// نامِ فایل جدا می‌شود؛ وگرنه 'abc.jpg?v=123' به‌عنوانِ نامِ فایل
+// برمی‌گشت و هیچ‌وقت با فایلِ واقعیِ روی دیسک جور نمی‌شد.
+function coverFileFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  if (!url.startsWith(COVER_URL_PREFIX)) return null;
+  const withoutQuery = url.slice(COVER_URL_PREFIX.length).split('?')[0];
+  const file = withoutQuery.split('/').pop();
+  return file || null;
+}
+
+// نسخهٔ عددیِ کش‌باست از روی URL (برای یکنواخت و صعودی نگه داشتنِ
+// نسخه در syncCoverAcrossTables).
+function coverVersionFromUrl(url) {
+  if (!url || typeof url !== 'string') return null;
+  const match = url.match(/[?&]v=(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
+// مرحله ۲ ـ بخش ب: ارجاع‌ها فقط از جدول‌های کاربری (history/library/
+// favorites) شمرده می‌شوند، نه از coverCache. coverCache یک کش است،
+// نه مالک؛ اگر خودش جزو مراجع باشد، هیچ کاوری با حذفِ کتاب هرگز
+// پاک نمی‌شود (باگِ بخش الف که تستِ بخش الف هم به‌اشتباه آن را
+// «امنیت» خوانده بود). بعد از این تغییر، حذفِ کتاب + حذفِ ورودیِ
+// کش (در اکشن‌های حذف) فایل را واقعاً یتیم می‌کند.
+function collectReferencedCoverFiles(db) {
+  const referenced = new Set();
+  const addFromCover = (cover) => {
+    const file = coverFileFromUrl(cover);
+    if (file) referenced.add(file);
+  };
+  Object.values(db.history || {}).forEach((h) => addFromCover(h?.cover));
+  (db.library || []).forEach((item) => addFromCover(item?.cover));
+  (db.favorites || []).forEach((item) => addFromCover(item?.cover));
+  return referenced;
+}
+
+// آیا کتاب هنوز در حداقل یکی از جدول‌های کاربری هست؟
+function isBookInUserTables(db, normPath) {
+  if (!normPath) return false;
+  if (db.history && db.history[normPath]) return true;
+  if ((db.library || []).some((item) => normalizePath(item.path || item.filePath) === normPath)) return true;
+  if ((db.favorites || []).some((item) => normalizePath(item.path || item.filePath) === normPath)) return true;
+  return false;
+}
+
+// اگر کتاب از هر سه جدولِ کاربری رفته باشد، ورودیِ کشِ آن را هم حذف
+// کن (وگرنه کشِ کهنه هم اسلاتِ ۳۰۰تایی را اشغال می‌کند و هم با
+// GET_CACHED_COVER کاورِ کتابِ حذف‌شده را زنده نگه می‌دارد).
+function purgeCoverCacheEntryIfBookGone(db, normPath) {
+  if (!normPath || !db.coverCache) return;
+  if (!isBookInUserTables(db, normPath)) {
+    delete db.coverCache[normPath];
+  }
+}
+
+// حذفِ فایلِ کاور فقط وقتی که هیچ جدولِ کاربری به آن ارجاع نمی‌دهد؛
+// این همان چیزی است که هرسِ کش و حذفِ کتاب را امن می‌کند (فایلِ
+// کاوری که هنوز در library/history/favorites هست، هرگز پاک نمی‌شود).
+function deleteCoverFileIfUnreferenced(db, file) {
+  if (!file) return;
+  try {
+    if (collectReferencedCoverFiles(db).has(file)) return;
+    const target = path.join(COVERS_DIR, path.basename(file));
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+  } catch (_) {}
+}
+
+// مهاجرتِ خودکارِ کاورهای Base64 قدیمی به فایل؛ در صورتِ شکستِ یک
+// ورودی، همان Data URL نگه داشته می‌شود (بدونِ از دست رفتن) تا بوتِ
+// بعدی دوباره تلاش کند. true یعنی چیزی عوض شد و باید ذخیره شود.
+function migrateCoversToDisk(db) {
+  let changed = false;
+  const convertCover = (normPath, currentCover) => {
+    if (!currentCover || typeof currentCover !== 'string') return currentCover;
+    if (!currentCover.startsWith('data:image/')) return currentCover;
+    const saved = saveCoverFile(normPath, currentCover);
+    if (!saved) return currentCover;
+    changed = true;
+    return saved.cover;
+  };
+  Object.entries(db.coverCache || {}).forEach(([normKey, entry]) => {
+    const current = coverEntryToUrl(entry);
+    const next = convertCover(normKey, current);
+    if (next !== current) {
+      db.coverCache[normKey] = {
+        cover: next,
+        file: coverFileFromUrl(next),
+        isCustom: Boolean(entry?.isCustom),
+        updatedAt: entry?.updatedAt || new Date().toISOString()
+      };
+    }
+  });
+  Object.entries(db.history || {}).forEach(([normKey, h]) => {
+    if (h) h.cover = convertCover(normKey, h.cover);
+  });
+  (db.library || []).forEach((item) => {
+    const norm = normalizePath(item.path || item.filePath);
+    if (norm) item.cover = convertCover(norm, item.cover);
+  });
+  (db.favorites || []).forEach((item) => {
+    const norm = normalizePath(item.path || item.filePath);
+    if (norm) item.cover = convertCover(norm, item.cover);
+  });
+  return changed;
+}
+
+// جاروی فایل‌های یتیمِ پوشهٔ covers (فایل‌هایی که هیچ جدولی به آن‌ها
+// ارجاع نمی‌دهد)؛ پشتیبانِ امنِ هرس و حذفِ کتاب.
+function sweepOrphanCoverFiles(db) {
+  try {
+    if (!fs.existsSync(COVERS_DIR)) return;
+    const referenced = collectReferencedCoverFiles(db);
+    fs.readdirSync(COVERS_DIR).forEach((file) => {
+      if (!referenced.has(file)) {
+        try { fs.unlinkSync(path.join(COVERS_DIR, file)); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+}
+
+// مرحله ۲ ـ بخش الف: همگام‌سازیِ کاور با ذخیرهٔ روی دیسک.
+// قراردادِ بازگشت: کاوری که باید ذخیره شود (comic:// یا URL عبوری)،
+// یا کاورِ قبلی اگر چیزی عوض نشد (مثلاً نگهبانِ سفارشی)، یا null اگر
+// اصلاً کاوری نیست. فراخواننده‌ها باید از همین مقدارِ بازگشتی برای
+// نوشتن در جدول‌ها استفاده کنند، نه از ورودیِ خام (که ممکن است
+// Base64 باشد و هرگز نباید دوباره در db.json بنشیند).
+function syncCoverAcrossTables(db, normPath, input, forceCustom = false) {
+  const existingCache = db.coverCache[normPath];
+  const existingCover = coverEntryToUrl(existingCache);
+  if (!normPath || !isPermanentCover(input)) return existingCover;
 
   // عدم استبدال الغلاف المخصص الذي عينه المستخدم إلا إذا كان التحديث مخصصًا
-  const existingCache = db.coverCache[normPath];
   if (existingCache?.isCustom && !forceCustom) {
-    return;
+    return existingCover;
   }
 
   const isCustomFlag = forceCustom ? true : Boolean(existingCache?.isCustom);
 
+  let cover = input;
+  let file = null;
+  if (typeof input === 'string' && input.startsWith('data:image/')) {
+    const saved = saveCoverFile(normPath, input);
+    if (!saved) return existingCover;
+    cover = saved.cover;
+    file = saved.file;
+    // مرحله ۲ ـ بخش ب: کش‌باست. محتوای فایل عوض شده (حتی با همان
+    // نامِ قبلی، مثلاً jpg→jpg در SET_CUSTOM_COVER)، پس URL باید
+    // عوض شود تا <img> کاورِ قبلیِ کش‌شده را نشان ندهد. نسخه فقط
+    // وقتی ساخته می‌شود که محتوا واقعاً نوشته شده باشد؛ بازهمگام‌سازیِ
+    // همان URL (مثلاً در SAVE_PROGRESS) نسخهٔ قبلی را حفظ می‌کند تا
+    // کشِ تصویر بی‌دلیل نشکند. نسخه یکنواخت و صعودی است تا دو تغییرِ
+    // پی‌درپی در یک میلی‌ثانیه هم URL یکسان نسازند.
+    let version = Date.now();
+    const prevVersion = coverVersionFromUrl(existingCover);
+    if (prevVersion && version <= prevVersion) version = prevVersion + 1;
+    cover = `${cover}?v=${version}`;
+  } else if (typeof input === 'string' && input.startsWith(COVER_URL_PREFIX)) {
+    file = coverFileFromUrl(input);
+  }
+
+  const oldFile = existingCache?.file || null;
   db.coverCache[normPath] = {
-    dataUrl,
+    cover,
+    file,
     isCustom: isCustomFlag,
     updatedAt: new Date().toISOString()
   };
 
   if (db.history[normPath]) {
-    db.history[normPath].cover = dataUrl;
+    db.history[normPath].cover = cover;
   }
 
   const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === normPath);
   if (libItem) {
-    libItem.cover = dataUrl;
+    libItem.cover = cover;
     if (isCustomFlag) libItem.hasCustomCover = true;
   }
 
   const favItem = db.favorites.find((item) => normalizePath(item.path || item.filePath) === normPath);
   if (favItem) {
-    favItem.cover = dataUrl;
+    favItem.cover = cover;
   }
+
+  if (oldFile && oldFile !== file) {
+    deleteCoverFileIfUnreferenced(db, oldFile);
+  }
+  return cover;
 }
 
 initDB();
@@ -489,13 +887,13 @@ parentPort.on('message', (request) => {
         const now = new Date().toISOString();
 
         let resolvedCover = db.coverCache[norm]?.isCustom
-          ? db.coverCache[norm].dataUrl
+          ? coverEntryToUrl(db.coverCache[norm])
           : isPermanentCover(cover)
           ? cover
-          : db.coverCache[norm]?.dataUrl || existingHist?.cover || null;
+          : coverEntryToUrl(db.coverCache[norm]) || existingHist?.cover || null;
 
         if (resolvedCover && isPermanentCover(resolvedCover)) {
-          syncCoverAcrossTables(db, norm, resolvedCover, false);
+          resolvedCover = syncCoverAcrossTables(db, norm, resolvedCover, false);
         } else {
           resolvedCover = null;
         }
@@ -562,7 +960,12 @@ parentPort.on('message', (request) => {
         const { filePath } = payload;
         const norm = normalizePath(filePath);
         if (db.history[norm]) {
+          const removedFile = coverFileFromUrl(db.history[norm].cover);
           delete db.history[norm];
+          // مرحله ۲ ـ بخش ب: اگر کتاب از هر سه جدول رفت، ورودیِ کشِ آن
+          // هم حذف می‌شود.
+          purgeCoverCacheEntryIfBookGone(db, norm);
+          if (removedFile) deleteCoverFileIfUnreferenced(db, removedFile);
           writeDB(db);
         }
         sendReply({ type: 'done', action, success: true });
@@ -570,7 +973,15 @@ parentPort.on('message', (request) => {
       }
 
       case 'CLEAR_RECENTS': {
+        const removedFiles = Object.values(db.history || {})
+          .map((h) => coverFileFromUrl(h?.cover))
+          .filter(Boolean);
+        const removedNorms = Object.keys(db.history || {});
         db.history = {};
+        // مرحله ۲ ـ بخش ب: ورودی‌های کشِ کتاب‌هایی که با پاک‌شدنِ
+        // تاریخچه از هر سه جدول رفته‌اند، حذف می‌شوند.
+        removedNorms.forEach((normKey) => purgeCoverCacheEntryIfBookGone(db, normKey));
+        removedFiles.forEach((file) => deleteCoverFileIfUnreferenced(db, file));
         writeDB(db);
         sendReply({ type: 'done', action, success: true });
         break;
@@ -591,15 +1002,15 @@ parentPort.on('message', (request) => {
         const historyData = db.history[norm];
 
         let cachedCover = db.coverCache[norm]?.isCustom
-          ? db.coverCache[norm].dataUrl
+          ? coverEntryToUrl(db.coverCache[norm])
           : isPermanentCover(coverPath)
           ? coverPath
-          : db.coverCache[norm]?.dataUrl || existingItem?.cover || null;
+          : coverEntryToUrl(db.coverCache[norm]) || existingItem?.cover || null;
 
         if (!isPermanentCover(cachedCover)) cachedCover = null;
 
         if (cachedCover) {
-          syncCoverAcrossTables(db, norm, cachedCover, false);
+          cachedCover = syncCoverAcrossTables(db, norm, cachedCover, false);
         }
 
         const pinnedState = existingItem ? Boolean(existingItem.isPinned) : Boolean(isPinned);
@@ -642,7 +1053,13 @@ parentPort.on('message', (request) => {
       case 'REMOVE_FROM_LIBRARY': {
         const { filePath } = payload;
         const norm = normalizePath(filePath);
+        const removed = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
+        const removedFile = removed ? coverFileFromUrl(removed.cover) : null;
         db.library = db.library.filter((item) => normalizePath(item.path || item.filePath) !== norm);
+        // مرحله ۲ ـ بخش ب: اگر کتاب از هر سه جدول رفت، ورودیِ کشِ آن
+        // هم حذف می‌شود؛ وگرنه فایل با ارجاعِ خودِ کش هرگز پاک نمی‌شد.
+        purgeCoverCacheEntryIfBookGone(db, norm);
+        if (removedFile) deleteCoverFileIfUnreferenced(db, removedFile);
         writeDB(db);
         sendReply({ type: 'done', action, library: db.library });
         break;
@@ -687,7 +1104,7 @@ parentPort.on('message', (request) => {
           };
         } else {
           const hist = db.history[norm];
-          const cachedCov = db.coverCache[norm]?.dataUrl || hist?.cover || null;
+          const cachedCov = coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
           db.library.unshift({
             path: targetPath,
             normPath: norm,
@@ -810,7 +1227,7 @@ parentPort.on('message', (request) => {
             db.library[idx].folderId = folderId || null;
           } else {
             const hist = db.history[norm];
-            const cachedCov = db.coverCache[norm]?.dataUrl || hist?.cover || null;
+            const cachedCov = coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
             db.library.unshift({
               path: rawP,
               normPath: norm,
@@ -846,13 +1263,13 @@ parentPort.on('message', (request) => {
           return;
         }
         const norm = normalizePath(filePath);
-        syncCoverAcrossTables(db, norm, dataUrl, true);
+        const resolvedCover = syncCoverAcrossTables(db, norm, dataUrl, true);
         writeDB(db);
         sendReply({
           type: 'done',
           action,
           success: true,
-          cover: dataUrl,
+          cover: resolvedCover || dataUrl,
           library: db.library
         });
         break;
@@ -942,12 +1359,17 @@ parentPort.on('message', (request) => {
 
         if (existingIdx >= 0) {
           db.favorites.splice(existingIdx, 1);
+          // مرحله ۲ ـ بخش ب: برداشتنِ لایک هم یک حذف از جدولِ کاربری
+          // است و همان قاعدهٔ GC را دارد (در بخش الف جا افتاده بود).
+          const favCoverFile = coverFileFromUrl(comic.cover);
+          purgeCoverCacheEntryIfBookGone(db, norm);
+          if (favCoverFile) deleteCoverFileIfUnreferenced(db, favCoverFile);
           isFav = false;
         } else {
           const hist = db.history[norm];
           let cachedCover = isPermanentCover(comic.cover)
             ? comic.cover
-            : db.coverCache[norm]?.dataUrl || hist?.cover || null;
+            : coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
 
           if (!isPermanentCover(cachedCover)) cachedCover = null;
 
@@ -978,9 +1400,15 @@ parentPort.on('message', (request) => {
       case 'REMOVE_FROM_FAVORITES': {
         const { filePath } = payload;
         const norm = normalizePath(filePath);
+        const removed = db.favorites.find((item) => normalizePath(item.path || item.filePath) === norm);
+        const removedFile = removed ? coverFileFromUrl(removed.cover) : null;
         db.favorites = db.favorites.filter(
           (item) => normalizePath(item.path || item.filePath) !== norm
         );
+        // مرحله ۲ ـ بخش ب: مثل حذف از کتابخانه (بخش الف جا انداخته بود
+        // که کشِ خودارجاع، فایل را نگه می‌دارد).
+        purgeCoverCacheEntryIfBookGone(db, norm);
+        if (removedFile) deleteCoverFileIfUnreferenced(db, removedFile);
         writeDB(db);
         sendReply({ type: 'done', action, favorites: db.favorites });
         break;
@@ -1033,7 +1461,8 @@ parentPort.on('message', (request) => {
         const { filePath } = payload;
         const norm = normalizePath(filePath);
         const cached = db.coverCache[norm] || null;
-        const validCover = isPermanentCover(cached?.dataUrl) ? cached.dataUrl : null;
+        const cachedUrl = coverEntryToUrl(cached);
+        const validCover = isPermanentCover(cachedUrl) ? cachedUrl : null;
         sendReply({
           type: 'done',
           action,
@@ -1046,7 +1475,7 @@ parentPort.on('message', (request) => {
       case 'GET_ALL_COVER_CACHES': {
         const simplified = {};
         Object.entries(db.coverCache || {}).forEach(([k, v]) => {
-          const dUrl = typeof v === 'string' ? v : v?.dataUrl;
+          const dUrl = coverEntryToUrl(v);
           if (isPermanentCover(dUrl)) {
             simplified[k] = dUrl;
           }

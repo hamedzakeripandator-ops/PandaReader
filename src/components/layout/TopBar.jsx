@@ -37,6 +37,12 @@ export default function TopBar({
   const setCurrentView = useAppStore((state) => state.setCurrentView);
   const showToast = useAppStore((state) => state.showToast);
 
+  // مرحله ۳ ـ بخش الف: وضعیتِ هر دو پنلِ کناری — مبنای قانونِ
+  // انحصارِ متقابل (تا وقتی یکی باز است، TopBar نباید باز شود).
+  const isLeftSidebarOpen = useAppStore((state) => Boolean(state.isLeftSidebarOpen));
+  const isRightSidebarOpen = useAppStore((state) => Boolean(state.isRightSidebarOpen));
+  const isSidePanelOpen = Boolean(isLeftSidebarOpen || isRightSidebarOpen);
+
   const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const toggleAnnotationMode = useAppStore((state) => state.toggleAnnotationMode);
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
@@ -175,9 +181,48 @@ export default function TopBar({
     releaseOverlappingBlockers,
   ]);
 
+  // مرحله ۳ ـ بخش ب: انحصارِ متقابل فقط در حالتِ خواندن.
+  // بررسیِ هندسی نشان داد در حالتِ غیرخواندن، Sidebar داخلِ
+  // mainLayout و زیرِ نوار است و RightPanel اصلاً رندر نمی‌شود؛ پس
+  // پنلی تا لبهٔ بالای پنجره نمی‌آید و دلیلی برای مخفی کردنِ نوار
+  // نیست. معافیتِ غیرخواندن، هم پرشِ ۴۸ پیکسلیِ بخش الف را از بین
+  // می‌برد و هم دسترسی به نوار در کتابخانه را برمی‌گرداند. در حالتِ
+  // خواندن، قانونِ بخش الف سرِ جایش است (نوارِ شناور فوراً مخفی
+  // می‌شود). این افکت بعد از افکتِ حالت اعلان شده تا در باز شدنِ
+  // پنل، دستورِ بستن بر دستورِ باز شدنِ اولیه بچربد.
+  useEffect(() => {
+    if (isSidePanelOpen && effectiveReaderMode) {
+      clearHideTimer();
+      // مرحله ۳ ـ بخش ب: گیر کردنِ فوکوس. اگر فوکوسِ کیبورد داخلِ
+      // نوارِ در حالِ مخفی شدن است، آن را رها کن تا تایپ به اینپوتِ
+      // نامرئی نرود و فوکوس به بدنه برگردد.
+      if (headerRef.current && headerRef.current.contains(document.activeElement)) {
+        document.activeElement.blur();
+        setIsSearchFocused(false);
+      }
+      updateShowBar(false);
+    } else if (!effectiveReaderMode) {
+      updateShowBar(true);
+    }
+  }, [isSidePanelOpen, effectiveReaderMode, clearHideTimer, updateShowBar, setIsSearchFocused]);
+
   // ۲. سنسور مجاورت با حاشیه امن ۱۵۵ پیکسل (برای لغزش دست هنگام تایپ) و بستن با کلیک وسط صفحه
   useEffect(() => {
     const handleMouseMove = (e) => {
+      // مرحله ۳ ـ بخش الف/ب: در حالتِ خواندن و تا وقتی پنلِ کناری باز
+      // است، سنسورِ بالای صفحه کاملاً خاموش است؛ getState تازه‌ترین
+      // مقدار را می‌دهد (بدونِ وابستگی به رندرِ بعدی)، پس رفتنِ ماوس
+      // به سمتِ دکمه‌های بالاییِ پنل‌ها هرگز TopBar را بیرون
+      // نمی‌پراند. در حالتِ غیرخواندن این نگهبان اعمال نمی‌شود تا
+      // رفتارِ عادیِ نوار (از جمله آزادسازیِ مسدودکننده‌ها) بماند.
+      if (
+        effectiveReaderMode &&
+        (useAppStore.getState().isLeftSidebarOpen ||
+          useAppStore.getState().isRightSidebarOpen)
+      ) {
+        return;
+      }
+
       // اگر ماوس در محدوده کادر سرچ است، اطمینان حاصل کن هیچ لایه بیرونی روی آن نیفتاده باشد
       if (e.clientY <= 65 && showBarRef.current) {
         releaseOverlappingBlockers();
@@ -439,7 +484,12 @@ export default function TopBar({
     }
   };
 
-  const isVisibleNow = !effectiveReaderMode || showBar || isSearchFocused;
+  // مرحله ۳ ـ بخش ب: انحصارِ متقابل فقط در حالتِ خواندن. در حالتِ
+  // غیرخواندن نوار همیشه مرئی است (پنل‌ها زیرِ آن‌اند و هم‌پوشانی
+  // ندارند)؛ در حالتِ خواندن، باز بودنِ هر پنلِ کناری نوارِ شناور را
+  // مخفی می‌کند.
+  const isVisibleNow =
+    !effectiveReaderMode || ((showBar || isSearchFocused) && !isSidePanelOpen);
 
   return (
     <>
@@ -468,7 +518,10 @@ export default function TopBar({
           isBarHoveredRef.current = true;
           clearHideTimer();
           releaseOverlappingBlockers();
-          if (!showBarRef.current) updateShowBar(true);
+          // مرحله ۳ ـ بخش الف: وقتی پنلِ کناری باز است، هاور روی خودِ
+          // نوار هم آن را باز نمی‌کند (نوار در این حالت مخفی است و
+          // این نگهبان از بازگشتِ غافلگیرکننده جلوگیری می‌کند).
+          if (!showBarRef.current && !isSidePanelOpen) updateShowBar(true);
           onMouseEnter?.(e);
         }}
         onMouseLeave={(e) => {
@@ -490,8 +543,14 @@ export default function TopBar({
               ? 'none'
               : 'translate3d(0, -42px, 0) scaleX(1.14) scaleY(0.28)'
             : 'none',
-          opacity: effectiveReaderMode ? (isVisibleNow ? 1 : 0) : 1,
-          pointerEvents: effectiveReaderMode ? (isVisibleNow ? 'auto' : 'none') : 'auto',
+          opacity: isVisibleNow ? 1 : 0,
+          pointerEvents: isVisibleNow ? 'auto' : 'none',
+          // مرحله ۳ ـ بخش ب: جمع‌شدنِ ارتفاعِ بخش الف حذف شد. آن
+          // ارتفاعِ صفر در حالتِ غیرخواندن، با هر باز و بسته شدنِ
+          // پنل، کلِ محتوا را ۴۸ پیکسل بالا و پایین می‌پراند. با
+          // معافیتِ غیرخواندن، دیگر موقعیتی برای صفر کردنِ ارتفاع
+          // نیست و در حالتِ خواندن هم نوار absolute است و همین
+          // transform مخفیِ موجود کافی است.
           backgroundColor: effectiveReaderMode ? 'rgba(10, 15, 19, 0.95)' : 'transparent',
           backdropFilter: effectiveReaderMode ? 'blur(18px)' : 'none',
           WebkitBackdropFilter: effectiveReaderMode ? 'blur(18px)' : 'none',

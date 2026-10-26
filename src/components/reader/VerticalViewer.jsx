@@ -470,8 +470,14 @@ export default function VerticalViewer() {
     showToast(`یادداشت‌های صفحه ${pageNum} پاک شد`, { type: 'info' });
   }, [activePageIndex, handleCommitPageAnnotations, showToast]);
 
+  // مرحله ۳ ـ بخش الف (ممیزی §۲.۶): گیتِ وارونه اصلاح شد تا دقیقاً
+  // هم‌تراز با PdfViewer باشد: وقتی استودیو روشن است، فقط تولبار
+  // Undo/Redo را مدیریت می‌کند و این شنونده خاموش می‌ماند؛ وقتی
+  // استودیو خاموش است، خودِ ویوور Undo/Redo حاشیه‌نویسی‌های صفحه
+  // را انجام می‌دهد (قبلاً برعکس بود و Ctrl+Z در کمیکِ بدونِ
+  // استودیو هیچ کاری نمی‌کرد).
   useEffect(() => {
-    if (!isAnnotationActive) return;
+    if (isAnnotationActive) return;
     const onKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         if (e.shiftKey) {

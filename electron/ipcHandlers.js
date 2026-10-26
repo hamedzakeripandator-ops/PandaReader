@@ -122,6 +122,9 @@ let persistentDbWorker = null;
 // handshake را کامل کرد و app.quit() را دوباره صدا زد، before-quitِ
 // دوم با این پرچم، بدونِ توقف عبور می‌کند (وگرنه حلقه می‌شد).
 let quitAfterFlush = false;
+// مرحله ۱ ـ بخش ب: محافظِ ورودِ مجددِ Handshake — وقتی true است،
+// یک before-quitِ دوم، Handshakeِ تازه شروع نمی‌کند (بخش B-I2).
+let flushInProgress = false;
 let dbRequestSeq = 0;
 const pendingDbCallbacks = new Map();
 
@@ -366,13 +369,23 @@ module.exports = function(app) {
   app.on('before-quit', (event) => {
     cleanupExtractedDiskCache('__FORCE_ALL__', true);
     if (quitAfterFlush) return;
+    // مرحله ۱ ـ بخش ب: محافظِ ورودِ مجدد. اگر Handshake در حالِ
+    // انجام است، before-quitِ دوم فقط خروج را متوقف می‌کند و برمی‌گردد
+    // تا FLUSH_SYNCِ تکراری، شنوندهٔ تکراری و تایمرِ دوم ساخته نشود؛
+    // Handshakeِ اول، خروج را به‌هرحال کامل می‌کند.
+    if (flushInProgress) {
+      event.preventDefault();
+      return;
+    }
     const worker = persistentDbWorker;
     if (!worker) return;
     event.preventDefault();
+    flushInProgress = true;
     let finished = false;
     const finishQuit = () => {
       if (finished) return;
       finished = true;
+      flushInProgress = false;
       try { worker.removeListener('message', onFlushAck); } catch (_) {}
       quitAfterFlush = true;
       try { worker.terminate(); } catch (_) {}
@@ -435,7 +448,7 @@ module.exports = function(app) {
 
           let coverBase64 = null;
           const cachedCov = await executeDbAction('GET_CACHED_COVER', { filePath: normalizedPath });
-          if (cachedCov?.cover && cachedCov.cover.startsWith('data:')) {
+          if (cachedCov?.cover && (cachedCov.cover.startsWith('data:') || cachedCov.cover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک (comic://) هم معتبر است
             coverBase64 = cachedCov.cover;
           } else {
             coverBase64 = await createPermanentCoverDataUrlAsync(folderImages[0].path);
@@ -478,7 +491,7 @@ module.exports = function(app) {
         let pdfCover = null;
         try {
           const cachedCov = await executeDbAction('GET_CACHED_COVER', { filePath: normalizedPath });
-          if (cachedCov?.cover && cachedCov.cover.startsWith('data:')) {
+          if (cachedCov?.cover && (cachedCov.cover.startsWith('data:') || cachedCov.cover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک (comic://) هم معتبر است
             pdfCover = cachedCov.cover;
           }
         } catch (_) {}
@@ -570,7 +583,7 @@ module.exports = function(app) {
           let coverBase64 = null;
           try {
             const cachedCov = await executeDbAction('GET_CACHED_COVER', { filePath: normalizedPath });
-            if (cachedCov?.cover && cachedCov.cover.startsWith('data:')) {
+            if (cachedCov?.cover && (cachedCov.cover.startsWith('data:') || cachedCov.cover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک (comic://) هم معتبر است
               coverBase64 = cachedCov.cover;
             } else if (result.coverBuffer) {
               coverBase64 = createCoverFromBuffer(result.coverBuffer, result.coverMime || 'image/jpeg');
@@ -701,7 +714,7 @@ module.exports = function(app) {
       const normalizedPath = path.normalize(filePath);
 
       const cachedRes = await executeDbAction('GET_CACHED_COVER', { filePath: normalizedPath });
-      if (cachedRes?.cover && cachedRes.cover.startsWith('data:')) {
+      if (cachedRes?.cover && (cachedRes.cover.startsWith('data:') || cachedRes.cover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک (comic://) هم معتبر است
         return { success: true, cover: cachedRes.cover };
       }
 

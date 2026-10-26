@@ -28,7 +28,9 @@ const isPermanentCover = (str) => {
     s.startsWith('data:image/') ||
     s.startsWith('http://') ||
     s.startsWith('https://') ||
-    s.startsWith('blob:')
+    s.startsWith('blob:') ||
+    // مرحله ۲ ـ بخش الف: مرجعِ کاورِ روی دیسک هم دائمی است.
+    s.startsWith('comic://')
   ) {
     return true;
   }

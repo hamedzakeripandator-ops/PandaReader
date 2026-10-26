@@ -4,6 +4,7 @@ process.env.UV_THREADPOOL_SIZE = '8';
 const { app, BrowserWindow, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { Readable } = require('stream');
 
 // ۱. تنظیم سوییچ‌های شتاب‌نگاشت سخت‌افزاری کرومیوم، تردهای رستر موازی و حذف لاگ‌های مزاحم
@@ -74,14 +75,23 @@ app.normalizeComicCacheKey = (rawPath) => {
   return path.normalize(rawPath).toLowerCase();
 };
 
-app.setComicPageInRam = (rawPath, buffer) => {
+// مرحله ۲ ـ بخش الف: ورودی‌های کشِ رم حالا متادیتا هم دارند
+// ({buffer, mtimeMs, size, validated}) تا جایگزینیِ فایل در همان
+// مسیر، با بافرِ کهنه سرو نشود. ورودی‌های بدونِ متادیتا (مثلاً
+// کاورِ صفحهٔ اول که ipcHandlers با setComicPageInRam می‌گذارد)
+// «اعتبارسنجی‌نشده» (validated: false) اند و همان‌طور که هستند
+// برگردانده می‌شوند؛ فقط ورودی‌های اعتبارسنجی‌شده با stat مقایسه
+// می‌شوند. این تفکیک، رفتارِ قبلیِ کاور را حفظ می‌کند و در عینِ حال
+// جلوی سروِ بافرِ کهنه برای فایل‌های جایگزین‌شده را می‌گیرد.
+app.setComicPageInRam = (rawPath, buffer, meta = null) => {
   if (!rawPath || !buffer || !Buffer.isBuffer(buffer)) return;
   const key = app.normalizeComicCacheKey(rawPath);
   if (!key) return;
 
   if (app.activeComicRamCache.has(key)) {
-    const oldBuf = app.activeComicRamCache.get(key);
-    currentRamCacheBytes -= oldBuf ? oldBuf.length : 0;
+    const oldEntry = app.activeComicRamCache.get(key);
+    const oldLen = oldEntry && oldEntry.buffer ? oldEntry.buffer.length : 0;
+    currentRamCacheBytes -= oldLen;
     app.activeComicRamCache.delete(key);
   }
 
@@ -90,12 +100,17 @@ app.setComicPageInRam = (rawPath, buffer) => {
 
   while (currentRamCacheBytes + buffer.length > MAX_RAM_CACHE_BYTES && app.activeComicRamCache.size > 0) {
     const oldestKey = app.activeComicRamCache.keys().next().value;
-    const oldestBuf = app.activeComicRamCache.get(oldestKey);
-    currentRamCacheBytes -= oldestBuf ? oldestBuf.length : 0;
+    const oldestEntry = app.activeComicRamCache.get(oldestKey);
+    currentRamCacheBytes -= oldestEntry && oldestEntry.buffer ? oldestEntry.buffer.length : 0;
     app.activeComicRamCache.delete(oldestKey);
   }
 
-  app.activeComicRamCache.set(key, buffer);
+  app.activeComicRamCache.set(key, {
+    buffer,
+    mtimeMs: meta && typeof meta.mtimeMs === 'number' ? meta.mtimeMs : null,
+    size: meta && typeof meta.size === 'number' ? meta.size : buffer.length,
+    validated: Boolean(meta)
+  });
   currentRamCacheBytes += buffer.length;
 };
 
@@ -104,11 +119,36 @@ app.readComicPageToRam = async (rawPath) => {
   const key = app.normalizeComicCacheKey(normalizedPath);
 
   if (app.activeComicRamCache.has(key)) {
-    const buf = app.activeComicRamCache.get(key);
-    // ارتقای موقعیت در LRU
-    app.activeComicRamCache.delete(key);
-    app.activeComicRamCache.set(key, buf);
-    return buf;
+    const entry = app.activeComicRamCache.get(key);
+    const buf = entry && entry.buffer ? entry.buffer : null;
+    if (entry && entry.validated) {
+      // ورودیِ اعتبارسنجی‌شده فقط وقتی معتبر است که فایل روی دیسک
+      // همان mtime و size را داشته باشد؛ وگرنه کهنه است و دوباره
+      // خوانده می‌شود.
+      try {
+        const stat = await fs.promises.stat(normalizedPath);
+        if (entry.mtimeMs === stat.mtimeMs && entry.size === stat.size) {
+          // ارتقای موقعیت در LRU
+          app.activeComicRamCache.delete(key);
+          app.activeComicRamCache.set(key, entry);
+          return buf;
+        }
+      } catch (_) {}
+      // کهنه یا غیرقابلِ stat: ورودی را دور بینداز تا خواندنِ دیسک
+      // در ادامه، بافرِ تازه (یا خطای واقعی) را برگرداند.
+      // مرحله ۲ ـ بخش ب: کم‌کردن فقط وقتی که delete واقعاً حذف کرده
+      // باشد؛ بین get و delete یک await (stat) هست و دو درخواستِ
+      // هم‌زمان می‌توانستند یک ورودی را دو بار کم کنند.
+      if (app.activeComicRamCache.delete(key)) {
+        currentRamCacheBytes -= buf ? buf.length : 0;
+      }
+    } else {
+      // ورودیِ اعتبارسنجی‌نشده (مثل کاورِ ipcHandlers) بدونِ چک
+      // برگردانده می‌شود؛ رفتارِ قبلی حفظ می‌شود.
+      app.activeComicRamCache.delete(key);
+      app.activeComicRamCache.set(key, entry);
+      return buf;
+    }
   }
 
   if (app.inFlightDiskReads.has(key)) {
@@ -116,8 +156,13 @@ app.readComicPageToRam = async (rawPath) => {
   }
 
   const diskReadPromise = fs.promises.readFile(normalizedPath)
-    .then((buf) => {
-      app.setComicPageInRam(normalizedPath, buf);
+    .then(async (buf) => {
+      let meta = null;
+      try {
+        const stat = await fs.promises.stat(normalizedPath);
+        meta = { mtimeMs: stat.mtimeMs, size: stat.size };
+      } catch (_) {}
+      app.setComicPageInRam(normalizedPath, buf, meta);
       app.inFlightDiskReads.delete(key);
       return buf;
     })
@@ -131,6 +176,14 @@ app.readComicPageToRam = async (rawPath) => {
 };
 
 // تجزیه استاندارد هدر Range برای پشتیبانی از 206 Partial Content در فایل‌های PDF
+// مرحله ۲ ـ بخش ب: سه‌حالته شد — null یعنی «Range نیست یا قابلِ
+// چشم‌پوشی است» (پاسخِ کامل)، {start,end} یعنی بازهٔ معتبر، و
+// {invalid:true} یعنی نحو درست ولی برآورده‌نشدنی (پاسخِ 416).
+// نکته‌های RFC که رعایت شده: end بزرگ‌تر از فایل، clamp می‌شود
+// (نه 416)؛ بازهٔ باز (bytes=0- یا bytes=65536-) تا انتهای فایل
+// ادامه دارد؛ start>=size یا start>end یا suffix<=0 یعنی 416؛
+// نحوِ کاملاً خراب (مثلاً bytes=abc) نادیده گرفته می‌شود و پاسخِ
+// کامل برمی‌گردد، چون سرور موظف نیست آن را بفهمد.
 function parseByteRange(rangeHeader, totalSize) {
   if (!rangeHeader || typeof rangeHeader !== 'string' || totalSize <= 0) return null;
   const match = rangeHeader.trim().match(/^bytes=(\d*)-(\d*)$/i);
@@ -145,24 +198,31 @@ function parseByteRange(rangeHeader, totalSize) {
   if (!startStr && endStr) {
     // حالت suffix-byte-range-spec (مثلاً bytes=-500 برای خواندن انتهای PDF)
     const suffixLength = parseInt(endStr, 10);
-    if (isNaN(suffixLength) || suffixLength <= 0) return null;
+    if (isNaN(suffixLength) || suffixLength <= 0) return { invalid: true };
     start = Math.max(0, totalSize - suffixLength);
     end = totalSize - 1;
   }
 
   if (isNaN(start) || isNaN(end) || start < 0 || start >= totalSize) {
-    return null;
+    return { invalid: true };
   }
 
   end = Math.min(end, totalSize - 1);
-  if (start > end) return null;
+  if (start > end) return { invalid: true };
 
   return { start, end, chunkSize: end - start + 1 };
 }
 
 // ایجاد استریم وب ایمن از روی دیسک با بستن خودکار هندل فایل در صورت لغو درخواست
+// مرحله ۲ ـ بخش ب (ممیزیِ نشتِ fd): علاوه بر abort، خطای استریم هم
+// صریحاً destroy می‌شود. Readable.toWeb خطا را به وب‌استریم منتقل
+// می‌کند، ولی destroy صریح تضمین می‌کند که هندلِ فایل روی ویندوز
+// باز نماند، حتی اگر مصرف‌کنندهٔ وب‌استریم دیگر گوش ندهد.
 function createSafeWebFileStream(filePath, options, abortSignal) {
   const nodeStream = fs.createReadStream(filePath, options);
+  nodeStream.on('error', () => {
+    try { nodeStream.destroy(); } catch (_) {}
+  });
 
   if (abortSignal) {
     if (abortSignal.aborted) {
@@ -195,6 +255,79 @@ const MIME_TYPES = {
   '.pdf': 'application/pdf'
 };
 
+// مرحله ۲ ـ بخش الف: پسوندهای مجازِ پروتکل comic:// (Default-Deny).
+// فقط همین‌ها سرو می‌شوند: آرشیوهای کمیک، PDF و تصاویر (از جمله
+// svg، چون کاورِ سفارشیِ SVG امروز کار می‌کند و در این برنامه فقط
+// در بسترِ <img> رندر می‌شود، نه به‌عنوانِ سند).
+// عمداً فایل‌های بدونِ پسوند سرو نمی‌شوند.
+// توجه: این allowlist، افشای فایل‌های تصویریِ دلخواهِ روی دیسک را
+// به‌طورِ کامل نمی‌بندد (مسیرِ مطلقِ یک تصویر، هنوز با پسوندِ مجاز
+// سرو می‌شود)؛ بستنِ کامل، به رجیستریِ «فایل‌های بازِ فعلی» نیاز
+// دارد که کارِ فازِ بعد است — ولی فایل‌های سیستمی، اجرایی، دیتابیس
+// و اسنادِ متنی از همین‌جا مسدود می‌شوند.
+const ALLOWED_COMIC_EXTS = new Set([
+  '.zip', '.cbz', '.cbr', '.rar', '.7z',
+  '.pdf',
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif', '.svg'
+]);
+
+// پوشهٔ کاورهای روی دیسک (همان که ورکرِ دیتابیس می‌نویسد).
+const COMIC_COVERS_DIR = path.join(os.homedir(), '.comic-reader', 'covers');
+
+// مرحله ۲ ـ بخش الف: helperهای خالصِ پروتکل (بدونِ وابستگی به
+// Electron، تا مستقل قابلِ تست باشند).
+function makeComicETag(size, mtimeMs) {
+  return `"${size}-${Math.floor(mtimeMs)}"`;
+}
+
+function isAllowedComicExtension(ext) {
+  return ALLOWED_COMIC_EXTS.has(String(ext || '').toLowerCase());
+}
+
+// بررسیِ عبور از مسیر (Path Traversal) روی مسیرِ نرمال‌شده: اگر بعد
+// از normalize هنوز جزءِ '..' مانده باشد، یعنی مسیر از مبدأ فرار
+// کرده است. روی هر دو جداکننده (‎/‎ و ‎\‎) چک می‌شود تا مستقل از
+// سیستم‌عامل باشد.
+function hasTraversalSegments(normalizedPath) {
+  if (!normalizedPath || typeof normalizedPath !== 'string') return true;
+  return normalizedPath.split(/[\\/]+/).includes('..');
+}
+
+// استخراجِ نامِ فایلِ کاور از URL (دو شکل: comic://covers/<file> که
+// hostname برابرِ covers است، و pathnameای که با /covers/ شروع
+// می‌شود). basename، هر تلاشِ traversal را خنثی می‌کند.
+function resolveCoverFileName(hostname, pathname) {
+  let raw = '';
+  if (hostname === 'covers') {
+    raw = String(pathname || '').replace(/^\/+/, '');
+  } else if (String(pathname || '').startsWith('/covers/')) {
+    raw = String(pathname || '').slice('/covers/'.length);
+  } else {
+    return null;
+  }
+  // مرحله ۲ ـ بخش ب: Query String کش‌باست (?v=...) پیش از اعتبارسنجی
+  // جدا می‌شود؛ وگرنه 'abc.jpg?v=123' با regex رد می‌شد و کاورِ
+  // نسخه‌دار هرگز سرو نمی‌شد. (در عمل، URL پارسر query را از pathname
+  // جدا می‌کند، ولی این خط دفاعِ دوم برای URLهای ناقص است.)
+  const file = raw.split('?')[0].split('/').pop();
+  if (!file || !/^[A-Za-z0-9._-]+$/.test(file)) return null;
+  return file;
+}
+
+// بررسیِ درخواستِ شرطی (If-None-Match مقدم بر If-Modified-Since):
+// true یعنی فایل تغییر نکرده و باید 304 برگردد.
+function isNotModified(requestHeaders, etag, mtimeMs) {
+  if (!requestHeaders || typeof requestHeaders.get !== 'function') return false;
+  const noneMatch = requestHeaders.get('if-none-match');
+  if (noneMatch && noneMatch.trim() === etag) return true;
+  const modifiedSince = requestHeaders.get('if-modified-since');
+  if (modifiedSince) {
+    const sinceMs = Date.parse(modifiedSince);
+    if (!Number.isNaN(sinceMs) && Math.floor(mtimeMs) <= sinceMs) return true;
+  }
+  return false;
+}
+
 function createWindow() {
   // نمونهٔ دوم، هرگز پنجره نمی‌سازد (نگهبانِ دومِ قفلِ تک‌نمونه‌ای).
   if (!gotSingleInstanceLock) return;
@@ -224,7 +357,11 @@ function createWindow() {
   // (شنوندهٔ قبلیِ devtools-opened که console.clear می‌کرد، عمداً
   // حذف شد تا لاگ‌های حیاتیِ دیباگ پاک نشوند.)
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    // مرحله ۱ ـ بخش ب: URLهای data: هم نادیده گرفته می‌شوند تا
+    // بارگذاریِ خودِ صفحهٔ خطا، هرگز did-fail-loadِ دیگری نسازد و
+    // حلقهٔ بی‌نهایت محال شود (صفحهٔ خطا با data: ساخته می‌شود).
     if (!isMainFrame || errorCode === -3) return;
+    if (validatedURL && validatedURL.startsWith('data:')) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const devUrl = 'http://localhost:5173';
     const safeDesc = String(errorDescription || '')
@@ -258,14 +395,36 @@ app.whenReady().then(() => {
 
   protocol.handle('comic', async (request) => {
     try {
+      // مرحله ۲ ـ بخش الف: پاسخِ Preflight برای درخواست‌های Range
+      // از pdf.js (هدرِ Range، درخواستِ ساده نیست و مرورگر پیش از آن
+      // OPTIONS می‌فرستد؛ بدونِ این شاخه، preflight شکست می‌خورد و
+      // Range عملاً هرگز کار نمی‌کرد).
+      if (request.method === 'OPTIONS') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+            'Access-Control-Allow-Headers': 'Range, Content-Type, If-None-Match, If-Modified-Since',
+            'Access-Control-Max-Age': '86400'
+          }
+        });
+      }
+
       const rawUrl = request.url;
       let targetFilePath = null;
+      let coverFileName = null;
 
       try {
         const parsedUrl = new URL(rawUrl);
-        targetFilePath = parsedUrl.searchParams.get('path');
-        if (!targetFilePath && parsedUrl.pathname && parsedUrl.pathname !== '/') {
-          targetFilePath = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
+        coverFileName = resolveCoverFileName(parsedUrl.hostname, parsedUrl.pathname);
+        if (coverFileName) {
+          targetFilePath = path.join(COMIC_COVERS_DIR, coverFileName);
+        } else {
+          targetFilePath = parsedUrl.searchParams.get('path');
+          if (!targetFilePath && parsedUrl.pathname && parsedUrl.pathname !== '/') {
+            targetFilePath = decodeURIComponent(parsedUrl.pathname.replace(/^\/+/, ''));
+          }
         }
       } catch (_) {
         const match = rawUrl.match(/[?&]path=([^&]+)/);
@@ -274,26 +433,48 @@ app.whenReady().then(() => {
         }
       }
 
-      if (!targetFilePath) {
+      if (!targetFilePath || targetFilePath.includes('\0')) {
         return new Response('Path parameter is missing', { status: 400 });
       }
 
       const normalizedPath = path.normalize(targetFilePath);
       const ext = path.extname(normalizedPath).toLowerCase();
+
+      // مرحله ۲ ـ بخش الف: لایهٔ امنیتی — Default-Deny.
+      if (hasTraversalSegments(normalizedPath)) {
+        return new Response('Forbidden: path traversal', { status: 403 });
+      }
+      if (!isAllowedComicExtension(ext)) {
+        return new Response('Forbidden: file type not allowed', { status: 403 });
+      }
+
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
       // ۱. پایپ‌لاین فوق‌سریع اختصاصی برای اسناد و کتاب‌های PDF (پشتیبانی از کش رم + Range Requests)
       if (ext === '.pdf') {
         const stat = await fs.promises.stat(normalizedPath);
         const totalSize = stat.size;
-        const rangeHeader = request.headers.get('range') || request.headers.get('Range');
+        const etag = makeComicETag(stat.size, stat.mtimeMs);
+        const lastModified = new Date(stat.mtimeMs).toUTCString();
+        const rangeHeader = request.headers.get('range');
 
+        // مرحله ۲ ـ بخش الف: هدرهای لازم برای Range در pdf.js —
+        // Expose-Headers (وگرنه مرورگر Content-Range را از fetch
+        // پنهان می‌کند و pdf.js پشتیبانیِ Range را تشخیص نمی‌دهد) +
+        // ETag/Last-Modified + اعتبارسنجیِ مجدد به‌جای کشِ یک‌ساله.
         const basePdfHeaders = {
           'Content-Type': 'application/pdf',
           'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, ETag, Last-Modified',
           'Accept-Ranges': 'bytes',
-          'Cache-Control': 'public, max-age=3600'
+          'ETag': etag,
+          'Last-Modified': lastModified,
+          'Cache-Control': 'public, max-age=0, must-revalidate'
         };
+
+        if (isNotModified(request.headers, etag, stat.mtimeMs)) {
+          return new Response(null, { status: 304, headers: basePdfHeaders });
+        }
 
         if (request.method === 'HEAD') {
           return new Response(null, {
@@ -306,8 +487,34 @@ app.whenReady().then(() => {
         }
 
         const parsedRange = parseByteRange(rangeHeader, totalSize);
+        // مرحله ۲ ـ بخش ب: بازهٔ برآورده‌نشدنی → 416 استاندارد با
+        // Content-Range: bytes */total (نه 200 کامل که قبلاً بود).
+        if (parsedRange && parsedRange.invalid) {
+          return new Response(null, {
+            status: 416,
+            headers: {
+              ...basePdfHeaders,
+              'Content-Range': `bytes */${totalSize}`
+            }
+          });
+        }
         const cacheKey = app.normalizeComicCacheKey(normalizedPath);
-        const cachedPdfBuf = app.activeComicRamCache.get(cacheKey);
+        const cachedEntry = app.activeComicRamCache.get(cacheKey);
+        // فقط ورودیِ اعتبارسنجی‌شده و هم‌خوان با stat فعلی قابلِ
+        // استفاده است؛ ورودیِ کهنه یا اعتبارسنجی‌نشده دور انداخته
+        // می‌شود تا هرگز بایتِ کاور به‌جای PDF سرو نشود.
+        let cachedPdfBuf = null;
+        if (cachedEntry && cachedEntry.validated && cachedEntry.mtimeMs === stat.mtimeMs && cachedEntry.size === stat.size) {
+          cachedPdfBuf = cachedEntry.buffer;
+        } else if (cachedEntry) {
+          // مرحله ۲ ـ بخش ب: کم‌کردنِ بایت فقط وقتی که delete واقعاً
+          // چیزی را حذف کرده باشد؛ وگرنه دو درخواستِ هم‌زمان برای
+          // یک فایلِ کهنه، حسابِ کش را دو بار کم می‌کردند و سقفِ
+          // ۳۵۰ مگابایت به‌تدریج سوراخ می‌شد.
+          if (app.activeComicRamCache.delete(cacheKey)) {
+            currentRamCacheBytes -= cachedEntry.buffer ? cachedEntry.buffer.length : 0;
+          }
+        }
 
         // الف) اگر درخواست Range (بایت‌های خاص) ارسال شده باشد
         if (parsedRange) {
@@ -364,6 +571,37 @@ app.whenReady().then(() => {
       }
 
       // ۲. پایپ‌لاین صفحات تصویری کمیک (تحویل مستقیم از رم در ۰ میلی‌ثانیه)
+      // مرحله ۲ ـ بخش الف: کشِ یک‌سالهٔ immutable حذف شد؛ به‌جایش
+      // ETag/Last-Modified + اعتبارسنجیِ مجدد: فایلِ جایگزین‌شده در
+      // همان مسیر، بلافاصله تشخیص داده می‌شود (200 با محتوای جدید)
+      // و فایلِ بدونِ تغییر، با 304 بدونِ بدنه سرو می‌شود.
+      const stat = await fs.promises.stat(normalizedPath);
+      const etag = makeComicETag(stat.size, stat.mtimeMs);
+      const lastModified = new Date(stat.mtimeMs).toUTCString();
+      if (isNotModified(request.headers, etag, stat.mtimeMs)) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            'ETag': etag,
+            'Last-Modified': lastModified,
+            'Cache-Control': 'public, max-age=0, must-revalidate',
+            'Access-Control-Allow-Origin': '*'
+          }
+        });
+      }
+      if (request.method === 'HEAD') {
+        return new Response(null, {
+          status: 200,
+          headers: {
+            'Content-Type': contentType,
+            'Content-Length': stat.size.toString(),
+            'Cache-Control': 'public, max-age=0, must-revalidate',
+            'Access-Control-Allow-Origin': '*',
+            'ETag': etag,
+            'Last-Modified': lastModified
+          }
+        });
+      }
       const buffer = await app.readComicPageToRam(normalizedPath);
 
       return new Response(buffer, {
@@ -371,9 +609,12 @@ app.whenReady().then(() => {
         headers: {
           'Content-Type': contentType,
           'Content-Length': buffer.length.toString(),
-          'Cache-Control': 'public, max-age=31536000, immutable',
+          'Cache-Control': 'public, max-age=0, must-revalidate',
           'Access-Control-Allow-Origin': '*',
-          'Accept-Ranges': 'bytes'
+          'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, ETag, Last-Modified',
+          'Accept-Ranges': 'bytes',
+          'ETag': etag,
+          'Last-Modified': lastModified
         }
       });
     } catch (error) {

@@ -1,7 +1,31 @@
 import { coreApi } from './coreApi';
 import useLibraryStore from '../store/useLibraryStore';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
+// مرحله ۳ ـ بخش ب: بارگذاریِ تنبلِ pdfjs-dist. این فایل از مسیرِ
+// بوتِ eager ایمپورت می‌شود (App → HomeView/ContextMenu →
+// thumbnailService)، پس ایمپورتِ استاتیکِ pdfjs-dist چانکِ vendor-pdfjs
+// را همان ثانیهٔ اول بارگذاری می‌کرد، حتی وقتی همهٔ کاورها از دیسک
+// خوانده می‌شدند. حالا موتور فقط وقتی لود می‌شود که واقعاً یک PDFِ
+// بدونِ کاورِ کش‌شده نیاز به رندر داشته باشد. وعده کش می‌شود تا
+// فراخوانی‌های هم‌زمان، دو بار لود نکنند؛ و در صورتِ شکست، کش پاک
+// می‌شود تا فراخوانیِ بعدی دوباره تلاش کند.
+let pdfjsLibPromise = null;
+
+async function getPdfJsLib() {
+  if (!pdfjsLibPromise) {
+    pdfjsLibPromise = (async () => {
+      const pdfjsLib = await import('pdfjs-dist');
+      const workerModule = await import('pdfjs-dist/build/pdf.worker.mjs?url');
+      const pdfjsWorker = workerModule.default;
+      initThumbnailPdfEnvironmentInternal(pdfjsLib, pdfjsWorker);
+      return pdfjsLib;
+    })();
+    pdfjsLibPromise = pdfjsLibPromise.catch((err) => {
+      pdfjsLibPromise = null;
+      throw err;
+    });
+  }
+  return pdfjsLibPromise;
+}
 
 // ============================================================================
 // ۱. نصب پلی‌فیل‌های ES2025/ES2026 برای جلوگیری از کرش ساخت کاور PDF
@@ -143,7 +167,10 @@ const THUMB_POLYFILL_RAW_CODE = `
 })();
 `;
 
-export function initThumbnailPdfEnvironment() {
+// همان بدنهٔ قبلیِ راه‌اندازیِ محیطِ pdfjs، با pdfjsLib و pdfjsWorker
+// به‌عنوانِ پارامتر (دیگر از ایمپورتِ استاتیک نمی‌آیند). فقط از طریقِ
+// getPdfJsLib صدا زده می‌شود، پس در بوت اجرا نمی‌شود.
+function initThumbnailPdfEnvironmentInternal(pdfjsLib, pdfjsWorker) {
   try {
     // eslint-disable-next-line no-new-func
     new Function(THUMB_POLYFILL_RAW_CODE)();
@@ -185,7 +212,8 @@ export function initThumbnailPdfEnvironment() {
   pdfjsLib.GlobalWorkerOptions.workerSrc = window.__pdfWorkerPatchedUrlV2 || pdfjsWorker;
 }
 
-initThumbnailPdfEnvironment();
+// مرحله ۳ ـ بخش ب: فراخوانیِ سطحِ ماژول حذف شد؛ راه‌اندازیِ محیطِ
+// pdfjs حالا فقط داخلِ getPdfJsLib و هنگامِ نیازِ واقعی اجرا می‌شود.
 
 // استانداردسازی یکسان کلید مسیر در تمام بخش‌های برنامه
 function normalizeCoverKey(filePath) {
@@ -224,6 +252,15 @@ const memoryCoverCache = new Map();
 // نقشه جلوگیری از ارسال درخواست‌های هم‌زمان برای یک مسیر مشترک
 const inFlightRequests = new Map();
 
+// مرحله ۴ — صفِ استخراجِ کاور با اولویتِ تازه‌ترین و لغوِ در صف:
+//  - LIFO به‌جای FIFO: وقتی کاربر سریع اسکرول می‌کند، تازه‌ترین کارت‌های
+//    در دید، زودتر از کارت‌های قدیمیِ صف اجرا می‌شوند (کارت‌های قدیمی
+//    معمولاً تا آن موقع از دید خارج شده و با cancel حذف شده‌اند).
+//  - cancel(key) فقط ورودیِ هنوز اجرا نشده را حذف می‌کند و وعده‌اش را با
+//    null حل می‌کند (نه reject)، چون فراخواننده‌ها catch ندارند و null
+//    یعنی «کاور نیست»؛ استخراجِ در حالِ اجرا لغو نمی‌شود (حداکثر ۳ عددند
+//    و به‌زودی تمام می‌شوند). گرسنگیِ دائمی رخ نمی‌دهد: وقتی اسکرول
+//    می‌ایستد، ورودیِ تازه‌ای نمی‌آید و صف خالی می‌شود.
 class TaskQueue {
   constructor(concurrency = 3) {
     this.concurrency = concurrency;
@@ -231,16 +268,24 @@ class TaskQueue {
     this.queue = [];
   }
 
-  add(task) {
+  add(key, task) {
     return new Promise((resolve, reject) => {
-      this.queue.push({ task, resolve, reject });
+      this.queue.push({ key, task, resolve, reject });
       this.next();
     });
   }
 
+  cancel(key) {
+    const idx = this.queue.findIndex((entry) => entry.key === key);
+    if (idx === -1) return false;
+    const [entry] = this.queue.splice(idx, 1);
+    entry.resolve(null);
+    return true;
+  }
+
   next() {
     while (this.running < this.concurrency && this.queue.length > 0) {
-      const { task, resolve, reject } = this.queue.shift();
+      const { task, resolve, reject } = this.queue.pop();
       this.running++;
       task()
         .then(resolve)
@@ -313,7 +358,7 @@ export const thumbnailService = {
     // گام دوم: بررسی کش استور کتابخانه
     const dbCover = useLibraryStore.getState().getCover?.(norm);
     const validDbCover = resolveCoverUrl(dbCover);
-    if (validDbCover && validDbCover.startsWith('data:')) {
+    if (validDbCover && (validDbCover.startsWith('data:') || validDbCover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
       memoryCoverCache.set(norm, validDbCover);
       return validDbCover;
     }
@@ -324,7 +369,7 @@ export const thumbnailService = {
     }
 
     const requestPromise = thumbnailQueue
-      .add(async () => {
+      .add(norm, async () => {
         // بررسی مجدد کش رم پس از نوبت در صف (در صورتی که PdfViewer در این فاصله کاور را ساخته باشد)
         if (memoryCoverCache.has(norm)) {
           return memoryCoverCache.get(norm);
@@ -338,7 +383,7 @@ export const thumbnailService = {
               payload: { filePath },
             });
             const resolvedFromDb = resolveCoverUrl(cachedDbRes?.cover);
-            if (resolvedFromDb && resolvedFromDb.startsWith('data:')) {
+            if (resolvedFromDb && (resolvedFromDb.startsWith('data:') || resolvedFromDb.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
               memoryCoverCache.set(norm, resolvedFromDb);
               useLibraryStore.getState().cacheCover?.(filePath, resolvedFromDb);
               return resolvedFromDb;
@@ -346,13 +391,25 @@ export const thumbnailService = {
           }
 
           // ب) استخراج کاور PDF با رزولوشن بهینه و بدون بارگذاری صفحات اضافی
+          // مرحله ۲ ـ بخش ب: مثل PdfViewer، اول با url + Range خوانده
+          // می‌شود تا برای رندرِ صفحهٔ اول، فقط چانک‌های لازم بیایند؛
+          // اگر بارگذاریِ URL شکست خورد، به fetch + arrayBuffer
+          // برمی‌گردد تا هیچ کاوری از تولید شدن باز نماند.
           if (norm.endsWith('.pdf')) {
-            initThumbnailPdfEnvironment();
+            // مرحله ۳ ـ بخش ب: موتورِ pdfjs فقط همین‌جا، و فقط برای
+            // PDFِ بدونِ کاورِ کش‌شده، بارگذاری می‌شود. اگر بارگذاری
+            // شکست بخورد، کاور null برمی‌گردد و مسیرِ کشِ دیسک سالم
+            // می‌ماند (نه کرش، نه وعدهٔ بی‌پاسخ).
+            let pdfjsLib = null;
+            try {
+              pdfjsLib = await getPdfJsLib();
+            } catch (_) {
+              return null;
+            }
+            if (!pdfjsLib) return null;
 
             const sanitized = filePath.trim().replace(/^[\\/]+/, '');
-            const resp = await fetch(`comic://media/?path=${encodeURIComponent(sanitized)}`);
-            if (!resp.ok) return null;
-            const arrayBuffer = await resp.arrayBuffer();
+            const comicUrl = `comic://media/?path=${encodeURIComponent(sanitized)}`;
 
             let loadingTask = null;
             let doc = null;
@@ -360,16 +417,37 @@ export const thumbnailService = {
             let canvas = null;
 
             try {
-              loadingTask = pdfjsLib.getDocument({
-                data: new Uint8Array(arrayBuffer),
-                cMapPacked: true,
-                isEvalSupported: false,
-                disableAutoFetch: true,
-                disableStream: true,
-                stopAtErrors: false,
-              });
-
-              doc = await loadingTask.promise;
+              try {
+                loadingTask = pdfjsLib.getDocument({
+                  url: comicUrl,
+                  cMapPacked: true,
+                  isEvalSupported: false,
+                  disableAutoFetch: true,
+                  disableStream: false,
+                  disableRange: false,
+                  rangeChunkSize: 65536,
+                  stopAtErrors: false,
+                });
+                doc = await loadingTask.promise;
+              } catch (rangeErr) {
+                try {
+                  if (loadingTask && typeof loadingTask.destroy === 'function') await loadingTask.destroy();
+                } catch (_) {}
+                loadingTask = null;
+                doc = null;
+                const resp = await fetch(comicUrl);
+                if (!resp.ok) return null;
+                const arrayBuffer = await resp.arrayBuffer();
+                loadingTask = pdfjsLib.getDocument({
+                  data: new Uint8Array(arrayBuffer),
+                  cMapPacked: true,
+                  isEvalSupported: false,
+                  disableAutoFetch: true,
+                  disableStream: true,
+                  stopAtErrors: false,
+                });
+                doc = await loadingTask.promise;
+              }
               page = await doc.getPage(1);
 
               const baseVp = page.getViewport({ scale: 1.0 });
@@ -427,6 +505,16 @@ export const thumbnailService = {
     return requestPromise;
   },
 
+  // مرحله ۴ — لغوِ استخراجِ در صف برای یک مسیر (صدا زده‌شده از
+  // پاک‌سازیِ ComicCard هنگامِ آنمانتِ کارتِ خارج از دید). اگر استخراج
+  // در حالِ اجراست یا اصلاً در صف نیست، false برمی‌گردد و هیچ‌کاری
+  // نمی‌شود؛ لغو، وعدهٔ در انتظار را با null حل می‌کند.
+  cancelThumbnailRequest: (filePath) => {
+    const norm = normalizeCoverKey(filePath);
+    if (!norm) return false;
+    return thumbnailQueue.cancel(norm);
+  },
+
   // بررسی آنی کش رم بدون تاخیر
   peekCover: (filePath) => {
     const norm = normalizeCoverKey(filePath);
@@ -435,7 +523,7 @@ export const thumbnailService = {
 
     const dbCover = useLibraryStore.getState().getCover?.(norm);
     const validDbCover = resolveCoverUrl(dbCover);
-    if (validDbCover && validDbCover.startsWith('data:')) {
+    if (validDbCover && (validDbCover.startsWith('data:') || validDbCover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
       memoryCoverCache.set(norm, validDbCover);
       return validDbCover;
     }

@@ -216,6 +216,18 @@ export default function useKeyboard(callbacks = {}) {
 
       // ۶. فوکوس صریح روی نوار جستجو با کلید میانبر (پیش‌فرض: Ctrl + F)
       if (settingsState.matchesShortcut?.('focusSearch', e)) {
+        // مرحله ۴ — در ریدرِ PDF، Ctrl+F به جستجوی درون‌متنیِ PdfViewer
+        // واگذار می‌شود: بدونِ preventDefault و stopPropagation برمی‌گردیم
+        // تا شنوندهٔ PdfViewer (که دیرتر و در فازِ حباب ثبت شده) آن را
+        // بگیرد. در ریدرِ کمیکِ تصویری و همهٔ نماهای دیگر، رفتارِ قبلی
+        // (فوکوسِ جستجوی TopBar) دقیقاً حفظ می‌شود؛ جستجوی TopBar در
+        // ریدرِ PDF همچنان با کلیک در دسترس است.
+        if (
+          appState.currentView === 'reader' &&
+          readerState.comicData?.type === 'pdf'
+        ) {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         const searchInput = document.getElementById('global-topbar-search-input');
