@@ -240,6 +240,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   onStorePageBlob,
   expectedHeight,
   rotation,
+  pageWidth,
   pageAnnotations,
   onCommitPageAnnotations,
   onPageRatioMeasured,
@@ -432,6 +433,16 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
   const activeSrc = hiDpiUrl || cachedBlobUrl || blobUrl;
 
+  // کالبدشکافیِ ناحیه‌های مردهٔ جزئی: برای چرخشِ ۹۰/۲۷۰، کادرِ
+  // چیدمانِ wrapper باید ابعادِ جابه‌جا شده (ارتفاعِ کارت × عرضِ
+  // کارت) داشته باشد تا پس از چرخش، دقیقاً کادرِ کارت را پر کند؛
+  // wrapperِ ۱۰۰٪×۱۰۰٪ پس از چرخش، از دو طرف از کادر بیرون می‌زد و
+  // contain: paintِ کارت، هم تصویر و هم لایه را از همان دو طرف
+  // می‌برید (نوارِ مردهٔ متناسب با زوم). چرخشِ ۱۸۰ نیازی به جابه‌جایی
+  // ندارد (کادرِ چرخیده، همان کادر است).
+  const normalizedRotation = ((Number(rotation) || 0) % 360 + 360) % 360;
+  const isSwappedRotation = normalizedRotation === 90 || normalizedRotation === 270;
+
   return (
     <div
       id={`comic-page-${pageNumber}`}
@@ -455,15 +466,30 @@ const PdfPageItem = React.memo(function PdfPageItem({
           مانت است و تا وقتی تصویر آماده نیست، روی placeholder می‌نشیند.
           وقتی استودیو غیرفعال است، pointerEventsِ لایه none است، پس
           دکمهٔ «تلاش مجدد» روی placeholder همچنان کلیک‌پذیر می‌ماند؛
-          وقتی فعال است، لایه با zIndex ۵۰ بالای تصویر/placeholder است
+          وقتی فعال است، لایه با zIndex ۱۰۰ بالای تصویر/placeholder است
           و رویدادها را خودش می‌گیرد. لایه آخرین فرزندِ wrapperِ چرخان
           است تا روی تصویر رنگ شود و چرخشِ صفحه را هم به‌ارث ببرد. */}
       <div
         style={{
-          position: 'relative',
-          width: '100%',
-          height: '100%',
-          transform: rotation ? `rotate(${rotation}deg)` : 'none',
+          // در حالتِ جابه‌جا شده، wrapper مطلق و وسط‌چین است (از جریانِ
+          // flex خارج می‌شود؛ ارتفاعِ کارت صریح است، پس چیزی فرو
+          // نمی‌ریزد) و با translate(-۵۰٪، -۵۰٪) + چرخش، دقیقاً روی
+          // کادرِ کارت می‌نشیند. wrapper همچنان positioned است، پس
+          // کانتینرِ مطلقِ لایه، مرجعش را از دست نمی‌دهد.
+          position: isSwappedRotation ? 'absolute' : 'relative',
+          left: isSwappedRotation ? '50%' : undefined,
+          top: isSwappedRotation ? '50%' : undefined,
+          width: isSwappedRotation ? (expectedHeight ? `${expectedHeight}px` : '650px') : '100%',
+          height: isSwappedRotation ? `${pageWidth}px` : '100%',
+          // فاز ۲، بخش ۱: minHeightِ صریحِ برابرِ ارتفاعِ صفحه تا
+          // wrapper تحتِ هیچ شرایطی (لودینگ، خطا، چرخش) فرو نریزد
+          // و والدِ AnnotationLayer هرگز صفر نشود. (در حالتِ
+          // جابه‌جا شده، ارتفاع صریحِ پیکسلی هست، پس minHeight لازم
+          // نیست.)
+          minHeight: isSwappedRotation ? undefined : (expectedHeight ? `${expectedHeight}px` : '650px'),
+          transform: isSwappedRotation
+            ? `translate(-50%, -50%) rotate(${rotation}deg)`
+            : (rotation ? `rotate(${rotation}deg)` : 'none'),
         }}
       >
         {activeSrc ? (
@@ -476,7 +502,13 @@ const PdfPageItem = React.memo(function PdfPageItem({
             draggable={false}
             style={{
               ...styles.pageImage,
-              height: expectedHeight ? `${expectedHeight}px` : '100%',
+              // کالبدشکافی: ارتفاعِ ۱۰۰٪ِ wrapper (نه ارتفاعِ کارت) —
+              // در حالتِ عادی، wrapper دقیقاً به ارتفاعِ کارت است و
+              // نتیجه یکسان است؛ در حالتِ چرخیدهٔ ۹۰/۲۷۰، wrapper به
+              // عرضِ کارت است و همین، تصویر را دقیقاً هم‌اندازهٔ لایه
+              // می‌کند (قبلاً ارتفاعِ کارت، تصویرِ چرخیده را بدقواره
+              // و بریده می‌کرد).
+              height: '100%',
             }}
           />
         ) : (
@@ -512,6 +544,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           items={pageAnnotations}
           onCommitPageItems={onCommitPageAnnotations}
           rotation={rotation}
+          isNearViewport={distanceFromActive <= 1}
         />
       </div>
     </div>
@@ -555,6 +588,21 @@ export default function PdfViewer({ filePath }) {
   const [redoStack, setRedoStack] = useState([]);
 
   const containerRef = useRef(null);
+
+  // کالبدشکافی: عرضِ کانتینر باید با تغییرِ اندازهٔ پنجره هم به‌روز
+  // شود، وگرنه ارتفاع‌ها (که از عرضِ قدیمی حساب شده‌اند) با عرضِ
+  // تازهٔ کارت نمی‌خوانند و آفستِ صفحه‌ها منحرف می‌شود (فعال/دورِ
+  // اشتباه و غافلگیریِ حالتِ سبک/نیم‌کیفیت).
+  useEffect(() => {
+    const onResize = () => {
+      const c = containerRef.current;
+      if (!c) return;
+      const w = Math.round(c.clientWidth || 900);
+      setContainerWidth((prev) => (Math.abs(w - prev) > 2 ? w : prev));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   const isJumpingRef = useRef(false);
   const isResumingRef = useRef(false);
   const hasResumedRef = useRef(false);
@@ -562,6 +610,8 @@ export default function PdfViewer({ filePath }) {
   const abortControllerRef = useRef(null);
   const customRatiosRef = useRef(new Map());
   const pageBlobCacheRef = useRef(new Map());
+  // فاز ۳: صفحه‌های در دید، برای تخلیهٔ هوشمندِ کش (مراجعهٔ زیر).
+  const visiblePageNumbersRef = useRef([]);
   const prevZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
@@ -595,15 +645,25 @@ export default function PdfViewer({ filePath }) {
       cache.delete(pageNum);
     }
 
+    // فاز ۳: تخلیه، اولِ قدیمی‌ترین صفحهٔ خارج از دید را می‌زند (نه
+    // لزوماً قدیمی‌ترینِ مطلق) تا صفحه‌های در دید، بی‌دلیل از کش
+    // نیفتند. اگر همهٔ صفحه‌های کش در دید بودند، قدیمی‌ترین می‌رود
+    // تا سقف، همیشه برقرار بماند. (سقف از قبل ۱۸ بود — کمتر از
+    // ۳۰ای که تسک گفته بود — پس بالا برده نشد.)
     while (cache.size >= MAX_CACHED_BLOBS) {
-      const oldestKey = cache.keys().next().value;
-      const oldestUrl = cache.get(oldestKey);
-      if (oldestUrl) {
+      const visible = visiblePageNumbersRef.current || [];
+      let evictKey = null;
+      for (const key of cache.keys()) {
+        if (!visible.includes(key)) { evictKey = key; break; }
+      }
+      if (evictKey == null) evictKey = cache.keys().next().value;
+      const evictUrl = cache.get(evictKey);
+      if (evictUrl) {
         try {
-          URL.revokeObjectURL(oldestUrl);
+          URL.revokeObjectURL(evictUrl);
         } catch (_) {}
       }
-      cache.delete(oldestKey);
+      cache.delete(evictKey);
     }
 
     cache.set(pageNum, blobUrl);
@@ -1109,6 +1169,9 @@ export default function PdfViewer({ filePath }) {
     };
   }, [numPages, activePage, pageOffsets, pageHeights, totalHeight, safePageGap]);
 
+  // فاز ۳: صفحه‌های در دید را برای تخلیهٔ کش، در ref نگه دار.
+  visiblePageNumbersRef.current = visiblePageNumbers;
+
   const handlePageRatioMeasured = useCallback(
     (pageIndex, measuredRatio) => {
       if (!measuredRatio || measuredRatio <= 0) return;
@@ -1422,6 +1485,7 @@ export default function PdfViewer({ filePath }) {
                   cachedBlobUrl={cachedUrl}
                   onStorePageBlob={storePageBlobInCache}
                   expectedHeight={pageHeights[index]}
+                  pageWidth={containerWidth * (Math.round(safeZoom * 100) / 100)}
                   rotation={rotation}
                   pageAnnotations={pageAnnots}
                   onCommitPageAnnotations={handleCommitPageAnnotations}

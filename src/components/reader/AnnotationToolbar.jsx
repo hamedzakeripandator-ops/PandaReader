@@ -287,6 +287,35 @@ export function AnnotationToolbar({
   // ثابتِ دراور (با اندازه‌گیریِ دکمه در لحظهٔ باز شدن)، پالتِ شخصی،
   // و refهای دکمه/پنل/ورودیِ رنگ برای بستن با کلیکِ بیرونی.
   const [colorDrawerOpen, setColorDrawerOpen] = useState(false);
+  // فازِ عبورِ ژست از زیرِ تولبار + بستنِ خودکارِ دراور:
+  // لایه، شروعِ هر ژستِ واقعیِ درگ (قلم، هایلایتر، باکس، فلش،
+  // پاک‌کن، مارکی، جابه‌جاییِ دستی، درگِ هندل، درگِ Konva) را با
+  // رویدادِ window ‏«annotation-gesture-start» اعلام می‌کند و پایانش
+  // را با «annotation-gesture-end». با شروعِ ژست، دراورِ پالت بسته
+  // می‌شود (تا هم کامپوزیتِ سبک شود و هم زیرِ قلم نماند) و پوسته‌های
+  // مرئی، موقتاً pointer-events: none می‌گیرند تا خط، بی‌وقفه از زیرِ
+  // تولبار ادامه پیدا کند. شنونده‌های pointerup/pointercancel/blur،
+  // نگهبانِ گیر نکردنِ حالتِ عبورند (اگر پایانِ ژست از لایه نرسید).
+  const [isGesturePassThrough, setIsGesturePassThrough] = useState(false);
+  useEffect(() => {
+    const onGestureStart = () => { setColorDrawerOpen(false); setIsGesturePassThrough(true); };
+    const onGestureEnd = () => setIsGesturePassThrough(false);
+    window.addEventListener('annotation-gesture-start', onGestureStart);
+    window.addEventListener('annotation-gesture-end', onGestureEnd);
+    window.addEventListener('pointerup', onGestureEnd);
+    window.addEventListener('pointercancel', onGestureEnd);
+    window.addEventListener('blur', onGestureEnd);
+    return () => {
+      window.removeEventListener('annotation-gesture-start', onGestureStart);
+      window.removeEventListener('annotation-gesture-end', onGestureEnd);
+      window.removeEventListener('pointerup', onGestureEnd);
+      window.removeEventListener('pointercancel', onGestureEnd);
+      window.removeEventListener('blur', onGestureEnd);
+    };
+  }, []);
+  // قانونِ ایزولاسیونِ Hitbox: پوسته‌های مرئی، در حالتِ عادی auto و
+  // حینِ ژستِ فعالِ ترسیم none هستند؛ کانتینرهای بیرونی، همیشه none.
+  const shellPointerEvents = isGesturePassThrough ? 'none' : 'auto';
   const [colorDrawerPos, setColorDrawerPos] = useState(null);
   const [userPalette, setUserPalette] = useState(() => {
     try {
@@ -1763,6 +1792,10 @@ export function AnnotationToolbar({
         left: colorDrawerPos.left,
         transform: colorDrawerPos.transform,
         zIndex: 40,
+        // کانتینرِ بیرونیِ دراور، فقط موقعیت نگه می‌دارد؛ جعبه‌اش
+        // دقیقاً همان کارتِ درونی است، ولی طبقِ قانون، صراحتاً none
+        // می‌گیرد تا هیچ پیکسلِ اضافه‌ای مسدود نشود.
+        pointerEvents: 'none',
       }}
     >
       <div
@@ -1770,6 +1803,7 @@ export function AnnotationToolbar({
         style={{
           width: 300,
           maxHeight: 'calc(100vh - 40px)',
+          pointerEvents: 'auto',
           overflowY: 'auto',
           scrollbarWidth: 'none',
           padding: 12,
@@ -1958,6 +1992,18 @@ export function AnnotationToolbar({
             transform: 'translateY(-50%)',
             ...floatingStyle,
             zIndex: 30,
+            // کالبدشکافیِ شیشهٔ نامرئی: این wrapِ flex، جعبه‌اش به
+            // اندازهٔ بلندترین فرزند × مجموعِ عرض‌هاست؛ پس وقتی
+            // فلای‌اوت کوتاه‌تر از داکِ ستونی است، فضای خالیِ بالا/
+            // پایینِ فلای‌اوت و نوارِ gapِ ۱۰ پیکسلی، داخلِ جعبهٔ
+            // wrap می‌افتند و با pointer-eventsِ پیش‌فرضِ auto،
+            // رویدادِ آن ناحیه‌ها را می‌بلعیدند (دقیقاً علامتِ
+            // گزارش‌شده: مسدود شدنِ فضای بالا و پایینِ پنل، نه
+            // خودِ پنل). حالا wrap، none است و فقط پوسته‌های مرئی،
+            // auto می‌گیرند؛ stopPropagationهای روی wrap، از طریقِ
+            // حباب از فرزندان همچنان کار می‌کنند، پس کلیکِ روی
+            // دکمه‌ها هرگز به صفحه نمی‌رسد.
+            pointerEvents: 'none',
             display: 'flex',
             // معماریِ قطعی §۱ — آینه‌ای: فلای‌اوت، خواهرِ flexیِ داک
             // است (نه absolute)، پس آینه‌ای شدن یعنی وارونه شدنِ
@@ -1985,6 +2031,11 @@ export function AnnotationToolbar({
               alignItems: 'center',
               gap: 8,
               padding: '10px 12px',
+              // پوستهٔ مرئیِ فلای‌اوت، با ارتفاعِ محتوای خودش؛
+              // alignSelf از کش‌آمدن در فضای flex جلوگیری می‌کند تا
+              // کارت، هرگز بلندتر از محتوایش نشود.
+              pointerEvents: shellPointerEvents,
+              alignSelf: 'flex-start',
               borderRadius: 16,
               background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
               border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
@@ -2011,6 +2062,7 @@ export function AnnotationToolbar({
               alignItems: 'center',
               gap: 4,
               padding: '6px 10px',
+              pointerEvents: shellPointerEvents,
               position: 'relative',
               borderRadius: 16,
               background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
@@ -2046,6 +2098,10 @@ export function AnnotationToolbar({
             transform: 'translateX(-50%)',
             ...floatingStyle,
             zIndex: 30,
+            // در حالتِ افقی، همین کپسول، پوستهٔ مرئی است (پس‌زمینه
+            // روی همین div است و فضای خالیِ بیرونی ندارد)؛ فقط حینِ
+            // ژست، none می‌شود تا خط از زیرش رد شود.
+            pointerEvents: shellPointerEvents,
             display: 'flex',
             flexDirection: 'row',
             alignItems: 'center',

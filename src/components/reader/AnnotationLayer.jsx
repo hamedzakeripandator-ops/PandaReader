@@ -17,7 +17,6 @@ import React, {
   useState,
   useRef,
   useEffect,
-  useLayoutEffect,
   useCallback,
   useMemo,
 } from 'react';
@@ -825,7 +824,11 @@ const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit,
 //    Rectِ جداگانهٔ بدونِ fill که بعد از هدر کشیده می‌شود تا دورِ
 //    کلِ کارت (از جمله هدر) خطِ یکدستی داشته باشد.
 //  • سایه: فقط روی زیره (نه روی لایه‌ها و هدر، تا سایه دو برابر
-//    نشود): shadowColor '#000000'، shadowBlur 16، shadowOpacity
+//    نشود): shadowColor '#000000'، shadowBlur 4 (فاز ۱ بهینه‌سازی:
+  //    قبلاً ۱۶ بود؛ هزینهٔ بلار تقریباً با مربعِ شعاع بالا می‌رود، پس
+  //    ۴ به‌جای ۱۶، پاسِ بلار را حدود ۱۶ برابر ارزان‌تر می‌کند؛
+  //    perfectDrawEnabled و shadowForStrokeEnabled از قبل false بودند)،
+  //    shadowOpacity
 //    0.22، shadowOffset {x: 0, y: 6} — دقیقاً طبقِ تسک.
 //  • پین: وسطِ هدر — هاله (رنگِ متن در آلفای ۰٫۲۲) + دیسکِ سفیدِ
 //    ۱۳ پیکسلی + نقطهٔ ۶ پیکسلی به رنگِ انتخابی. هاله، عامدانه
@@ -952,7 +955,7 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
         fill={theme.bodyBase}
         cornerRadius={14}
         shadowColor="#000000"
-        shadowBlur={16}
+        shadowBlur={4}
         shadowOpacity={0.22}
         shadowOffsetX={0}
         shadowOffsetY={6}
@@ -1560,6 +1563,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // از useReaderStore می‌خواند و به لایه می‌دهد. پیش‌فرض ۰ است تا
   // لایهٔ قدیمیِ بدونِ این prop، دقیقاً مثلِ قبل کار کند.
   rotation = 0,
+  // فاز ۳: صفحه نزدیکِ دید است؟ (PdfViewer: distanceFromActive <= 1؛
+  // VerticalViewer: |index - activePageIndex| <= 1.) پیش‌فرض true تا
+  // هر فراخوانندهٔ قدیمی، دقیقاً رفتارِ قبل را ببیند.
+  isNearViewport = true,
 }) {
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
@@ -1586,6 +1593,16 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // فاز ۲-مرحله ۳: layerRef در ۴ جا استفاده می‌شد ولی هرگز تعریف نشده
   // بود (ReferenceError و عدم batchDraw) — حالا تعریف و به <Layer> وصل است.
   const layerRef = useRef(null);
+  const draftLayerRef = useRef(null);
+  // فاز ۱ بهینه‌سازی — رنگِ هر دو لایه با هم: هر جا آیتمِ داخلِ لایهٔ
+  // ایستا عوض می‌شود (درگ، ترنسفورم، کامیت، ویرایشِ هندل)، هر دو لایه
+  // رنگ می‌شوند — چون Adorner (درفت) هم ممکن است با آن عوض شده باشد.
+  // به‌روزرسانیِ صرفِ پیش‌نویس هرگز از این helper استفاده نمی‌کند
+  // (فقط درفت). پایدار است (بدون وابستگی).
+  const drawBothLayers = useCallback(() => {
+    layerRef.current?.batchDraw();
+    draftLayerRef.current?.batchDraw();
+  }, []);
 
   // --- بافرها (صفر setState حین رسم) ---
   const draftShapeRef = useRef(null);
@@ -1614,20 +1631,26 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const activeStickyEditorRef = useRef(null);
   // فاز ۵: Transformer، مارکی و نودهای انتخاب‌شده
   const transformerRef = useRef(null);
-  const [marqueeBox, setMarqueeBox] = useState(null); // { x, y, width, height } در فضای یکنواخت
+  // فاز ۲: مارکی بدونِ setState — ابعاد در ref، نود در لایهٔ درفت.
+  const marqueeBoxRef = useRef(null); // { x, y, width, height } در فضای یکنواخت
+  const marqueeRectRef = useRef(null);
+  // فاز ۲: کشِ Rect ژست برای extractPoints (در handleDown پر و در
+  // handleUp پاک می‌شود؛ اسکرول/ریسایز هم آن را باطل می‌کند).
+  const activeGestureRectRef = useRef(null);
   // selectedNodes: آینهٔ stateیِ نودهای متصل به Transformer (طبقِ
   // TASK)؛ اتصالِ واقعی با transformerRef.current.nodes(...) انجام
   // می‌شود، نه با prop — این state فقط برای اینکه effectِ اتصال،
   // نودهای فعلی را هم نگه دارد و در صورتِ نیاز در دسترس باشند.
   const [selectedNodes, setSelectedNodes] = useState([]);
-  // پولیشِ انقلابی — پیش‌نمایشِ زندهٔ درگِ هندل‌های فلش (بدونِ کامیت):
-  // در حینِ درگ، فلش از این کپی رندر می‌شود تا زنده بازطراحی شود؛
-  // فقط در dragEnd، یک کامیت (یک Undo) ثبت می‌شود.
-  const [arrowDragPreview, setArrowDragPreview] = useState(null);
+  // فاز ۲: پیش‌نمایشِ درگِ هندل‌های فلش دیگر state ندارد (صفر
+  // ری‌رندر در هر فریم): در حینِ درگ، فلشِ اصلی مخفی است و یک
+  // Shapeِ دائمی در لایهٔ درفت، از رویِ lastPreview رسم می‌شود؛
+  // فقط در handleUp، یک کامیت (یک Undo) ثبت می‌شود.
+  const arrowPreviewShapeRef = useRef(null);
   // ماشینِ وضعیتِ یکپارچهٔ هندل‌های فلش (تسک): درگِ هندل، دیگر
   // شنوندهٔ جداگانه ندارد؛ وضعیتش در arrowHandleEditRef زندگی
   // می‌کند: { id, handle, initialItem, moved, lastPreview } —
-  // lastPreview آینهٔ refایِ arrowDragPreview است تا handleUp،
+  // lastPreview، خودِ پیش‌نمایش است (نه آینهٔ state) تا handleUp،
   // بدونِ وابستگی به closureی state، تازه‌ترین پیش‌نمایش را کامیت
   // کند. lastMidClickRef هم زمانِ آخرین کلیکِ روی هندلِ وسط را
   // نگه می‌دارد تا دوبارکلیکِ زیرِ ۳۵۰ میلی‌ثانیه تشخیص داده شود.
@@ -1707,27 +1730,161 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageRef.current = pageNumber;
   commitFnRef.current = onCommitPageItems;
 
-  // رفعِ باگِ صفر ماندنِ ابعادِ Stage (بخش ۱٫۳ تسک): اندازه‌گیری در
-  // useLayoutEffect (پیش از رنگ‌شدنِ فریم، نه بعد از آن) + خوانشِ
-  // دوباره در فریمِ بعد (اگر مانت وسطِ چیدمان رخ داده و خوانشِ اول
-  // صفر بوده باشد) + ResizeObserver برای تغییرهای بعدیِ ابعادِ والد.
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => {
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        setSize({ w: r.width, h: r.height });
-        const a = r.height / r.width;
-        setAspect((prev) => (Math.abs(prev - a) < 0.01 ? prev : a));
+  // کالبدشکافیِ ناحیه‌های مردهٔ جزئی — اندازه‌گیریِ «چیدمان» (layout)،
+  // نه «کادرِ محاط» (bounding):
+  // افکتِ قبلی با deps [] و getBoundingClientRect کار می‌کرد؛ کادرِ
+  // محاطِ یک عنصرِ داخلِ wrapperِ چرخیده، ابعادِ جابه‌جا شده دارد و
+  // RO هم روی تغییرِ transform (که چیدمان را عوض نمی‌کند) آتش
+  // نمی‌شود — پس پس از چرخشِ ۹۰/۲۷۰، size/aspect کهنه می‌ماند و
+  // Stage با جعبهٔ قبلی، بخشی از صفحهٔ چرخیده را نمی‌پوشاند (نوارِ
+  // مردهٔ متناسب با زوم) و مختصات هم با SW/SHِ کهنه، غلط می‌شد.
+  // راه‌حل: اندازه از contentRectِ RO (چیدمانِ کسری، بی‌اثر از
+  // transform) + خوانشِ اولیه از offsetWidth/Height (چیدمانِ عددی)
+  // برای حالتِ چرخیده می‌آید؛ و برای حالتِ ۰/۱۸۰، کادرِ محاطِ کسری
+  // (که با چیدمان یکی است) خوانده می‌شود.
+  // همچنین اندازه‌گیری از طریقِ callback ref انجام می‌شود، نه افکتِ
+  // یک‌باره: divِ کانتینر ممکن است دیرتر از مانتِ کامپوننت ظاهر شود
+  // (guardِ null وقتی استودیو خاموش و صفحه خالی است)؛ افکتِ قبلی در
+  // آن حالت، زود برمی‌گشت و دیگر هرگز RO وصل نمی‌کرد، پس صفحه پس
+  // از فعال شدنِ استودیو، برای همیشه در placeholderِ صفر می‌ماند.
+  // callback ref با هر ظاهر/ناپدید شدنِ div و با هر تغییرِ rotation
+  // دوباره صدا زده می‌شود و اندازه را می‌گیرد.
+  const sizeRORef = useRef(null);
+  const sizeRafRef = useRef(null);
+  const measureContainer = useCallback((rectOverride) => {
+    let w = 0;
+    let h = 0;
+    if (rectOverride && rectOverride.width > 0 && rectOverride.height > 0) {
+      w = rectOverride.width;
+      h = rectOverride.height;
+    } else {
+      const el = containerRef.current;
+      if (!el) return;
+      const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
+      if (rot === 90 || rot === 270) {
+        w = el.offsetWidth;
+        h = el.offsetHeight;
+      } else {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) { w = r.width; h = r.height; }
       }
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    const rafId = requestAnimationFrame(update);
-    return () => { ro.disconnect(); cancelAnimationFrame(rafId); };
+      if (!(w > 0 && h > 0)) {
+        // زنجیرهٔ fallbackِ چیدمانی: والدِ بلافصل (wrapperِ چرخان —
+        // چیدمانش همان چیدمانِ Stage است) و بعد کارتِ صفحه. برای
+        // کارتِ چرخیدهٔ ۹۰/۲۷۰، ابعاد جابه‌جا می‌شود تا با چیدمانِ
+        // wrapper هم‌خوان باشد (اتریبیوتِ واقعیِ کارت در هر دو
+        // ویوور data-page است). اگر هر سه صفر بودند، اندازهٔ قبلی
+        // حفظ می‌شود (هرگز به صفر برنمی‌گردد).
+        const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
+        const parent = el.parentElement;
+        if (parent && parent.offsetWidth > 0 && parent.offsetHeight > 0) {
+          w = parent.offsetWidth;
+          h = parent.offsetHeight;
+        } else {
+          const pageEl = el.closest ? el.closest('[data-page]') : null;
+          if (pageEl && pageEl.offsetWidth > 0 && pageEl.offsetHeight > 0) {
+            if (rot === 90 || rot === 270) {
+              w = pageEl.offsetHeight;
+              h = pageEl.offsetWidth;
+            } else {
+              w = pageEl.offsetWidth;
+              h = pageEl.offsetHeight;
+            }
+          }
+        }
+      }
+      if (!(w > 0 && h > 0)) return;
+    }
+    const a = h / w;
+    // نگهبانِ مقداری: RO با همان ابعاد، رندرِ اضافه نسازد.
+    setSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+    setAspect((prev) => (Math.abs(prev - a) < 0.01 ? prev : a));
   }, []);
+  const containerCallbackRef = useCallback((node) => {
+    containerRef.current = node;
+    if (sizeRORef.current) { sizeRORef.current.disconnect(); sizeRORef.current = null; }
+    if (sizeRafRef.current) { cancelAnimationFrame(sizeRafRef.current); sizeRafRef.current = null; }
+    if (!node) return;
+    measureContainer();
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries && entries[0] ? entries[0].contentRect : null;
+      if (cr && cr.width > 0 && cr.height > 0) {
+        measureContainer({ width: cr.width, height: cr.height });
+      } else {
+        measureContainer();
+      }
+    });
+    ro.observe(node);
+    sizeRORef.current = ro;
+    // نگهبانِ مانتِ وسطِ چیدمان: فقط اگر هنوز صفر است، یک فریم بعد
+    // دوباره بخوان (اگر RO مقدارِ کسری داده باشد، این خوانشِ عددی
+    // آن را برنمی‌گرداند).
+    sizeRafRef.current = requestAnimationFrame(() => {
+      const cur = sizeRef.current || {};
+      if (!(cur.w > 0 && cur.h > 0)) measureContainer();
+    });
+  }, [rotation, measureContainer]);
+
+  // فاز ۲: باطل‌کردنِ کشِ Rect ژست با اسکرول/ریسایز — چون مختصاتِ
+  // getBoundingClientRect نسبت به viewport است و با اسکرول، کهنه
+  // می‌شود. فقط یک ref را null می‌کند (بدونِ setState، بدونِ رندر).
+  useEffect(() => {
+    const invalidate = () => { activeGestureRectRef.current = null; };
+    window.addEventListener('scroll', invalidate, true);
+    window.addEventListener('resize', invalidate);
+    return () => {
+      window.removeEventListener('scroll', invalidate, true);
+      window.removeEventListener('resize', invalidate);
+    };
+  }, []);
+
+  // فاز ۳: حالتِ Stage — کامل (نزدیک یا بیدارشده)، نیم‌کیفیت (دور +
+  // آیتم‌دار + خواب) یا سبک (دور + خالی + خواب: اصلاً Stage نیست).
+  // بیداری، چسبنده است (تا unmount): صفحه‌ای که کاربر یک بار ماوس
+  // را رویش برده، کامل می‌ماند — چون کاربر با آن کار داشته و
+  // پنجرهٔ مجازی، با اسکرولِ دور شدن، خودش آن را unmount و VRAM را
+  // آزاد می‌کند. پس‌اندازِ VRAM برای صفحه‌های دوری است که هرگز لمس
+  // نشده‌اند (حالتِ غالب).
+  const [stageAwake, setStageAwake] = useState(false);
+  const stageItemCount = Array.isArray(items) ? items.filter(Boolean).length : 0;
+  const stageMode = isNearViewport || stageAwake ? 'full' : (stageItemCount > 0 ? 'half' : 'light');
+
+  // فاز ۱ بهینه‌سازی — سقفِ داینامیکِ pixelRatio (گزارشِ ممیزی، §۱):
+  // بدون سقف، Stage در زوم ۳٫۵ با dpr=2 بومِ ۸۴۰۰×۱۱۸۴۴ می‌سازد
+  // (~۴۰۰ مگابایت صحنه + ~۴۰۰ مگابایت هیت به‌ازای هر صفحه). این ضریب،
+  // بزرگ‌ترین ضلعِ بومِ واقعی را تا ۳۸۴۰ پیکسل سقف می‌کند؛ کفِ ۰٫۷۵
+  // طبقِ فرمولِ تسک حفظ شده — یعنی برای صفحه‌های بزرگ‌تر از ۵۱۲۰
+  // پیکسلِ CSS، کفِ کیفی بر سقفِ ۳۸۴۰ غلبه می‌کند (در جدولِ گزارش
+  // آمده است). هیت‌گراف هم حداکثر ۱ می‌گیرد تا در HiDPI یک‌چهارم شود
+  // (دقتِ کلیک کم نمی‌شود، چون هیت‌تست به وضوحِ کامل نیاز ندارد).
+  const rawDpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
+  const maxDim = Math.max(size.w || 1, size.h || 1);
+  const maxBackingStorePx = 3840;
+  const effectivePixelRatio = Math.max(0.75, Math.min(rawDpr, maxBackingStorePx / maxDim));
+  // فاز ۳: صفحاتِ دورِ آیتم‌دار، با نیم‌کیفیت (۰٫۵) رندر می‌شوند تا
+  // VRAM پس‌زمینه تقریباً صفر شود؛ با نزدیک شدن یا بیداری، افکتِ
+  // زیر (با تغییرِ appliedPixelRatio) به effective کامل برمی‌گردد.
+  // در حالتِ سبک، اصلاً Stageای نیست و افکت، هیچ کاری نمی‌کند.
+  const appliedPixelRatio = stageMode === 'half' ? 0.5 : effectivePixelRatio;
+  useEffect(() => {
+    const staticLayer = layerRef.current;
+    const draftLayer = draftLayerRef.current;
+    if (staticLayer) {
+      staticLayer.getCanvas().setPixelRatio(appliedPixelRatio);
+      const hitCanvas = staticLayer.getHitCanvas();
+      if (hitCanvas) {
+        hitCanvas.setPixelRatio(Math.min(1, appliedPixelRatio));
+      }
+      staticLayer.batchDraw();
+    }
+    if (draftLayer) {
+      // لایهٔ درفت listening={false} است و بومِ هیت ندارد؛ فقط بومِ
+      // صحنه‌اش سقف می‌خورد (getHitCanvas را صدا نمی‌زنیم تا بومِ
+      // هیت برایش ساخته نشود).
+      draftLayer.getCanvas().setPixelRatio(appliedPixelRatio);
+      draftLayer.batchDraw();
+    }
+  }, [size.w, size.h, appliedPixelRatio]);
 
   const scaleX = size.w > 0 ? size.w / 1000 : 1;
   const scaleY = size.h > 0 ? size.h / (1000 * aspect) : 1;
@@ -1741,16 +1898,54 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const rotationRef = useRef(rotation);
   rotationRef.current = rotation;
 
+  // فاز ۳: کشِ تبدیلِ storage→uniform با کلیدِ رفرنسِ آبجکتِ storage.
+  // اگر همان آبجکتِ storage با همان aspect دوباره رسید، دقیقاً همان
+  // آبجکتِ یکنواختِ قبلی (با همان _bbox) برمی‌گردد تا React.memo
+  // شکل‌ها، آیتم‌های بی‌تغییر را Skip کند. فرضِ بنیادی: آبجکت‌های
+  // یکنواخت، پس از ساخت، درجا تغییر نمی‌کنند (همهٔ به‌روزرسانی‌ها
+  // از مسیرِ commit با آبجکتِ تازه می‌گذرند) — الگویی که کد از قبل
+  // هم بر آن استوار بود (spread در همهٔ به‌روزرسانی‌ها).
+  const uniformCacheRef = useRef(new Map());
+  const toUniformCached = useCallback((storageItem, aspectValue) => {
+    const cache = uniformCacheRef.current;
+    const hit = cache.get(storageItem);
+    if (hit && hit.aspect === aspectValue) return hit.uniform;
+    const u = storageToUniform(storageItem, aspectValue);
+    const uniform = { ...u, _bbox: getStrokeBBox(u.points, 15) };
+    cache.set(storageItem, { aspect: aspectValue, uniform });
+    return uniform;
+  }, []);
+
   const uniformItems = useMemo(() => {
-    return (items || []).filter(Boolean).map((it) => {
-      const u = storageToUniform(it, aspect);
-      // BBox کش برای پاک‌کن بهینه
-      return { ...u, _bbox: getStrokeBBox(u.points, 15) };
-    });
-  }, [items, aspect]);
+    const list = (items || []).filter(Boolean).map((it) => toUniformCached(it, aspect));
+    // هرس: فقط آیتم‌های همین صفحه در کش بمانند (جلوگیری از نشت در
+    // نشست‌های طولانی با Undoهای مکرر که آبجکت‌های تازه می‌سازند).
+    const alive = new Set((items || []).filter(Boolean));
+    const cache = uniformCacheRef.current;
+    for (const key of cache.keys()) {
+      if (!alive.has(key)) cache.delete(key);
+    }
+    return list;
+  }, [items, aspect, toUniformCached]);
 
   const commit = useCallback((uniformList) => {
+    // فاز ۳: حفظِ هویتِ storage برای آیتم‌های بی‌تغییر — بدونِ این،
+    // کشِ بالا بی‌اثر می‌ماند، چون commitِ قبلی برای همهٔ آیتم‌ها
+    // آبجکتِ storageِ تازه می‌ساخت و رندرِ بعد، همه را Miss می‌کرد.
+    // اگر آیتمِ یکنواخت، دقیقاً همان آبجکتِ رندرِ جاری باشد (یعنی
+    // از آخرین رندر تا حالا عوض نشده)، همان آبجکتِ storageِ اصلی
+    // برگردانده می‌شود؛ فقط آیتم‌های واقعاً عوض‌شده، تبدیل می‌شوند.
+    // (نهایی‌سازیِ باکس/فلش، از قبل با spread روی itemsِ اصلی، همین
+    // هویت را نگه می‌داشت؛ این‌جا همان رفتار، برای همهٔ مسیرها
+    // یکسان شد.)
+    const prevUniform = uniformItemsRef.current || [];
+    const prevStorage = itemsRef.current || [];
+    const uniformById = new Map(prevUniform.map((u) => [u.id, u]));
+    const storageById = new Map(prevStorage.map((s) => [s.id, s]));
     const storageList = uniformList.map((it) => {
+      if (it && uniformById.get(it.id) === it && storageById.has(it.id)) {
+        return storageById.get(it.id);
+      }
       const { _bbox, ...clean } = it; // BBox ذخیره نمی‌شه
       return uniformToStorage(clean, aspectRef.current);
     });
@@ -1768,10 +1963,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (it && it.tool === 'arrow') primaryArrowItem = it;
     }
   }
-  const displayArrowItem = primaryArrowItem && arrowDragPreview &&
-    arrowDragPreview.id === primaryArrowItem.id
-    ? arrowDragPreview
-    : primaryArrowItem;
+  // فاز ۲: پیش‌نمایشِ درگِ هندل دیگر از state نمی‌آید (در لایهٔ
+  // درفت رسم می‌شود)، پس آیتمِ نمایشی همیشه همان آیتمِ اصلی است.
+  const displayArrowItem = primaryArrowItem;
   // بازمعماریِ قطعی — هندسهٔ هندل‌ها در فضای یکنواخت (برای رندرِ
   // داخلِ Groupِ خودِ فلش): شروع/پایان دقیقاً روی نقاطِ آیتم؛
   // وسط روی فلشِ صاف، نقطهٔ میانیِ وتر و روی فلشِ خمیده، قلهٔ
@@ -1797,9 +1991,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     };
   }
   // معماریِ Adorner — مبنای زندهٔ هندل‌های اورلی برای همگام‌سازیِ
-  // درگِ گروهی (فقط وقتی پیش‌نمایشِ درگِ هندل فعال نیست، تا درگِ
-  // هندل، مبنا را خراب نکند).
-  if (arrowHandlePos && !arrowDragPreview) {
+  // درگِ گروهی. (قبلاً «فقط وقتی پیش‌نمایش فعال نیست» بود؛ حالا
+  // پیش‌نمایش state ندارد و در حینِ درگ اصلاً رندری رخ نمی‌دهد،
+  // پس درگِ هندل نمی‌تواند مبنا را خراب کند.)
+  if (arrowHandlePos) {
     arrowHandleBaseRef.current = { id: displayArrowItem.id, ...arrowHandlePos };
   }
 
@@ -2057,7 +2252,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         other.position({ x: dx, y: dy });
       }
     }
-    layerRef.current?.batchDraw();
+    drawBothLayers();
   }, []);
 
   // فاز ۵: پایانِ جابه‌جاییِ یک نود (تکی یا گروهی).
@@ -2072,7 +2267,23 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   //   commit() کامیت می‌شوند (یک ورودیِ Undo در والد).
   // - اگر دلتا صفر بود، هیچ کامیتی ثبت نمی‌شود (کلیک بدونِ drag،
   //   ورودیِ Undoیِ خالی نمی‌سازد).
+  // فازِ عبورِ ژست از زیرِ تولبار: لایه، شروع/پایانِ هر ژستِ واقعیِ
+  // درگ را با رویدادِ window اعلام می‌کند تا تولبار، دراورِ پالت را
+  // ببندد و حینِ ژست، pointer-events خود را none کند (وگرنه Stage که
+  // رویدادهایش به کانتینرش وصل است، وقتی نشانگر روی تولبارِ با
+  // zIndex بالاتر می‌رود، pointermove/up را از دست می‌دهد و خط، زیرِ
+  // تولبار قطع می‌شود؛ برای ابزارهای select که capturePointer ندارند،
+  // این، تنها راهِ عبورِ روان است). توابعِ ساده‌اند (هوک نیستند) تا
+  // ترتیبِ تعریف، اهمیتی نداشته باشد؛ پایان، عمداً در چند جا اعلام
+  // می‌شود (handleUp و onDragEnd) و اعلامِ تکراری، بی‌اثر است.
+  const notifyGestureStart = () => {
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('annotation-gesture-start'));
+  };
+  const notifyGestureEnd = () => {
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('annotation-gesture-end'));
+  };
   const handleItemDragEnd = useCallback((e, item) => {
+    notifyGestureEnd();
     const node = e.target;
     if (!node) return;
     // بازمعماریِ قطعی — دفاعِ دوم در برابرِ حبابِ درگِ هندل: اگر
@@ -2095,7 +2306,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // اورلی که حینِ درگ زنده جابه‌جا شده بودند هم به مبنا
       // برمی‌گردند تا بعد از snap-backِ فلش، سرگردان نمانند.
       resetAdornerHandlesToBase();
-      layerRef.current?.batchDraw();
+      drawBothLayers();
       restoreStageCursor();
       return;
     }
@@ -2106,7 +2317,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (n) n.position({ x: 0, y: 0 });
     }
     if (dx === 0 && dy === 0) {
-      layerRef.current?.batchDraw();
+      drawBothLayers();
       restoreStageCursor();
       return;
     }
@@ -2114,7 +2325,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       idsToMove.includes(it.id) ? moveAnnotationByDelta(it, dx, dy) : it
     );
     commit(nextItems);
-    layerRef.current?.batchDraw();
+    drawBothLayers();
     restoreStageCursor();
   }, [commit, uniformItems]);
 
@@ -2161,7 +2372,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       node.scale({ x: 1, y: 1 });
     }
     if (changed) commit(nextItems);
-    layerRef.current?.batchDraw();
+    drawBothLayers();
   }, [commit, uniformItems]);
 
   // فاز ۵: اتصالِ هوشمندِ نودها به Transformer.
@@ -2206,7 +2417,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       tr.nodes(nodes);
       setSelectedNodes(nodes);
     }
-    layerRef.current?.batchDraw();
+    drawBothLayers();
   }, [selectedAnnotationId, selectedAnnotationIds, uniformItems, annotationTool, isAnnotationActive, selectedAnnotationPage, pageNumber]);
 
   // فاز ۵: حذف با Delete / Backspace.
@@ -2257,7 +2468,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       }
       commit(remaining);
       if (typeof state.clearSelection === 'function') state.clearSelection();
-      layerRef.current?.batchDraw();
+      drawBothLayers();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -2358,7 +2569,32 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     const pts = draftPointsRef.current;
     const style = draftStyleRef.current;
     if (!pts || pts.length === 0 || !style) return;
-    drawSmoothStroke(ctx, pts, style);
+    // فاز ۳: دسی‌میشنِ سبکِ پیش‌نمایش برای خط‌های خیلی طولانی —
+    // بدونِ آن، sceneFunc در هر فریم، کلِ بافر (تا ۲۰۰۰ نقطه) را
+    // دوباره پردازش می‌کند. بالای ۴۰۰ نقطه، فقط هر strideامین
+    // نقطه + همیشه آخرین نقطه رسم می‌شود تا هزینهٔ هر فریم،
+    // سقف‌دار (~۴۰۰ نقطه) بماند. این فقط پیش‌نمایش است؛ بافرِ کامل
+    // برای کامیتِ نهایی دست نخورده می‌ماند، پس خطِ نهایی دقیق است
+    // (پیش‌نمایشِ خط‌های خیلی طولانی ممکن است در حدِ میکرون با
+    // نهایی فرق کند).
+    let renderPts = pts;
+    if (pts.length > 400) {
+      const stride = Math.ceil(pts.length / 400);
+      renderPts = pts.filter((_, i) => i % stride === 0);
+      const last = pts[pts.length - 1];
+      if (renderPts[renderPts.length - 1] !== last) renderPts.push(last);
+    }
+    drawSmoothStroke(ctx, renderPts, style);
+  }, []);
+
+  // فاز ۲: sceneFuncِ پیش‌نمایشِ درگِ هندل — دقیقاً همان رسمِ
+  // CommittedArrow (drawArrowCanvas روی آیتمِ کامل)، ولی از رویِ ref
+  // (lastPreview) تا هیچ setStateای در هر فریم لازم نباشد. با هر
+  // batchDrawِ لایهٔ درفت، تازه‌ترین پیش‌نمایش رسم می‌شود.
+  const arrowPreviewSceneFunc = useCallback((ctx) => {
+    const pv = arrowHandleEditRef.current?.lastPreview;
+    if (!pv) return;
+    drawArrowCanvas(ctx, pv);
   }, []);
 
   // Refinement Final: چرخشِ معکوس در extractPoints.
@@ -2396,7 +2632,15 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
     const out = [];
     const content = stage.content;
-    const rect = content ? content.getBoundingClientRect() : null;
+    // فاز ۲: کشِ Rect ژست — اگر handleDown برای همین ژست، Rect را
+    // کش کرده و ابعادِ Stage از آن موقع عوض نشده، همان را بگیر تا
+    // در هر فریم، Layout Thrashing از getBoundingClientRect نباشد.
+    // (اسکرول/ریسایز، کش را باطل می‌کند؛ پایانِ ژست هم همین‌طور.)
+    const cached = activeGestureRectRef.current;
+    const sizeNow = sizeRef.current || {};
+    const rect = (cached && cached.w === sizeNow.w && cached.h === sizeNow.h)
+      ? cached.rect
+      : (content ? content.getBoundingClientRect() : null);
     const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
 
     for (const ce of events) {
@@ -2405,6 +2649,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (rect && ce.clientX !== undefined) {
         bx = ce.clientX - rect.left;
         by = ce.clientY - rect.top;
+        // کالبدشکافی: کشِ Rect فقط با اندازه اعتبارسنجی می‌شد، نه با
+        // موقعیت — جابه‌جاییِ چیدمان بدونِ تغییرِ اندازه (مثلاً وقتی
+        // ارتفاعِ صفحهٔ بالایی پس از اندازه‌گیریِ نسبت، عوض می‌شود و
+        // صفحه‌های پایین‌تر جابه‌جا می‌شوند) کش را کهنه می‌کرد و
+        // مختصات تا پایانِ ژست، جابه‌جا می‌ماند. اگر نقطه بیرونِ
+        // کادرِ کش‌شده افتاد، یک بار Rectِ تازه بخوان (فقط در همین
+        // حالتِ مرزی، نه در هر فریم).
+        if (bx < -2 || by < -2 || bx > rect.width + 2 || by > rect.height + 2) {
+          const fresh = content ? content.getBoundingClientRect() : null;
+          if (fresh) {
+            bx = ce.clientX - fresh.left;
+            by = ce.clientY - fresh.top;
+          }
+        }
       } else {
         const pos = stage.getPointerPosition();
         if (!pos) continue;
@@ -2560,8 +2818,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const redrawDraft = useCallback(() => {
     const node = draftShapeRef.current;
     if (node) {
-      // sceneFunc از draftPointsRef می‌خونه — فقط redraw
-      node.getLayer()?.batchDraw();
+      // فاز ۱: پیش‌نویس در لایهٔ درفت است — فقط همان لایه رنگ می‌شود
+      // تا در هر فریمِ حرکتِ موس، صدها شکلِ ثبت‌شدهٔ لایهٔ ایستا
+      // دوباره رستر نشوند (sceneFunc از draftPointsRef می‌خونه).
+      draftLayerRef.current?.batchDraw();
     }
   }, []);
 
@@ -2600,6 +2860,19 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // همین، در ترکیب با mount شدنِ textarea با autoFocus در همان
     // ژست، فوکوس را ناپایدار می‌کرد. select از قبل مستثنا بود.
     if (toolRef.current !== 'select' && toolRef.current !== 'text') capturePointer(native);
+
+    // فاز ۲: کشِ Rect ژست برای کلِ این ژست — همان Rectای که
+    // extractPoints می‌خواند (بومِ contentِ Stage؛ وگرنه کانتینرِ
+    // لایه). تسک containerRef گفته بود، ولی extractPoints دقیقاً
+    // stage.content را می‌خواند و این دو، یک کادرند (content، کلِ
+    // کانتینر را پر می‌کند)، پس کشِ content دقیق‌تر است.
+    const stageContent = stageRef.current?.content;
+    const gestureRect = stageContent
+      ? stageContent.getBoundingClientRect()
+      : (containerRef.current?.getBoundingClientRect() || null);
+    activeGestureRectRef.current = gestureRect
+      ? { rect: gestureRect, w: sizeRef.current?.w || 0, h: sizeRef.current?.h || 0 }
+      : null;
 
     const pts = extractPoints(native);
     if (pts.length === 0) return;
@@ -2654,7 +2927,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               it.id === selectedArrow.id ? { ...it, arrowStyle: 'straight', cx: null, cy: null } : it
             );
             commit(nextItems);
-            layerRef.current?.batchDraw();
+            drawBothLayers();
           }
           return;
         }
@@ -2670,6 +2943,14 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         };
         setArrowHandleDraggingKind(hitHandle);
         setStageCursor('crosshair');
+        notifyGestureStart();
+        // فاز ۲: مخفی‌کردنِ فلشِ اصلی حینِ درگِ هندل تا پیش‌نمایشِ
+        // درفت، شبح نسازد. در handleUp با visible=true برمی‌گردد،
+        // حتی اگر کامیتی نباشد. فقط یک رنگِ ایستا در شروعِ ژست،
+        // نه در هر فریم.
+        const origNode = itemNodeRefs.current.get(selectedArrow.id);
+        if (origNode) origNode.visible(false);
+        layerRef.current?.batchDraw();
         return;
       }
       // Refinement Step 2: هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا
@@ -2709,6 +2990,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           );
           if (originals.size > 0) {
             manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+            notifyGestureStart();
             setStageCursor('grabbing');
           }
         }
@@ -2736,13 +3018,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             pt.y >= ub.y - 10 && pt.y <= ub.y + ub.height + 10) {
           const originals = new Map(selectedItems.map((it) => [it.id, it]));
           manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          notifyGestureStart();
           setStageCursor('grabbing');
           return;
         }
       }
       // در غیر این صورت: شروعِ مارکیِ موقت.
       isMarqueeRef.current = { startPt: pt };
-      setMarqueeBox({ x: pt.x, y: pt.y, width: 0, height: 0 });
+      notifyGestureStart();
+      marqueeBoxRef.current = { x: pt.x, y: pt.y, width: 0, height: 0 };
+      // نودِ مارکی، از قبل visible={false} است و ۰×۰ هم طبقِ قانونِ
+      // «بزرگ‌تر از ۴×۴» پنهان می‌ماند؛ پس در شروع، draw لازم نیست.
+      if (marqueeRectRef.current) {
+        marqueeRectRef.current.setAttrs({ x: pt.x, y: pt.y, width: 0, height: 0, visible: false });
+      }
       return;
     }
 
@@ -2852,17 +3141,18 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         currentY: p0.y,
       };
       isDrawingRef.current = true;
+      notifyGestureStart();
       // ریست pending قبلی
       pendingCommitRef.current = null;
       if (pendingTimeoutRef.current) {
         clearTimeout(pendingTimeoutRef.current);
         pendingTimeoutRef.current = null;
       }
-      // نمایش پیش‌نویس
+      // نمایش پیش‌نویس — فقط لایهٔ درفت (آیتمِ ایستا عوض نشده است).
       if (draftBoxShapeRef.current) {
         draftBoxShapeRef.current.visible(true);
       }
-      layerRef.current?.batchDraw();
+      draftLayerRef.current?.batchDraw();
       return;
     }
 
@@ -2880,23 +3170,28 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         cy: p0.y,
       };
       isDrawingRef.current = true;
+      notifyGestureStart();
       // ریست pending قبلی (مثل باکس)
       pendingCommitRef.current = null;
       if (pendingTimeoutRef.current) {
         clearTimeout(pendingTimeoutRef.current);
         pendingTimeoutRef.current = null;
       }
-      // نمایش پیش‌نویس
+      // نمایش پیش‌نویس — فقط لایهٔ درفت (آیتمِ ایستا عوض نشده است).
       if (draftArrowShapeRef.current) {
         draftArrowShapeRef.current.visible(true);
       }
-      layerRef.current?.batchDraw();
+      draftLayerRef.current?.batchDraw();
       return;
     }
 
     if (toolRef.current === 'eraser') {
-      eraserPtsRef.current = pts;
+      // فاز ۲: ذخیرهٔ مسطحِ نقاط (x0, y0, x1, y1, ...) به‌جای آبجکت‌ها.
+      const flat = [];
+      for (const p of pts) flat.push(p.x, p.y);
+      eraserPtsRef.current = flat;
       isDrawingRef.current = true;
+      notifyGestureStart();
       setEraserVisible(true);
       return;
     }
@@ -2921,6 +3216,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     };
 
     isDrawingRef.current = true;
+    notifyGestureStart();
 
     const node = draftShapeRef.current;
     if (node) {
@@ -2935,15 +3231,23 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [isAnnotationActive, getNative, shouldProcessEvent, capturePointer, extractPoints, getTextClickPoint, pushFilteredPoints, redrawDraft, commit, commitText, cancelTextEditor, uniformItems, pageNumber]);
 
   const handleMove = useCallback((e) => {
+    // فاز ۲: dedup اول + extractPoints فقط یک بار در ابتدای handleMove.
+    // قبلاً extractPoints در شاخهٔ هندل، شاخهٔ select و شاخهٔ رسم،
+    // جداگانه صدا زده می‌شد (تا ۲ بار در هر فریم + یک
+    // getBoundingClientRect به‌ازای هر بار) و محافظِ زمانی، فقط در
+    // شاخهٔ رسم بود (و همان‌جا هم هرگز به‌روز نمی‌شد، چون فقط چک
+    // می‌کرد و set نمی‌کرد). حالا هر رویدادِ نیتیو حداکثر یک بار
+    // پردازش می‌شود و همهٔ شاخه‌ها همان pts0 را می‌گیرند.
+    const native0 = getNative(e);
+    if (!shouldProcessEvent(native0)) return;
+    const pts0 = native0 ? extractPoints(native0) : [];
     // ماشینِ وضعیتِ یکپارچه (§۳ تسک): اگر درگِ هندل فعال است،
-    // همین‌جا با همان extractPoints، پیش‌نمایش را زنده می‌کنیم و
+    // همین‌جا با همان pts0، پیش‌نمایش را زنده می‌کنیم و
     // برمی‌گردیم — نه مارکی، نه manualMove، نه رسم.
     if (arrowHandleEditRef.current) {
       const edit = arrowHandleEditRef.current;
-      const nativeEdit = getNative(e);
-      const ptsEdit = nativeEdit ? extractPoints(nativeEdit) : [];
-      if (ptsEdit.length > 0) {
-        const pt = ptsEdit[ptsEdit.length - 1];
+      if (pts0.length > 0) {
+        const pt = pts0[pts0.length - 1];
         edit.moved = true;
         const init = edit.initialItem;
         let next;
@@ -2962,7 +3266,26 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           }
         }
         edit.lastPreview = next;
-        setArrowDragPreview(next);
+        // فاز ۲: بدونِ setState — پیش‌نمایشِ درفت + ۳ دایرهٔ Adorner،
+        // مستقیم در سطحِ Konva به‌روز می‌شوند و فقط لایهٔ درفت
+        // batchDraw می‌شود (صفر ری‌رندرِ ری‌اکت در هر فریم). قلهٔ
+        // هندلِ وسط، دقیقاً همان فرمولِ رندر است: روی فلشِ صاف،
+        // نقطهٔ میانیِ وتر و روی فلشِ خمیده، (M + C) / 2.
+        if (arrowPreviewShapeRef.current) arrowPreviewShapeRef.current.visible(true);
+        const nMidX = (Number(next.startX) + Number(next.endX)) / 2;
+        const nMidY = (Number(next.startY) + Number(next.endY)) / 2;
+        const nCurved = next.arrowStyle === 'curved' &&
+          Number.isFinite(Number(next.cx)) && Number.isFinite(Number(next.cy));
+        const apexX = nCurved ? (nMidX + Number(next.cx)) / 2 : nMidX;
+        const apexY = nCurved ? (nMidY + Number(next.cy)) / 2 : nMidY;
+        const hn = arrowHandleNodeRefs.current;
+        const sN = hn.get('start');
+        const eN = hn.get('end');
+        const mN = hn.get('mid');
+        if (sN) sN.setAttrs({ x: next.startX, y: next.startY });
+        if (eN) eN.setAttrs({ x: next.endX, y: next.endY });
+        if (mN) mN.setAttrs({ x: apexX, y: apexY });
+        draftLayerRef.current?.batchDraw();
       }
       return;
     }
@@ -2971,12 +3294,21 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // isDrawingRef را تنظیم نمی‌کند (عمداً) — اگر این شاخه‌ها بعد
     // از محافظِ isDrawing می‌آمدند، هیچ‌وقت اجرا نمی‌شدند.
     if (isAnnotationActive) {
-      const nativeForSelect = getNative(e);
-      const ptsForSelect = nativeForSelect ? extractPoints(nativeForSelect) : [];
-      if (ptsForSelect.length > 0) {
-        const cur = ptsForSelect[ptsForSelect.length - 1];
+      if (pts0.length > 0) {
+        const cur = pts0[pts0.length - 1];
         if (isMarqueeRef.current) {
-          setMarqueeBox(marqueeRect(isMarqueeRef.current.startPt, cur));
+          const box = marqueeRect(isMarqueeRef.current.startPt, cur);
+          marqueeBoxRef.current = box;
+          // قانونِ نمایشیِ قدیمی حفظ می‌شود: مارکیِ کوچک‌تر از ۴×۴
+          // اصلاً دیده نمی‌شود (ولی ابعادش در ref هست تا handleUp،
+          // میکروکلیک را تشخیص دهد).
+          if (marqueeRectRef.current) {
+            marqueeRectRef.current.setAttrs({
+              x: box.x, y: box.y, width: box.width, height: box.height,
+              visible: box.width > 4 || box.height > 4,
+            });
+          }
+          draftLayerRef.current?.batchDraw();
           return;
         }
         if (manualMoveRef.current) {
@@ -2998,7 +3330,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             syncAdornerHandlesWithGroupDrag(dx, dy);
           }
           setStageCursor('grabbing');
-          layerRef.current?.batchDraw();
+          drawBothLayers();
           return;
         }
         // کرسرِ هاور در حالتِ select — نوشتنِ مستقیم روی DOM (بدون
@@ -3028,13 +3360,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       }
     }
     if (!isDrawingRef.current || !isAnnotationActive) return;
-    const native = getNative(e);
-    // برای move، محافظ زمانی رو شل‌تر می‌گیریم (ایونت‌های پشت سر هم طبیعیه)
-    // فقط اگه دقیقاً همون timeStamp بود رد می‌کنیم
-    const t = native?.timeStamp || 0;
-    if (t !== 0 && t === lastEventTimeRef.current) return;
-
-    const pts = extractPoints(native);
+    const pts = pts0;
     if (pts.length === 0) return;
 
     // فاز ۲: به‌روزرسانی پیش‌نویس باکس
@@ -3042,11 +3368,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       const last = pts[pts.length - 1];
       draftBoxRef.current.currentX = last.x;
       draftBoxRef.current.currentY = last.y;
-      // رندر فوری پیش‌نویس
+      // رندر فوری پیش‌نویس — فقط لایهٔ درفت، نه لایهٔ ایستا.
       if (draftBoxShapeRef.current) {
         draftBoxShapeRef.current.visible(true);
       }
-      layerRef.current?.batchDraw();
+      draftLayerRef.current?.batchDraw();
       return;
     }
 
@@ -3063,24 +3389,31 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         db.cx = ctrl.cx;
         db.cy = ctrl.cy;
       }
-      // رندر فوری پیش‌نویس
+      // رندر فوری پیش‌نویس — فقط لایهٔ درفت، نه لایهٔ ایستا.
       if (draftArrowShapeRef.current) {
         draftArrowShapeRef.current.visible(true);
       }
-      layerRef.current?.batchDraw();
+      draftLayerRef.current?.batchDraw();
       return;
     }
 
     if (toolRef.current === 'eraser') {
+      // فاز ۲: آرایهٔ مسطحِ افزایشی (x0, y0, x1, y1, ...) با سقفِ
+      // ۶۰ نقطهٔ اخیر (۱۲۰ عدد). قبلاً تاریخچهٔ بی‌نهایت، با
+      // flatMap در هر فریم از نو کپی می‌شد (O(n²) در کلِ ژست)؛
+      // حالا هر فریم، حداکثر ۱۲۰ عدد لمس می‌شود (ثابت). آستانهٔ
+      // فاصله (مربعِ فاصله < ۴) و رفتارِ خط، دقیقاً مثلِ قبل است.
+      const flat = eraserPtsRef.current;
       for (const pt of pts) {
-        const prev = eraserPtsRef.current[eraserPtsRef.current.length - 1];
-        if (prev && dist2(pt.x, pt.y, prev.x, prev.y) < 4) continue;
-        eraserPtsRef.current.push(pt);
+        const n = flat.length;
+        if (n >= 2 && dist2(pt.x, pt.y, flat[n - 2], flat[n - 1]) < 4) continue;
+        flat.push(pt.x, pt.y);
       }
+      if (flat.length > 120) eraserPtsRef.current = flat.slice(-120);
       if (eraserLineRef.current) {
         const epts = eraserPtsRef.current;
-        if (epts.length > 1) {
-          eraserLineRef.current.setAttr('points', epts.flatMap((p) => [p.x, p.y]));
+        if (epts.length >= 4) {
+          eraserLineRef.current.setAttr('points', epts);
           eraserLineRef.current.getLayer()?.batchDraw();
         }
       }
@@ -3090,9 +3423,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     if (pushFilteredPoints(pts)) {
       redrawDraft(); // فیکس #۵: مستقیم batchDraw، تأخیر صفر
     }
-  }, [isAnnotationActive, getNative, extractPoints, pushFilteredPoints, redrawDraft]);
+  }, [isAnnotationActive, getNative, shouldProcessEvent, extractPoints, pushFilteredPoints, redrawDraft]);
 
-  const handleUp = useCallback((e) => {
+  const handleUpInner = useCallback((e) => {
     // ماشینِ وضعیتِ یکپارچه (§۴ تسک): ثبتِ نهاییِ درگِ هندل با
     // یک تراکنشِ واحد. کلیکِ بدونِ حرکت (moved=false) و فلشِ
     // ناپدیدشده حینِ درگ، هیچ کامیتی نمی‌سازند. چون handleUp روی
@@ -3101,7 +3434,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     if (arrowHandleEditRef.current) {
       const edit = arrowHandleEditRef.current;
       arrowHandleEditRef.current = null;
-      setArrowDragPreview(null);
+      // فاز ۲: بازگرداندنِ فلشِ اصلی (حینِ درگ مخفی شده بود) و
+      // مخفی‌کردنِ پیش‌نمایشِ درفت — حتی اگر کامیتی نباشد (کلیکِ
+      // بدونِ حرکت یا فلشِ ناپدیدشده)، تا فلش هرگز مخفی نماند.
+      const origNode = itemNodeRefs.current.get(edit.id);
+      if (origNode) origNode.visible(true);
+      if (arrowPreviewShapeRef.current) arrowPreviewShapeRef.current.visible(false);
       setArrowHandleDraggingKind(null);
       if (edit.moved && edit.lastPreview) {
         const current = uniformItemsRef.current || [];
@@ -3112,7 +3450,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           commit(nextItems);
         }
       }
-      layerRef.current?.batchDraw();
+      drawBothLayers();
       restoreStageCursor();
       return;
     }
@@ -3126,8 +3464,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (isMarqueeRef.current) {
         const startPt = isMarqueeRef.current.startPt;
         isMarqueeRef.current = null;
-        const box = curPt ? marqueeRect(startPt, curPt) : marqueeBox;
-        setMarqueeBox(null);
+        const box = curPt ? marqueeRect(startPt, curPt) : marqueeBoxRef.current;
+        marqueeBoxRef.current = null;
+        if (marqueeRectRef.current) marqueeRectRef.current.visible(false);
         // آستانهٔ میکروکلیک (الگوی قدیمی): مارکیِ کوچک‌تر از
         // ۶×۶، انتخاب را پاک می‌کند (نه اینکه آیتمی را انتخاب کند).
         if (!box || box.width < 6 || box.height < 6) {
@@ -3152,7 +3491,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             state.clearSelection();
           }
         }
-        layerRef.current?.batchDraw();
+        drawBothLayers();
         restoreStageCursor();
         return;
       }
@@ -3175,7 +3514,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           });
           commit(nextItems);
         }
-        layerRef.current?.batchDraw();
+        drawBothLayers();
         restoreStageCursor();
         return;
       }
@@ -3324,8 +3663,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     }
 
     if (toolRef.current === 'eraser') {
-      const epts = eraserPtsRef.current;
+      // فاز ۲: موتورِ پاک‌کن، نقاط را به‌صورتِ آبجکتِ {x, y} می‌خواهد؛
+      // تبدیلِ یک‌باره در پایانِ ژست (حداکثر ۶۰ نقطه)، نه هر فریم.
+      const flat = eraserPtsRef.current;
       eraserPtsRef.current = [];
+      const epts = [];
+      for (let i = 0; i + 1 < flat.length; i += 2) epts.push({ x: flat[i], y: flat[i + 1] });
       setEraserVisible(false);
       if (eraserLineRef.current) {
         eraserLineRef.current.setAttr('points', []);
@@ -3408,7 +3751,19 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     const current = uniformItems;
     commit([...current, newItem]);
     // توجه: پاک‌سازی draftPoints در useEffect بعد از سینک انجام می‌شه
-  }, [commit, getNative, releasePointer, uniformItems, marqueeBox]);
+  }, [commit, getNative, releasePointer, uniformItems]);
+
+  // فاز ۲: پایانِ ژست، کشِ Rect را همیشه پاک می‌کند — حتی در
+  // مسیرهای returnِ زودهنگامِ handleUpInner (با finally) — تا ژستِ
+  // بعدی یا هاور، Rectِ کهنه نبیند.
+  const handleUp = useCallback((e) => {
+    try {
+      handleUpInner(e);
+    } finally {
+      activeGestureRectRef.current = null;
+      notifyGestureEnd();
+    }
+  }, [handleUpInner]);
 
   const handleEraseClick = useCallback((id) => {
     if (toolRef.current !== 'eraser') return;
@@ -3528,10 +3883,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (Object.keys(patch).length === 0) return;
 
       // بازسازی لیست یکنواخت از itemsRef تا closure قدیمی استفاده نشود
-      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) => {
-        const u = storageToUniform(it, aspectRef.current);
-        return { ...u, _bbox: getStrokeBBox(u.points, 15) };
-      });
+      // فاز ۳: با همان کشِ useMemo (تا آیتم‌های بی‌تغییر، هویتشان را
+      // نگه دارند و commitِ بعدی، storageِ اصلی را برگرداند).
+      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) =>
+        toUniformCached(it, aspectRef.current)
+      );
       let changed = false;
       const nextList = uniformList.map((target) => {
         if (!targetIds.includes(target.id)) return target;
@@ -3607,10 +3963,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       if (selectedPage != null && Number(selectedPage) !== Number(pageRef.current)) return;
       // بازسازی لیست یکنواخت از itemsRef تا closure قدیمی استفاده نشود
       // (همان الگوی onUpdateSelected).
-      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) => {
-        const u = storageToUniform(it, aspectRef.current);
-        return { ...u, _bbox: getStrokeBBox(u.points, 15) };
-      });
+      // فاز ۳: با همان کشِ useMemo (تا آیتم‌های بی‌تغییر، هویتشان را
+      // نگه دارند و commitِ بعدی، storageِ اصلی را برگرداند).
+      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) =>
+        toUniformCached(it, aspectRef.current)
+      );
       // اگر صفحهٔ انتخاب در استور ثبت نشده بود، فقط وقتی این لایه
       // دست‌کم یکی از آیتم‌های انتخاب‌شده را دارد عمل می‌کنیم.
       const selected = uniformList.filter((it) => selectedIds.has(it.id));
@@ -3628,8 +3985,47 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [commit]);
 
   if (!isAnnotationActive && uniformItems.length === 0) return null;
+  if (stageMode === 'light') {
+    // فاز ۳: صفحهٔ دورِ خالی — اصلاً Stage نساز؛ فقط کانتینرِ سبک با
+    // کرسرِ صحیح. ورودِ ماوس (یا لمس/کلیک) فوراً Stage را بیدار
+    // می‌کند (یک رندر). با لمس، اولین ضربه فقط بیدار می‌کند و رسم
+    // از ضربهٔ بعد شروع می‌شود، چون Stage موقعِ همان ضربه نبود —
+    // با ماوس، چون ورود پیش از کلیک رخ می‌دهد، هیچ ضربه‌ای از دست
+    // نمی‌رود. این div همان گرهٔ DOMِ کانتینرِ Stage است (React آن
+    // را نگه می‌دارد)، پس ResizeObserver و اندازهٔ از قبل خوانده‌شده،
+    // با بیداری، بی‌درنگ درست‌اند.
+    return (
+      <div
+        ref={containerCallbackRef}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          width: '100%',
+          height: '100%',
+          cursor: baseCursor,
+          pointerEvents: isAnnotationActive ? 'auto' : 'none',
+        }}
+        onPointerEnter={() => setStageAwake(true)}
+        onPointerDown={() => setStageAwake(true)}
+      />
+    );
+  }
   if (size.w === 0 || size.h === 0) {
-    return <div ref={containerRef} style={{ position: 'absolute', inset: 0 }} />;
+    // فاز ۲، بخش ۱: حتی پیش از آماده‌شدنِ Stage، همین divِ نگهدارنده
+    // هم کرسرِ ابزار و pointerEventsِ درست را دارد تا صفحه در بازهٔ
+    // موقتِ صفر بودنِ ابعاد، «مرده» به نظر نرسد (کرسر عوض می‌شود و
+    // وقتی Stage آمد، همان‌جا رسم شروع می‌شود).
+    return (
+      <div
+        ref={containerCallbackRef}
+        style={{
+          position: 'absolute',
+          inset: 0,
+          cursor: baseCursor,
+          pointerEvents: isAnnotationActive ? 'auto' : 'none',
+        }}
+      />
+    );
   }
 
   // کرسرِ Stage از baseCursor می‌آید (تعریف‌شده پیش از شرطِ خروج،
@@ -3666,18 +4062,22 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
   return (
     <div
-      ref={containerRef}
+      ref={containerCallbackRef}
       style={{
         position: 'absolute',
         inset: 0,
         width: '100%',
         height: '100%',
-        // Forensic Step 4: وقتی استودیو فعال است، کانتینر با
-        // zIndex 50 بالای لایه‌های دیگرِ صفحه (مثلِ textLayerی
-        // PDF) می‌نشیند تا رویدادهای اشاره‌گر را نبلعند؛ وقتی
-        // غیرفعال است، ۱۸ برمی‌گردد (و pointerEvents هم 'none'
-        // است، پس هیچ تداخلی با تعاملِ عادیِ صفحه ندارد).
-        zIndex: isAnnotationActive ? 50 : 18,
+        // Forensic Step 4 (فاز ۲: ۵۰→۱۰۰ طبقِ تسک): وقتی استودیو
+        // فعال است، کانتینر با zIndex 100 بالای لایه‌های دیگرِ صفحه
+        // (مثلِ textLayerی PDF) می‌نشیند تا رویدادهای اشاره‌گر را
+        // نبلعند؛ وقتی غیرفعال است، ۱۸ برمی‌گردد (و pointerEvents
+        // هم 'none' است، پس هیچ تداخلی با تعاملِ عادیِ صفحه ندارد).
+        // امن است: کارتِ صفحه contain: layout paint دارد (یک کانتکستِ
+        // انباشتِ مستقل)، پس این ۱۰۰ از کارت بیرون نمی‌زند و تولبارِ
+        // شناور (zIndex 40 در سطحِ ویوور) را نمی‌پوشاند — امروز هم
+        // لایه با ۵۰ بالاتر از ۴۰ بود و تولبار بی‌مشکل کار می‌کرد.
+        zIndex: isAnnotationActive ? 100 : 18,
         pointerEvents: isAnnotationActive ? 'auto' : 'none',
         // اعمالِ اولِ کرسرِ ابزار (اعمالِ دوم: styleی Stage؛ اعمالِ
         // سوم: افکتِ stageRef.current.container().style.cursor) — وقتی
@@ -3691,6 +4091,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         ref={stageRef}
         width={size.w}
         height={size.h}
+        pixelRatio={appliedPixelRatio}
         // فیکس #۱: فقط Pointer Events — بدون mouse/touch موازی
         onPointerDown={handleDown}
         onPointerMove={handleMove}
@@ -3704,6 +4105,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           cursor: baseCursor,
         }}
       >
+        {/* فاز ۱ بهینه‌سازی — لایهٔ اول: ایستا. فقط آیتم‌های ثبت‌شده و
+          Transformer را دارد و هنگامِ رسمِ خطِ جدید، هرگز در هر فریم
+          batchDraw نمی‌شود (فقط موقعِ درگ/ترنسفورم/کامیت، همراه با
+          لایهٔ درفت، از طریقِ drawBothLayers). */}
         <Layer ref={layerRef}>
           <Group scaleX={scaleX} scaleY={scaleY}>
             {uniformItems.map((item) => {
@@ -3744,7 +4149,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                   />
                 ) : item.tool === 'arrow' ? (
                   <CommittedArrow
-                    item={arrowDragPreview && arrowDragPreview.id === item.id ? arrowDragPreview : item}
+                    item={item}
                     onErase={handleEraseClick}
                   />
                 ) : item.tool === 'text' ? (
@@ -3779,6 +4184,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                     }
                   }}
                   draggable={isAnnotationActive && annotationTool === 'select' && item.tool !== 'arrow'}
+                  onDragStart={notifyGestureStart}
                   onDragMove={handleItemDragMove}
                   onDragEnd={(e) => handleItemDragEnd(e, item)}
                   onTransformEnd={handleTransformEnd}
@@ -3825,26 +4231,53 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               onTransformEnd={handleTransformEnd}
             />
 
-            {/* فاز ۵: مستطیلِ مارکی (فقط وقتی بزرگ‌تر از ۴×۴ است).
-              listening={false} تا کلیک‌ها را نگیرد و داخلِ Groupِ
-              مقیاس‌دار است، پس مختصاتش همان فضای یکنواخت است. */}
-            {marqueeBox && (marqueeBox.width > 4 || marqueeBox.height > 4) && (
-              <Rect
-                x={marqueeBox.x}
-                y={marqueeBox.y}
-                width={marqueeBox.width}
-                height={marqueeBox.height}
-                fill="rgba(34, 211, 238, 0.08)"
-                stroke="#22d3ee"
-                strokeWidth={1}
-                dash={[6, 4]}
-                listening={false}
-              />
-            )}
+          </Group>
+        </Layer>
+        {/* فاز ۱ بهینه‌سازی — لایهٔ دوم: درفت و اورلی (سریع).
+          listening={false} است، پس بومِ هیت ندارد و رویداد نمی‌گیرد؛
+          روی لایهٔ ایستا رنگ می‌شود و فقط اجزای زنده/موقت را دارد:
+          پیش‌نویسِ قلم/هایلایتر، پیش‌نمایشِ باکس و فلش، خطِ دنبالهٔ
+          پاک‌کن، مستطیلِ مارکی و اورلیِ هندل‌های فلش (Adorner).
+          هنگامِ رسم، فقط همین لایه batchDraw می‌شود تا لایهٔ ایستا
+          (صدها شکلِ ثبت‌شده) در هر فریم دوباره رستر نشود. Groupِ
+          مقیاس‌دارِ آن هم‌مقیاسِ لایهٔ اول است تا مختصات یکی بماند. */}
+        <Layer ref={draftLayerRef} listening={false}>
+          <Group scaleX={scaleX} scaleY={scaleY}>
+            {/* فاز ۲: مستطیلِ مارکیِ دائمی — بدونِ setState: handleDown/
+              handleMove/handleUp مستقیم با setAttrs روی همین نود کار
+              می‌کنند و فقط لایهٔ درفت batchDraw می‌شود. قانونِ نمایشیِ
+              قدیمی (پنهان بودن زیرِ ۴×۴) با visible کنترل می‌شود،
+              نه با mount/unmount. داخلِ Groupِ مقیاس‌دار است، پس
+              مختصاتش همان فضای یکنواخت است. */}
+            <Rect
+              ref={marqueeRectRef}
+              visible={false}
+              x={0}
+              y={0}
+              width={0}
+              height={0}
+              fill="rgba(34, 211, 238, 0.08)"
+              stroke="#22d3ee"
+              strokeWidth={1}
+              dash={[6, 4]}
+              listening={false}
+            />
 
             <Shape
               ref={draftShapeRef}
               sceneFunc={draftSceneFunc}
+              visible={false}
+              listening={false}
+              perfectDrawEnabled={false}
+              shadowForStrokeEnabled={false}
+            />
+
+            {/* فاز ۲: پیش‌نمایشِ درگِ هندلِ فلش — Shapeِ دائمی در لایهٔ
+              درفت؛ sceneFunc از رویِ lastPreview می‌خواند و با هر
+              batchDrawِ درفت، تازه می‌شود (بدونِ setState). */}
+            <Shape
+              ref={arrowPreviewShapeRef}
+              sceneFunc={arrowPreviewSceneFunc}
               visible={false}
               listening={false}
               perfectDrawEnabled={false}
@@ -3965,7 +4398,6 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               </Group>
             )}
           </Group>
-
         </Layer>
       </Stage>
 

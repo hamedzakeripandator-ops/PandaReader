@@ -31,9 +31,12 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   index,
   isLastItem,
   knownHeight,
+  frameWidth,
   pageGap,
   rotation,
   isHiDpiPassActive,
+  isNearViewport,
+  isSharpenFilterActive,
   pageAnnotations,
   onCommitPageAnnotations,
   onImageLoad,
@@ -71,6 +74,10 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
     [index, onImageLoad]
   );
 
+  const normalizedRotation = ((Number(rotation) || 0) % 360 + 360) % 360;
+  const isSwappedRotation = normalizedRotation === 90 || normalizedRotation === 270;
+  const useSwappedLayout = isSwappedRotation && frameWidth > 0;
+
   const isSeamlessMode = pageGap === 0 && !rotation;
 
   return (
@@ -89,15 +96,41 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
       }}
       onContextMenu={(e) => onContextMenu(e, index, rawPath)}
     >
-      {imgSrc && !hasError ? (
-        <div
-          style={{
-            position: 'relative',
-            width: '100%',
-            height: '100%',
-            transform: rotation ? `rotate(${rotation}deg)` : 'none',
-          }}
-        >
+      {/* مانتِ دائمیِ لایهٔ حاشیه‌نویسی (یکسان‌سازی با PdfViewer، فاز ۱):
+          قبلاً AnnotationLayer فقط وقتی imgSrc آماده و بدونِ خطا بود
+          مانت می‌شد؛ پس صفحه‌های کمیکِ در حالِ بارگذاری یا خطادار،
+          اصلاً لایه نداشتند و هیچ ورودی‌ای نمی‌گرفتند. حالا لایه همیشه
+          مانت است و تا وقتی تصویر آماده نیست، روی placeholder می‌نشیند.
+          وقتی استودیو غیرفعال است، pointerEventsِ لایه none است، پس
+          دکمهٔ «تلاش مجدد» همچنان کلیک‌پذیر می‌ماند. لایه آخرین فرزندِ
+          wrapperِ چرخان است تا روی تصویر رنگ شود و چرخش را به‌ارث ببرد.
+          یکسان‌سازی با PdfViewer: از این فاز، rotation به لایه هم پاس
+          داده می‌شود تا مختصاتِ معکوسِ چرخش در extractPoints، با
+          چیدمانِ جابه‌جا شدهٔ بالا هم‌خوان باشد. */}
+      <div
+        style={{
+          // یکسان‌سازی با PdfViewer (رفعِ بدهیِ فنی): برای چرخشِ
+          // ۹۰/۲۷۰، چیدمانِ wrapper باید جابه‌جا شده باشد، وگرنه
+          // wrapperِ ۱۰۰٪×۱۰۰٪ پس از چرخش، از دو طرف از کادر بیرون
+          // می‌زند و contain/overflowِ کادر، هم تصویر و هم لایه را
+          // می‌بُرد (همان خانوادهٔ باگِ ناحیه‌های مردهٔ PDF). عرضِ
+          // واقعیِ کادر (frameWidth) از والد می‌آید؛ تا وقتی اندازه
+          // نشده، چیدمانِ قدیمی حفظ می‌شود (فقط یک رندرِ گذرا).
+          position: useSwappedLayout ? 'absolute' : 'relative',
+          left: useSwappedLayout ? '50%' : undefined,
+          top: useSwappedLayout ? '50%' : undefined,
+          width: useSwappedLayout ? (knownHeight ? `${knownHeight}px` : '450px') : '100%',
+          height: useSwappedLayout ? `${frameWidth}px` : '100%',
+          // کانتینرِ درونی، هرگز فرو نمی‌ریزد: حتی وقتی تصویر هنوز
+          // اندازه نشده یا خطا داده، minHeightِ کادر را دارد تا
+          // لایه، همیشه جعبهٔ زنده داشته باشد.
+          minHeight: knownHeight ? `${knownHeight}px` : '450px',
+          transform: useSwappedLayout
+            ? `translate(-50%, -50%) rotate(${rotation}deg)`
+            : (rotation ? `rotate(${rotation}deg)` : 'none'),
+        }}
+      >
+        {imgSrc && !hasError ? (
           <img
             src={imgSrc}
             alt={`Page ${pageNum}`}
@@ -112,38 +145,44 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
                   : '100%'
                 : 'auto',
               objectFit: 'fill',
-              filter: isHiDpiPassActive ? 'url(#comic-hidpi-sharpen)' : 'none',
+              // فاز ۳: فیلترِ شارپنسِ SVG (کانولوشنِ ۳×۳ روی کلِ تصویر)
+              // فقط وقتی روشن است که پاسِ HiDPI فعال باشد و زوم ≤ ۱٫۵
+              // و استودیو خاموش باشد؛ در زومِ بالا یا حینِ حاشیه‌نویسی،
+              // مرورگر از این کانولوشنِ هر فریم راحت می‌شود.
+              filter: isSharpenFilterActive ? 'url(#comic-hidpi-sharpen)' : 'none',
               transform: isHiDpiPassActive ? 'translateZ(0)' : 'none',
             }}
             onLoad={handleLoad}
             onError={handleImgError}
           />
+        ) : (
+          <div style={styles.errorPlaceholder}>
+            <span style={{ color: 'var(--danger)', display: 'flex' }}>
+              <Icons.AlertTriangle size={24} />
+            </span>
+            <span style={styles.errorText}>خطا در بارگذاری صفحه {pageNum}</span>
+            <button
+              type="button"
+              onClick={() => {
+                setHasError(false);
+                setRetryCount((c) => c + 1);
+              }}
+              style={styles.retryBtn}
+            >
+              تلاش مجدد
+            </button>
+          </div>
+        )}
 
-          {/* لایه تعاملی استودیو ویرایش روی صفحات کمیک */}
-          <AnnotationLayer
-            pageNumber={pageNum}
-            items={pageAnnotations}
-            onCommitPageItems={onCommitPageAnnotations}
-          />
-        </div>
-      ) : (
-        <div style={styles.errorPlaceholder}>
-          <span style={{ color: 'var(--danger)', display: 'flex' }}>
-            <Icons.AlertTriangle size={24} />
-          </span>
-          <span style={styles.errorText}>خطا در بارگذاری صفحه {pageNum}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setHasError(false);
-              setRetryCount((c) => c + 1);
-            }}
-            style={styles.retryBtn}
-          >
-            تلاش مجدد
-          </button>
-        </div>
-      )}
+        {/* لایه تعاملی استودیو ویرایش روی صفحات کمیک — همیشه مانت است */}
+        <AnnotationLayer
+          pageNumber={pageNum}
+          rotation={rotation}
+          items={pageAnnotations}
+          onCommitPageItems={onCommitPageAnnotations}
+          isNearViewport={isNearViewport}
+        />
+      </div>
     </div>
   );
 });
@@ -175,9 +214,26 @@ export default function VerticalViewer() {
   const [isScrollIdle, setIsScrollIdle] = useState(true);
 
   const containerRef = useRef(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  // یکسان‌سازی با PdfViewer: عرضِ کانتینر باید با تغییرِ اندازهٔ
+  // پنجره هم به‌روز شود، وگرنه عرضِ کادرِ چرخیده (frameWidth) که از
+  // آن حساب می‌شود، کهنه می‌ماند و لایهٔ چرخیده، دوباره از کادر
+  // بیرون می‌زند. نگهبانِ ۲ پیکسلی، از رندرِ بیهوده جلوگیری می‌کند.
+  useEffect(() => {
+    const measure = () => {
+      const c = containerRef.current;
+      if (!c) return;
+      const w = Math.round(c.clientWidth || 0);
+      setContainerWidth((prev) => (Math.abs(w - prev) > 2 ? w : prev));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
   const hasResumedRef = useRef(false);
   const isResumingRef = useRef(false);
-  const predecodedSetRef = useRef(new Set());
+  const predecodedMapRef = useRef(new Map());
   const scrollIdleTimerRef = useRef(null);
 
   const items = comicData?.items || [];
@@ -185,6 +241,13 @@ export default function VerticalViewer() {
   const currentFilePath = comicData?.filePath;
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
+  // عرضِ واقعیِ هر کادر = عرضِ کانتینر × ضریبِ زوم (همان درصدی که
+  // zoomWrapper با آن ساخته می‌شود؛ بدونِ کف، چون wrapper هم کفی
+  // ندارد). تا قبل از اندازه‌گیری، صفر است و کادر، چیدمانِ قدیمی را
+  // نگه می‌دارد.
+  const frameWidth = containerWidth > 0
+    ? Math.round(containerWidth * (Math.round(safeZoom * 100) / 100))
+    : 0;
   const safePageGap = Math.max(0, Math.min(48, Math.round(Number(comicPageGap) || 0)));
 
   const {
@@ -452,9 +515,9 @@ export default function VerticalViewer() {
         if (!rawPath) return;
 
         const url = buildComicImageUrl(rawPath);
-        if (!url || predecodedSetRef.current.has(url)) return;
+        if (!url || predecodedMapRef.current.has(url)) return;
 
-        predecodedSetRef.current.add(url);
+        predecodedMapRef.current.set(url, idx);
 
         const img = new Image();
         img.decoding = 'async';
@@ -471,6 +534,27 @@ export default function VerticalViewer() {
           }
         };
       });
+      // پاک‌سازیِ کشِ پیش‌دیکود در پیمایش‌های طولانی: Setِ قبلی،
+      // هرگز خالی نمی‌شد و در کمیک‌های چندصد صفحه‌ای تا پایانِ فایل
+      // رشد می‌کرد. حالا فقط URLهای نزدیکِ پنجرهٔ مرئی (±۴ صفحه)
+      // نگه داشته می‌شوند و سقفِ سخت، ۴۸ ورودی است (دورترین‌ها اول
+      // حذف می‌شوند). حذف از Map، فقط به‌معنای «دیکودِ دوباره در
+      // بازگشت» است؛ خودِ تصویر در کشِ مرورگر می‌ماند و چیزی از
+      // صفحه پاک نمی‌شود. شی‌های Imageی هر دور هم از قبل با
+      // onload=null و src='' آزاد می‌شدند و همان‌طور مانده‌اند.
+      const firstVisible = visibleIndices.length > 0 ? visibleIndices[0] : activePageIndex;
+      for (const [cachedUrl, cachedIdx] of predecodedMapRef.current) {
+        if (cachedIdx < firstVisible - 4 || cachedIdx > lastVisible + 4) {
+          predecodedMapRef.current.delete(cachedUrl);
+        }
+      }
+      if (predecodedMapRef.current.size > 48) {
+        const windowCenter = (firstVisible + lastVisible) / 2;
+        const sorted = [...predecodedMapRef.current.entries()].sort(
+          (a, b) => Math.abs(a[1] - windowCenter) - Math.abs(b[1] - windowCenter)
+        );
+        for (const [cachedUrl] of sorted.slice(48)) predecodedMapRef.current.delete(cachedUrl);
+      }
     }, 120);
 
     return () => {
@@ -484,7 +568,7 @@ export default function VerticalViewer() {
   }, [activePageIndex, visibleIndices, items, itemsCount, recordImageDimensions]);
 
   useEffect(() => {
-    predecodedSetRef.current.clear();
+    predecodedMapRef.current.clear();
   }, [currentFilePath]);
 
   // ۴. مدیریت هوشمند زوم با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x)
@@ -766,9 +850,12 @@ export default function VerticalViewer() {
                 index={index}
                 isLastItem={index === itemsCount - 1}
                 knownHeight={heights ? heights[index] : null}
+                frameWidth={frameWidth}
                 pageGap={safePageGap}
                 rotation={rotation}
                 isHiDpiPassActive={enableHiDpiCrispPass && isNearCenter}
+                isNearViewport={isNearCenter}
+                isSharpenFilterActive={enableHiDpiCrispPass && isNearCenter && safeZoom <= 1.5 && !isAnnotationActive}
                 pageAnnotations={pageAnnots}
                 onCommitPageAnnotations={handleCommitPageAnnotations}
                 onImageLoad={recordImageDimensions}
