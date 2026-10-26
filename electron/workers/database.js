@@ -7,6 +7,9 @@ const os = require('os');
 const DB_DIR = path.join(os.homedir(), '.comic-reader');
 const DB_FILE = path.join(DB_DIR, 'db.json');
 const DB_BAK_FILE = path.join(DB_DIR, 'db.json.bak');
+// مرحله ۱ ـ بخش الف: فایلِ موقتِ نوشتنِ اتمیک (همیشه در همان دایرکتوری،
+// تا rename اتمیک بماند).
+const DB_TMP_FILE = DB_FILE + '.tmp';
 
 const MAX_COVER_CACHE_ENTRIES = 300;
 
@@ -200,20 +203,34 @@ let cachedDbInstance = null;
 let diskWriteTimer = null;
 let isWritingDisk = false;
 let needsAnotherWrite = false;
+// مرحله ۱ ـ بخش الف: پرچمِ کثیفی — هر فراخوانیِ writeDB آن را true
+// می‌کند و هر نوشتنِ موفقِ روی دیسک، false؛ تا FLUSH_SYNC بداند آیا
+// چیزی برای نوشتن هست یا نه.
+let dbDirty = false;
 
 function initDB() {
   try {
     if (!fs.existsSync(DB_DIR)) {
       fs.mkdirSync(DB_DIR, { recursive: true });
     }
+    // پاک‌سازیِ فایلِ موقتِ به‌جامانده از کرشِ قبلی: نوشتنِ اتمیکِ
+    // ناتمام، فقط همین tmp را جا می‌گذارد و db.json سالم می‌ماند.
+    try {
+      if (fs.existsSync(DB_TMP_FILE)) fs.unlinkSync(DB_TMP_FILE);
+    } catch (_) {}
     if (!fs.existsSync(DB_FILE)) {
       const initialJson = JSON.stringify(defaultDB, null, 2);
-      fs.writeFileSync(DB_FILE, initialJson, 'utf8');
-      fs.writeFileSync(DB_BAK_FILE, initialJson, 'utf8');
+      writeDbFilesSync(initialJson);
       cachedDbInstance = JSON.parse(initialJson);
-    } else {
+    } else if (!fs.existsSync(DB_BAK_FILE)) {
+      // .bak فقط وقتی از روی db.json ساخته می‌شود که db.json سالم و
+      // قابلِ parse باشد. کپیِ کورکورانهٔ db.json روی .bak (رفتارِ
+      // قبلی) اگر db.json خراب بود، پشتیبانِ سالم را هم نابود می‌کرد
+      // و بازیابیِ readDB را بی‌اثر می‌کرد.
       try {
-        fs.copyFileSync(DB_FILE, DB_BAK_FILE);
+        const raw = fs.readFileSync(DB_FILE, 'utf8');
+        JSON.parse(raw);
+        atomicWriteFileSync(DB_BAK_FILE, raw);
       } catch (_) {}
     }
   } catch (error) {
@@ -252,6 +269,47 @@ function readDB() {
   }
 }
 
+// مرحله ۱ ـ بخش الف: نوشتنِ اتمیک (Write-to-Temp + Atomic Rename).
+// محتوا اول کامل در یک فایلِ tmp (در همان دایرکتوری) نوشته و fsync
+// می‌شود و بعد با rename — که در یک فایل‌سیستم اتمیک است — جای فایلِ
+// هدف را می‌گیرد؛ پس در هر لحظه، فایلِ هدف یا نسخهٔ کاملِ قبلی است یا
+// نسخهٔ کاملِ جدید، هرگز نیمه‌کاره نیست.
+function atomicWriteFileSync(targetPath, content) {
+  const tmpPath = targetPath + '.tmp';
+  fs.writeFileSync(tmpPath, content, 'utf8');
+  try {
+    const fd = fs.openSync(tmpPath, 'r');
+    try { fs.fsyncSync(fd); } catch (_) {}
+    fs.closeSync(fd);
+  } catch (_) {}
+  fs.renameSync(tmpPath, targetPath);
+}
+
+async function atomicWriteFileAsync(targetPath, content) {
+  const tmpPath = targetPath + '.tmp';
+  await fs.promises.writeFile(tmpPath, content, 'utf8');
+  try {
+    const handle = await fs.promises.open(tmpPath, 'r');
+    try { await handle.sync(); } catch (_) {}
+    await handle.close();
+  } catch (_) {}
+  await fs.promises.rename(tmpPath, targetPath);
+}
+
+// نوشتنِ هر دو فایل (اصلی + پشتیبان) با یک محتوا؛ ترتیب عمداً همین
+// است: اول db.json، بعد .bak — پس .bak همیشه با «آخرین وضعیتِ موفقِ
+// دیسک» همگام است و دیگر فقط در نوشتن‌های فوری به‌روز نمی‌شود.
+function writeDbFilesSync(jsonString) {
+  atomicWriteFileSync(DB_FILE, jsonString);
+  atomicWriteFileSync(DB_BAK_FILE, jsonString);
+  return true;
+}
+
+async function writeDbFilesAsync(jsonString) {
+  await atomicWriteFileAsync(DB_FILE, jsonString);
+  await atomicWriteFileAsync(DB_BAK_FILE, jsonString);
+}
+
 async function performAsyncDiskWrite() {
   if (isWritingDisk || !cachedDbInstance) {
     needsAnotherWrite = true;
@@ -264,7 +322,8 @@ async function performAsyncDiskWrite() {
   try {
     pruneCoverCache(cachedDbInstance);
     const jsonString = JSON.stringify(cachedDbInstance, null, 2);
-    await fs.promises.writeFile(DB_FILE, jsonString, 'utf8');
+    await writeDbFilesAsync(jsonString);
+    dbDirty = false;
   } catch (error) {
     needsAnotherWrite = true;
   } finally {
@@ -277,17 +336,27 @@ async function performAsyncDiskWrite() {
 
 function writeDB(data, immediate = false) {
   cachedDbInstance = data;
+  dbDirty = true;
 
   if (immediate) {
     if (diskWriteTimer) {
       clearTimeout(diskWriteTimer);
       diskWriteTimer = null;
     }
+    // اگر نوشتنِ ناهمگام در حالِ انجام است، نوشتنِ همگامِ مستقیم با
+    // آن روی یک tmp مسابقه می‌دهد؛ پس به‌جای نوشتن، پرچمِ «یک بارِ
+    // دیگر بنویس» را می‌گذاریم تا finallyیِ نوشتنِ در حالِ انجام،
+    // تازه‌ترین داده را بنویسد (و پرچمِ کثیفی هم تا آن موقع true
+    // می‌ماند تا FLUSH_SYNC آن را بگیرد).
+    if (isWritingDisk) {
+      needsAnotherWrite = true;
+      return false;
+    }
     try {
       pruneCoverCache(cachedDbInstance);
       const jsonString = JSON.stringify(cachedDbInstance, null, 2);
-      fs.writeFileSync(DB_FILE, jsonString, 'utf8');
-      fs.writeFileSync(DB_BAK_FILE, jsonString, 'utf8');
+      writeDbFilesSync(jsonString);
+      dbDirty = false;
       return true;
     } catch (_) {
       return false;
@@ -301,6 +370,40 @@ function writeDB(data, immediate = false) {
   }, 900);
 
   return true;
+}
+
+// مرحله ۱ ـ بخش الف: فلاشِ نهاییِ خروج (همگام، اتمیک).
+// تایمرِ debounce را لغو می‌کند، تا حدِ ۲۴۰۰ میلی‌ثانیه منتظرِ تمام
+// شدنِ نوشتنِ ناهمگامِ در حالِ انجام می‌ماند (چون main حداکثر ۲۵۰۰
+// میلی‌ثانیه صبر می‌کند)، و اگر دادهٔ نوشته‌نشده هست، آن را همگام و
+// اتمیک می‌نویسد. اگر نوشتنِ قبلی هنوز تمام نشده بود، flushed:false
+// برمی‌گردد تا main با تایم‌اوت، خروج را قفل نکند؛ در آن حالت،
+// db.json همان نسخهٔ کاملِ قبلی است و tmpِ نیمه‌کاره در بوتِ بعدی
+// پاک می‌شود.
+async function handleFlushSync() {
+  if (diskWriteTimer) {
+    clearTimeout(diskWriteTimer);
+    diskWriteTimer = null;
+  }
+  const start = Date.now();
+  while (isWritingDisk && Date.now() - start < 2400) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (isWritingDisk) {
+    return { ok: false, flushed: false };
+  }
+  if (!dbDirty || !cachedDbInstance) {
+    return { ok: true, flushed: false };
+  }
+  try {
+    pruneCoverCache(cachedDbInstance);
+    const jsonString = JSON.stringify(cachedDbInstance, null, 2);
+    writeDbFilesSync(jsonString);
+    dbDirty = false;
+    return { ok: true, flushed: true };
+  } catch (_) {
+    return { ok: false, flushed: false };
+  }
 }
 
 function syncCoverAcrossTables(db, normPath, dataUrl, forceCustom = false) {
@@ -350,8 +453,17 @@ parentPort.on('message', (request) => {
   try {
     switch (action) {
       case 'FLUSH_SYNC': {
-        writeDB(db, true);
-        sendReply({ type: 'done', action, success: true });
+        // پاسخ، صراحتاً FLUSH_SYNC_ACK است تا main در handshakeِ خروج
+        // آن را از پاسخ‌های عادیِ db-action تشخیص بدهد. اگر main این
+        // پیام را با reqId فرستاده باشد، sendReply همان reqId را هم
+        // برمی‌گرداند.
+        handleFlushSync()
+          .then((result) => {
+            sendReply({ type: 'FLUSH_SYNC_ACK', action, success: result.ok, flushed: result.flushed });
+          })
+          .catch(() => {
+            sendReply({ type: 'FLUSH_SYNC_ACK', action, success: false, flushed: false });
+          });
         break;
       }
 

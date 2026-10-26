@@ -33,6 +33,33 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow;
 
+// مرحله ۱ ـ بخش الف: قفلِ تک‌نمونه‌ای.
+// بدونِ این قفل، اجرای دومِ برنامه یک پروسهٔ دوم با ورکرِ دیتابیسِ
+// جدا می‌ساخت و هر دو پروسه روی یک db.json می‌نوشتند. اگر قفل گرفته
+// نشد، این پروسه بلافاصله خارج می‌شود؛ app.quit() پیش از ready، جلوی
+// شلیکِ whenReady را می‌گیرد، پس پنجره و ورکری ساخته نمی‌شود (و
+// createWindow هم برای اطمینان، همین شرط را چک می‌کند).
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (event, commandLine) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    // اگر نمونهٔ دوم با یک فایل (مثلاً یک کمیک یا PDF) باز شده بود،
+    // مسیرش را به پنجرهٔ موجود اطلاع بده تا در فازهای بعد، همان‌جا
+    // باز شود؛ امروز، رندرر هنوز شنونده‌ای برای این رویداد ندارد و
+    // پیام، بی‌اثر دریافت می‌شود (نه خطا).
+    const fileArg = (commandLine || []).slice(1).find((arg) => {
+      return arg && !arg.startsWith('-') && /\.(zip|cbz|cbr|rar|7z|pdf)$/i.test(arg);
+    });
+    if (fileArg) {
+      try { mainWindow.webContents.send('second-instance-file', fileArg); } catch (_) {}
+    }
+  });
+}
+
 // مخزن بافر مقیم در حافظه رم کمیک فعال با سقف ایمن ۳۵۰ مگابایت (LRU Eviction)
 const MAX_RAM_CACHE_BYTES = 350 * 1024 * 1024;
 // سقف مجاز کش شدن مستقیم فایل PDF در رم (۱۲۰ مگابایت)؛ فایل‌های بزرگ‌تر مستقیماً استریم می‌شوند
@@ -169,6 +196,8 @@ const MIME_TYPES = {
 };
 
 function createWindow() {
+  // نمونهٔ دوم، هرگز پنجره نمی‌سازد (نگهبانِ دومِ قفلِ تک‌نمونه‌ای).
+  if (!gotSingleInstanceLock) return;
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -186,14 +215,37 @@ function createWindow() {
     }
   });
 
-  mainWindow.webContents.on('devtools-opened', () => {
-    mainWindow.webContents.executeJavaScript('console.clear();').catch(() => {});
+  // مرحله ۱ ـ بخش الف: هندلرِ ایمنِ did-fail-load.
+  // قبلاً اگر سرورِ توسعه (Vite) بالا نبود، فقط صفحهٔ سفیدِ
+  // ERR_CONNECTION_REFUSED دیده می‌شد. حالا به‌جای آن، یک صفحهٔ
+  // خطای فارسی با دکمهٔ «تلاش مجدد» نشان داده می‌شود؛ خطای -3
+  // (لغوِ ناوبری، مثلاً با ناوبریِ جدید) نادیده گرفته می‌شود تا حلقه
+  // نسازد، و خطاهای فریم‌های فرعی هم صفحه را عوض نمی‌کنند.
+  // (شنوندهٔ قبلیِ devtools-opened که console.clear می‌کرد، عمداً
+  // حذف شد تا لاگ‌های حیاتیِ دیباگ پاک نشوند.)
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || errorCode === -3) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const devUrl = 'http://localhost:5173';
+    const safeDesc = String(errorDescription || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    const errorHtml = '<!DOCTYPE html><html lang="fa" dir="rtl"><head><meta charset="utf-8">'
+      + '<title>خطا در بارگذاری</title>'
+      + '<style>body{margin:0;background:#0a0f13;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}main{text-align:center;max-width:480px;padding:24px}h1{font-size:20px}p{color:#9ca3af;line-height:2}button{margin-top:16px;padding:10px 24px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:#111827;color:#fff;font-size:15px;cursor:pointer}button:hover{background:#1f2937}</style></head>'
+      + '<body><main><h1>برنامه نتوانست بارگذاری شود</h1>'
+      + '<p>سرورِ توسعه (Vite) در دسترس نیست. مطمئن شوید <b>npm run dev</b> در حال اجراست، بعد دوباره تلاش کنید.</p>'
+      + '<p style="font-size:12px;direction:ltr">' + String(errorCode) + ' — ' + safeDesc + '</p>'
+      + '<button onclick="window.location.href=' + "'" + devUrl + "'" + '">تلاش مجدد</button></main></body></html>';
+    mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(errorHtml));
   });
 
   mainWindow.loadURL('http://localhost:5173');
 }
 
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;
   app.on('comic-cache-clear', () => {
     if (app.activeComicRamCache) {
       app.activeComicRamCache.clear();

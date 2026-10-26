@@ -118,6 +118,10 @@ async function enrichFolderImagesWithDimensions(folderImages) {
 // مدیریت تک‌ورکر پایدار دیتابیس (Persistent Singleton DB Worker)
 // ============================================================================
 let persistentDbWorker = null;
+// مرحله ۱ ـ بخش الف: پرچمِ خروجِ پس از فلاش — وقتی before-quitِ اول،
+// handshake را کامل کرد و app.quit() را دوباره صدا زد، before-quitِ
+// دوم با این پرچم، بدونِ توقف عبور می‌کند (وگرنه حلقه می‌شد).
+let quitAfterFlush = false;
 let dbRequestSeq = 0;
 const pendingDbCallbacks = new Map();
 
@@ -170,12 +174,16 @@ function executeDbAction(action, payload) {
 
     const reqId = ++dbRequestSeq;
 
+    // مرحله ۱ ـ بخش الف: قراردادِ تایم‌اوتِ دیتابیس — main: ۵۰۰۰،
+    // رندرر: ۵۵۰۰ میلی‌ثانیه. پس خطای کنترل‌شدهٔ main همیشه زودتر از
+    // تایم‌اوتِ رندرر می‌رسد و رندرر، نیم ثانیه زودتر خطای کاذب نشان
+    // نمی‌دهد (باگِ قبلی: ۴۰۰۰ در برابرِ ۳۵۰۰).
     const timer = setTimeout(() => {
       if (pendingDbCallbacks.has(reqId)) {
         pendingDbCallbacks.delete(reqId);
-        resolve({ type: 'error', message: 'مهلت زمانی ورکر دیتابیس به پایان رسید (Timeout 4000ms)' });
+        resolve({ type: 'error', message: 'مهلت زمانی ورکر دیتابیس به پایان رسید (Timeout 5000ms)' });
       }
-    }, 4000);
+    }, 5000);
 
     pendingDbCallbacks.set(reqId, { resolve, timer });
     worker.postMessage({ reqId, action, payload });
@@ -347,14 +355,45 @@ module.exports = function(app) {
 
   ensureTempDir();
 
-  app.on('before-quit', () => {
+  // مرحله ۱ ـ بخش الف: Handshakeِ واقعیِ خروج.
+  // رفتارِ قبلی، FLUSH_SYNC را می‌فرستاد و بلافاصله terminate می‌کرد،
+  // پس ورکر معمولاً پیش از نوشتن می‌مرد و تغییراتِ ۹۰۰ میلی‌ثانیهٔ
+  // آخر گم می‌شد. حالا: خروجِ اول با preventDefault متوقف می‌شود،
+  // FLUSH_SYNC فرستاده می‌شود و تا رسیدنِ FLUSH_SYNC_ACK یا حداکثر
+  // ۲۵۰۰ میلی‌ثانیه صبر می‌شود؛ بعد ورکر تمیز متوقف و app.quit() با
+  // پرچمِ quitAfterFlush دوباره صدا زده می‌شود. اگر ورکری اصلاً
+  // ساخته نشده باشد، خروج بی‌درنگ انجام می‌شود.
+  app.on('before-quit', (event) => {
     cleanupExtractedDiskCache('__FORCE_ALL__', true);
-    if (persistentDbWorker) {
-      try {
-        persistentDbWorker.postMessage({ action: 'FLUSH_SYNC' });
-        persistentDbWorker.terminate();
-      } catch (_) {}
+    if (quitAfterFlush) return;
+    const worker = persistentDbWorker;
+    if (!worker) return;
+    event.preventDefault();
+    let finished = false;
+    const finishQuit = () => {
+      if (finished) return;
+      finished = true;
+      try { worker.removeListener('message', onFlushAck); } catch (_) {}
+      quitAfterFlush = true;
+      try { worker.terminate(); } catch (_) {}
+      app.quit();
+    };
+    const onFlushAck = (msg) => {
+      if (msg && msg.type === 'FLUSH_SYNC_ACK') finishQuit();
+    };
+    try {
+      worker.on('message', onFlushAck);
+    } catch (_) {
+      finishQuit();
+      return;
     }
+    try {
+      worker.postMessage({ action: 'FLUSH_SYNC' });
+    } catch (_) {
+      finishQuit();
+      return;
+    }
+    setTimeout(() => { finishQuit(); }, 2500);
   });
 
   const processComicFile = (filePath, sortBy = 'name_asc', sender = null) => {
