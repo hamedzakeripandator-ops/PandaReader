@@ -260,7 +260,7 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
           style={styles.stepBtn}
           title={`کوچک‌نمایی (-${Math.round(zoomStep * 100)}%)`}
         >
-          <Icons.Minimize size={13} />
+          <Icons.Minus size={13} />
         </button>
 
         <div style={styles.sliderTrackWrapper}>
@@ -329,6 +329,11 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
 
 const styles = {
   dockContainer: {
+    // مرحله ۴ ـ بخش ب: چیدمانِ داک همیشه چپ‌به‌راست است (قلب چپ،
+    // زوم و دکمه‌ها به ترتیبِ قبل از dir="rtl")؛ جهتِ سند، ترتیبِ
+    // فلکس و جهتِ اسلایدرِ range (و گرادیانِ پرشدگی‌اش) را برعکس
+    // کرده بود.
+    direction: 'ltr',
     position: 'absolute',
     bottom: '18px',
     left: '50%',

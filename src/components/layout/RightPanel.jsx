@@ -6,6 +6,7 @@ import { coreApi } from '../../services/coreApi';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../common/Icons';
 import MarqueeText from '../common/MarqueeText';
+import { flattenOutline, findActiveOutlineEntry, firstJumpablePage } from '../../utils/pdfOutline';
 
 const PageListRow = React.memo(function PageListRow({
   pageNum,
@@ -91,6 +92,9 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const comicData = useReaderStore((state) => state.comicData);
   const currentPage = useReaderStore((state) => (isRightSidebarOpen ? state.currentPage : 1));
   const jumpToPage = useReaderStore((state) => state.jumpToPage);
+  const pdfOutline = useReaderStore((state) => state.pdfOutline);
+  const pdfOutlineFile = useReaderStore((state) => state.pdfOutlineFile);
+  const pdfOutlineStatus = useReaderStore((state) => state.pdfOutlineStatus);
   const setComicData = useReaderStore((state) => state.setComicData);
 
   // استیت‌های تنظیم فاصله صفحات (Page Offset / Gap)
@@ -239,6 +243,35 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
     }
     return activeTitle;
   }, [chapterGroups, currentPage]);
+
+  // مرحله ۶ ـ بخش الف: فهرستِ PDF (Outline) — فقط وقتی فهرست،
+  // متعلق به همین فایلِ جاری است. برای فایل‌های کمیک، فصل‌ها از
+  // قبل از روی نامِ فایل‌ها/پوشه‌ها در همین پنل بودند و دست نخورده‌اند.
+  const outlineForCurrentFile = isPdfMode && pdfOutlineFile === filePath && Array.isArray(pdfOutline) ? pdfOutline : [];
+  const flatOutline = useMemo(
+    () => flattenOutline(outlineForCurrentFile),
+    [outlineForCurrentFile]
+  );
+  const activeOutlineEntry = useMemo(
+    () => findActiveOutlineEntry(flatOutline, currentPage),
+    [flatOutline, currentPage]
+  );
+
+  // مرحله ۶ ـ بخش ب: نگه‌داشتنِ سرفصلِ فعال در معرضِ دید — با هر
+  // تغییرِ صفحهٔ جاری، ردیفِ فعال با block:'nearest' به داخلِ
+  // ناحیهٔ قابل‌مشاهدهٔ لیست اسکرول می‌شود (اگر از قبل دیده شود،
+  // هیچ اسکرولی رخ نمی‌دهد و اسکرولِ دستیِ کاربر دزدیده نمی‌شود).
+  // بخشِ فهرست، حالتِ بسته‌شونده ندارد (همیشه باز است)، پس همین
+  // یک مکانیزم برای «در معرضِ دید نگه داشتن» کافی است.
+  const outlineRowRefs = useRef(new Map());
+  const activeOutlineIndex = activeOutlineEntry ? flatOutline.indexOf(activeOutlineEntry) : -1;
+  useEffect(() => {
+    if (activeOutlineIndex < 0) return;
+    const rowEl = outlineRowRefs.current.get(activeOutlineIndex);
+    if (rowEl && typeof rowEl.scrollIntoView === 'function') {
+      try { rowEl.scrollIntoView({ block: 'nearest', behavior: 'auto' }); } catch (_) {}
+    }
+  }, [activeOutlineIndex]);
 
   // دریافت و همگام‌سازی تصویر کاور
   useEffect(() => {
@@ -556,6 +589,79 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
             </button>
           </div>
         </div>
+
+        {/* ===================================================================
+            مرحله ۶ ـ بخش الف: فهرستِ کتاب (PDF Outline) — فقط برای PDFها
+            و فقط وقتی سند، فهرستِ داخلی دارد. استخراج، غیرمسدودکننده
+            در PdfViewer انجام می‌شود؛ کلیک روی هر سرفصل، به صفحه‌اش
+            می‌پرد. برای کمیک‌ها، فصل‌ها از قبل در کارتِ زیر بودند.
+        =================================================================== */}
+        {isPdfMode && pdfOutlineStatus === 'loading' && (
+          <div style={styles.outlinePanel}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.titleWithIcon}>
+                <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                  <Icons.Layers size={15} />
+                </span>
+                <span style={styles.panelHeaderTitle}>فهرست کتاب</span>
+              </div>
+            </div>
+            <div style={styles.outlineEmptyText}>در حال استخراجِ فهرست…</div>
+          </div>
+        )}
+        {isPdfMode && pdfOutlineStatus === 'done' && flatOutline.length > 0 && (
+          <div style={styles.outlinePanel}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.titleWithIcon}>
+                <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                  <Icons.Layers size={15} />
+                </span>
+                <span style={styles.panelHeaderTitle}>فهرست کتاب</span>
+              </div>
+              <span style={styles.pageCountTag}>{flatOutline.length} سرفصل</span>
+            </div>
+            <div style={styles.outlineScrollList}>
+              {flatOutline.map((entry, idx) => {
+                const jumpPage = firstJumpablePage(entry);
+                const isActive = entry === activeOutlineEntry;
+                return (
+                  <div
+                    key={`${idx}-${entry.title}`}
+                    ref={(el) => {
+                      if (el) outlineRowRefs.current.set(idx, el);
+                      else outlineRowRefs.current.delete(idx);
+                    }}
+                    onClick={() => {
+                      if (jumpPage) jumpToPage(jumpPage);
+                    }}
+                    title={jumpPage ? `پرش به صفحه ${jumpPage}` : entry.title}
+                    style={{
+                      ...styles.outlineRow,
+                      paddingRight: `${10 + entry.depth * 14}px`,
+                      borderColor: isActive ? 'var(--accent)' : 'transparent',
+                      backgroundColor: isActive ? 'rgba(34, 211, 238, 0.12)' : 'transparent',
+                      cursor: jumpPage ? 'pointer' : 'default',
+                      opacity: jumpPage ? 1 : 0.65,
+                    }}
+                  >
+                    <span
+                      style={{
+                        ...styles.outlineRowTitle,
+                        color: isActive ? 'var(--accent)' : 'var(--text)',
+                        fontWeight: entry.depth === 0 ? 600 : 400,
+                      }}
+                    >
+                      {entry.title}
+                    </span>
+                    {jumpPage ? (
+                      <span style={styles.outlineRowPage}>ص. {jumpPage}</span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ===================================================================
             ۲. کارت فهرست صفحات: ناوبری فصول + لیست اسکرول صفحات
@@ -1028,6 +1134,56 @@ const styles = {
     width: '100%',
     boxSizing: 'border-box',
     flexShrink: 0,
+  },
+  outlinePanel: {
+    backgroundColor: 'var(--panel)',
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    padding: '12px',
+    marginBottom: '12px',
+    boxSizing: 'border-box',
+  },
+  outlineScrollList: {
+    maxHeight: '300px',
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+    marginTop: '8px',
+    paddingLeft: '2px',
+  },
+  outlineRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    paddingTop: '6px',
+    paddingBottom: '6px',
+    paddingLeft: '8px',
+    borderRight: '2px solid transparent',
+    borderRadius: '6px',
+    boxSizing: 'border-box',
+  },
+  outlineRowTitle: {
+    fontSize: '12.5px',
+    lineHeight: '1.6',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    flex: 1,
+    minWidth: 0,
+  },
+  outlineRowPage: {
+    fontSize: '11px',
+    color: 'var(--muted)',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  outlineEmptyText: {
+    fontSize: '12px',
+    color: 'var(--muted)',
+    marginTop: '8px',
   },
   panelTitleRow: {
     display: 'flex',

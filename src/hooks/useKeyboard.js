@@ -5,16 +5,29 @@ import useLibraryStore from '../store/useLibraryStore';
 import useSettingsStore from '../store/useSettingsStore';
 import { coreApi } from '../services/coreApi';
 
-const STUDIO_TOOL_HOTKEYS = {
-  v: { id: 'select', label: 'انتخاب و ویرایش (V)' },
-  b: { id: 'box', label: 'کادربندی و کادر ابری (B)' },
-  h: { id: 'highlighter', label: 'هایلایت هوشمند (H)' },
-  p: { id: 'pen', label: 'قلم نرم (P)' },
-  a: { id: 'arrow', label: 'فلش مهندسی (A)' },
-  t: { id: 'text', label: 'تایپ متن (T)' },
-  n: { id: 'sticky', label: 'استیکی‌نوت (N)' },
-  e: { id: 'eraser', label: 'پاک‌کن جارویی (E)' },
-};
+// مرحله ۷ ـ بخش الف: نگاشتِ ابزار ← اکشنِ تنظیمات. این جدول، فقط
+// «کدام اکشن، کدام ابزار است» را می‌گوید؛ خودِ کلیدها، فقط از
+// matchesShortcut در useSettingsStore خوانده می‌شوند (مرجعِ واحد).
+// پیش از این، این‌جا نگاشتِ هاردکدشدهٔ v/b/h/p/a/t/n/e بود که
+// بدونِ خواندنِ تنظیمات، ابزار را عوض می‌کرد؛ به همین دلیل، تغییرِ
+// میانبرِ ابزار در تنظیمات، کلیدِ قبلی را از کار نمی‌انداخت.
+const STUDIO_TOOL_ACTIONS = [
+  { actionId: 'toolSelect', toolId: 'select' },
+  { actionId: 'toolPen', toolId: 'pen' },
+  { actionId: 'toolBox', toolId: 'box' },
+  { actionId: 'toolArrow', toolId: 'arrow' },
+  { actionId: 'toolText', toolId: 'text' },
+  { actionId: 'toolSticky', toolId: 'sticky' },
+  { actionId: 'toolHighlighter', toolId: 'highlighter' },
+  { actionId: 'toolEraser', toolId: 'eraser' },
+];
+
+function resolveStudioToolId(settingsState, e) {
+  for (const { actionId, toolId } of STUDIO_TOOL_ACTIONS) {
+    if (settingsState.matchesShortcut?.(actionId, e)) return toolId;
+  }
+  return null;
+}
 
 export default function useKeyboard(callbacks = {}) {
   const isCopyingRef = useRef(false);
@@ -60,6 +73,22 @@ export default function useKeyboard(callbacks = {}) {
 
       // ۲. سلسله‌مراتب اولویت‌بندی شده کلید Escape
       if (e.key === 'Escape' || e.code === 'Escape') {
+        // مرحله ۴ ـ بخش ب: نوارِ جستجوی PDF، لایهٔ روئیِ گذراست. اگر
+        // باز است و فوکوس از اینپوتش بیرون آمده (مثلاً کاربر دکمهٔ
+        // بعدی/قبلی را زده یا روی صفحه کلیک کرده)، Escape اول نوار
+        // را می‌بندد، نه کمیک را. شنوندهٔ PdfViewer به‌خاطرِ
+        // capture:true بودنِ این شنونده و زودتر ثبت شدنش نمی‌تواند
+        // جلوی این شاخه را بگیرد؛ هماهنگی از راهِ استورِ ریدر است.
+        if (
+          appState.currentView === 'reader' &&
+          readerState.comicData?.type === 'pdf' &&
+          readerState.pdfSearchOpen
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          readerState.setPdfSearchOpen(false);
+          return;
+        }
         if (appState.isAreaZoomActive) {
           e.preventDefault();
           e.stopPropagation();
@@ -139,8 +168,14 @@ export default function useKeyboard(callbacks = {}) {
       if (appState.isAnnotationActive) {
         const lowerKey = (e.key || '').toLowerCase();
 
-        // واگذاری Undo / Redo به کامپوننت ریدر
-        if ((e.ctrlKey || e.metaKey) && (lowerKey === 'z' || lowerKey === 'y')) {
+        // واگذاری Undo / Redo به تولبار/ویوور: فقط وقتی رویداد،
+        // دقیقاً با میانبرِ فعلیِ undo/redo در تنظیمات جور است.
+        // پیش از این، هر Ctrl+Z/Y (حتی پس از تغییرِ میانبر) به
+        // این‌جا می‌رسید و کلیدِ قبلی، زنده می‌ماند.
+        if (
+          settingsState.matchesShortcut?.('undoAnnotation', e) ||
+          settingsState.matchesShortcut?.('redoAnnotation', e)
+        ) {
           return;
         }
 
@@ -156,12 +191,16 @@ export default function useKeyboard(callbacks = {}) {
           }
         }
 
-        // سوییچ سریع بین ابزارهای داخل استودیو با کلیدهای V, B, H, P, A, T, N, E
-        if (!e.ctrlKey && !e.altKey && !e.metaKey && STUDIO_TOOL_HOTKEYS[lowerKey]) {
+        // سوییچ سریع بین ابزارهای داخل استودیو — فقط از مرجعِ واحد
+        // (matchesShortcut). گیتِ modifier، خودِ matcher است؛ پس
+        // اگر کاربر، ابزار را به ترکیبی (مثلِ Alt+P) ببندد، همان
+        // ترکیب کار می‌کند و کلیدِ سادهٔ قبلی، دیگر ابزار را عوض
+        // نمی‌کند.
+        const studioToolId = resolveStudioToolId(settingsState, e);
+        if (studioToolId) {
           e.preventDefault();
           e.stopPropagation();
-          const toolCfg = STUDIO_TOOL_HOTKEYS[lowerKey];
-          appState.setAnnotationTool(toolCfg.id);
+          appState.setAnnotationTool(studioToolId);
           return;
         }
       }
@@ -171,7 +210,7 @@ export default function useKeyboard(callbacks = {}) {
       // =========================================================================
 
       // ۳. تمام‌صفحه (پیش‌فرض: F11)
-      if (settingsState.matchesShortcut?.('fullscreen', e) || e.key === 'F11') {
+      if (settingsState.matchesShortcut?.('fullscreen', e)) {
         e.preventDefault();
         e.stopPropagation();
         coreApi.toggleFullscreen();
@@ -328,7 +367,7 @@ export default function useKeyboard(callbacks = {}) {
       }
 
       // ۱۰. میانبر زوم ناحیه‌ای با کشیدن باکس (Alt + Z)
-      if (comicData && e.altKey && !e.ctrlKey && !e.metaKey && e.code === 'KeyZ') {
+      if (comicData && settingsState.matchesShortcut?.('areaZoom', e)) {
         e.preventDefault();
         e.stopPropagation();
         const activeNow = appState.toggleAreaZoom?.();
@@ -362,16 +401,13 @@ export default function useKeyboard(callbacks = {}) {
       }
 
       // ۱۲. کنترل‌های بزرگ‌نمایی و کوچک‌نمایی با کیبورد (Ctrl + Plus, Ctrl + Minus, Ctrl + 0)
-      const isZoomInTriggered =
-        (e.ctrlKey || e.metaKey) &&
-        (e.key === '=' || e.key === '+' || e.code === 'NumpadAdd');
-
-      const isZoomOutTriggered =
-        (e.ctrlKey || e.metaKey) &&
-        (e.key === '-' || e.code === 'NumpadSubtract');
-
-      const isResetZoomTriggered =
-        (e.ctrlKey || e.metaKey) && (e.key === '0' || e.code === 'Numpad0');
+      // مرحله ۷ ـ بخش الف: زوم، فقط از مرجعِ واحد. پیش از این، هر
+      // سه چک، هاردکدشده بودند و تغییرِ میانبرِ زوم در تنظیمات،
+      // هیچ اثری نداشت. تحملِ Shift برای '+' روی چیدمانِ QWERTY،
+      // در خودِ matchesShortcut (پرچمِ ignoreShift) حل شده است.
+      const isZoomInTriggered = settingsState.matchesShortcut?.('zoomIn', e);
+      const isZoomOutTriggered = settingsState.matchesShortcut?.('zoomOut', e);
+      const isResetZoomTriggered = settingsState.matchesShortcut?.('resetZoom', e);
 
       if (isZoomInTriggered) {
         e.preventDefault();
@@ -427,10 +463,7 @@ export default function useKeyboard(callbacks = {}) {
       }
 
       // ۱۶. فصل یا فایل بعدی در پوشه (PageDown یا شورت‌کات اختصاصی)
-      if (
-        comicData &&
-        (settingsState.matchesShortcut?.('nextChapter', e) || e.key === 'PageDown')
-      ) {
+      if (comicData && settingsState.matchesShortcut?.('nextChapter', e)) {
         const nextComic = comicData.nextComic;
         if (nextComic?.path) {
           e.preventDefault();
@@ -449,10 +482,7 @@ export default function useKeyboard(callbacks = {}) {
       }
 
       // ۱۷. فصل یا فایل قبلی در پوشه (PageUp یا شورت‌کات اختصاصی)
-      if (
-        comicData &&
-        (settingsState.matchesShortcut?.('prevChapter', e) || e.key === 'PageUp')
-      ) {
+      if (comicData && settingsState.matchesShortcut?.('prevChapter', e)) {
         // Refinement Final: کلیدِ سادهٔ A (prevChapter) وقتی استودیو
         // روشن است، هرگز فصلِ قبلی را باز نمی‌کند — چون A ابزارِ فلش
         // است و شاخهٔ ابزار (بالا) وقتی comicData باشد آن را گرفته
@@ -495,13 +525,16 @@ export default function useKeyboard(callbacks = {}) {
       // Refinement Final: کلیدهای ابزارِ حاشیه‌نویسی، حتی در صورتِ
       // ابهام، هرگز به اینپوتِ جستجو تزریق نمی‌شوند. قبلاً این بخش
       // فقط با !isAnnotationActive گیت شده بود؛ حالا صراحتاً چک
-      // می‌شود که کلید در STUDIO_TOOL_HOTKEYS نباشد. با این گیت،
+      // می‌شود که کلید، با میانبرِ فعلیِ یک ابزار در تنظیمات جور باشد. با این گیت،
       // وقتی استودیو خاموش است، فشردنِ V/P/B/A/T/N/H/E به‌جای
       // اینکه حرف را در جستجو بنویسد، هیچ‌کاری نمی‌کند (باز کردنِ
       // استودیو با میانبر، در این گام خواسته نشده است و همچنان با
       // دکمهٔ TopBar انجام می‌شود).
-      const lowerKeyForSearch = (e.key || '').toLowerCase();
-      const isStudioToolKey = Boolean(STUDIO_TOOL_HOTKEYS[lowerKeyForSearch]);
+      // مرحله ۷ ـ بخش الف: کلیدِ ابزارِ فعلیِ تنظیمات، هرگز به
+      // جستجو تزریق نمی‌شود — حتی اگر کاربر، آن را به کلیدِ دیگری
+      // بسته باشد. پیش از این، فقط حروفِ هاردکدشدهٔ قدیمی مستثنا
+      // بودند و کلیدِ جدیدِ ابزار، به جستجو می‌رفت.
+      const isStudioToolKey = resolveStudioToolId(settingsState, e) !== null;
       if (
         !isInputFocused &&
         !isControlOrNavKey &&

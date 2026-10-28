@@ -836,6 +836,11 @@ export default function TopBar({
 
 const styles = {
   topBar: {
+    // مرحله ۴ ـ بخش ب: چیدمانِ هدر همیشه چپ‌به‌راست است (لوگو چپ،
+    // کنترل‌های پنجره راست)؛ dir="rtl" سند از مرحلهٔ ۳، آن را برعکس
+    // کرده بود. متن‌های فارسیِ داخل، جهتِ صریحِ خودشان را دارند
+    // (searchBar/searchInput/dropdown روی rtl، brand/hint روی ltr).
+    direction: 'ltr',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'space-between',

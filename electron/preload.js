@@ -94,12 +94,29 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('save-screenshot', sanitizePayload(payload));
   },
 
+  // مرحله ۵ ـ بخش الف: خروجیِ PDFِ حاشیه‌نویسی‌شده + پشتیبان‌گیری/بازیابی
+  exportAnnotatedPdf: (payload) => {
+    return ipcRenderer.invoke('export-annotated-pdf', sanitizePayload(payload));
+  },
+
+  exportBackup: () => {
+    return ipcRenderer.invoke('export-backup');
+  },
+
+  importBackup: () => {
+    return ipcRenderer.invoke('import-backup');
+  },
+
   // کنترل‌های پنجره
   closeApp: () => ipcRenderer.send('window-close'),
   minimizeApp: () => ipcRenderer.send('window-minimize'),
   maximizeApp: () => ipcRenderer.send('window-maximize'),
   toggleFullscreen: () => ipcRenderer.invoke('toggle-fullscreen'),
   isFullscreen: () => ipcRenderer.invoke('is-fullscreen'),
+
+  // مرحله ۷ ـ بخش الف: اطلاعاتِ محیط برای صفحهٔ دانلودها/به‌روزرسانی
+  // (نسخه، حالتِ بسته‌بندی/Portable، اندازهٔ دیتابیس و لاگ، تعدادِ کاورها).
+  getAppInfo: () => ipcRenderer.invoke('get-app-info'),
 
   // شنونده پیشرفت استخراج بدون نشت حافظه
   onExtractionProgress: (callback) => {

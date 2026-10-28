@@ -3,9 +3,32 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const JSZip = require('jszip');
+// مرحله ۵ ـ بخش الف: لودِ تنبلِ backupFormat تا نبودِ آن (مثلاً اگر
+// کاربر فایل را سرِ جایش نگذاشته باشد) فقط پشتیبان‌گیری/بازیابی را
+// از کار بیندازد، نه کلِ ورکرِ دیتابیس را.
+let backupFormatCache = null;
+function getBackupFormat() {
+  if (backupFormatCache) return backupFormatCache;
+  try {
+    backupFormatCache = require('./backupFormat');
+    return backupFormatCache;
+  } catch (_) {
+    throw new Error('ماژولِ قالبِ پشتیبان (backupFormat.js) پیدا نشد؛ فایل را در پوشهٔ electron/workers قرار دهید.');
+  }
+}
 
-// المسار الثابت لقاعدة البيانات المحلية في مجلد المستخدم
-const DB_DIR = path.join(os.homedir(), '.comic-reader');
+// مرحله ۷ ـ بخش الف: محلِ دیتابیس از متغیرِ محیطیِ
+// COMIC_READER_DATA_DIR خوانده می‌شود که main.js، پیش از اسپاونِ
+// ورکر، آن را از روی حالتِ Portable/عادی تنظیم می‌کند. اگر متغیر،
+// غایب یا نسبی یا خالی باشد، دقیقاً همان مسیرِ قبلیِ
+// ~/.comic-reader به کار می‌رود. بقیهٔ مسیرهای مشتق‌شده (db.json،
+// db.json.bak، covers و مسیرهای بازیابی) دقیقاً مثلِ قبل، از
+// DB_DIR ساخته می‌شوند؛ هیچ‌کدام، دست نخورده‌اند.
+const ENV_DATA_DIR = process.env.COMIC_READER_DATA_DIR;
+const DB_DIR = (typeof ENV_DATA_DIR === 'string' && ENV_DATA_DIR.length > 0 && path.isAbsolute(ENV_DATA_DIR))
+  ? ENV_DATA_DIR
+  : path.join(os.homedir(), '.comic-reader');
 const DB_FILE = path.join(DB_DIR, 'db.json');
 const DB_BAK_FILE = path.join(DB_DIR, 'db.json.bak');
 // مرحله ۲ ـ بخش الف: پوشهٔ کاورهای روی دیسک + پیشوندِ URL آن‌ها.
@@ -16,6 +39,11 @@ const COVER_URL_PREFIX = 'comic://covers/';
 // مرحله ۱ ـ بخش الف: فایلِ موقتِ نوشتنِ اتمیک (همیشه در همان دایرکتوری،
 // تا rename اتمیک بماند).
 const DB_TMP_FILE = DB_FILE + '.tmp';
+// مرحله ۵ ـ بخش الف: مسیرهای ایمنیِ بازیابی — نسخهٔ دیتابیسِ پیش از
+// Restore (تک‌نسلی، مثلِ .bak) و پوشهٔ کاورهای پیش از Restore.
+const DB_PRE_RESTORE_FILE = DB_FILE + '.pre-restore.bak';
+const COVERS_PRE_RESTORE_DIR = path.join(DB_DIR, 'covers.pre-restore');
+const COVERS_STAGING_DIR = path.join(DB_DIR, 'covers.restore-staging');
 
 const MAX_COVER_CACHE_ENTRIES = 300;
 
@@ -25,6 +53,7 @@ const defaultDB = {
   libraryFolders: [],
   favorites: [],
   annotations: {},
+  readingStats: { days: {} },
   profile: {
     username: 'Haamed',
     subtitle: 'توسعه‌دهنده و کمیک‌خوان حرفه‌ای',
@@ -165,12 +194,39 @@ function migrateSchema(parsed) {
     }
   });
 
+  // مرحله ۶ ـ بخش الف: جدولِ آمارِ مطالعه. دیتابیس‌های قدیمی این
+  // کلید را ندارند (مقدارِ پیش‌فرضِ خالی) و ورودی‌های خراب، بی‌صدا
+  // به صفر برمی‌گردند؛ سقفِ ۱۰۹۵ روز (۳ سال) جلوی رشدِ بی‌نهایت را
+  // می‌گیرد. این جدول در پشتیبان (.crbackup) هم هست، چون بخشی از
+  // db.json است؛ اعتبارسنجِ پشتیبان آن را اختیاری می‌داند تا
+  // پشتیبان‌های قدیمی همچنان بازیابی شوند.
+  const readingStatsDays = {};
+  {
+    const rawDays =
+      parsed.readingStats && typeof parsed.readingStats === 'object' && parsed.readingStats.days && typeof parsed.readingStats.days === 'object'
+        ? parsed.readingStats.days
+        : {};
+    const dayKeys = Object.keys(rawDays)
+      .filter((k) => /^\d{4}-\d{2}-\d{2}$/.test(k))
+      .sort()
+      .slice(-1095);
+    for (const key of dayKeys) {
+      const entry = rawDays[key] || {};
+      readingStatsDays[key] = {
+        pages: Math.max(0, Math.min(100000, Math.floor(Number(entry.pages) || 0))),
+        seconds: Math.max(0, Math.min(86400, Math.floor(Number(entry.seconds) || 0))),
+      };
+    }
+  }
+  const readingStats = { days: readingStatsDays };
+
   return {
     history,
     library: sortLibraryItems(library),
     libraryFolders,
     favorites,
     annotations,
+    readingStats,
     profile: {
       ...defaultDB.profile,
       ...(parsed.profile && typeof parsed.profile === 'object' ? parsed.profile : {})
@@ -837,6 +893,308 @@ function syncCoverAcrossTables(db, normPath, input, forceCustom = false) {
   return cover;
 }
 
+// ============================================================================
+// مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی.
+// همهٔ کارِ ZIP و جایگزینی، داخلِ همین ورکر انجام می‌شود تا:
+//  ۱) فلاشِ دیتابیس (handleFlushSync) و خواندنِ db.json در یک تردِ
+//     مالکِ داده باشند و نسخهٔ پشتیبان، تازه‌ترین وضعیت باشد؛
+//  ۲) جایگزینیِ دیتابیس از مسیرِ writeDB عبور کند تا حافظهٔ ورکر با
+//     دیسک همگام بماند (جایگزینیِ مستقیمِ فایل از main، باعث می‌شد
+//     نوشتنِ debounceِ بعدیِ ورکر، دیتابیسِ بازیابی‌شده را با حافظهٔ
+//     قدیمی بازنویسی کند).
+// ============================================================================
+
+/** فهرستِ فایل‌های واقعیِ پوشهٔ covers (فقط نام‌های امن، مرتب‌شده). */
+function listCoverFiles() {
+  if (!fs.existsSync(COVERS_DIR)) return [];
+  const out = [];
+  for (const name of fs.readdirSync(COVERS_DIR)) {
+    if (!getBackupFormat().isSafeCoverFileName(name)) continue;
+    const fullPath = path.join(COVERS_DIR, name);
+    try {
+      const st = fs.statSync(fullPath);
+      if (st.isFile()) out.push({ name, fullPath, size: st.size });
+    } catch (_) {}
+  }
+  out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return out;
+}
+
+/**
+ * ساختِ فایلِ پشتیبان (ZIP) از وضعیتِ فلاش‌شدهٔ دیتابیس + کاورها.
+ * @returns {Promise<{base64: string, coverCount: number, dbSha256: string, size: number}>}
+ */
+async function buildBackupZip() {
+  const flush = await handleFlushSync();
+  if (!flush.ok) {
+    throw new Error('ذخیرهٔ تغییراتِ اخیر روی دیسک کامل نشد؛ چند لحظه دیگر دوباره تلاش کنید.');
+  }
+  if (!fs.existsSync(DB_FILE)) {
+    throw new Error('فایل دیتابیس روی دیسک پیدا نشد.');
+  }
+  const dbBytes = fs.readFileSync(DB_FILE);
+  if (dbBytes.length > getBackupFormat().MAX_DB_BYTES) {
+    throw new Error('دیتابیس برای پشتیبان‌گیری بیش از حد بزرگ است.');
+  }
+  const covers = listCoverFiles();
+  const manifest = getBackupFormat().createBackupManifest({ dbBytes, coverCount: covers.length });
+
+  const zip = new JSZip();
+  zip.file(getBackupFormat().BACKUP_MANIFEST_NAME, JSON.stringify(manifest, null, 2));
+  zip.file(getBackupFormat().BACKUP_DB_NAME, dbBytes);
+  const coversFolder = zip.folder(getBackupFormat().BACKUP_COVERS_PREFIX.replace(/\/$/, ''));
+  for (const cover of covers) {
+    if (cover.size > getBackupFormat().MAX_COVER_BYTES) {
+      throw new Error(`فایل کاورِ ${cover.name} برای پشتیبان‌گیری بیش از حد بزرگ است.`);
+    }
+    coversFolder.file(cover.name, fs.readFileSync(cover.fullPath));
+  }
+  const buffer = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+  return {
+    base64: buffer.toString('base64'),
+    coverCount: covers.length,
+    dbSha256: manifest.dbSha256,
+    size: buffer.length,
+  };
+}
+
+/** خطای قفلِ فایل/دایرکتوری در ویندوز (NTFS) قابلِ تلاشِ مجدد است. */
+function isDirectoryLockError(err) {
+  return err && ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(err.code);
+}
+
+/** renameِ دایرکتوری با تلاشِ مجددِ کوتاه (الگوی مرحله ۱ ـ بخش ب). */
+function retryDirRenameSync(fromPath, toPath) {
+  let lastErr = null;
+  const delays = [50, 100];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      fs.renameSync(fromPath, toPath);
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (!isDirectoryLockError(err) || attempt === 2) throw err;
+      const end = Date.now() + delays[attempt];
+      while (Date.now() < end) { /* انتظارِ همگامِ کوتاه */ }
+    }
+  }
+  throw lastErr || new Error('تغییرِ نامِ پوشه انجام نشد.');
+}
+
+function listPlainFilesInDir(dirPath) {
+  let names = [];
+  try { names = fs.readdirSync(dirPath); } catch (_) { return []; }
+  const out = [];
+  for (const name of names) {
+    try {
+      if (fs.statSync(path.join(dirPath, name)).isFile()) out.push(name);
+    } catch (_) {}
+  }
+  out.sort();
+  return out;
+}
+
+/**
+ * Fallbackِ فایل‌به‌فایل برای ویندوز (مرحله ۵ ـ بخش ب): وقتی
+ * renameِ خودِ دایرکتوریِ covers به‌خاطرِ باز بودنِ یک تصویر در
+ * تگِ <img> یا پروتکلِ comic:// قفل است، پوشه نگه داشته می‌شود؛
+ * فایل‌های قبلی به covers.pre-restore کپی می‌شوند و تک‌تکِ
+ * فایل‌های staging با copyFileSync درونِ covers نوشته می‌شوند.
+ * فایل‌های قدیمی‌ای که در مجموعهٔ جدید نیستند، بهترین تلاش حذف
+ * می‌شوند؛ اگر قفل، حذفشان را نگذاشت، در بوتِ بعدی، جاروی
+ * orphanِ کاورها آن‌ها را پاک می‌کند (پس شکستِ حذف، شکستِ
+ * بازیابی نیست). کپیِ هر فایلِ staging که نشد، در failedCopies
+ * برمی‌گردد و فراخواننده باید بازیابی را ناموفق اعلام کند.
+ */
+function swapCoversDirectoryFileByFile(stagingDir) {
+  const failedCopies = [];
+  try { fs.mkdirSync(COVERS_DIR, { recursive: true }); } catch (_) {}
+  try { fs.rmSync(COVERS_PRE_RESTORE_DIR, { recursive: true, force: true }); } catch (_) {}
+  try { fs.mkdirSync(COVERS_PRE_RESTORE_DIR, { recursive: true }); } catch (_) {}
+  const oldFiles = listPlainFilesInDir(COVERS_DIR);
+  for (const name of oldFiles) {
+    try { fs.copyFileSync(path.join(COVERS_DIR, name), path.join(COVERS_PRE_RESTORE_DIR, name)); } catch (_) {}
+  }
+  const stagingFiles = listPlainFilesInDir(stagingDir);
+  for (const name of stagingFiles) {
+    try {
+      fs.copyFileSync(path.join(stagingDir, name), path.join(COVERS_DIR, name));
+    } catch (_) {
+      failedCopies.push(name);
+    }
+  }
+  const stagingSet = new Set(stagingFiles);
+  const staleLeft = [];
+  for (const name of oldFiles) {
+    if (stagingSet.has(name)) continue;
+    try { fs.unlinkSync(path.join(COVERS_DIR, name)); } catch (_) { staleLeft.push(name); }
+  }
+  try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch (_) {}
+  return { failedCopies, staleLeft };
+}
+
+/**
+ * جابه‌جاییِ پوشهٔ کاورها با پوشهٔ staging + بازگشت در صورتِ خطا.
+ * مسیرِ سریع، renameِ دایرکتوری است؛ اگر در ویندوز قفل شد،
+ * Fallbackِ فایل‌به‌فایل (swapCoversDirectoryFileByFile) بازیابی را
+ * نجات می‌دهد و فقط وقتی کپیِ فایل‌های staging هم نشد، خطا می‌دهد.
+ */
+function swapCoversDirectory(stagingDir) {
+  const hadCovers = fs.existsSync(COVERS_DIR);
+  try {
+    if (hadCovers) {
+      if (fs.existsSync(COVERS_PRE_RESTORE_DIR)) {
+        fs.rmSync(COVERS_PRE_RESTORE_DIR, { recursive: true, force: true });
+      }
+      retryDirRenameSync(COVERS_DIR, COVERS_PRE_RESTORE_DIR);
+    }
+    try {
+      retryDirRenameSync(stagingDir, COVERS_DIR);
+      return;
+    } catch (err) {
+      if (hadCovers && fs.existsSync(COVERS_PRE_RESTORE_DIR) && !fs.existsSync(COVERS_DIR)) {
+        try { fs.renameSync(COVERS_PRE_RESTORE_DIR, COVERS_DIR); } catch (_) {}
+      }
+      throw err;
+    }
+  } catch (fastErr) {
+    // Fallback فقط وقتی معنا دارد که staging هنوز سرِ جایش باشد.
+    if (!fs.existsSync(stagingDir)) throw fastErr;
+    // اگر rollbackِ بالا موفق نبود و پوشهٔ covers نیست، اول همان
+    // rollback را با تلاشِ مجدد امتحان کن تا fallback، پوشه‌ای
+    // خالی نسازد.
+    if (hadCovers && !fs.existsSync(COVERS_DIR) && fs.existsSync(COVERS_PRE_RESTORE_DIR)) {
+      try { retryDirRenameSync(COVERS_PRE_RESTORE_DIR, COVERS_DIR); } catch (_) {}
+    }
+    const result = swapCoversDirectoryFileByFile(stagingDir);
+    if (result.failedCopies.length > 0) {
+      throw new Error('جایگزینیِ کاورها با کپیِ فایل‌به‌فایل کامل نشد (' + result.failedCopies.join(', ') + ')؛ نسخهٔ قبلی در covers.pre-restore نگه داشته شده است.');
+    }
+    return;
+  }
+}
+
+/**
+ * اعتبارسنجی و اعمالِ فایلِ پشتیبان. همهٔ بررسی‌ها پیش از هر تغییری
+ * انجام می‌شوند؛ ترتیبِ تغییرات: ۱) کپیِ ایمنیِ دیتابیسِ فعلی،
+ * ۲) جایگزینیِ اتمیکِ دیتابیس از مسیرِ writeDB، ۳) جابه‌جاییِ کاورها.
+ * @returns {Promise<{coverCount: number, dbSha256: string}>}
+ */
+async function applyRestoreFromZip(zipBuffer) {
+  if (!Buffer.isBuffer(zipBuffer) || zipBuffer.length === 0) {
+    throw new Error('فایل پشتیبان خالی است.');
+  }
+  if (zipBuffer.length > getBackupFormat().MAX_BACKUP_BYTES) {
+    throw new Error('فایل پشتیبان بیش از حد بزرگ است.');
+  }
+  let zip;
+  try {
+    zip = await JSZip.loadAsync(zipBuffer);
+  } catch (_) {
+    throw new Error('فایل پشتیبان خراب است یا یک فایل ZIP معتبر نیست.');
+  }
+  const entryNames = Object.keys(zip.files || {});
+  if (entryNames.length > getBackupFormat().MAX_BACKUP_ENTRIES) {
+    throw new Error('فایل پشتیبان ورودی‌های بیش از حد زیادی دارد.');
+  }
+
+  // --- اعتبارسنجی (پیش از هر تغییری) ---
+  const manifestFile = zip.file(getBackupFormat().BACKUP_MANIFEST_NAME);
+  if (!manifestFile || manifestFile.dir) {
+    throw new Error('فایل پشتیبان، manifest ندارد.');
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(await manifestFile.async('string'));
+  } catch (_) {
+    throw new Error('فایل manifest پشتیبان خوانا نیست.');
+  }
+  const manifestError = getBackupFormat().validateBackupManifest(manifest);
+  if (manifestError) throw new Error(manifestError);
+
+  const dbFile = zip.file(getBackupFormat().BACKUP_DB_NAME);
+  if (!dbFile || dbFile.dir) {
+    throw new Error('فایل پشتیبان، دیتابیس (db.json) ندارد.');
+  }
+  const dbBytes = await dbFile.async('nodebuffer');
+  if (dbBytes.length !== manifest.dbSize || dbBytes.length > getBackupFormat().MAX_DB_BYTES) {
+    throw new Error('اندازهٔ دیتابیسِ داخلِ پشتیبان با manifest هم‌خوانی ندارد.');
+  }
+  if (getBackupFormat().sha256Hex(dbBytes) !== manifest.dbSha256) {
+    throw new Error('اثر انگشتِ دیتابیسِ داخلِ پشتیبان با manifest هم‌خوانی ندارد؛ فایل ممکن است خراب یا دست‌کاری‌شده باشد.');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(dbBytes.toString('utf8'));
+  } catch (_) {
+    throw new Error('دیتابیسِ داخلِ فایل پشتیبان، JSON معتبر نیست.');
+  }
+  const dbError = getBackupFormat().validateRestoredDb(parsed);
+  if (dbError) throw new Error(dbError);
+  const migratedDb = migrateSchema(parsed);
+
+  // کاورها: همهٔ ورودی‌های covers/ باید نامِ امن داشته باشند و در سقف باشند؛
+  // و هر ارجاعِ داخلِ دیتابیس باید فایلِ متناظرش در پشتیبان باشد.
+  const coverEntries = [];
+  for (const name of entryNames) {
+    const entry = zip.files[name];
+    if (entry.dir) continue;
+    if (!name.startsWith(getBackupFormat().BACKUP_COVERS_PREFIX)) continue;
+    const fileName = name.slice(getBackupFormat().BACKUP_COVERS_PREFIX.length);
+    if (!getBackupFormat().isSafeCoverFileName(fileName)) {
+      throw new Error(`فایل پشتیبان، ورودیِ کاورِ نامعتبر دارد (${fileName}).`);
+    }
+    coverEntries.push({ name, fileName, entry });
+  }
+  if (coverEntries.length !== manifest.coverCount) {
+    throw new Error('شمارِ کاورهای داخلِ پشتیبان با manifest هم‌خوانی ندارد.');
+  }
+  const availableCovers = new Set(coverEntries.map((c) => c.fileName));
+  const referenced = getBackupFormat().collectBackupCoverReferences(migratedDb);
+  const missing = [...referenced].filter((f) => !availableCovers.has(f));
+  if (missing.length > 0) {
+    throw new Error(`فایل پشتیبان ناقص است؛ ${missing.length} کاورِ موردنیازِ دیتابیس در آن نیست. بازیابی انجام نشد.`);
+  }
+  const coverBuffers = [];
+  for (const cover of coverEntries) {
+    const buffer = await cover.entry.async('nodebuffer');
+    if (buffer.length > getBackupFormat().MAX_COVER_BYTES) {
+      throw new Error(`فایل کاورِ ${cover.fileName} در پشتیبان بیش از حد بزرگ است.`);
+    }
+    coverBuffers.push({ fileName: cover.fileName, buffer });
+  }
+
+  // --- اعمال (پس از اعتبارسنجیِ کامل) ---
+  // ۱) کپیِ ایمنیِ دیتابیسِ فعلی، پیش از هر جایگزینی.
+  if (fs.existsSync(DB_FILE)) {
+    try { fs.copyFileSync(DB_FILE, DB_PRE_RESTORE_FILE); } catch (_) {}
+  }
+  // ۲) جایگزینیِ اتمیکِ دیتابیس از مسیرِ writeDB (حافظهٔ ورکر همگام می‌ماند).
+  const written = writeDB(migratedDb, true);
+  if (!written) {
+    throw new Error('جایگزینیِ دیتابیس انجام نشد؛ اطلاعات فعلی دست‌نخورده باقی ماند.');
+  }
+  // ۳) کاورها: اول در پوشهٔ staging، بعد جابه‌جاییِ اتمیکِ پوشه.
+  if (fs.existsSync(COVERS_STAGING_DIR)) {
+    fs.rmSync(COVERS_STAGING_DIR, { recursive: true, force: true });
+  }
+  fs.mkdirSync(COVERS_STAGING_DIR, { recursive: true });
+  try {
+    for (const cover of coverBuffers) {
+      atomicWriteBinaryFileSync(path.join(COVERS_STAGING_DIR, cover.fileName), cover.buffer);
+    }
+    swapCoversDirectory(COVERS_STAGING_DIR);
+  } catch (err) {
+    try { fs.rmSync(COVERS_STAGING_DIR, { recursive: true, force: true }); } catch (_) {}
+    throw new Error('جایگزینیِ کاورها کامل نشد: ' + (err && err.message ? err.message : String(err)));
+  }
+  return { coverCount: coverBuffers.length, dbSha256: manifest.dbSha256 };
+}
+
 initDB();
 readDB();
 
@@ -945,6 +1303,54 @@ parentPort.on('message', (request) => {
           updatedAt: null
         };
         sendReply({ type: 'done', action, progress });
+        break;
+      }
+
+      // مرحله ۶ ـ بخش الف: آمارِ واقعیِ مطالعه، به تفکیکِ روزِ محلی.
+      // رندرر گزارش‌ها را دسته‌ای می‌فرستد؛ اینجا فقط جمع می‌شود و
+      // نوشته می‌شود. سقف‌های محافظ، از دادهٔ خراب یا سوءاستفادهٔ
+      // فراخوانِ مستقیم جلوگیری می‌کنند.
+      case 'RECORD_READING_ACTIVITY': {
+        const { date, pages = 0, seconds = 0 } = payload || {};
+        if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          sendReply({ type: 'error', action, message: 'تاریخِ فعالیت معتبر نیست.' });
+          return;
+        }
+        const addPages = Math.max(0, Math.min(10000, Math.floor(Number(pages) || 0)));
+        const addSeconds = Math.max(0, Math.min(86400, Math.floor(Number(seconds) || 0)));
+        if (addPages === 0 && addSeconds === 0) {
+          sendReply({ type: 'done', action, success: true, days: db.readingStats?.days || {} });
+          return;
+        }
+        if (!db.readingStats || typeof db.readingStats !== 'object' || Array.isArray(db.readingStats)) {
+          db.readingStats = { days: {} };
+        }
+        if (!db.readingStats.days || typeof db.readingStats.days !== 'object') {
+          db.readingStats.days = {};
+        }
+        const prev = db.readingStats.days[date] || { pages: 0, seconds: 0 };
+        db.readingStats.days[date] = {
+          pages: Math.min(100000, (Number(prev.pages) || 0) + addPages),
+          seconds: Math.min(86400, (Number(prev.seconds) || 0) + addSeconds),
+        };
+        // هرسِ روزهای خیلی قدیمی (بیش از ۱۰۹۵ روز) در همان نوشتن.
+        const dayKeys = Object.keys(db.readingStats.days).sort();
+        if (dayKeys.length > 1095) {
+          for (const oldKey of dayKeys.slice(0, dayKeys.length - 1095)) {
+            delete db.readingStats.days[oldKey];
+          }
+        }
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true, days: db.readingStats.days });
+        break;
+      }
+
+      case 'GET_READING_STATS': {
+        const days =
+          db.readingStats && typeof db.readingStats === 'object' && db.readingStats.days && typeof db.readingStats.days === 'object'
+            ? db.readingStats.days
+            : {};
+        sendReply({ type: 'done', action, days });
         break;
       }
 
@@ -1512,6 +1918,36 @@ parentPort.on('message', (request) => {
 
       case 'GET_SHORTCUTS': {
         sendReply({ type: 'done', action, shortcuts: db.shortcuts || {} });
+        break;
+      }
+
+      case 'BUILD_BACKUP': {
+        buildBackupZip()
+          .then((result) => {
+            sendReply({ type: 'done', action, success: true, ...result });
+          })
+          .catch((err) => {
+            sendReply({ type: 'error', action, message: err && err.message ? err.message : 'خطا در ساخت فایل پشتیبان.' });
+          });
+        break;
+      }
+
+      case 'RESTORE_BACKUP': {
+        const { base64 } = payload || {};
+        if (!base64 || typeof base64 !== 'string') {
+          sendReply({ type: 'error', action, message: 'دادهٔ فایل پشتیبان ارسال نشده است.' });
+          break;
+        }
+        // فلاشِ اول: تا نوشتنِ debounceِ در حالِ انجام، دیتابیسِ فعلی
+        // روی دیسک کامل شود و کپیِ .pre-restore.bak، تازه‌ترین وضعیت باشد.
+        handleFlushSync()
+          .then(() => applyRestoreFromZip(Buffer.from(base64, 'base64')))
+          .then((result) => {
+            sendReply({ type: 'done', action, success: true, ...result });
+          })
+          .catch((err) => {
+            sendReply({ type: 'error', action, message: err && err.message ? err.message : 'خطا در بازیابیِ فایل پشتیبان.' });
+          });
         break;
       }
 

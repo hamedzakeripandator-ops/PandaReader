@@ -1,16 +1,28 @@
 {
-  "name": "my-comic-reader",
-  "version": "1.0.0",
-  "description": "A modern offline comic and manga reader for desktop",
-  "main": "electron/main.js",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "electron": "electron ."
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.25.12": true
   },
-  "keywords": [],
   "author": "",
-  "license": "ISC",
+  "build": {
+    "appId": "com.comicreader.app",
+    "asar": true,
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "productName": "my-comic-reader",
+    "win": {
+      "arch": [
+        "x64"
+      ],
+      "target": "nsis"
+    }
+  },
   "dependencies": {
     "jszip": "^3.10.1",
     "konva": "^10.9.0",
@@ -24,13 +36,23 @@
     "react-konva": "^19.3.2",
     "zustand": "^5.0.15"
   },
+  "description": "A modern offline comic and manga reader for desktop",
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.0",
-    "electron": "^33.0.0",
+    "electron": "33.4.11",
+    "electron-builder": "^26.18.0",
     "vite": "^6.0.0"
   },
-  "allowScripts": {
-    "electron@33.4.11": true,
-    "esbuild@0.25.12": true
-  }
+  "keywords": [],
+  "license": "ISC",
+  "main": "electron/main.js",
+  "name": "my-comic-reader",
+  "private": true,
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "dist": "npm run build && electron-builder",
+    "electron": "electron ."
+  },
+  "version": "1.0.0"
 }

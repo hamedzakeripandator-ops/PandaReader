@@ -22,8 +22,14 @@ const FOLDER_COLORS = [
 // پاک‌سازیِ ComicCard درخواستِ در صفِ آن را لغو می‌کند (مراجعه:
 // thumbnailService.js، مرحله ۴). مانتِ دوباره ارزان است چون کاور از کشِ
 // رم/دیسک برمی‌گردد، نه از استخراجِ دوباره.
+// مرحله ۴ ـ بخش ب: ارتفاعِ واقعیِ کارت، هنگامِ مرئی بودن اندازه‌گیری
+// و روی اسکلت قفل می‌شود تا جایگزینیِ کارت با اسکلت، حتی یک پیکسل هم
+// ارتفاعِ ردیف را عوض نکند و پرشِ اسکرول صفر شود (اسکلتِ ثابت، چون
+// بخشِ توضیحاتِ کارت همیشه ۳۷ پیکسل عنوان + ردیفِ برچسب است، هرگز
+// دقیق درنمی‌آمد).
 function LazyLibraryCard({ item, onOpenComic, onRemove }) {
   const slotRef = useRef(null);
+  const measuredHeightRef = useRef(0);
   const [isVisible, setIsVisible] = useState(false);
 
   useEffect(() => {
@@ -43,12 +49,49 @@ function LazyLibraryCard({ item, onOpenComic, onRemove }) {
     return () => observer.disconnect();
   }, []);
 
+  // مرحله ۴ ـ بخش ب: قفلِ ارتفاعِ اسکلت. تا وقتی کارت مرئی است،
+  // ارتفاعِ واقعیِ slot خوانده و در ref نگه داشته می‌شود (ResizeObserver
+  // تغییرِ ارتفاع بر اثرِ ری‌سایزِ پنجره یا تغییرِ محتوا را هم دنبال
+  // می‌کند)؛ وقتی کارت از دید خارج شد و اسکلت جایش را گرفت، همان
+  // ارتفاعِ اندازه‌گیری‌شده روی اسکلت اعمال می‌شود. ref عمداً state
+  // نیست: خواندنش دقیقاً در همان رندرِ تعویض انجام می‌شود.
+  useEffect(() => {
+    if (!isVisible) return;
+    const el = slotRef.current;
+    if (!el) return;
+    const measure = () => {
+      const h = el.offsetHeight || 0;
+      if (h > 0) measuredHeightRef.current = h;
+    };
+    measure();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [isVisible]);
+
+  const lockedHeight = measuredHeightRef.current;
+
   return (
     <div ref={slotRef}>
       {isVisible ? (
         <ComicCard item={item} onOpenComic={onOpenComic} onRemove={onRemove} />
       ) : (
-        <div style={styles.cardSkeleton}>
+        <div
+          style={
+            lockedHeight > 0
+              ? {
+                  ...styles.cardSkeleton,
+                  height: lockedHeight,
+                  boxSizing: 'border-box',
+                  overflow: 'hidden',
+                }
+              : styles.cardSkeleton
+          }
+        >
           <div style={styles.skeletonCover} />
           <div style={styles.skeletonLine} />
           <div style={{ ...styles.skeletonLine, width: '60%' }} />

@@ -161,6 +161,22 @@ export const coreApi = {
     });
   },
 
+  // مرحله ۷ ـ بخش الف: اطلاعاتِ محیط (نسخه/حالت/سلامتِ سیستم)
+  // برای صفحهٔ دانلودها. با تایم‌اوتِ ۵ ثانیه‌ایِ مرسومِ همین
+  // فایل، و همان قراردادِ {success:false} وقتی API در دسترس نیست.
+  getAppInfo: async () => {
+    const api = getApi();
+    if (!api?.getAppInfo) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.getAppInfo(), 5000, {
+        success: false,
+        error: 'تایم‌اوت دریافتِ اطلاعاتِ برنامه',
+      });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در دریافتِ اطلاعاتِ برنامه' };
+    }
+  },
+
   showItemInFolder: async (filePath) => {
     const api = getApi();
     if (!api?.showItemInFolder) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
@@ -198,6 +214,63 @@ export const coreApi = {
     } catch (err) {
       return { success: false, error: err?.message || 'خطا در ذخیره اسکرین‌شات' };
     }
+  },
+
+  // مرحله ۵ ـ بخش ب: خروجیِ PDFِ حاشیه‌نویسی‌شده (ذخیرهٔ دوگانه).
+  // عمداً بدونِ
+  // withTimeout است (مثلِ openFile/saveScreenshot): دیالوگِ ذخیره در
+  // main باز می‌شود و زمانِ انتخابِ کاربر، نباید تایم‌اوتِ کاذب بسازد.
+  exportAnnotatedPdf: async (payload) => {
+    const api = getApi();
+    if (!api?.exportAnnotatedPdf) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    // مرحله ۵ ـ بخش ب: mode ('in-place' | 'save-as') از همین‌جا عبور
+    // می‌کند و pages می‌تواند آبجکتِ خالی باشد، فقط در حالتِ درجا
+    // (بازگرداندنِ فایل به پایهٔ تمیز پس از پاک‌شدنِ همهٔ آیتم‌ها).
+    if (!payload?.pdfPath || payload?.pages == null) {
+      return { success: false, error: 'دادهٔ خروجیِ PDF کامل نیست.' };
+    }
+    try {
+      return await api.exportAnnotatedPdf(payload);
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ساختِ PDFِ حاشیه‌نویسی‌شده' };
+    }
+  },
+
+  // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی (دیالوگ‌دار،
+  // بدونِ تایم‌اوتِ رندرر — همان استدلالِ exportAnnotatedPdf).
+  exportBackup: async () => {
+    const api = getApi();
+    if (!api?.exportBackup) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.exportBackup();
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ساختِ فایل پشتیبان' };
+    }
+  },
+
+  importBackup: async () => {
+    const api = getApi();
+    if (!api?.importBackup) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.importBackup();
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در بازیابیِ فایل پشتیبان' };
+    }
+  },
+
+  // مرحله ۶ ـ بخش الف: آمارِ واقعیِ مطالعه. از مسیرِ dbActionِ معمولی
+  // می‌گذرد (تایم‌اوتِ ۵٫۵ ثانیه‌ایِ استاندارد)؛ فراخواننده (سرویسِ
+  // readingActivity) گزارش‌ها را دسته‌ای می‌فرستد، پس این فراخوان‌ها
+  // کم‌تعداد و سبک‌اند.
+  recordReadingActivity: async ({ date, pages = 0, seconds = 0 } = {}) => {
+    return await coreApi.dbAction({
+      action: 'RECORD_READING_ACTIVITY',
+      payload: { date, pages, seconds },
+    });
+  },
+
+  getReadingStats: async () => {
+    return await coreApi.dbAction({ action: 'GET_READING_STATS', payload: {} });
   },
 
   toggleFullscreen: async () => {

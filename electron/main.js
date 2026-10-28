@@ -6,6 +6,35 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { Readable } = require('stream');
+const { createLogger, resolveComicDataDir } = require('./logger');
+
+// مرحله ۷ ـ بخش الف: محلِ دیتای برنامه، یک بار و پیش از هر مصرفی
+// مشخص می‌شود: حالتِ Portable (portable-data در کنارِ فایلِ
+// اجرایی، یا .portable، یا COMIC_READER_PORTABLE=1) یا حالتِ عادی
+// (~/.comic-reader، دقیقاً مثلِ قبل). این مسیر، از همین‌جا در
+// متغیرِ محیطیِ COMIC_READER_DATA_DIR هم گذاشته می‌شود تا ورکرِ
+// دیتابیس (database.js) همان پوشه را بخواند؛ app.comicDataDir و
+// app.isPortableMode هم برای بقیهٔ ماژول‌ها در دسترس‌اند.
+const COMIC_DATA_DIR = resolveComicDataDir(app);
+app.comicDataDir = COMIC_DATA_DIR;
+app.isPortableMode = COMIC_DATA_DIR !== path.join(os.homedir(), '.comic-reader');
+process.env.COMIC_READER_DATA_DIR = COMIC_DATA_DIR;
+const logger = createLogger(COMIC_DATA_DIR);
+
+// مرحله ۷ ـ بخش الف: لاگرِ چرخشیِ دیسک. پیش از این، هیچ هندلری
+// برای uncaughtException/unhandledRejection نبود و خطاهای بحرانیِ
+// پروسهٔ اصلی، فقط در کنسولِ (غیرقابلِ دسترسِ کاربر) گم می‌شدند.
+// حالا با زمان و Stack Trace در logs/app.log ثبت می‌شوند (چرخش در
+// سقفِ ۲ مگابایت). عمداً app.quit صدا زده نمی‌شود: رفتارِ قبلی،
+// ادامهٔ کار بود و فقط ثبتِ خطا اضافه شده است.
+process.on('uncaughtException', (err) => {
+  try { logger.error('uncaughtException', err); } catch (_) { /* ignore */ }
+  try { console.error('Uncaught exception:', err); } catch (_) { /* ignore */ }
+});
+process.on('unhandledRejection', (reason) => {
+  try { logger.error('unhandledRejection', reason); } catch (_) { /* ignore */ }
+  try { console.error('Unhandled rejection:', reason); } catch (_) { /* ignore */ }
+});
 
 // ۱. تنظیم سوییچ‌های شتاب‌نگاشت سخت‌افزاری کرومیوم، تردهای رستر موازی و حذف لاگ‌های مزاحم
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,Autofill,Translate');
@@ -75,6 +104,81 @@ app.normalizeComicCacheKey = (rawPath) => {
   return path.normalize(rawPath).toLowerCase();
 };
 
+// مرحله ۶ ـ بخش ب: رجیستریِ استریم‌های خواندنِ فعالِ پروتکل comic://
+// (کلید = همان کلیدِ نرمال‌شدهٔ کشِ رم) تا پیش از ذخیرهٔ درجا، هندلِ
+// بازی روی فایلِ PDF بسته شود و ویندوز، جایگزینی را قفل نکند.
+// استریم، هنگامِ ساخته‌شدن ثبت و با رویدادِ close حذف می‌شود؛ پس
+// رجیستری هرگز استریمِ تمام‌شده را نگه نمی‌دارد. بستن، بهترین تلاش
+// است: اگر استریمی نباشد، هیچ اتفاقی نمی‌افتد.
+const activeComicReadStreams = new Map();
+
+function closeComicReadStreamsForKey(cacheKey) {
+  if (!cacheKey) return;
+  const set = activeComicReadStreams.get(cacheKey);
+  if (!set || set.size === 0) return;
+  activeComicReadStreams.delete(cacheKey);
+  for (const nodeStream of set) {
+    try { nodeStream.destroy(); } catch (_) {}
+  }
+}
+
+function trackComicReadStream(cacheKey, nodeStream) {
+  if (!cacheKey || !nodeStream || typeof nodeStream.once !== 'function') return;
+  let set = activeComicReadStreams.get(cacheKey);
+  if (!set) {
+    set = new Set();
+    activeComicReadStreams.set(cacheKey, set);
+  }
+  set.add(nodeStream);
+  nodeStream.once('close', () => {
+    const current = activeComicReadStreams.get(cacheKey);
+    if (current) {
+      current.delete(nodeStream);
+      if (current.size === 0) activeComicReadStreams.delete(cacheKey);
+    }
+  });
+}
+
+// مرحله ۶ ـ بخش ب: بستنِ همهٔ استریم‌های خواندنِ باز روی یک PDF و
+// روی پایهٔ خامش (.orig.bak)؛ از ipcHandlers پیش از ذخیرهٔ درجا و
+// از invalidateComicRamCache پس از آن صدا زده می‌شود.
+app.closeComicReadStreams = (rawPath) => {
+  if (!rawPath || typeof rawPath !== 'string') return;
+  closeComicReadStreamsForKey(app.normalizeComicCacheKey(rawPath));
+  closeComicReadStreamsForKey(app.normalizeComicCacheKey(String(rawPath) + '.orig.bak'));
+};
+
+// مرحله ۶ ـ بخش ب: انتخابِ مسیرِ واقعیِ سروِ PDF. اگر پایهٔ خامِ
+// معتبر (<filePath>.orig.bak با جادوی %PDF-) کنارِ فایل هست، بایت‌ها
+// از روی آن سرو می‌شوند تا (۱) فایلِ اصلی، پس از اولین ذخیرهٔ درجا
+// هرگز توسط comic:// باز نشود، (۲) آفست‌های Range در pdf.js هرگز با
+// بایت‌های جدیدِ pdf-lib خراب نشوند (پایهٔ خام تغییر نمی‌کند)، و
+// (۳) در برنامه همیشه برگهٔ تمیز زیرِ AnnotationLayer دیده شود.
+// اگر پایهٔ خام نیست یا معتبر نیست، همان فایلِ اصلی سرو می‌شود.
+// فقط stat + خواندنِ ۵ بایتِ اول است تا در هر درخواستِ Range،
+// سربارِ ناچیزی داشته باشد.
+function resolvePdfServePath(normalizedPath) {
+  if (!normalizedPath || typeof normalizedPath !== 'string') return normalizedPath;
+  if (path.extname(normalizedPath).toLowerCase() !== '.pdf') return normalizedPath;
+  const origPath = normalizedPath + '.orig.bak';
+  let fd = -1;
+  try {
+    const stat = fs.statSync(origPath);
+    if (!stat.isFile() || stat.size <= 5) return normalizedPath;
+    fd = fs.openSync(origPath, 'r');
+    const head = Buffer.alloc(5);
+    const read = fs.readSync(fd, head, 0, 5, 0);
+    if (read === 5 && head.toString('ascii') === '%PDF-') return origPath;
+  } catch (_) {
+    // هر خطا (نیست، دایرکتوری، غیرقابلِ خواندن) = سرو از فایلِ اصلی.
+  } finally {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+  return normalizedPath;
+}
+
 // مرحله ۲ ـ بخش الف: ورودی‌های کشِ رم حالا متادیتا هم دارند
 // ({buffer, mtimeMs, size, validated}) تا جایگزینیِ فایل در همان
 // مسیر، با بافرِ کهنه سرو نشود. ورودی‌های بدونِ متادیتا (مثلاً
@@ -112,6 +216,40 @@ app.setComicPageInRam = (rawPath, buffer, meta = null) => {
     validated: Boolean(meta)
   });
   currentRamCacheBytes += buffer.length;
+};
+
+// مرحله ۵ ـ بخش ب: باطل‌کردنِ فقط یک ورودیِ کشِ رم (پس از ذخیرهٔ
+// درجا). شمارندهٔ بایت، فقط وقتی کم می‌شود که delete واقعاً حذف
+// کرده باشد (همان گاردِ مرحله ۲ ـ بخش ب در برابرِ مسابقهٔ دو
+// درخواستِ هم‌زمان)؛ ورودیِ inFlight هم پاک می‌شود تا خواندنِ
+// نیمه‌کارهٔ قدیمی، دوباره بافرِ کهنه را در کش ننشاند.
+app.invalidateComicRamCache = (rawPath) => {
+  if (!rawPath || typeof rawPath !== 'string') return;
+  const key = app.normalizeComicCacheKey(rawPath);
+  if (!key) return;
+  const entry = app.activeComicRamCache.get(key);
+  if (entry && app.activeComicRamCache.delete(key)) {
+    currentRamCacheBytes -= entry.buffer ? entry.buffer.length : 0;
+    if (currentRamCacheBytes < 0) currentRamCacheBytes = 0;
+  }
+  if (app.inFlightDiskReads) app.inFlightDiskReads.delete(key);
+  // مرحله ۶ ـ بخش ب: پس از اولین ذخیرهٔ درجا، ورودی‌های کش ممکن
+  // است با کلیدِ پایهٔ خام (.orig.bak) هم باشند؛ آن‌ها هم باطل
+  // می‌شوند تا خواندنِ بعدی، بایتِ تازه را بگیرد.
+  const bakKey = app.normalizeComicCacheKey(String(rawPath) + '.orig.bak');
+  if (bakKey && bakKey !== key) {
+    const bakEntry = app.activeComicRamCache.get(bakKey);
+    if (bakEntry && app.activeComicRamCache.delete(bakKey)) {
+      currentRamCacheBytes -= bakEntry.buffer ? bakEntry.buffer.length : 0;
+      if (currentRamCacheBytes < 0) currentRamCacheBytes = 0;
+    }
+    if (app.inFlightDiskReads) app.inFlightDiskReads.delete(bakKey);
+  }
+  // مرحله ۶ ـ بخش ب: بستنِ استریم‌های خواندنِ فعال روی هر دو مسیر،
+  // تا در ذخیرهٔ بعدی هیچ هندلِ بازی از سمتِ comic:// نماند.
+  if (typeof app.closeComicReadStreams === 'function') {
+    try { app.closeComicReadStreams(rawPath); } catch (_) {}
+  }
 };
 
 app.readComicPageToRam = async (rawPath) => {
@@ -220,6 +358,8 @@ function parseByteRange(rangeHeader, totalSize) {
 // باز نماند، حتی اگر مصرف‌کنندهٔ وب‌استریم دیگر گوش ندهد.
 function createSafeWebFileStream(filePath, options, abortSignal) {
   const nodeStream = fs.createReadStream(filePath, options);
+  // مرحله ۶ ـ بخش ب: ثبت در رجیستری تا پیش از ذخیرهٔ درجا بسته شود.
+  trackComicReadStream(app.normalizeComicCacheKey(filePath), nodeStream);
   nodeStream.on('error', () => {
     try { nodeStream.destroy(); } catch (_) {}
   });
@@ -272,7 +412,7 @@ const ALLOWED_COMIC_EXTS = new Set([
 ]);
 
 // پوشهٔ کاورهای روی دیسک (همان که ورکرِ دیتابیس می‌نویسد).
-const COMIC_COVERS_DIR = path.join(os.homedir(), '.comic-reader', 'covers');
+const COMIC_COVERS_DIR = path.join(COMIC_DATA_DIR, 'covers'); // مرحله ۷ ـ بخش الف: از COMIC_DATA_DIR (حالتِ Portable را هم پوشش می‌دهد).
 
 // مرحله ۲ ـ بخش الف: helperهای خالصِ پروتکل (بدونِ وابستگی به
 // Electron، تا مستقل قابلِ تست باشند).
@@ -364,6 +504,13 @@ function createWindow() {
     if (validatedURL && validatedURL.startsWith('data:')) return;
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const devUrl = 'http://localhost:5173';
+    // مرحله ۷ ـ بخش الف: در حالتِ بسته‌بندی‌شده، دکمهٔ «تلاش مجدد»
+    // باید دوباره فایلِ dist/index.html را لود کند، نه سرورِ توسعه
+    // را؛ و متنِ خطا هم باید علتِ مخصوصِ همان حالت را بگوید.
+    const isPackagedMode = Boolean(app.isPackaged);
+    const retryUrl = isPackagedMode
+      ? 'file:///' + path.join(app.getAppPath(), 'dist', 'index.html').split(path.sep).join('/')
+      : devUrl;
     const safeDesc = String(errorDescription || '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -372,13 +519,24 @@ function createWindow() {
       + '<title>خطا در بارگذاری</title>'
       + '<style>body{margin:0;background:#0a0f13;color:#e5e7eb;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh}main{text-align:center;max-width:480px;padding:24px}h1{font-size:20px}p{color:#9ca3af;line-height:2}button{margin-top:16px;padding:10px 24px;border-radius:10px;border:1px solid rgba(255,255,255,.2);background:#111827;color:#fff;font-size:15px;cursor:pointer}button:hover{background:#1f2937}</style></head>'
       + '<body><main><h1>برنامه نتوانست بارگذاری شود</h1>'
-      + '<p>سرورِ توسعه (Vite) در دسترس نیست. مطمئن شوید <b>npm run dev</b> در حال اجراست، بعد دوباره تلاش کنید.</p>'
+      + (isPackagedMode
+        ? '<p>فایلِ dist/index.html پیدا نشد. برنامه را دوباره بسازید (<b>npm run build</b>) و دوباره تلاش کنید.</p>'
+        : '<p>سرورِ توسعه (Vite) در دسترس نیست. مطمئن شوید <b>npm run dev</b> در حال اجراست، بعد دوباره تلاش کنید.</p>')
       + '<p style="font-size:12px;direction:ltr">' + String(errorCode) + ' — ' + safeDesc + '</p>'
-      + '<button onclick="window.location.href=' + "'" + devUrl + "'" + '">تلاش مجدد</button></main></body></html>';
+      + '<button onclick="window.location.href=' + "'" + retryUrl + "'" + '">تلاش مجدد</button></main></body></html>';
     mainWindow.webContents.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(errorHtml));
   });
 
-  mainWindow.loadURL('http://localhost:5173');
+  // مرحله ۷ ـ بخش الف: بارگذاریِ دوگانه. در حالتِ بسته‌بندی‌شده،
+  // فایلِ ساخته‌شدهٔ dist/index.html با loadFile لود می‌شود (بدونِ
+  // نیاز به سرورِ Vite)؛ در حالتِ توسعه، همان localhost:5173ی
+  // قبلی. پیش از این، همیشه localhost لود می‌شد و نسخهٔ
+  // بسته‌بندی‌شده، صفحهٔ سفید نشان می‌داد.
+  if (app.isPackaged) {
+    mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'));
+  } else {
+    mainWindow.loadURL('http://localhost:5173');
+  }
 }
 
 app.whenReady().then(() => {
@@ -452,7 +610,9 @@ app.whenReady().then(() => {
 
       // ۱. پایپ‌لاین فوق‌سریع اختصاصی برای اسناد و کتاب‌های PDF (پشتیبانی از کش رم + Range Requests)
       if (ext === '.pdf') {
-        const stat = await fs.promises.stat(normalizedPath);
+        // مرحله ۶ ـ بخش ب: مسیرِ واقعیِ سرو (پایهٔ خام، اگر معتبر باشد).
+        const servePath = resolvePdfServePath(normalizedPath);
+        const stat = await fs.promises.stat(servePath);
         const totalSize = stat.size;
         const etag = makeComicETag(stat.size, stat.mtimeMs);
         const lastModified = new Date(stat.mtimeMs).toUTCString();
@@ -498,7 +658,7 @@ app.whenReady().then(() => {
             }
           });
         }
-        const cacheKey = app.normalizeComicCacheKey(normalizedPath);
+        const cacheKey = app.normalizeComicCacheKey(servePath);
         const cachedEntry = app.activeComicRamCache.get(cacheKey);
         // فقط ورودیِ اعتبارسنجی‌شده و هم‌خوان با stat فعلی قابلِ
         // استفاده است؛ ورودیِ کهنه یا اعتبارسنجی‌نشده دور انداخته
@@ -533,7 +693,7 @@ app.whenReady().then(() => {
           }
 
           const webStream = createSafeWebFileStream(
-            normalizedPath,
+            servePath,
             { start, end, highWaterMark: 256 * 1024 },
             request.signal
           );
@@ -545,7 +705,7 @@ app.whenReady().then(() => {
 
         // ب) درخواست کامل فایل PDF: برای فایل‌های تا ۱۲۰ مگابایت از کش رم ادغام‌شده استفاده کن
         if (totalSize <= MAX_PDF_RAM_CACHE_BYTES) {
-          const pdfBuffer = await app.readComicPageToRam(normalizedPath);
+          const pdfBuffer = await app.readComicPageToRam(servePath);
           return new Response(pdfBuffer, {
             status: 200,
             headers: {
@@ -557,7 +717,7 @@ app.whenReady().then(() => {
 
         // ج) برای کتاب‌های PDF بسیار حجیم (بالای ۱۲۰ مگابایت)، استریم مستقیم با بافر ۵۱۲ کیلوبایتی
         const fullWebStream = createSafeWebFileStream(
-          normalizedPath,
+          servePath,
           { highWaterMark: 512 * 1024 },
           request.signal
         );

@@ -4,24 +4,14 @@ import useReaderStore from '../../store/useReaderStore';
 import useAppStore from '../../store/useAppStore';
 import KeybindRecorder from './KeybindRecorder';
 import Icons from '../../components/common/Icons';
+import { coreApi } from '../../services/coreApi';
+import annotationLocalBackup from '../../services/annotationLocalBackup';
 
-const SHORTCUT_DESCRIPTIONS = {
-  nextChapter: { title: 'فصل / کمیک بعدی در پوشه', category: 'ناوبری کمیک' },
-  prevChapter: { title: 'فصل / کمیک قبلی در پوشه', category: 'ناوبری کمیک' },
-  zoomIn: { title: 'بزرگ‌نمایی صفحه (Zoom In)', category: 'بزرگ‌نمایی و تصویر' },
-  zoomOut: { title: 'کوچک‌نمایی صفحه (Zoom Out)', category: 'بزرگ‌نمایی و تصویر' },
-  resetZoom: { title: 'بازنشانی زوم به حالت پیش‌فرض', category: 'بزرگ‌نمایی و تصویر' },
-  rotatePage: { title: 'چرخش ۹۰ درجه‌ای صفحات', category: 'بزرگ‌نمایی و تصویر' },
-  toggleLeftSidebar: { title: 'باز و بسته کردن منوی سمت چپ', category: 'پنل‌ها و پنجره' },
-  toggleRightSidebar: { title: 'باز و بسته کردن فهرست صفحات راست', category: 'پنل‌ها و پنجره' },
-  fullscreen: { title: 'حالت تمام‌صفحه (Fullscreen)', category: 'پنل‌ها و پنجره' },
-  quickSnip: { title: 'برش سریع بخشی از تصویر (Snipping)', category: 'ابزارهای کاربردی' },
-  copyPage: { title: 'کپی مستقیم صفحه جاری در کلیپ‌بورد', category: 'ابزارهای کاربردی' },
-  openFile: { title: 'انتخاب و باز کردن فایل جدید', category: 'ابزارهای کاربردی' },
-  openFolder: { title: 'انتخاب و باز کردن پوشه کمیک', category: 'ابزارهای کاربردی' },
-  focusSearch: { title: 'فوکوس سریع روی نوار جستجو', category: 'ابزارهای کاربردی' },
-  openSettings: { title: 'باز کردن صفحه تنظیمات برنامه', category: 'پنل‌ها و پنجره' },
-};
+// مرحله ۷ ـ بخش الف: دیگر هیچ نگاشتِ موازیِ عنوان/دسته در این
+// فایل نیست. ردیف‌های میانبر، مستقیماً از ورودی‌های استور
+// (shortcuts) رندر می‌شوند؛ پس هر ورودیِ جدیدِ استور (مثلِ
+// undoAnnotation یا toggleLeftSidebar) خودبه‌خود این‌جا هم دیده
+// می‌شود و عنوان/دسته، فقط در یک جا تعریف شده است.
 
 export default function SettingsView() {
   const {
@@ -37,23 +27,101 @@ export default function SettingsView() {
 
   const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader'
 
-  const handleSaveShortcut = (actionId, newBind) => {
-    const conflictKey = Object.keys(shortcuts || {}).find((key) => {
-      if (key === actionId) return false;
-      const s = shortcuts[key];
-      return (
-        s?.label?.toLowerCase() === newBind.label.toLowerCase()
-      );
-    });
+  // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی.
+  const [backupBusy, setBackupBusy] = useState(null); // null | 'export' | 'import'
+  const [backupStatus, setBackupStatus] = useState('');
+  const [lastBackup, setLastBackup] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem('comicReader.lastBackup');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.at) return parsed;
+    } catch (_) {}
+    return null;
+  });
 
-    updateShortcut(actionId, newBind);
-
-    if (conflictKey) {
-      const conflictTitle = SHORTCUT_DESCRIPTIONS[conflictKey]?.title || conflictKey;
-      showToast(`میانبر ثبت شد (توجه: مشابه با «${conflictTitle}»)`, { type: 'warning' });
-    } else {
-      showToast(`میانبر جدید (${newBind.label}) در دیتابیس ذخیره شد`, { type: 'success' });
+  const handleExportBackup = async () => {
+    if (backupBusy) return;
+    setBackupBusy('export');
+    setBackupStatus('در حال ساختِ فایل پشتیبان…');
+    try {
+      const result = await coreApi.exportBackup();
+      if (result && result.canceled) {
+        setBackupStatus('ذخیرهٔ فایل پشتیبان لغو شد.');
+        return;
+      }
+      if (result && result.success) {
+        const info = { at: new Date().toISOString(), name: (result.filePath || '').split(/[\\/]/).pop() || '', coverCount: result.coverCount || 0 };
+        setLastBackup(info);
+        try { window.localStorage.setItem('comicReader.lastBackup', JSON.stringify(info)); } catch (_) {}
+        setBackupStatus(`فایل پشتیبان ذخیره شد (${result.coverCount || 0} کاور).`);
+        showToast('فایل پشتیبان با موفقیت ذخیره شد.', { type: 'success' });
+      } else {
+        setBackupStatus((result && result.error) || 'ساختِ فایل پشتیبان انجام نشد.');
+        showToast((result && result.error) || 'ساختِ فایل پشتیبان انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      const msg = 'خطا در ساختِ فایل پشتیبان: ' + (err && err.message ? err.message : String(err));
+      setBackupStatus(msg);
+      showToast(msg, { type: 'error' });
+    } finally {
+      setBackupBusy(null);
     }
+  };
+
+  const handleImportBackup = async () => {
+    if (backupBusy) return;
+    setBackupBusy('import');
+    setBackupStatus('در حال بررسی و بازیابیِ فایل پشتیبان…');
+    try {
+      const result = await coreApi.importBackup();
+      if (result && result.canceled) {
+        setBackupStatus('بازیابی لغو شد؛ هیچ تغییری انجام نشد.');
+        return;
+      }
+      if (result && result.success) {
+        // مرحله ۵ ـ بخش ب: پیش از reload، آینهٔ localStorageِ
+        // حاشیه‌نویسی‌ها پاک می‌شود تا کلیدهای قدیمیِ قبل از Restore،
+        // دوباره واردِ دیتابیسِ بازیابی‌شده نشوند (دیتابیس، مرجعِ
+        // مطلق است). فقط کلیدهای `comicReader.annotations.v1:` پاک
+        // می‌شوند؛ `comicReader.lastBackup` و بقیه دست نمی‌خورند.
+        try { annotationLocalBackup.clearAllAnnotationBackups(); } catch (_) {}
+        setBackupStatus(`بازیابی انجام شد (${result.coverCount || 0} کاور) — برنامه دوباره بارگذاری می‌شود…`);
+        showToast('بازیابی انجام شد؛ برنامه دوباره بارگذاری می‌شود.', { type: 'success' });
+        setTimeout(() => { window.location.reload(); }, 1200);
+      } else {
+        setBackupStatus((result && result.error) || 'بازیابیِ فایل پشتیبان انجام نشد؛ اطلاعات فعلی دست‌نخورده باقی ماند.');
+        showToast((result && result.error) || 'بازیابی انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      const msg = 'خطا در بازیابیِ فایل پشتیبان: ' + (err && err.message ? err.message : String(err));
+      setBackupStatus(msg);
+      showToast(msg, { type: 'error' });
+    } finally {
+      // در حالتِ موفق، reload پس از ۱۲۰۰ میلی‌ثانیه می‌آید؛ finally
+      // زودتر اجرا می‌شود و دکمه را آزاد می‌کند تا کاربر، وضعیتِ
+      // موفقیت را ببیند.
+      setBackupBusy(null);
+    }
+  };
+
+  // مرحله ۷ ـ بخش الف: نتیجهٔ updateShortcut، حکمِ نهایی است.
+  // پیش از این، این تابع، برگشتیِ استور را نادیده می‌گرفت و حتی
+  // وقتی استور، میانبر را به‌خاطرِ تداخل رد می‌کرد، پیامِ موفقیت
+  // نشان می‌داد و کاربر فکر می‌کرد تغییر، اعمال شده است؛ در
+  // حالی که کلیدِ قبلی، همچنان زنده بود. حالا رد شدن، با پیامِ
+  // خطا و بدونِ پیامِ موفقیت گزارش می‌شود.
+  const handleSaveShortcut = (actionId, newBind) => {
+    const result = updateShortcut(actionId, newBind);
+    if (result && result.success === false) {
+      if (result.conflict) {
+        showToast(`این میانبر، قبلاً به «${result.conflictWith || 'اقدامی دیگر'}» اختصاص دارد؛ تغییر انجام نشد.`, { type: 'error' });
+      } else {
+        showToast('ذخیرهٔ میانبر انجام نشد.', { type: 'error' });
+      }
+      return;
+    }
+    showToast(`میانبر جدید (${newBind.label}) در دیتابیس ذخیره شد`, { type: 'success' });
   };
 
   const handleResetAllShortcuts = () => {
@@ -133,15 +201,15 @@ export default function SettingsView() {
           </div>
 
           <div style={styles.shortcutsList}>
-            {Object.keys(SHORTCUT_DESCRIPTIONS).map((actionId) => {
-              const meta = SHORTCUT_DESCRIPTIONS[actionId];
-              const currentBinding = shortcuts?.[actionId] || { label: '—' };
+            {Object.values(shortcuts || {}).map((entry) => {
+              const actionId = entry.id;
+              const currentBinding = entry;
 
               return (
                 <div key={actionId} style={styles.shortcutRow}>
                   <div style={styles.shortcutInfo}>
-                    <span style={styles.shortcutTitle}>{meta.title}</span>
-                    <span style={styles.shortcutCategory}>{meta.category}</span>
+                    <span style={styles.shortcutTitle}>{entry.title}</span>
+                    <span style={styles.shortcutCategory}>{entry.category}</span>
                   </div>
 
                   <KeybindRecorder
@@ -234,6 +302,58 @@ export default function SettingsView() {
           </div>
         </div>
       )}
+
+      {/* مرحله ۵ ـ بخش الف: کارتِ پشتیبان‌گیری و بازیابی — همیشه زیرِ
+          تب‌ها دیده می‌شود (مستقل از تبِ فعال)، چون به هیچ تبِ خاصی
+          تعلق ندارد. */}
+      <div style={styles.sectionCard}>
+        <div style={styles.cardTopRow}>
+          <div>
+            <h3 style={styles.cardTitle}>پشتیبان‌گیری و بازیابی اطلاعات</h3>
+            <p style={styles.cardDesc}>
+              یک فایلِ واحد شاملِ دیتابیس (کتابخانه، تاریخچه، علاقه‌مندی‌ها، پوشه‌ها، تنظیمات و همهٔ حاشیه‌نویسی‌ها) به همراهِ همهٔ فایل‌های کاور. بازیابی، پیش از جایگزینی، سلامتِ فایل را بررسی می‌کند و نسخهٔ فعلی را در db.json.pre-restore.bak نگه می‌دارد.
+            </p>
+          </div>
+          <div style={styles.headerIcon}>
+            <Icons.FileArchive size={22} />
+          </div>
+        </div>
+
+        <div style={styles.backupBtnRow}>
+          <button
+            type="button"
+            onClick={handleExportBackup}
+            disabled={Boolean(backupBusy)}
+            style={{ ...styles.backupBtn, ...(backupBusy ? styles.backupBtnDisabled : {}) }}
+          >
+            <Icons.Download size={15} />
+            <span>{backupBusy === 'export' ? 'در حال ساخت…' : 'دریافت فایل پشتیبان (Export)'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleImportBackup}
+            disabled={Boolean(backupBusy)}
+            style={{ ...styles.backupBtn, ...styles.backupBtnGhost, ...(backupBusy ? styles.backupBtnDisabled : {}) }}
+          >
+            <Icons.FolderOpen size={15} />
+            <span>{backupBusy === 'import' ? 'در حال بازیابی…' : 'بازیابی از فایل پشتیبان (Import)'}</span>
+          </button>
+        </div>
+
+        {(backupStatus || lastBackup) && (
+          <div style={styles.backupStatusRow}>
+            {backupStatus && <span style={styles.backupStatus}>{backupStatus}</span>}
+            {lastBackup && (
+              <span style={styles.backupMeta}>
+                آخرین پشتیبان: {lastBackup.name || '—'}
+                {' — '}
+                {new Date(lastBackup.at).toLocaleString('fa-IR')}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -447,5 +567,51 @@ const styles = {
     height: '18px',
     accentColor: 'var(--accent)',
     cursor: 'pointer',
+  },
+  // مرحله ۵ ـ بخش الف: استایل‌های کارتِ پشتیبان‌گیری (همان توکن‌های
+  // بقیهٔ کارت‌ها: panel/panel2/border/text/muted/accent).
+  backupBtnRow: {
+    display: 'flex',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  backupBtn: {
+    padding: '10px 16px',
+    borderRadius: '11px',
+    backgroundColor: 'var(--accent)',
+    border: '1px solid var(--accent)',
+    color: '#0a0f13',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '7px',
+    transition: 'all 0.18s ease',
+  },
+  backupBtnGhost: {
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    color: 'var(--text)',
+  },
+  backupBtnDisabled: {
+    opacity: 0.55,
+    cursor: 'default',
+  },
+  backupStatusRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  backupStatus: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--text)',
+  },
+  backupMeta: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    color: 'var(--muted)',
   },
 };

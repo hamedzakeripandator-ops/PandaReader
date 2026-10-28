@@ -20,6 +20,7 @@ import {
   Clock,
   Heart,
   Download,
+  Save,
   Rocket,
   Settings,
   SlidersHorizontal,
@@ -134,6 +135,7 @@ export const Icons = {
   Clock: withBase(Clock, 'Icons.Clock'),
   Heart: withFill(Heart, '#f85149', 'Icons.Heart'),
   Download: withBase(Download, 'Icons.Download'),
+  Save: withBase(Save, 'Icons.Save'), // lucide: save — مرحله ۵ بخش ب: دکمهٔ ذخیرهٔ درجا
   Rocket: withBase(Rocket, 'Icons.Rocket'),
   Settings: withBase(Settings, 'Icons.Settings'),
   Sliders: withBase(SlidersHorizontal, 'Icons.Sliders'), // lucide: sliders-horizontal

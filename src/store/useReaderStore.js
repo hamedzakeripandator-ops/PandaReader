@@ -64,6 +64,10 @@ const useReaderStore = create((set, get) => ({
   rotation: 0,
   isLoading: false,
   loadingProgress: 0,
+  pdfSearchOpen: false,
+  pdfOutline: [],
+  pdfOutlineFile: '',
+  pdfOutlineStatus: 'idle',
 
   initZoomSettings: async () => {
     try {
@@ -121,6 +125,10 @@ const useReaderStore = create((set, get) => ({
         preAreaZoomLevel: null,
         areaZoomTarget: null,
         rotation: 0,
+        pdfSearchOpen: false,
+        pdfOutline: [],
+        pdfOutlineFile: '',
+        pdfOutlineStatus: 'idle',
       });
       return;
     }
@@ -147,6 +155,9 @@ const useReaderStore = create((set, get) => ({
       preAreaZoomLevel: null,
       areaZoomTarget: null,
       rotation: 0,
+      pdfOutline: [],
+      pdfOutlineFile: '',
+      pdfOutlineStatus: 'idle',
     });
   },
 
@@ -157,6 +168,18 @@ const useReaderStore = create((set, get) => ({
   },
 
   setTargetPage: (pageNumber) => set({ targetPage: pageNumber }),
+
+  // مرحله ۶ ـ بخش الف: فهرستِ PDF (Outline). فقط برای سندِ جاری
+  // معتبر است؛ با عوض‌شدنِ فایل، در setComicData پاک می‌شود.
+  setPdfOutline: (items, filePath, status = 'done') => {
+    set({
+      pdfOutline: Array.isArray(items) ? items : [],
+      pdfOutlineFile: typeof filePath === 'string' ? filePath : '',
+      pdfOutlineStatus: status,
+    });
+  },
+
+  clearPdfOutline: () => set({ pdfOutline: [], pdfOutlineFile: '', pdfOutlineStatus: 'idle' }),
 
   jumpToPage: (pageNumber) => {
     const valid = typeof pageNumber === 'number' &&  pageNumber  > 0 ? pageNumber : 1;
@@ -336,6 +359,12 @@ const useReaderStore = create((set, get) => ({
   rotateCounterClockwise: () => set((state) => ({ rotation: (state.rotation + 270) % 360 })),
   resetRotation: () => set({ rotation: 0 }),
 
+  // مرحله ۴ ـ بخش ب: باز بودنِ نوارِ جستجوی PDF، برای هماهنگیِ Escape
+  // (useKeyboard باید آن را ببیند). با بستنِ کمیک در closeComic (و
+  // با null شدنِ comicData در setComicData) صفر می‌شود؛ با عوض شدنِ
+  // فایل، افکتِ [filePath] در PdfViewer آن را خاموش می‌کند.
+  setPdfSearchOpen: (open) => set({ pdfSearchOpen: Boolean(open) }),
+
   setIsLoading: (status) => set({ isLoading: Boolean(status) }),
   setLoadingProgress: (progress) =>
     set({ loadingProgress: typeof progress === 'number' ? progress : 0 }),
@@ -356,6 +385,7 @@ const useReaderStore = create((set, get) => ({
       preAreaZoomLevel: null,
       areaZoomTarget: null,
       rotation: 0,
+      pdfSearchOpen: false,
     });
   },
 }));

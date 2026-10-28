@@ -142,29 +142,17 @@ const FONT_OPTIONS = [
 ];
 
 // ============================================================================
-// Refinement Step 2: میانبرهای ابزار، خوانده‌شده از استورِ تنظیمات.
-// قرارداد: اگر کاربر در تنظیمات، ورودی‌ای برای ابزارِ استودیو تعریف
-// کرده باشد (کلیدهایی با شناسه‌های toolSelect/toolPen/toolBox/
-// toolArrow/toolText/toolSticky/toolHighlighter/toolEraser، هر کدام با
-// فیلدِ key یا code)، همان کلید استفاده می‌شود؛ وگرنه به نگاشتِ
-// پیش‌فرض (V/P/B/A/T/N/H/E، همان STUDIO_TOOL_HOTKEYSی useKeyboard)
-// برمی‌گردیم. توجه: در حالِ حاضر، DEFAULT_SHORTCUTSی تنظیمات هیچ
-// ورودیِ ابزارِ استودیو ندارد، پس در عمل نگاشتِ پیش‌فرض اعمال
-// می‌شود و این تابع، سازگاریِ رو به جلو برای وقتی است که کاربر
-// چنین میانبرهایی را در تنظیمات تعریف کند. این تابع عمداً در هر
-// keydown از getState خوانده می‌شود تا تغییرِ تنظیمات بدونِ
+// مرحله ۷ ـ بخش الف: میانبرهای ابزار، فقط از مرجعِ واحد
+// (matchesShortcut در useSettingsStore) خوانده می‌شوند.
+// نگاشتِ قبلیِ مبتنی بر حرفِ کلید، فقط حرفِ کلید را از ورودی
+// می‌خواند و modifier را کاملاً نادیده می‌گرفت: میانبری مثلِ
+// Ctrl+P در تولبار، با فشردنِ Pی ساده هم ابزار را عوض می‌کرد، و
+// میانبری مثلِ F2 اصلاً از این مسیر، دست‌نیافتنی بود. حالا رویدادِ
+// کامل (code/key/modifierها) به matcher داده می‌شود؛ پس تغییرِ
+// میانبر در تنظیمات، کلیدِ قبلی را واقعاً خلع می‌کند. این تابع، در
+// هر keydown از getState خوانده می‌شود تا تغییرِ تنظیمات، بدونِ
 // ری‌ماونتِ تولبار اعمال شود.
 // ============================================================================
-const DEFAULT_STUDIO_TOOL_KEYS = {
-  select: 'v',
-  pen: 'p',
-  box: 'b',
-  arrow: 'a',
-  text: 't',
-  sticky: 'n',
-  highlighter: 'h',
-  eraser: 'e',
-};
 const STUDIO_TOOL_SETTING_IDS = {
   select: 'toolSelect',
   pen: 'toolPen',
@@ -175,28 +163,19 @@ const STUDIO_TOOL_SETTING_IDS = {
   highlighter: 'toolHighlighter',
   eraser: 'toolEraser',
 };
-export function resolveStudioToolHotkeys() {
-  const out = { ...DEFAULT_STUDIO_TOOL_KEYS };
+export function resolveStudioToolForEvent(e) {
   try {
     const settingsState = typeof useSettingsStore.getState === 'function'
       ? useSettingsStore.getState()
       : null;
-    const shortcuts = settingsState?.shortcuts || null;
-    if (shortcuts) {
-      for (const [toolId, settingId] of Object.entries(STUDIO_TOOL_SETTING_IDS)) {
-        const entry = shortcuts[settingId];
-        if (!entry) continue;
-        if (typeof entry.key === 'string' && entry.key.length === 1) {
-          out[toolId] = entry.key.toLowerCase();
-        } else if (typeof entry.code === 'string' && entry.code.startsWith('Key')) {
-          out[toolId] = entry.code.slice(3).toLowerCase();
-        }
-      }
+    if (!settingsState?.matchesShortcut) return null;
+    for (const [toolId, settingId] of Object.entries(STUDIO_TOOL_SETTING_IDS)) {
+      if (settingsState.matchesShortcut(settingId, e)) return toolId;
     }
   } catch (_) {
-    // اگر استورِ تنظیمات در دسترس نبود، نگاشتِ پیش‌فرض می‌ماند.
+    // اگر استورِ تنظیمات در دسترس نبود، هیچ ابزاری برنمی‌گردد.
   }
-  return out;
+  return null;
 }
 
 const btnBase = {
@@ -216,6 +195,8 @@ export function AnnotationToolbar({
   onUndo,
   onRedo,
   onClearPage,
+  onExportAnnotatedPdf,
+  isExportingPdf = false,
 } = {}) {
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
@@ -525,6 +506,12 @@ export function AnnotationToolbar({
     />
   );
   const [doneHover, setDoneHover] = useState(false);
+  // مرحله ۵ ـ بخش الف: هاورِ دکمهٔ خروجیِ PDF (قبل از returnِ زودهنگام،
+  // طبقِ قانونِ هوک‌ها — مثلِ doneHover).
+  const [exportHover, setExportHover] = useState(false);
+  // مرحله ۵ — بخش ب: هاورِ دو دکمهٔ ذخیرهٔ دوگانه (قبل از returnِ زودهنگام، طبقِ قانونِ هوک‌ها — مثلِ doneHover/exportHover).
+  const [saveInPlaceHover, setSaveInPlaceHover] = useState(false);
+  const [saveAsHover, setSaveAsHover] = useState(false);
   const [hoverUserHex, setHoverUserHex] = useState(null);
   const [viewportW, setViewportW] = useState(() => window.innerWidth);
   const setIsAnnotationActive = useAppStore((s) => s.setIsAnnotationActive);
@@ -658,8 +645,9 @@ export function AnnotationToolbar({
   //   می‌کند تا Undo/Redoی والد دوباره اعمال نشود (رفعِ باگِ Undoی
   //   مضاعفِ گزارشِ ممیزی، §۱٫۳: قبلاً هم تولبار و هم PdfViewer،
   //   هر دو handleUndoAnnotation را صدا می‌زدند).
-  // - فقط کلیدهایی که در نگاشتِ ابزار (resolveStudioToolHotkeys)
-  //   هستند مهار می‌شوند؛ بقیهٔ کلیدها کاملاً آزاد می‌مانند (بدونِ
+  // - فقط کلیدهایی که با میانبرِ فعلیِ تنظیمات جورند
+  //   (resolveStudioToolForEvent / matchesShortcut) مهار می‌شوند؛
+  //   بقیهٔ کلیدها کاملاً آزاد می‌مانند (بدونِ
   //   preventDefault و بدونِ stopPropagation) تا به ناوبری یا جستجو
   //   برسند.
   // - تشخیصِ توالیِ تایپ (Typing Sequence Detection): با
@@ -684,10 +672,20 @@ export function AnnotationToolbar({
     const onKey = (e) => {
       const tag = e.target?.tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') return;
-      // Ctrl+Z / Ctrl+Y: فقط یک بار Undo/Redo، بدونِ رسیدن به PdfViewer.
+      // Undo/Redo: فقط وقتی رویداد، با میانبرِ فعلیِ تنظیمات جور
+      // است — و فقط یک بار، بدونِ رسیدن به PdfViewer. پیش از این،
+      // هر Ctrl+Z/Y (حتی پس از تغییرِ میانبر در تنظیمات) این‌جا
+      // Undo/Redo می‌کرد و کلیدِ قبلی، زنده می‌ماند.
       if (e.ctrlKey || e.metaKey) {
-        const k = (e.key || '').toLowerCase();
-        if (k === 'z' || k === 'y') {
+        let settingsState = null;
+        try {
+          settingsState = typeof useSettingsStore.getState === 'function'
+            ? useSettingsStore.getState()
+            : null;
+        } catch (_) { /* ignore */ }
+        const isRedo = Boolean(settingsState?.matchesShortcut?.('redoAnnotation', e));
+        const isUndo = !isRedo && Boolean(settingsState?.matchesShortcut?.('undoAnnotation', e));
+        if (isUndo || isRedo) {
           if (typeof onUndo !== 'function' && typeof onRedo !== 'function') return;
           e.preventDefault();
           if (typeof e.stopImmediatePropagation === 'function') {
@@ -695,16 +693,21 @@ export function AnnotationToolbar({
           } else if (typeof e.stopPropagation === 'function') {
             e.stopPropagation();
           }
-          if (k === 'z') {
-            if (e.shiftKey) {
-              doRedo(); // Ctrl+Shift+Z → Redo
-            } else {
-              doUndo(); // Ctrl+Z → Undo
-            }
+          if (isRedo) {
+            doRedo(); // Ctrl+Y یا Ctrl+Shift+Z → Redo
           } else {
-            doRedo(); // Ctrl+Y → Redo
+            doUndo(); // Ctrl+Z → Undo
           }
           return;
+        }
+        // بقیهٔ ترکیب‌های Ctrl: پشتیبانِ تعویضِ ابزارِ اصلاح‌شده
+        // (مثلِ Alt/Ctrl+کلید) — useKeyboard، شنوندهٔ اصلی است و
+        // معمولاً زودتر رویداد را مهار کرده است؛ این‌جا فقط اگر
+        // رویداد هنوز زنده باشد، ابزار عوض می‌شود.
+        const modifiedTool = resolveStudioToolForEvent(e);
+        if (modifiedTool) {
+          e.preventDefault();
+          setAnnotationTool(modifiedTool);
         }
         return; // بقیهٔ ترکیب‌های Ctrl، به تولبار ربطی ندارند.
       }
@@ -722,12 +725,7 @@ export function AnnotationToolbar({
         // مهار نمی‌شود تا به مقصدِ خودش (فیلد/جستجو) برسد.
         return;
       }
-      const hotkeys = resolveStudioToolHotkeys();
-      const toolByKey = {};
-      for (const [toolId, key] of Object.entries(hotkeys)) {
-        toolByKey[key] = toolId;
-      }
-      const tool = toolByKey[k];
+      const tool = resolveStudioToolForEvent(e);
       if (tool) {
         e.preventDefault();
         setAnnotationTool(tool);
@@ -1739,6 +1737,100 @@ export function AnnotationToolbar({
       </svg>
     </button>
   );
+  // مرحله ۵ ـ بخش الف — دکمهٔ «خروجی PDF با حاشیه‌نویسی‌ها» دقیقاً
+  // قبل از Done (منطقهٔ اقدام‌های پایانی): فقط وقتی onExportAnnotatedPdf
+  // داده شده (یعنی در PdfViewer؛ در VerticalViewer که کمیکِ تصویری است،
+  // این prop نمی‌آید و دکمه اصلاً رندر نمی‌شود). هنگامِ پردازش، غیرفعال
+  // و کم‌رنگ است تا کلیکِ تکراری، خروجیِ تکراری نسازد. توجه: برخلافِ
+  // Done که دو onMouseEnter دارد (دومی، اولی را خنثی می‌کند و تولتیپِ
+  // آن هیچ‌وقت نشان داده نمی‌شود)، اینجا هر دو کار در یک هندلر انجام
+  // می‌شود تا هم تولتیپ بیاید و هم هاور.
+  // مرحله ۵ ـ بخش ب — دو دکمهٔ ذخیرهٔ دوگانه، دقیقاً قبل از Done
+  // (منطقهٔ اقدام‌های پایانی): فقط وقتی onExportAnnotatedPdf داده
+  // شده (یعنی در PdfViewer؛ در VerticalViewer که کمیکِ تصویری است،
+  // این prop نمی‌آید و هیچ‌کدام رندر نمی‌شوند). هنگامِ پردازش، هر
+  // دو غیرفعال و کم‌رنگ‌اند تا کلیکِ تکراری، خروجیِ تکراری نسازد.
+  //  • «ذخیره روی همین فایل» (کهربایی، آیکونِ Save): بدونِ دیالوگ،
+  //    روی خودِ فایلِ بازشده می‌نشیند؛ پایهٔ خامِ `.orig.bak`
+  //    جلوی پختِ دوباره را می‌گیرد.
+  //  • «ذخیره به عنوان فایل جدید» (فیروزه‌ای، آیکونِ Download):
+  //    دیالوگِ Save As با نامِ پیش‌فرضِ `<نام>-annotated.pdf`.
+  // هر دو دکمه، هر دو کارِ هاور (تولتیپ + حالتِ هاور) را در یک
+  // هندلر انجام می‌دهند (الگوی درستِ دکمهٔ خروجیِ بخش الف).
+  const saveInPlaceButton = typeof onExportAnnotatedPdf === 'function' ? (
+    <button
+      aria-label="ذخیره روی همین فایل"
+      onMouseEnter={(e) => { showTooltipDelayed(e, 'ذخیره روی همین فایل'); setSaveInPlaceHover(true); }}
+      onMouseLeave={() => { hideTooltip(); setSaveInPlaceHover(false); }}
+      onClick={() => {
+        if (isExportingPdf) return;
+        onExportAnnotatedPdf('in-place');
+      }}
+      style={{
+        ...btnBase,
+        width: 38,
+        height: 38,
+        borderRadius: 11,
+        background: 'rgba(251,191,36,0.16)',
+        color: '#fcd34d',
+        outline: '1px solid rgba(251,191,36,0.45)',
+        outlineOffset: -1,
+        boxShadow: saveInPlaceHover && !isExportingPdf ? '0 0 14px rgba(251,191,36,0.55)' : 'none',
+        opacity: isExportingPdf ? 0.55 : 1,
+        cursor: isExportingPdf ? 'default' : 'pointer',
+        transition: 'all 0.2s ease',
+      }}
+    >
+      {Icons.Save ? <Icons.Save size={18} /> : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+          <path d="M17 21v-8H7v8" />
+          <path d="M7 3v5h8" />
+        </svg>
+      )}
+    </button>
+  ) : null;
+  const saveAsButton = typeof onExportAnnotatedPdf === 'function' ? (
+    <button
+      aria-label="ذخیره به عنوان فایل جدید"
+      onMouseEnter={(e) => { showTooltipDelayed(e, 'ذخیره به عنوان فایل جدید'); setSaveAsHover(true); }}
+      onMouseLeave={() => { hideTooltip(); setSaveAsHover(false); }}
+      onClick={() => {
+        if (isExportingPdf) return;
+        onExportAnnotatedPdf('save-as');
+      }}
+      style={{
+        ...btnBase,
+        width: 38,
+        height: 38,
+        borderRadius: 11,
+        background: 'rgba(34,211,238,0.16)',
+        color: '#67e8f9',
+        outline: '1px solid rgba(34,211,238,0.45)',
+        outlineOffset: -1,
+        boxShadow: saveAsHover && !isExportingPdf ? '0 0 14px rgba(34,211,238,0.55)' : 'none',
+        opacity: isExportingPdf ? 0.55 : 1,
+        cursor: isExportingPdf ? 'default' : 'pointer',
+        transition: 'all 0.2s ease',
+      }}
+    >
+      {Icons.Download ? <Icons.Download size={18} /> : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <path d="M7 10l5 5 5-5" />
+          <path d="M12 15V3" />
+        </svg>
+      )}
+    </button>
+  ) : null;
+  // قطعهٔ واحدِ هر دو دکمه، برای هر دو جهتِ تولبار (افقی/عمودی) —
+  // ترتیب، در هر دو جهت: درجا، بعد Save As، بعد Done.
+  const exportButtons = (
+    <>
+      {saveInPlaceButton}
+      {saveAsButton}
+    </>
+  );
   // معماریِ قطعی §۵ — دکمهٔ تأییدِ نهایی (Done) در انتهای نوار:
   // تیکِ لوسید با تمِ سبزِ زمردی (#10b981) و درخششِ هاور. کلیک:
   // لغوِ انتخاب‌های فعال + بستنِ همهٔ پنل‌ها (دراورِ رنگ و زیرمنوی
@@ -1748,16 +1840,15 @@ export function AnnotationToolbar({
   const doneButton = (
     <button
       aria-label="اتمام ویرایش — لغو انتخاب و خروج از حالت ویرایش"
-      onMouseEnter={(e) => showTooltipDelayed(e, 'اتمام ویرایش')}
-      onMouseLeave={hideTooltip}
+      onMouseEnter={(e) => { showTooltipDelayed(e, 'اتمام ویرایش'); setDoneHover(true); }}
+      onMouseLeave={() => { hideTooltip(); setDoneHover(false); }}
       onClick={() => {
         if (typeof clearSelection === 'function') clearSelection();
         setPanelClosed(false);
         setColorDrawerOpen(false);
         if (typeof setIsAnnotationActive === 'function') setIsAnnotationActive(false);
       }}
-      onMouseEnter={() => setDoneHover(true)}
-      onMouseLeave={() => setDoneHover(false)}
+
       style={{
         ...btnBase,
         width: 38,
@@ -2084,6 +2175,7 @@ export function AnnotationToolbar({
             {divider}
             {actionsContent}
             {orientationToggle}
+            {exportButtons}
             {doneButton}
           </div>
         </div>
@@ -2134,6 +2226,7 @@ export function AnnotationToolbar({
           {divider}
           {actionsContent}
           {orientationToggle}
+          {exportButtons}
           {doneButton}
         </div>
       )}

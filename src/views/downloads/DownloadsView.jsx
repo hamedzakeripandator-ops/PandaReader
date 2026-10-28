@@ -1,9 +1,18 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import useAppStore from '../../store/useAppStore';
 import Icons from '../../components/common/Icons';
+import { coreApi } from '../../services/coreApi';
 
-const CURRENT_VERSION = 'v5.0.0-pro';
-const BUILD_DATE = 'مهر ۱۴۰۵ • اکتبر ۲۰۲۶';
+// مرحله ۷ ـ بخش الف: این صفحه، دیگر هیچ «نسخهٔ» هاردکدشده‌ای
+// ندارد؛ نسخه، از app.getVersion() (همان versionی package.json)
+// خوانده می‌شود و اگر در دسترس نبود، «نامشخص» نشان داده می‌شود.
+function formatSize(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return '۰ بایت';
+  if (n < 1024) return n + ' بایت';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' کیلوبایت';
+  return (n / (1024 * 1024)).toFixed(1) + ' مگابایت';
+}
 
 const CHANGELOG_HISTORY = [
   {
@@ -12,7 +21,7 @@ const CHANGELOG_HISTORY = [
     date: 'مهر ۱۴۰۵ - اکتبر ۲۰۲۶',
     badge: 'فعال',
     features: [
-      'موتور استخراج صاعقه‌ای تک‌تصویر کاور در رم (coverOnly) با زمان پاسخ زیر ۰.۱ ثانیه',
+      'موتور استخراجِ تک‌تصویرِ کاور در رم (coverOnly) بدونِ خواندنِ کلِ آرشیو',
       'پشتیبانی کامل از فایل‌های زیپ چندپوشه‌ای و پوشه‌های مستقیم عکس با سورت سلسله‌مراتبی چپترها',
       'سیستم پاک‌سازی خودکار کش هارد دیسک پس از اتمام مطالعه به همراه دکمه لغو فوری بارگذاری (Cancel)',
       'تایپوگرافی سه‌گانه لوکال (Estedad، Manrope، JetBrains Mono) و آیکون‌های وکتور استاندارد Lucide',
@@ -25,7 +34,7 @@ const CHANGELOG_HISTORY = [
     date: 'شهریور ۱۴۰۵',
     badge: 'پایدار',
     features: [
-      'اسلایدر درگ‌پذیر با موس در بالای کتابخانه به همراه ذخیره دائمی کاورهای Base64 در دیتابیس',
+      'اسلایدر درگ‌پذیر با موس در بالای کتابخانه به همراه ذخیرهٔ کاورها به‌صورتِ فایل روی دیسک',
       'موتور هوشمند شورت‌کات‌های ترکیبی در فاز Capture با پشتیبانی از کلیدهای Ctrl و Alt',
       'ابزار برش آزاد با موس (Snipping Tool) با رزولوشن طبیعی تصاویر',
     ],
@@ -45,49 +54,61 @@ const CHANGELOG_HISTORY = [
 export default function DownloadsView() {
   const showToast = useAppStore((state) => state.showToast);
 
-  const [updateStatus, setUpdateStatus] = useState('idle'); // 'idle' | 'checking' | 'latest' | 'available' | 'downloading'
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [autoCheck, setAutoCheck] = useState(true);
+  // مرحله ۷ ـ بخش الف: این صفحه، حالا اطلاعاتِ واقعیِ همین نصب را
+  // از پروسهٔ اصلی می‌خواند (کانالِ get-app-info). تایمرِ ساختگیِ
+  // «بررسیِ سرور» (۱۶۰۰ میلی‌ثانیه، همیشه «به‌روز») و دانلودِ
+  // ساختگیِ +۲۰٪ هر ۳۵۰ میلی‌ثانیه و وضعیتِ دست‌نیافتنیِ
+  // 'available'، کاملاً حذف شدند: هیچ سرورِ به‌روزرسانی‌ای در
+  // برنامه وجود ندارد و چیزی برای «چک کردن» نیست.
+  const [appInfo, setAppInfo] = useState(null);
+  const [infoLoading, setInfoLoading] = useState(true);
+  const [infoError, setInfoError] = useState('');
 
-  const checkTimerRef = useRef(null);
-  const downloadIntervalRef = useRef(null);
-
-  useEffect(() => {
-    return () => {
-      if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
-      if (downloadIntervalRef.current) clearInterval(downloadIntervalRef.current);
-    };
-  }, []);
-
-  const handleCheckForUpdates = () => {
-    if (updateStatus === 'checking' || updateStatus === 'downloading') return;
-
-    setUpdateStatus('checking');
-    showToast('در حال بررسی سرور برای دریافت آخرین نسخه...', { type: 'info' });
-
-    if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
-    checkTimerRef.current = setTimeout(() => {
-      setUpdateStatus('latest');
-      showToast('شما از آخرین نسخه برنامه استفاده می‌کنید', { type: 'success' });
-    }, 1600);
+  const loadAppInfo = async () => {
+    setInfoLoading(true);
+    setInfoError('');
+    try {
+      const result = await coreApi.getAppInfo();
+      if (result && result.success) {
+        setAppInfo(result);
+      } else {
+        setInfoError((result && result.error) || 'دریافتِ اطلاعاتِ برنامه انجام نشد.');
+      }
+    } catch (err) {
+      setInfoError(err?.message || 'دریافتِ اطلاعاتِ برنامه انجام نشد.');
+    } finally {
+      setInfoLoading(false);
+    }
   };
 
-  const handleSimulateDownload = () => {
-    setUpdateStatus('downloading');
-    setDownloadProgress(0);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const result = await coreApi.getAppInfo();
+      if (cancelled) return;
+      if (result && result.success) {
+        setAppInfo(result);
+      } else {
+        setInfoError((result && result.error) || 'دریافتِ اطلاعاتِ برنامه انجام نشد.');
+      }
+      setInfoLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
-    if (downloadIntervalRef.current) clearInterval(downloadIntervalRef.current);
-    downloadIntervalRef.current = setInterval(() => {
-      setDownloadProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(downloadIntervalRef.current);
-          setUpdateStatus('latest');
-          showToast('به‌روزرسانی با موفقیت دریافت و آماده نصب شد', { type: 'success' });
-          return 100;
-        }
-        return prev + 20;
-      });
-    }, 350);
+  const handleOpenDataFolder = async () => {
+    const dataDir = appInfo?.dataDir;
+    if (!dataDir) {
+      showToast('پوشهٔ دیتا مشخص نیست.', { type: 'error' });
+      return;
+    }
+    // db.json داخلِ پوشهٔ دیتاست؛ نمایشِ آن در فایل‌اکسپلورر،
+    // پوشهٔ دیتا را با فایلِ انتخاب‌شده باز می‌کند.
+    const dbPath = dataDir.replace(/[\\/]+$/, '') + '/db.json';
+    const result = await coreApi.showItemInFolder(dbPath);
+    if (result && result.success === false) {
+      showToast(result.error || 'باز کردنِ پوشهٔ دیتا انجام نشد.', { type: 'error' });
+    }
   };
 
   return (
@@ -99,111 +120,137 @@ export default function DownloadsView() {
             <Icons.Rocket size={22} />
           </div>
           <div>
-            <h2 style={styles.title}>مرکز به‌روزرسانی و ارتقای نرم‌افزار</h2>
+            <h2 style={styles.title}>اطلاعاتِ نسخه و سلامتِ سیستم</h2>
             <span style={styles.subtitle}>
-              مدیریت دانلود پچ‌ها، آپدیت‌های سیستمی و تاریخچه تغییرات{' '}
+              نسخه، محیطِ اجرا و وضعیتِ دیتای همین نصب{' '}
               <span style={{ fontFamily: 'var(--font-latin)', fontWeight: 700 }}>ComicReader</span>
+              {' '}— این برنامه، سرورِ به‌روزرسانی ندارد؛ نسخه‌های جدید، به‌صورتِ دستی نصب می‌شوند.
             </span>
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleCheckForUpdates}
-          disabled={updateStatus === 'checking' || updateStatus === 'downloading'}
-          style={styles.checkBtn}
-        >
-          {updateStatus === 'checking' ? (
-            <>
-              <Icons.Loader size={15} />
-              <span>در حال بررسی سرور...</span>
-            </>
-          ) : (
-            <>
-              <Icons.RefreshCw size={15} />
-              <span>بررسی نسخه جدید</span>
-            </>
-          )}
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={handleOpenDataFolder}
+            disabled={!appInfo?.dataDir}
+            style={styles.checkBtn}
+          >
+            <Icons.FolderOpen size={15} />
+            <span>باز کردن پوشهٔ دیتا</span>
+          </button>
+          <button
+            type="button"
+            onClick={loadAppInfo}
+            disabled={infoLoading}
+            style={styles.checkBtn}
+          >
+            {infoLoading ? (
+              <>
+                <Icons.Loader size={15} />
+                <span>در حال خواندن...</span>
+              </>
+            ) : (
+              <>
+                <Icons.RefreshCw size={15} />
+                <span>به‌روزرسانیِ اطلاعات</span>
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* کارت وضعیت نسخه جاری */}
       <div style={styles.versionStatusCard}>
         <div style={styles.statusLeft}>
           <div style={styles.versionBadgeRow}>
-            <span style={styles.versionPill}>{CURRENT_VERSION}</span>
-            <span style={styles.buildDateText}>تاریخ ساخت: {BUILD_DATE}</span>
+            <span style={styles.versionPill}>
+              {appInfo?.version ? 'v' + appInfo.version : 'نسخه نامشخص'}
+            </span>
+            <span style={styles.buildDateText}>
+              {infoLoading
+                ? 'در حال خواندنِ اطلاعات…'
+                : appInfo
+                  ? (appInfo.isPackaged ? 'نسخهٔ بسته‌بندی‌شده' : 'حالتِ توسعه') +
+                    (appInfo.isPortableMode ? ' • حالتِ Portable' : '')
+                  : 'اطلاعات در دسترس نیست'}
+            </span>
           </div>
           <h3 style={styles.statusTitle}>
-            {updateStatus === 'checking' && 'در حال ارتباط با مخزن آپدیت...'}
-            {updateStatus === 'idle' && 'نرم‌افزار شما در وضعیت آماده به کار قرار دارد.'}
-            {updateStatus === 'latest' &&
-              'نسخه شما کاملاً به‌روز است و هیچ آپدیت جدیدی در انتظار نیست.'}
-            {updateStatus === 'available' &&
-              'نسخه جدید با قابلیت‌های ارتقایافته در دسترس است!'}
-            {updateStatus === 'downloading' &&
-              `در حال دانلود بسته آپدیت (${downloadProgress}%)...`}
+            {infoLoading && 'در حال خواندنِ اطلاعاتِ محیط…'}
+            {!infoLoading && infoError && infoError}
+            {!infoLoading && !infoError &&
+              'اطلاعاتِ زیر، وضعیتِ واقعیِ همین نصب است؛ هیچ بررسیِ سروری انجام نمی‌شود.'}
           </h3>
           <p style={styles.statusDesc}>
-            کانال انتشار: استیبل (Stable Official Channel) • معماری ۶۴ بیتی الکترون
+            به‌روزرسانی، خودکار نیست: نسخهٔ جدید را خودتان دانلود و نصب می‌کنید؛ دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.
           </p>
         </div>
 
         <div style={styles.statusRight}>
-          {updateStatus === 'downloading' ? (
-            <div style={styles.downloadProgressBox}>
-              <div style={styles.progressBarTrack}>
-                <div style={{ ...styles.progressBarFill, width: `${downloadProgress}%` }} />
-              </div>
-              <span style={styles.percentText}>{downloadProgress}%</span>
-            </div>
-          ) : updateStatus === 'available' ? (
-            <button
-              type="button"
-              onClick={handleSimulateDownload}
-              style={styles.downloadActionBtn}
-            >
-              <Icons.Download size={15} />
-              <span>دانلود و نصب نسخه جدید</span>
-            </button>
-          ) : (
-            <div style={styles.okBadge}>
-              <Icons.Check size={15} />
-              <span>سیستم پایدار</span>
-            </div>
-          )}
+          <div style={styles.okBadge}>
+            <Icons.Check size={15} />
+            <span>
+              {appInfo?.isPackaged ? 'اجرا از روی فایلِ ساخته‌شده' : 'اجرا در حالتِ توسعه'}
+            </span>
+          </div>
         </div>
       </div>
 
-      {/* تنظیمات خودکار بررسی */}
-      <div style={styles.optionsRow}>
-        <div style={styles.optionLabelWrap}>
-          <span style={styles.optionLabel}>بررسی خودکار نسخه‌های جدید هنگام اجرای برنامه</span>
-          <span style={styles.optionSub}>
-            در صورت وجود پچ جدید، اعلان کپسولی در بالای صفحه ظاهر خواهد شد
+      {/* مرحله ۷ ـ بخش الف: اطلاعاتِ واقعیِ محیط و سلامتِ سیستم */}
+      <div style={styles.changelogSection}>
+        <div style={styles.changelogHeaderRow}>
+          <span style={{ color: 'var(--accent)', display: 'flex' }}>
+            <Icons.Info size={18} />
           </span>
+          <h3 style={styles.changelogHeader}>محیطِ اجرا و سلامتِ سیستم</h3>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setAutoCheck(!autoCheck);
-            showToast(
-              !autoCheck ? 'بررسی خودکار آپدیت فعال شد' : 'بررسی خودکار غیرفعال شد',
-              { type: 'info' }
-            );
-          }}
-          style={{
-            ...styles.toggleBtn,
-            backgroundColor: autoCheck
-              ? 'rgba(34, 211, 238, 0.14)'
-              : 'rgba(255, 255, 255, 0.04)',
-            borderColor: autoCheck ? 'var(--accent)' : 'var(--border)',
-            color: autoCheck ? 'var(--accent)' : 'var(--muted)',
-          }}
-        >
-          <Icons.Check size={14} />
-          <span>{autoCheck ? 'روشن (فعال)' : 'خاموش'}</span>
-        </button>
+        {infoLoading ? (
+          <p style={styles.statusDesc}>در حال خواندنِ اطلاعات…</p>
+        ) : infoError ? (
+          <p style={styles.statusDesc}>{infoError}</p>
+        ) : appInfo ? (
+          <div style={styles.infoGrid}>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>سیستم‌عامل و معماری</span>
+              <span style={styles.infoValue}>{appInfo.platform} • {appInfo.arch}</span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>نسخهٔ Electron / Chrome / Node</span>
+              <span style={{ ...styles.infoValue, direction: 'ltr' }}>
+                {appInfo.electronVersion} / {appInfo.chromeVersion} / {appInfo.nodeVersion}
+              </span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>حالتِ دیتا</span>
+              <span style={styles.infoValue}>
+                {appInfo.isPortableMode ? 'Portable (portable-data در کنارِ فایلِ اجرایی)' : 'عادی (پوشهٔ خانگیِ کاربر)'}
+              </span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>پوشهٔ دیتا</span>
+              <span style={{ ...styles.infoValue, direction: 'ltr', wordBreak: 'break-all' }}>{appInfo.dataDir || '—'}</span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>اندازهٔ دیتابیس (db.json)</span>
+              <span style={styles.infoValue}>{formatSize(appInfo.dbSize)}</span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>تعدادِ کاورهای روی دیسک</span>
+              <span style={styles.infoValue}>{appInfo.coverCount}</span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>فایلِ لاگ</span>
+              <span style={styles.infoValue}>
+                {appInfo.logExists ? ('وجود دارد • ' + formatSize(appInfo.logSize)) : 'هنوز ساخته نشده است'}
+              </span>
+            </div>
+            <div style={styles.infoRow}>
+              <span style={styles.infoLabel}>مسیرِ فایلِ لاگ</span>
+              <span style={{ ...styles.infoValue, direction: 'ltr', wordBreak: 'break-all' }}>{appInfo.logFile || '—'}</span>
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {/* لاگ تغییرات و تاریخچه آپدیت‌ها (Changelog) */}
@@ -220,7 +267,9 @@ export default function DownloadsView() {
             <div key={idx} style={styles.logCard}>
               <div style={styles.logHeadRow}>
                 <div style={styles.logVersionWrap}>
-                  <span style={styles.logVersionTitle}>{log.version}</span>
+                  <span style={styles.logVersionTitle}>
+                    {idx === 0 && appInfo?.version ? 'v' + appInfo.version : log.version}
+                  </span>
                   <span style={styles.logVersionSub}>{log.label}</span>
                   <span
                     style={{
@@ -301,6 +350,34 @@ const styles = {
     fontFamily: 'var(--font-fa)',
     fontSize: '12px',
     color: 'var(--muted)',
+  },
+  infoGrid: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    marginTop: '12px',
+  },
+  infoRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: '16px',
+    padding: '8px 12px',
+    borderRadius: '10px',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    border: '1px solid var(--border)',
+    flexWrap: 'wrap',
+  },
+  infoLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    color: 'var(--muted)',
+  },
+  infoValue: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    color: 'var(--text)',
+    fontWeight: 600,
   },
   checkBtn: {
     padding: '9px 18px',

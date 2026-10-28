@@ -9,6 +9,9 @@ import annotationLocalBackup from '../../services/annotationLocalBackup';
 import Icons from '../common/Icons';
 import AnnotationLayer from './AnnotationLayer';
 import AnnotationToolbar from './AnnotationToolbar';
+import useSettingsStore from '../../store/useSettingsStore';
+import readingActivity from '../../services/readingActivity';
+import { getReadingThemeFilter } from '../../utils/readingTheme';
 
 // تولید آدرس استاندارد و مطلق برای پروتکل امن comic://
 function buildComicImageUrl(filePath) {
@@ -41,6 +44,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   onCommitPageAnnotations,
   onImageLoad,
   onContextMenu,
+  pageFilter,
 }) {
   const pageNum = index + 1;
   const rawPath = item?.path || item?.filePath || '';
@@ -149,7 +153,10 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
               // فقط وقتی روشن است که پاسِ HiDPI فعال باشد و زوم ≤ ۱٫۵
               // و استودیو خاموش باشد؛ در زومِ بالا یا حینِ حاشیه‌نویسی،
               // مرورگر از این کانولوشنِ هر فریم راحت می‌شود.
-              filter: isSharpenFilterActive ? 'url(#comic-hidpi-sharpen)' : 'none',
+              // مرحله ۶ ـ بخش الف: تمِ مطالعه با فیلترِ شارپنسِ HiDPI
+              // ترکیب می‌شود (هر دو فقط روی همین img اثر می‌کنند؛
+              // لایهٔ حاشیه‌نویسی، خواهرِ wrapper است و دست نمی‌خورد).
+              filter: [pageFilter && pageFilter !== 'none' ? pageFilter : null, isSharpenFilterActive ? 'url(#comic-hidpi-sharpen)' : null].filter(Boolean).join(' ') || 'none',
               transform: isHiDpiPassActive ? 'translateZ(0)' : 'none',
             }}
             onLoad={handleLoad}
@@ -197,6 +204,13 @@ export default function VerticalViewer() {
   const triggerHiDpiRender = useReaderStore((state) => state.triggerHiDpiRender);
   const comicPageGap = useReaderStore((state) => state.comicPageGap ?? 0);
   const rotation = useReaderStore((state) => state.rotation);
+  const readingTheme = useSettingsStore((state) => state.preferences?.readingTheme || 'default');
+  const readingBrightness = useSettingsStore((state) => state.preferences?.readingBrightness ?? 1);
+  const readingWarmth = useSettingsStore((state) => state.preferences?.readingWarmth ?? 0);
+  const pageFilter = useMemo(
+    () => getReadingThemeFilter(readingTheme, readingBrightness, readingWarmth),
+    [readingTheme, readingBrightness, readingWarmth]
+  );
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
   const targetPage = useReaderStore((state) => state.targetPage);
   const clearTargetPage = useReaderStore((state) => state.clearTargetPage);
@@ -479,17 +493,24 @@ export default function VerticalViewer() {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        if (e.shiftKey) {
-          e.preventDefault();
-          handleRedoAnnotation();
-        } else {
-          e.preventDefault();
-          handleUndoAnnotation();
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      // مرحله ۷ ـ بخش الف: مالکیتِ این شنونده (فقط وقتی استودیو
+      // خاموش است) دقیقاً مثلِ قبل می‌ماند؛ فقط گزاره، از
+      // مرجعِ واحد (matchesShortcut) خوانده می‌شود تا تغییرِ
+      // میانبرِ Undo/Redo در تنظیمات، کلیدِ قبلی را خلع کند.
+      // Ctrl+Shift+Z، اسمِ مستعارِ redo است و در خودِ matcher
+      // حل شده است.
+      let settingsState = null;
+      try {
+        settingsState = typeof useSettingsStore.getState === 'function'
+          ? useSettingsStore.getState()
+          : null;
+      } catch (_) { /* ignore */ }
+      if (settingsState?.matchesShortcut?.('redoAnnotation', e)) {
         e.preventDefault();
         handleRedoAnnotation();
+      } else if (settingsState?.matchesShortcut?.('undoAnnotation', e)) {
+        e.preventDefault();
+        handleUndoAnnotation();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -577,76 +598,73 @@ export default function VerticalViewer() {
     predecodedMapRef.current.clear();
   }, [currentFilePath]);
 
-  // ۴. مدیریت هوشمند زوم با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x)
+  // مرحله ۶ ـ بخش الف: نشستِ آمارِ مطالعه برای فایلِ جاری؛ با
+  // عوض‌شدنِ فایل یا بسته‌شدنِ ریدر، نشست پایان می‌یابد و
+  // باقی‌ماندهٔ گزارش‌ها فرستاده می‌شوند.
+  useEffect(() => {
+    if (!currentFilePath) return undefined;
+    readingActivity.begin(currentFilePath);
+    return () => {
+      readingActivity.end();
+    };
+  }, [currentFilePath]);
+
+  // ۴. مدیریت هوشمند زوم با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x) — مرحله ۶:
+  // نسخهٔ قبلی، شنوندهٔ wheel را فقط وقتی Ctrl نگه داشته شده بود
+  // وصل می‌کرد؛ ژستِ Pinchِ ترک‌پد، keydownِ Control نمی‌فرستد و
+  // چرخِ ماوس وقتی Ctrl از قبل نگه داشته شده بود هم شنونده را نداشت.
+  // حالا شنونده همیشه وصل است و ctrlKey/metaKey داخلِ هندلر بررسی
+  // می‌شود. زوم، ضربی و نرم است تا ژستِ پیوستهٔ دو انگشتی روان حس شود.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    let isWheelListenerAttached = false;
+    // مرحله ۶ ـ بخش ب: تجمیعِ رویدادهای wheel در یک فریم با
+    // requestAnimationFrame — مانند PdfViewer: دلتاهای یک فریم جمع
+    // و فقط یک setZoomLevel اعمال می‌شود تا سیلِ ۶۰ تا ۱۲۰ رویدادِ
+    // ترک‌پد در ثانیه، استیت را در هر رویداد تکان ندهد.
+    let pendingWheel = null;
 
     const handleWheelZoom = (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       e.stopPropagation();
 
-      const delta = e.deltaY < 0 ? 0.1 : -0.1;
-      const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
-      const nextZoom = Math.min(
-        3.5,
-        Math.max(0.4, parseFloat((currentZoom + delta).toFixed(2)))
-      );
-
-      if (nextZoom !== currentZoom) {
-        const rect = container.getBoundingClientRect();
-        const mouseY = e.clientY - rect.top;
-        const scrollY = container.scrollTop;
-        const factor = nextZoom / currentZoom;
-
-        setZoomLevel(nextZoom);
-
-        requestAnimationFrame(() => {
-          container.scrollTop = (scrollY + mouseY) * factor - mouseY;
-        });
+      const deltaY = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      if (pendingWheel) {
+        pendingWheel.accDeltaY += deltaY;
+        pendingWheel.clientY = e.clientY;
+        return;
       }
+      pendingWheel = { accDeltaY: deltaY, clientY: e.clientY, rafId: 0 };
+      pendingWheel.rafId = requestAnimationFrame(() => {
+        const pending = pendingWheel;
+        pendingWheel = null;
+        if (!pending) return;
+        const factor = Math.min(1.12, Math.max(0.89, Math.exp(-pending.accDeltaY * 0.0018)));
+        const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
+        const nextZoom = Math.min(
+          3.5,
+          Math.max(0.4, parseFloat((currentZoom * factor).toFixed(2)))
+        );
+
+        if (nextZoom !== currentZoom) {
+          const rect = container.getBoundingClientRect();
+          const mouseY = pending.clientY - rect.top;
+          const scrollY = container.scrollTop;
+          const scrollFactor = nextZoom / currentZoom;
+
+          setZoomLevel(nextZoom);
+          container.scrollTop = (scrollY + mouseY) * scrollFactor - mouseY;
+        }
+      });
     };
 
-    const attachNonPassiveWheel = () => {
-      if (!isWheelListenerAttached && containerRef.current) {
-        containerRef.current.addEventListener('wheel', handleWheelZoom, {
-          passive: false,
-        });
-        isWheelListenerAttached = true;
-      }
-    };
-
-    const detachNonPassiveWheel = () => {
-      if (isWheelListenerAttached && containerRef.current) {
-        containerRef.current.removeEventListener('wheel', handleWheelZoom);
-        isWheelListenerAttached = false;
-      }
-    };
-
-    const handleKeyDown = (e) => {
-      if (e.key === 'Control' || e.key === 'Meta' || e.ctrlKey || e.metaKey) {
-        attachNonPassiveWheel();
-      }
-    };
-
-    const handleKeyUp = (e) => {
-      if (e.key === 'Control' || e.key === 'Meta' || (!e.ctrlKey && !e.metaKey)) {
-        detachNonPassiveWheel();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown, { passive: true });
-    window.addEventListener('keyup', handleKeyUp, { passive: true });
-    window.addEventListener('blur', detachNonPassiveWheel, { passive: true });
-
+    container.addEventListener('wheel', handleWheelZoom, { passive: false });
     return () => {
-      detachNonPassiveWheel();
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('blur', detachNonPassiveWheel);
+      container.removeEventListener('wheel', handleWheelZoom);
+      if (pendingWheel && pendingWheel.rafId) cancelAnimationFrame(pendingWheel.rafId);
+      pendingWheel = null;
     };
   }, [setZoomLevel]);
 
@@ -693,6 +711,7 @@ export default function VerticalViewer() {
             if (isMounted) {
               scrollToIndex(targetToJump - 1, 'auto');
               setCurrentPage(targetToJump);
+              readingActivity.visitPage(targetToJump);
 
               setTimeout(() => {
                 if (isMounted) {
@@ -750,6 +769,7 @@ export default function VerticalViewer() {
       calculatedPage <= itemsCount
     ) {
       setCurrentPage(calculatedPage);
+      readingActivity.visitPage(calculatedPage);
 
       if (currentFilePath) {
         updateReadingProgress(currentFilePath, calculatedPage, itemsCount);
@@ -864,6 +884,7 @@ export default function VerticalViewer() {
                 isSharpenFilterActive={enableHiDpiCrispPass && isNearCenter && safeZoom <= 1.5 && !isAnnotationActive}
                 pageAnnotations={pageAnnots}
                 onCommitPageAnnotations={handleCommitPageAnnotations}
+                pageFilter={pageFilter}
                 onImageLoad={recordImageDimensions}
                 onContextMenu={handleFrameContextMenu}
               />

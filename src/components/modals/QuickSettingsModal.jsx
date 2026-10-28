@@ -20,6 +20,7 @@ export default function QuickSettingsModal() {
 
   const preferences = useSettingsStore((state) => state.preferences);
   const updatePreferences = useSettingsStore((state) => state.updatePreferences);
+  const previewPreferences = useSettingsStore((state) => state.previewPreferences);
   const resetPreferences = useSettingsStore((state) => state.resetPreferences);
 
   const [localPrefs, setLocalPrefs] = useState({
@@ -29,28 +30,58 @@ export default function QuickSettingsModal() {
   });
   const [isSaving, setIsSaving] = useState(false);
   const isMountedRef = useRef(true);
+  // مرحله ۶ ـ بخش ب: تصویرِ مقادیرِ تمِ مطالعه در لحظهٔ باز شدنِ
+  // مودال (برای Rollback هنگامِ انصراف) + پرچمِ «پیش‌نمایشی اعمال
+  // شده» + نگهبانِ گذارِ بسته→باز (تا همگام‌سازیِ فرم، فقط هنگامِ
+  // باز شدن انجام شود و پیش‌نمایشِ زنده، ویرایش‌های محلیِ
+  // ذخیره‌نشده را پاک نکند).
+  const readingSnapshotRef = useRef(null);
+  const previewAppliedRef = useRef(false);
+  const wasOpenRef = useRef(false);
 
   const isOpen = Boolean(isQuickSettingsOpen || currentView === 'quick-settings');
 
   const handleClose = useCallback(() => {
+    // مرحله ۶ ـ بخش ب: بستن بدونِ ذخیره (انصراف، دکمهٔ X، Escape،
+    // کلیکِ بیرون) = Rollback: مقادیرِ تمِ مطالعه به حالتِ لحظهٔ باز
+    // شدنِ مودال برمی‌گردند. پس از Save، پرچم پاک شده است و این
+    // شاخه اجرا نمی‌شود.
+    if (previewAppliedRef.current && readingSnapshotRef.current && previewPreferences) {
+      previewPreferences({ ...readingSnapshotRef.current });
+    }
+    previewAppliedRef.current = false;
     if (closeQuickSettings) {
       closeQuickSettings();
     }
     if (currentView === 'quick-settings') {
       setCurrentView('reader');
     }
-  }, [closeQuickSettings, currentView, setCurrentView]);
+  }, [closeQuickSettings, currentView, setCurrentView, previewPreferences]);
 
   // ۱. همگام‌سازی وضعیت فرم با مقادیر واقعی استور هنگام باز شدن پنجره
+  // مرحله ۶ ـ بخش ب: فقط در گذارِ بسته→باز (نه با هر تغییرِ
+  // preferences)؛ وگرنه پیش‌نمایشِ زنده که preferences را عوض
+  // می‌کند، همین افکت را دوباره می‌چرخاند و ویرایش‌های محلیِ
+  // ذخیره‌نشدهٔ فرم را پاک می‌کرد. در همین گذار، تصویرِ مقادیرِ
+  // تمِ مطالعه هم برای Rollback گرفته می‌شود.
   useEffect(() => {
     isMountedRef.current = true;
-    if (isOpen) {
+    if (isOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
+      readingSnapshotRef.current = {
+        readingTheme: preferences?.readingTheme ?? 'default',
+        readingBrightness: preferences?.readingBrightness ?? 1,
+        readingWarmth: preferences?.readingWarmth ?? 0,
+      };
+      previewAppliedRef.current = false;
       setLocalPrefs({
         ...preferences,
         defaultZoom: zoomLevel || preferences?.defaultZoom || 1.0,
         comicPageGap: comicPageGap ?? 0,
         pdfPageGap: pdfPageGap ?? 12,
       });
+    } else if (!isOpen) {
+      wasOpenRef.current = false;
     }
     return () => {
       isMountedRef.current = false;
@@ -89,6 +120,17 @@ export default function QuickSettingsModal() {
     setPdfPageGap?.(num);
   };
 
+  // مرحله ۶ ـ بخش ب: پیش‌نمایشِ زندهٔ تمِ مطالعه — مقدارِ جدید، هم
+  // در فرمِ محلی و هم بی‌درنگ در استورِ سراسری (بدونِ ماندگاری)
+  // اعمال می‌شود تا صفحهٔ زیرِ مودال همان لحظه واکنش نشان دهد؛
+  // ماندگاری، فقط با دکمهٔ Save و Rollback، فقط با بستنِ بدونِ
+  // ذخیره انجام می‌شود.
+  const applyReadingPreview = (patch) => {
+    setLocalPrefs((s) => ({ ...s, ...patch }));
+    if (previewPreferences) previewPreferences(patch);
+    previewAppliedRef.current = true;
+  };
+
   // ذخیره‌سازی همگام در استور سراسری، دیتابیس لوکال و ریدر
   const handleSave = async () => {
     if (isSaving) return;
@@ -96,6 +138,16 @@ export default function QuickSettingsModal() {
 
     try {
       updatePreferences(localPrefs);
+
+      // مرحله ۶ ـ بخش ب: مقادیر، ماندگار شدند؛ پس بستنِ پس از
+      // ذخیره، هرگز Rollback نمی‌کند و تصویرِ لحظهٔ باز شدنِ مودال
+      // هم به مقادیرِ ذخیره‌شده به‌روز می‌شود.
+      previewAppliedRef.current = false;
+      readingSnapshotRef.current = {
+        readingTheme: localPrefs.readingTheme ?? 'default',
+        readingBrightness: localPrefs.readingBrightness ?? 1,
+        readingWarmth: localPrefs.readingWarmth ?? 0,
+      };
 
       if (typeof localPrefs.defaultZoom === 'number') {
         setZoomLevel(localPrefs.defaultZoom);
@@ -126,6 +178,15 @@ export default function QuickSettingsModal() {
       comicPageGap: 0,
       pdfPageGap: 12,
     });
+    // مرحله ۶ ـ بخش ب: بازنشانی، خودش ماندگار است؛ پس تصویرِ لحظهٔ
+    // باز شدن هم به پیش‌فرض‌ها به‌روز می‌شود تا انصرافِ بعدی،
+    // بازنشانیِ انجام‌شده را برنگرداند.
+    previewAppliedRef.current = false;
+    readingSnapshotRef.current = {
+      readingTheme: defaultState?.readingTheme ?? 'default',
+      readingBrightness: defaultState?.readingBrightness ?? 1,
+      readingWarmth: defaultState?.readingWarmth ?? 0,
+    };
     setZoomLevel(defaultState?.defaultZoom || 1.0);
     setComicPageGap?.(0);
     setPdfPageGap?.(12);
@@ -278,6 +339,80 @@ export default function QuickSettingsModal() {
                 />
               </div>
             )}
+          </section>
+
+          {/* مرحله ۶ ـ بخش الف: تمِ مطالعه و نورِ صفحه — فقط روی
+              تصویرِ صفحه اعمال می‌شود (فیلترِ CSS روی عنصرِ img) و
+              رنگِ تولبار و مختصاتِ حاشیه‌نویسی را لمس نمی‌کند.
+              تغییرها بی‌درنگ روی صفحهٔ زیرِ مودال دیده می‌شوند (پیش‌نمایشِ زنده)؛ با «ذخیره» ماندگار و با «انصراف»/Escape/کلیکِ بیرون، به حالتِ پیش از باز شدن برمی‌گردند. */}
+          <section style={styles.section}>
+            <div style={styles.sectionTitle}>
+              <Icons.Eye size={14} />
+              <span>تم مطالعه و نور صفحه (راحتی چشم)</span>
+            </div>
+
+            <div style={styles.row}>
+              <label style={styles.label}>تم نمایش صفحه:</label>
+              <div style={styles.pillGroup}>
+                <button
+                  type="button"
+                  style={getPillStyle((localPrefs.readingTheme || 'default') === 'default')}
+                  onClick={() => applyReadingPreview({ readingTheme: 'default' })}
+                >
+                  پیش‌فرض
+                </button>
+                <button
+                  type="button"
+                  style={getPillStyle(localPrefs.readingTheme === 'sepia')}
+                  onClick={() => applyReadingPreview({ readingTheme: 'sepia' })}
+                >
+                  کاغذی گرم (سپیا)
+                </button>
+                <button
+                  type="button"
+                  style={getPillStyle(localPrefs.readingTheme === 'night')}
+                  onClick={() => applyReadingPreview({ readingTheme: 'night' })}
+                >
+                  کنتراست نرم شب
+                </button>
+              </div>
+            </div>
+
+            <div style={styles.row}>
+              <div style={styles.labelWithVal}>
+                <label style={styles.label}>روشنایی صفحه:</label>
+                <span style={styles.valBadge}>{Math.round((localPrefs.readingBrightness ?? 1) * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0.6"
+                max="1.1"
+                step="0.05"
+                value={localPrefs.readingBrightness ?? 1}
+                onChange={(e) =>
+                  applyReadingPreview({ readingBrightness: parseFloat(e.target.value) })
+                }
+                style={styles.slider}
+              />
+            </div>
+
+            <div style={styles.row}>
+              <div style={styles.labelWithVal}>
+                <label style={styles.label}>گرمای صفحه (ته‌مایهٔ کهربایی):</label>
+                <span style={styles.valBadge}>{Math.round((localPrefs.readingWarmth ?? 0) * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="0.4"
+                step="0.05"
+                value={localPrefs.readingWarmth ?? 0}
+                onChange={(e) =>
+                  applyReadingPreview({ readingWarmth: parseFloat(e.target.value) })
+                }
+                style={styles.slider}
+              />
+            </div>
           </section>
 
           {/* بخش ۲: زوم و مقیاس نمایش صفحات کمیک */}

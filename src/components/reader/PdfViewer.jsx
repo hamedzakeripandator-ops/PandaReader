@@ -11,6 +11,11 @@ import thumbnailService from '../../services/thumbnailService';
 import hiDpiRenderService from '../../services/hiDpiRenderService';
 import Icons from '../common/Icons';
 import { normalizeSearchText } from '../../utils/persianSearch';
+import { prepareAnnotatedPdfExport } from '../../utils/annotationPdfExport';
+import useSettingsStore from '../../store/useSettingsStore';
+import readingActivity from '../../services/readingActivity';
+import { extractPdfOutline } from '../../utils/pdfOutline';
+import { getReadingThemeFilter } from '../../utils/readingTheme';
 // Cycle-fix (2026-10-25): هر ماژول، مستقیم از فایلِ خودش ایمپورت
 // می‌شود — تولبار دیگر از طریقِ لایه re-export نمی‌شود، پس هیچ
 // مسیری بینِ لایه و تولبار (در هیچ جهتی) وجود ندارد.
@@ -207,6 +212,33 @@ const DOM_OVERSCAN = 4;
 const RENDER_RADIUS = 3;
 const MAX_CACHED_BLOBS = 18;
 
+// مرحله ۴ ـ بخش ب: سقفِ کشِ متنِ جستجو + شعاعِ cleanup. شعاعِ ۵، یک
+// صفحه حاشیه فراتر از پنجرهٔ رندر (DOM_OVERSCAN=۴) نگه می‌دارد.
+const MAX_SEARCH_TEXT_CACHE_PAGES = 500;
+const SEARCH_CLEANUP_RADIUS = 5;
+
+// مرحله ۴ ـ بخش ب: جهتِ آیتمِ متنیِ pdf.js. در pdf.js، برای یک آیتمِ
+// خالصِ فارسی/عبری، رشتهٔ item.str به ترتیبِ منطقی برمی‌گردد و
+// item.dir برابرِ 'rtl' است، در حالی که tx[4] لبهٔ چپِ کادرِ بصری است؛
+// پس کاراکترِ منطقیِ اول، سمتِ راستِ کادر است و برشِ افقیِ جزئی باید
+// قرینه شود (اثباتِ تجربی در گزارشِ بخش ب). اگر dir نباشد، اولین
+// کاراکترِ دارای جهتِ قوی تصمیم می‌گیرد.
+const RTL_STRONG_RE = /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+const LTR_STRONG_RE = /[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]/;
+function isRtlSearchItem(item, str) {
+  if (item && typeof item.dir === 'string') {
+    if (item.dir === 'rtl') return true;
+    if (item.dir === 'ltr') return false;
+  }
+  const text = str || '';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (RTL_STRONG_RE.test(ch)) return true;
+    if (LTR_STRONG_RE.test(ch)) return false;
+  }
+  return false;
+}
+
 function extractDataUrlFromImgElement(imgEl) {
   try {
     if (!imgEl || !imgEl.naturalWidth || !imgEl.naturalHeight) return null;
@@ -247,6 +279,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   onPageRatioMeasured,
   onContextMenu,
   searchHighlights,
+  pageFilter,
 }) {
   const [blobUrl, setBlobUrl] = useState(cachedBlobUrl || null);
   const [hiDpiUrl, setHiDpiUrl] = useState(() =>
@@ -504,6 +537,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
             draggable={false}
             style={{
               ...styles.pageImage,
+              // مرحله ۶ ـ بخش الف: تمِ مطالعه فقط روی خودِ تصویرِ
+              // صفحه اعمال می‌شود؛ لایهٔ حاشیه‌نویسی، خواهرِ این
+              // عنصر است و فیلتر روی آن اثر نمی‌گذارد (نه رنگِ
+              // ابزارها عوض می‌شود، نه مختصاتِ بوم).
+              filter: pageFilter || 'none',
               // کالبدشکافی: ارتفاعِ ۱۰۰٪ِ wrapper (نه ارتفاعِ کارت) —
               // در حالتِ عادی، wrapper دقیقاً به ارتفاعِ کارت است و
               // نتیجه یکسان است؛ در حالتِ چرخیدهٔ ۹۰/۲۷۰، wrapper به
@@ -600,6 +638,17 @@ const PdfPageItem = React.memo(function PdfPageItem({
 export default function PdfViewer({ filePath }) {
   const zoomLevel = useReaderStore((state) => state.zoomLevel);
   const setZoomLevel = useReaderStore((state) => state.setZoomLevel);
+  const setPdfOutline = useReaderStore((state) => state.setPdfOutline);
+  // مرحله ۶ ـ بخش الف: تمِ مطالعه از تنظیماتِ سراسری خوانده می‌شود
+  // (در QuickSettingsModal ذخیره می‌شود)؛ تغییرِ آن، فقط همین رشتهٔ
+  // فیلتر را عوض می‌کند و هیچ محاسبهٔ هندسی‌ای را لمس نمی‌کند.
+  const readingTheme = useSettingsStore((state) => state.preferences?.readingTheme || 'default');
+  const readingBrightness = useSettingsStore((state) => state.preferences?.readingBrightness ?? 1);
+  const readingWarmth = useSettingsStore((state) => state.preferences?.readingWarmth ?? 0);
+  const pageFilter = useMemo(
+    () => getReadingThemeFilter(readingTheme, readingBrightness, readingWarmth),
+    [readingTheme, readingBrightness, readingWarmth]
+  );
   const areaZoomTarget = useReaderStore((state) => state.areaZoomTarget);
   const clearAreaZoomTarget = useReaderStore((state) => state.clearAreaZoomTarget);
   const hiDpiRenderTick = useReaderStore((state) => state.hiDpiRenderTick);
@@ -619,6 +668,9 @@ export default function PdfViewer({ filePath }) {
 
   const [numPages, setNumPages] = useState(0);
   const [pdfDoc, setPdfDoc] = useState(null);
+  // مرحله ۵ ـ بخش الف: وضعیتِ «در حالِ ساختِ خروجیِ PDF» برای غیرفعال
+  // کردنِ دکمهٔ خروجیِ تولبار در طولِ پردازش.
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [errorMsg, setErrorMsg] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
@@ -665,12 +717,22 @@ export default function PdfViewer({ filePath }) {
   // pageTextCacheRef فقط متن + مستطیل‌های درصدی را نگه می‌دارد (نه تصویر)،
   // پس با کشِ Blobِ صفحات (pageBlobCacheRef) هیچ تماسی ندارد.
   const pdfDocRef = useRef(null);
+  const outlineRunRef = useRef(0);
   pdfDocRef.current = pdfDoc;
+  // مرحله ۵ ـ بخش الف: آینهٔ annotationsByPage برای هندلرِ خروجیِ PDF تا
+  // تازه‌ترین کامیت‌ها (نه closureی قدیمی) خوانده شوند.
+  const annotationsByPageRef = useRef({});
+  annotationsByPageRef.current = annotationsByPage;
   const pageTextCacheRef = useRef(new Map());
   const searchRunIdRef = useRef(0);
   const searchInputRef = useRef(null);
   const searchDebounceRef = useRef(null);
-  const [searchOpen, setSearchOpen] = useState(false);
+  // مرحله ۴ ـ بخش ب: باز بودنِ نوارِ جستجو در استورِ ریدر زندگی
+  // می‌کند تا شنوندهٔ سراسریِ Escape در useKeyboard هم آن را ببیند و
+  // Escape، پیش از بستنِ کمیک، اول نوار را ببندد. بقیهٔ منطقِ جستجو
+  // (closeSearch و همهٔ call siteها) با همین نام‌ها دست‌نخورده ماند.
+  const searchOpen = useReaderStore((state) => Boolean(state.pdfSearchOpen));
+  const setSearchOpen = useReaderStore((state) => state.setPdfSearchOpen);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchCurrentKey, setSearchCurrentKey] = useState(null);
@@ -849,6 +911,100 @@ export default function PdfViewer({ filePath }) {
     showToast(`یادداشت‌های صفحه ${pageNum} پاک شد`, { type: 'info' });
   }, [handleCommitPageAnnotations, showToast]);
 
+  // مرحله ۵ ـ بخش الف: خروجیِ PDFِ حاشیه‌نویسی‌شده.
+  //  • فقط حاشیه‌نویسی‌های «ثبت‌شده» (کامیت‌شده) صادر می‌شوند؛ طرحِ
+  //    نیمه‌کارهٔ در حالِ ترسیم، هنوز در دیتابیس/استیت نیست.
+  //  • هندسه و رندرِ overlay روی «همان سندِ» pdfDocRef انجام می‌شود
+  //    (سندِ دومی باز نمی‌شود) و کشِ Blobِ صفحات دست نمی‌خورد.
+  //  • پیام‌ها از سیستمِ Toast برنامه می‌آیند؛ درصدِ ساختگی نشان داده
+  //    نمی‌شود، فقط دو فازِ «آماده‌سازی» و «نوشتن» گزارش می‌شود.
+  // مرحله ۵ ـ بخش ب: handleExportAnnotatedPdf حالا mode می‌گیرد
+  // ('in-place' | 'save-as') و تولبار، همان تابع را با همان mode
+  // صدا می‌زند؛ mountِ تولبار عوض نشده است.
+  const handleExportAnnotatedPdf = useCallback(async (mode = 'save-as') => {
+    if (isExportingPdf) return;
+    if (!coreApi.isAvailable()) {
+      showToast('خروجیِ PDF فقط در نسخهٔ دسکتاپ (Electron) در دسترس است.', { type: 'warning' });
+      return;
+    }
+    const saveMode = mode === 'in-place' ? 'in-place' : 'save-as';
+    const pages = annotationsByPageRef.current || {};
+    const annotatedCount = Object.values(pages).reduce(
+      (n, items) => n + (Array.isArray(items) ? items.length : 0),
+      0
+    );
+    // صفر آیتم، فقط در حالتِ درجا معنا دارد: برگرداندنِ فایل به
+    // پایهٔ تمیز. در Save As، مثلِ قبل فقط پیام داده می‌شود.
+    if (annotatedCount === 0 && saveMode !== 'in-place') {
+      showToast('هنوز حاشیه‌نویسی‌ای روی این فایل نیست.', { type: 'info' });
+      return;
+    }
+    const doc = pdfDocRef.current;
+    if (!doc) {
+      showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+      return;
+    }
+    setIsExportingPdf(true);
+    showToast('در حال آماده‌سازیِ خروجیِ PDF…', { type: 'info' });
+    try {
+      const prepared = annotatedCount > 0
+        ? await prepareAnnotatedPdfExport({
+            annotationsByPage: pages,
+            getPageViewport: async (pageNum) => {
+              const pg = await doc.getPage(pageNum);
+              const vp = pg.getViewport({ scale: 1 });
+              return {
+                width: vp.width,
+                height: vp.height,
+                transform: vp.transform,
+                rotate: pg.rotate,
+                view: pg.view,
+              };
+            },
+            cssRotation: rotation,
+          })
+        : { pages: {}, totalItems: 0, annotatedPages: 0 };
+      if (annotatedCount > 0 && prepared.annotatedPages === 0) {
+        showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        return;
+      }
+      showToast(saveMode === 'in-place' ? 'در حال ذخیره روی همین فایل…' : 'در حال نوشتنِ فایلِ PDF…', { type: 'info' });
+      const result = await coreApi.exportAnnotatedPdf({
+        pdfPath: filePath,
+        pages: prepared.pages,
+        mode: saveMode,
+      });
+      if (result && result.canceled) {
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
+        return;
+      }
+      if (result && result.success) {
+        if (result.restoredClean) {
+          showToast('فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.', { type: 'success' });
+        } else if (saveMode === 'in-place') {
+          showToast(
+            `روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`,
+            { type: 'success' }
+          );
+        } else {
+          showToast(
+            `فایلِ PDF با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`,
+            { type: 'success' }
+          );
+        }
+      } else if (result && result.locked) {
+        // هات‌فیکسِ مرحله ۶: پیامِ دقیقِ قفل، به‌جای خطای عمومی.
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
+      } else {
+        showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      showToast('خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+    } finally {
+      setIsExportingPdf(false);
+    }
+  }, [filePath, rotation, showToast, isExportingPdf]);
+
   // Refinement Final: مالکیتِ Ctrl+Z/Y وارونه شد تا Undoی مضاعف
   // رفع شود. قبلاً این شنونده فقط وقتی استودیو روشن بود ثبت می‌شد
   // و هم‌زمان با شنوندهٔ تولبار، هر دو handleUndoAnnotation را صدا
@@ -862,17 +1018,24 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-        if (e.shiftKey) {
-          e.preventDefault();
-          handleRedoAnnotation();
-        } else {
-          e.preventDefault();
-          handleUndoAnnotation();
-        }
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      // مرحله ۷ ـ بخش الف: مالکیتِ این شنونده (فقط وقتی استودیو
+      // خاموش است) دقیقاً مثلِ قبل می‌ماند؛ فقط گزاره، از
+      // مرجعِ واحد (matchesShortcut) خوانده می‌شود تا تغییرِ
+      // میانبرِ Undo/Redo در تنظیمات، کلیدِ قبلی را خلع کند.
+      // Ctrl+Shift+Z، اسمِ مستعارِ redo است و در خودِ matcher
+      // حل شده است.
+      let settingsState = null;
+      try {
+        settingsState = typeof useSettingsStore.getState === 'function'
+          ? useSettingsStore.getState()
+          : null;
+      } catch (_) { /* ignore */ }
+      if (settingsState?.matchesShortcut?.('redoAnnotation', e)) {
         e.preventDefault();
         handleRedoAnnotation();
+      } else if (settingsState?.matchesShortcut?.('undoAnnotation', e)) {
+        e.preventDefault();
+        handleUndoAnnotation();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -886,7 +1049,16 @@ export default function PdfViewer({ filePath }) {
   // وقتی فوکوس داخلِ یک کادرِ متنی است، هیچ‌کدام دخالت نمی‌کنند.
   useEffect(() => {
     const onKeyDown = (e) => {
-      if (!(e.ctrlKey || e.metaKey) || (e.key || '').toLowerCase() !== 'f') return;
+      // مرحله ۷ ـ بخش الف: فقط از مرجعِ واحد (findInPdf). پیش از
+      // این، Ctrl+F هاردکدشده بود و تغییرِ میانبرِ جستجو در
+      // تنظیمات، روی ریدرِ PDF اثری نداشت.
+      let settingsState = null;
+      try {
+        settingsState = typeof useSettingsStore.getState === 'function'
+          ? useSettingsStore.getState()
+          : null;
+      } catch (_) { /* ignore */ }
+      if (!settingsState?.matchesShortcut?.('findInPdf', e)) return;
       const t = e.target;
       if (
         t &&
@@ -1104,6 +1276,25 @@ export default function PdfViewer({ filePath }) {
         setActivePage(savedPage);
         activePageRef.current = savedPage;
         setIsLoading(false);
+        // مرحله ۶ ـ بخش الف: (الف) نشستِ آمارِ مطالعه برای این فایل
+        // شروع می‌شود و صفحهٔ ازسرگیری، اولین بازدیدِ نشست است؛
+        // (ب) فهرستِ PDF، غیرمسدودکننده و پس از آماده‌شدنِ سند
+        // استخراج می‌شود تا رندرِ صفحه‌ها معطلِ آن نماند.
+        readingActivity.begin(filePath);
+        readingActivity.visitPage(savedPage);
+        {
+          const outlineRunId = (outlineRunRef.current += 1);
+          setPdfOutline([], filePath, 'loading');
+          extractPdfOutline(doc).then((outline) => {
+            if (isMounted && outlineRunRef.current === outlineRunId) {
+              setPdfOutline(outline, filePath, 'done');
+            }
+          }).catch(() => {
+            if (isMounted && outlineRunRef.current === outlineRunId) {
+              setPdfOutline([], filePath, 'done');
+            }
+          });
+        }
       } catch (err) {
         if (err?.name === 'AbortError') return;
         console.error('PDF Load Error:', err);
@@ -1121,6 +1312,7 @@ export default function PdfViewer({ filePath }) {
 
     return () => {
       isMounted = false;
+      readingActivity.end();
       abortController.abort();
       clearAllCachedPageBlobs();
       hiDpiRenderService.clearFileCache(filePath);
@@ -1136,7 +1328,7 @@ export default function PdfViewer({ filePath }) {
         } catch (_) {}
       }
     };
-  }, [filePath, clearAllCachedPageBlobs, updateReadingProgress]);
+  }, [filePath, clearAllCachedPageBlobs, updateReadingProgress, setPdfOutline]);
 
   // ۳. محاسبه ارتفاع دقیق صفحات و آفست‌ها
   const { pageHeights, pageOffsets, totalHeight } = useMemo(() => {
@@ -1179,6 +1371,25 @@ export default function PdfViewer({ filePath }) {
   //    (strippedToOriginal) آفست‌ها را دقیق به آیتم‌های اصلی برمی‌گرداند.
   //    پس «نام کتاب» با «نامکتاب» (جداییِ آیتم‌های pdf.js) و «می‌شود» با
   //    «می شود» هم می‌خورد؛ متنِ عمودیِ داخلِ صفحه فقط تقریبی است.
+  // مرحله ۴ ـ بخش ب: تخلیهٔ کشِ متنِ جستجو. وقتی کش از سقف گذشت،
+  // دورترین صفحه‌ها از صفحهٔ فعلی (به‌جز صفحهٔ تازه‌اضافه‌شده و شعاعِ
+  // امنِ ±۵) حذف می‌شوند تا حافظهٔ کتاب‌های چند هزار صفحه‌ای کران‌دار
+  // بماند؛ استخراجِ دوبارهٔ یک صفحهٔ حذف‌شده، فقط متنی و ارزان است.
+  const pruneSearchTextCache = useCallback((justAddedPage) => {
+    const cache = pageTextCacheRef.current;
+    if (cache.size <= MAX_SEARCH_TEXT_CACHE_PAGES) return;
+    const center = activePageRef.current || 1;
+    const candidates = [...cache.keys()]
+      .filter(
+        (p) => p !== justAddedPage && Math.abs(p - center) > SEARCH_CLEANUP_RADIUS
+      )
+      .sort((a, b) => Math.abs(b - center) - Math.abs(a - center));
+    for (const p of candidates) {
+      if (cache.size <= MAX_SEARCH_TEXT_CACHE_PAGES) break;
+      cache.delete(p);
+    }
+  }, []);
+
   const extractPageText = useCallback(async (pageNum) => {
     const cached = pageTextCacheRef.current.get(pageNum);
     if (cached) return cached;
@@ -1196,11 +1407,18 @@ export default function PdfViewer({ filePath }) {
       const end = text.length;
       if (!str) continue;
       const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-      const scaleX = Math.hypot(tx[0], tx[1]);
       const scaleY = Math.hypot(tx[2], tx[3]);
       const fontHeight = scaleY;
-      const advance = (item.width || 0) * scaleX;
       const vertical = Math.abs(tx[1]) > Math.abs(tx[0]);
+      // مرحله ۴ ـ بخش ب — اصلاحِ بحرانیِ بزرگیِ مستطیل (یافتهٔ تستِ
+      // سرتاسری با PDF واقعی): item.width و item.height در pdf.js از
+      // قبل در واحدِ فضای کاربر (پوینت) هستند، چون worker هنگامِ
+      // ساختِ آیتم، textAdvanceScale (شاملِ اندازهٔ فونت) را اعمال
+      // کرده است. ضربِ دوباره در scaleX، عرض را به‌اندازهٔ فونت
+      // (مثلاً ۲۴ برابر) باد می‌کرد و هر هایلایت عملاً کلِ عرضِ صفحه
+      // را می‌پوشاند. برای متنِ افقی، امتدادِ along برابرِ item.width
+      // و برای متنِ عمودی، برابرِ item.height است.
+      const advance = vertical ? (item.height || 0) : (item.width || 0);
       let rect;
       if (vertical) {
         // متنِ عمودی: تقریبِ ابعادی (جعبهٔ بلند)؛ برای متنِ افقی دقیق است.
@@ -1218,7 +1436,7 @@ export default function PdfViewer({ filePath }) {
           height: (fontHeight / viewport.height) * 100,
         };
       }
-      items.push({ start, end, rect, vertical });
+      items.push({ start, end, rect, vertical, rtl: isRtlSearchItem(item, str) });
     }
     const normalized = normalizeSearchText(text);
     const strippedChars = [];
@@ -1237,8 +1455,21 @@ export default function PdfViewer({ filePath }) {
       items,
     };
     pageTextCacheRef.current.set(pageNum, entry);
+    pruneSearchTextCache(pageNum);
+    // مرحله ۴ ـ بخش ب: صفحه‌های دور از شعاعِ رندر، پس از استخراجِ متن
+    // cleanup می‌شوند تا وضعیتِ intentِ رندرِ pdf.js انباشته نشود.
+    // خودِ pdf.js جلوی cleanupِ رندرِ در حالِ اجرا را می‌گیرد
+    // (renderTasks فعال یا operatorList ناقص → no-op) و همین الگو
+    // (cleanup پس از رندرِ تصویر) از قبل در همین فایل برقرار است؛
+    // استخراجِ متن، در سمتِ worker انجام می‌شود و به intent state
+    // وابسته نیست، پس cleanup هیچ رندرِ در دیدی را خراب نمی‌کند.
+    if (Math.abs(pageNum - (activePageRef.current || 1)) > SEARCH_CLEANUP_RADIUS) {
+      try {
+        if (typeof page.cleanup === 'function') page.cleanup();
+      } catch (_) {}
+    }
     return entry;
-  }, []);
+  }, [pruneSearchTextCache]);
 
   // نگاشتِ یک تطابق روی آیتم‌ها به مستطیل‌های درصدی.
   const findMatchesInPage = useCallback((entry, normQuery) => {
@@ -1270,6 +1501,17 @@ export default function PdfViewer({ filePath }) {
               width: item.rect.width,
               top: item.rect.top + item.rect.height * f0,
               height: item.rect.height * (f1 - f0),
+            });
+          } else if (item.rtl) {
+            // مرحله ۴ ـ بخش ب: آیتمِ RTLِ منطقی — کادرِ جزئی قرینه
+            // می‌شود: بازهٔ منطقیِ [f0,f1) روی کادرِ بصری، در بازهٔ
+            // [1-f1,1-f0) می‌نشیند. تطابقِ کاملِ آیتم (شاخهٔ بالا)
+            // بدونِ برش می‌ماند و همین‌طور متنِ عمودی دست نمی‌خورد.
+            rects.push({
+              top: item.rect.top,
+              height: item.rect.height,
+              left: item.rect.left + item.rect.width * (1 - f1),
+              width: item.rect.width * (f1 - f0),
             });
           } else {
             rects.push({
@@ -1382,6 +1624,20 @@ export default function PdfViewer({ filePath }) {
     // کشِ متن عمداً پاک نمی‌شود: باز کردنِ دوبارهٔ جستجو روی همان سند،
     // بدونِ هیچ درخواستِ تازه‌ای انجام می‌شود.
   }, []);
+
+  // مرحله ۴ ـ بخش ب: بستنِ بیرونی (Escape در useKeyboard) فقط پرچمِ
+  // استور را خاموش می‌کند؛ این افکت همان پاک‌سازیِ closeSearch را
+  // برای آن مسیر هم اجرا می‌کند تا نتیجه‌ها و پرسمانِ کهنه، با باز
+  // شدنِ دوبارهٔ نوار برنگردند. کشِ متن دست نمی‌خورد.
+  useEffect(() => {
+    if (searchOpen) return;
+    searchRunIdRef.current += 1;
+    setSearchResults([]);
+    setSearchCurrentKey(null);
+    setSearchQuery('');
+    setSearchScanning(false);
+    setSearchScannedCount(0);
+  }, [searchOpen]);
 
   // هایلایت‌های هر صفحه (کلیدِ نتیجهٔ جاری، رنگِ فعال را تعیین می‌کند).
   // رندرِ مجددِ صفحه‌هایِ در دید، فقط JSX است (افکت‌های رندرِ تصویر،
@@ -1652,6 +1908,7 @@ export default function PdfViewer({ filePath }) {
 
         if (filePath) {
           updateReadingProgress(filePath, nextPage, numPages);
+          readingActivity.visitPage(nextPage);
         }
       }
     };
@@ -1700,77 +1957,68 @@ export default function PdfViewer({ filePath }) {
     triggerHiDpiRender,
   ]);
 
-  // ۹. زوم کانونی با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x)
+  // ۹. زوم کانونی با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x) — مرحله ۶:
+  // نسخهٔ قبلی، شنوندهٔ wheel را فقط وقتی Ctrl نگه داشته شده بود
+  // (keydown) وصل می‌کرد؛ ژستِ Pinchِ ترک‌پد، keydownِ Controlِ
+  // جداگانه نمی‌فرستد و چرخِ ماوس وقتی Ctrl از قبل نگه داشته شده
+  // بود هم شنونده را نداشت. حالا شنونده همیشه وصل است و فقط داخلِ
+  // هندلر، ctrlKey/metaKey بررسی می‌شود؛ پس زومِ پیش‌فرضِ پنجرهٔ
+  // مرورگر، همیشه با preventDefault خنثی می‌شود. زوم، ضربی و نرم
+  // است (exp) تا هم ناچ‌های چرخِ ماوس و هم ژستِ پیوستهٔ دو انگشتی،
+  // روان حس شوند؛ deltaModeِ خطی هم به پیکسل تبدیل می‌شود.
   useEffect(() => {
     const container = containerRef.current;
     if (!container || isLoading) return;
 
-    let isWheelListenerAttached = false;
+    // مرحله ۶ ـ بخش ب: تجمیعِ رویدادهای wheel در یک فریم با
+    // requestAnimationFrame — ترک‌پد تا ۱۲۰ رویداد در ثانیه
+    // می‌فرستد؛ به‌جای یک setZoomLevel (و یک به‌روزرسانیِ استیت)
+    // در هر رویداد، دلتاها در یک فریم جمع و فقط یک بار اعمال
+    // می‌شوند. ذخیرهٔ ماندگارِ زوم، از قبل در setZoomLevel با
+    // Debounceِ ۳۵۰ میلی‌ثانیه‌ای انجام می‌شد و دست نخورده است.
+    let pendingWheel = null;
 
     const handleWheelZoom = (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
       e.preventDefault();
       e.stopPropagation();
 
-      const delta = e.deltaY < 0 ? 0.1 : -0.1;
-      const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
-      const nextZoom = Math.min(
-        3.5,
-        Math.max(0.4, parseFloat((currentZoom + delta).toFixed(2)))
-      );
-
-      if (nextZoom !== currentZoom) {
-        const rect = container.getBoundingClientRect();
-        const mouseY = e.clientY - rect.top;
-        const scrollY = container.scrollTop;
-        const factor = nextZoom / currentZoom;
-
-        prevZoomRef.current = nextZoom;
-        setZoomLevel(nextZoom);
-
-        requestAnimationFrame(() => {
-          container.scrollTop = (scrollY + mouseY) * factor - mouseY;
-        });
+      const deltaY = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      if (pendingWheel) {
+        pendingWheel.accDeltaY += deltaY;
+        pendingWheel.clientY = e.clientY;
+        return;
       }
+      pendingWheel = { accDeltaY: deltaY, clientY: e.clientY, rafId: 0 };
+      pendingWheel.rafId = requestAnimationFrame(() => {
+        const pending = pendingWheel;
+        pendingWheel = null;
+        if (!pending) return;
+        const factor = Math.min(1.12, Math.max(0.89, Math.exp(-pending.accDeltaY * 0.0018)));
+        const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
+        const nextZoom = Math.min(
+          3.5,
+          Math.max(0.4, parseFloat((currentZoom * factor).toFixed(2)))
+        );
+
+        if (nextZoom !== currentZoom) {
+          const rect = container.getBoundingClientRect();
+          const mouseY = pending.clientY - rect.top;
+          const scrollY = container.scrollTop;
+          const scrollFactor = nextZoom / currentZoom;
+
+          prevZoomRef.current = nextZoom;
+          setZoomLevel(nextZoom);
+          container.scrollTop = (scrollY + mouseY) * scrollFactor - mouseY;
+        }
+      });
     };
 
-    const attachNonPassiveWheel = () => {
-      if (!isWheelListenerAttached && containerRef.current) {
-        containerRef.current.addEventListener('wheel', handleWheelZoom, {
-          passive: false,
-        });
-        isWheelListenerAttached = true;
-      }
-    };
-
-    const detachNonPassiveWheel = () => {
-      if (isWheelListenerAttached && containerRef.current) {
-        containerRef.current.removeEventListener('wheel', handleWheelZoom);
-        isWheelListenerAttached = false;
-      }
-    };
-
-    const handleKeyDown = (e) => {
-      if (e.key === 'Control' || e.key === 'Meta' || e.ctrlKey || e.metaKey) {
-        attachNonPassiveWheel();
-      }
-    };
-
-    const handleKeyUp = (e) => {
-      if (e.key === 'Control' || e.key === 'Meta' || (!e.ctrlKey && !e.metaKey)) {
-        detachNonPassiveWheel();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown, { passive: true });
-    window.addEventListener('keyup', handleKeyUp, { passive: true });
-    window.addEventListener('blur', detachNonPassiveWheel, { passive: true });
-
+    container.addEventListener('wheel', handleWheelZoom, { passive: false });
     return () => {
-      detachNonPassiveWheel();
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('blur', detachNonPassiveWheel);
+      container.removeEventListener('wheel', handleWheelZoom);
+      if (pendingWheel && pendingWheel.rafId) cancelAnimationFrame(pendingWheel.rafId);
+      pendingWheel = null;
     };
   }, [isLoading, setZoomLevel]);
 
@@ -1865,11 +2113,16 @@ export default function PdfViewer({ filePath }) {
         onUndo={handleUndoAnnotation}
         onRedo={handleRedoAnnotation}
         onClearPage={handleClearCurrentPageAnnotations}
+        onExportAnnotatedPdf={handleExportAnnotatedPdf}
+        isExportingPdf={isExportingPdf}
       />
 
-      {/* مرحله ۴ — نوارِ شناورِ جستجوی درون‌متنی PDF (بالای اسکرول، زیر TopBar) */}
+      {/* مرحله ۴ — نوارِ شناورِ جستجوی درون‌متنی PDF (بالای اسکرول، زیر TopBar) — بخش ب: وقتی استودیو فعال است، نوار پایین‌تر می‌نشیند تا روی داکِ پیش‌فرضِ افقیِ تولبار (بالا وسط) نیفتد. */}
       {searchOpen && (
-        <div style={styles.searchBar} dir="rtl">
+        <div
+          style={{ ...styles.searchBar, top: isAnnotationActive ? '132px' : '64px' }}
+          dir="rtl"
+        >
           <span style={{ color: 'var(--muted)', display: 'flex' }}>
             <Icons.Search size={16} />
           </span>
@@ -1981,6 +2234,7 @@ export default function PdfViewer({ filePath }) {
                   rotation={rotation}
                   pageAnnotations={pageAnnots}
                   searchHighlights={searchHighlightsByPage.get(pageNum) || null}
+                  pageFilter={pageFilter}
                   onCommitPageAnnotations={handleCommitPageAnnotations}
                   onPageRatioMeasured={handlePageRatioMeasured}
                   onContextMenu={handlePageContextMenu}

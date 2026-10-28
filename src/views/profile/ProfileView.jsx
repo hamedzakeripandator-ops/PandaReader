@@ -3,6 +3,9 @@ import useSettingsStore from '../../store/useSettingsStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import Icons from '../../components/common/Icons';
+import { coreApi } from '../../services/coreApi';
+import { readingActivity } from '../../services/readingActivity';
+import { computeReadingSummary, formatReadingHours } from '../../utils/readingStats';
 
 const PRESET_GRADIENTS = [
   { id: 'neon-cyan', label: 'نئون سایان', gradient: 'linear-gradient(135deg, #22d3ee 0%, #0f171c 100%)' },
@@ -21,6 +24,33 @@ export default function ProfileView() {
   const [subtitle, setSubtitle] = useState(profile?.subtitle || 'توسعه‌دهنده و کمیک‌خوان حرفه‌ای');
   const [dailyGoal, setDailyGoal] = useState(profile?.dailyGoalPages || 50);
   const [isProcessingImg, setIsProcessingImg] = useState(false);
+  // مرحله ۶ ـ بخش الف: آمارِ واقعیِ مطالعه از دیتابیس. تا وقتی
+  // بارگذاری نشده، summary برابر null است تا عددِ جعلی نشان داده نشود.
+  const [readingSummary, setReadingSummary] = useState(null);
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        // مرحله ۶ ـ بخش ب: پیش از خواندنِ آمار، منتظرِ اتمامِ فلاشِ
+        // در حالِ انجام می‌مانیم؛ وگرنه رفتنِ مستقیم از ریدر به
+        // پروفایل، آمارِ لحظاتی پیش را نشان نمی‌داد (مسابقهٔ
+        // flush ناهمگام با getReadingStats).
+        if (readingActivity && typeof readingActivity.waitForPendingFlush === 'function') {
+          await readingActivity.waitForPendingFlush();
+        }
+        if (!isMounted) return;
+        const res = await coreApi.getReadingStats();
+        if (isMounted && res && res.days) {
+          setReadingSummary(computeReadingSummary(res.days));
+        } else if (isMounted) {
+          setReadingSummary(computeReadingSummary({}));
+        }
+      } catch (_) {
+        if (isMounted) setReadingSummary(computeReadingSummary({}));
+      }
+    })();
+    return () => { isMounted = false; };
+  }, []);
 
   const fileInputRef = useRef(null);
 
@@ -34,9 +64,12 @@ export default function ProfileView() {
     if (profile?.dailyGoalPages) setDailyGoal(profile.dailyGoalPages);
   }, [profile]);
 
-  const totalReadPages = useMemo(() => {
-    return (recentItems || []).reduce((acc, item) => acc + (item.lastPage || item.currentPage || 1), 0);
-  }, [recentItems]);
+  // مرحله ۶ ـ بخش الف: «صفحه خوانده‌شده» حالا از آمارِ واقعیِ
+  // ثبت‌شده می‌آید، نه از جمعِ شمارهٔ صفحهٔ جاریِ کتاب‌ها (که
+  // موقعیتِ فعلی را می‌شمرد، نه صفحاتِ واقعاً خوانده‌شده را، و با
+  // هر بار خواندنِ دوباره، دوباره شمرده می‌شد). تا وقتی آمار
+  // بارگذاری نشده، null است و در کارت، خطِ تیره نشان داده می‌شود.
+  const totalReadPages = readingSummary ? readingSummary.totalPages : null;
 
   const effectiveLibrary = library || libraryItems || [];
   const totalComics = effectiveLibrary.length;
@@ -174,8 +207,16 @@ export default function ProfileView() {
 
         <div style={styles.statsSummaryGrid}>
           <div style={styles.statBox}>
-            <strong style={styles.statVal}>{totalReadPages}</strong>
+            <strong style={styles.statVal}>{totalReadPages === null ? '—' : totalReadPages}</strong>
             <span style={styles.statLbl}>صفحه خوانده‌شده</span>
+          </div>
+          <div style={styles.statBox}>
+            <strong style={styles.statVal}>{readingSummary ? `${readingSummary.currentStreak} روز` : '—'}</strong>
+            <span style={styles.statLbl}>رکورد پیوستگی جاری</span>
+          </div>
+          <div style={styles.statBox}>
+            <strong style={styles.statVal}>{readingSummary ? formatReadingHours(readingSummary.totalSeconds) : '—'}</strong>
+            <span style={styles.statLbl}>زمان مطالعه</span>
           </div>
           <div style={styles.statBox}>
             <strong style={styles.statVal}>{totalComics}</strong>
@@ -186,6 +227,83 @@ export default function ProfileView() {
             <span style={styles.statLbl}>علاقه‌مندی</span>
           </div>
         </div>
+      </div>
+
+      {/* مرحله ۶ ـ بخش الف: آمارِ واقعیِ مطالعه و رکوردِ پیوستگی */}
+      <div style={styles.sectionCard}>
+        <div style={styles.sectionHeaderRow}>
+          <span style={{ color: 'var(--accent)', display: 'flex' }}>
+            <Icons.Sparkles size={18} />
+          </span>
+          <h4 style={styles.sectionTitle}>آمار واقعی مطالعه</h4>
+        </div>
+        <p style={styles.sectionDesc}>
+          از این به بعد، هر صفحه‌ای که در ریدر بخوانی و هر ۳۰ ثانیه حضور در مطالعه، به‌صورت خودکار اینجا ثبت می‌شود. آمارِ قبل از این نسخه، چون ثبت نشده بود، در این کارت‌ها نیست.
+        </p>
+
+        {readingSummary ? (
+          <>
+            <div style={styles.statsSummaryGrid}>
+              <div style={styles.statBox}>
+                <strong style={styles.statVal}>{readingSummary.currentStreak} روز</strong>
+                <span style={styles.statLbl}>رکورد پیوستگی جاری</span>
+              </div>
+              <div style={styles.statBox}>
+                <strong style={styles.statVal}>{readingSummary.bestStreak} روز</strong>
+                <span style={styles.statLbl}>بهترین رکورد پیوستگی</span>
+              </div>
+              <div style={styles.statBox}>
+                <strong style={styles.statVal}>{readingSummary.totalPages}</strong>
+                <span style={styles.statLbl}>کل صفحات خوانده‌شده</span>
+              </div>
+              <div style={styles.statBox}>
+                <strong style={styles.statVal}>{formatReadingHours(readingSummary.totalSeconds)}</strong>
+                <span style={styles.statLbl}>کل زمان مطالعه</span>
+              </div>
+              <div style={styles.statBox}>
+                <strong style={styles.statVal}>{readingSummary.totalDays} روز</strong>
+                <span style={styles.statLbl}>روزهای فعال</span>
+              </div>
+            </div>
+
+            <div style={styles.goalRow}>
+              <div style={styles.labelWithVal}>
+                <span style={styles.goalLabel}>هدف امروز: {readingSummary.todayPages} از {Number(dailyGoal) || 50} صفحه</span>
+                <span style={styles.valBadge}>
+                  {Math.min(100, Math.round((readingSummary.todayPages / Math.max(1, Number(dailyGoal) || 50)) * 100))}%
+                </span>
+              </div>
+              <div style={styles.goalBarTrack}>
+                <div
+                  style={{
+                    ...styles.goalBarFill,
+                    width: `${Math.min(100, Math.round((readingSummary.todayPages / Math.max(1, Number(dailyGoal) || 50)) * 100))}%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={styles.chartRow}>
+              {readingSummary.last7.map((day) => {
+                const maxPages = Math.max(1, ...readingSummary.last7.map((d) => d.pages));
+                const heightPct = Math.round((day.pages / maxPages) * 100);
+                const dayLabel = day.key.slice(5).replace('-', '/');
+                return (
+                  <div key={day.key} style={styles.chartCol}>
+                    <div style={styles.chartBarTrack}>
+                      <div style={{ ...styles.chartBarFill, height: `${Math.max(day.pages > 0 ? 8 : 3, heightPct)}%` }} />
+                    </div>
+                    <span style={styles.chartVal}>{day.pages}</span>
+                    <span style={styles.chartLbl}>{dayLabel}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <p style={styles.sectionDesc}>نمودار: صفحات خوانده‌شده در ۷ روز اخیر (راست به چپ: قدیمی‌ترین تا امروز).</p>
+          </>
+        ) : (
+          <p style={styles.sectionDesc}>در حال بارگذاریِ آمار…</p>
+        )}
       </div>
 
       {/* بخش آپلود یا انتخاب آواتار */}
@@ -471,6 +589,84 @@ const styles = {
     fontWeight: 500,
     color: 'var(--muted)',
     marginTop: '3px',
+  },
+  goalRow: {
+    marginTop: '16px',
+  },
+  labelWithVal: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+  },
+  goalLabel: {
+    fontSize: '13px',
+    fontWeight: 600,
+    color: 'var(--text)',
+  },
+  valBadge: {
+    fontSize: '12px',
+    fontWeight: 700,
+    color: 'var(--accent)',
+    backgroundColor: 'rgba(34, 211, 238, 0.1)',
+    borderRadius: '999px',
+    padding: '2px 10px',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  goalBarTrack: {
+    height: '8px',
+    borderRadius: '999px',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    overflow: 'hidden',
+    marginTop: '8px',
+  },
+  goalBarFill: {
+    height: '100%',
+    background: 'linear-gradient(90deg, #22d3ee, #10b981)',
+    borderRadius: '999px',
+    transition: 'width 0.4s ease',
+  },
+  chartRow: {
+    display: 'flex',
+    gap: '10px',
+    alignItems: 'stretch',
+    marginTop: '18px',
+  },
+  chartCol: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '4px',
+    minWidth: 0,
+  },
+  chartBarTrack: {
+    height: '72px',
+    width: '100%',
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    borderRadius: '8px',
+    overflow: 'hidden',
+  },
+  chartBarFill: {
+    width: '100%',
+    background: 'linear-gradient(180deg, #22d3ee, #0e7490)',
+    minHeight: '3px',
+  },
+  chartVal: {
+    fontSize: '12px',
+    fontWeight: 700,
+    color: 'var(--text)',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  chartLbl: {
+    fontSize: '10.5px',
+    color: 'var(--muted)',
+    fontVariantNumeric: 'tabular-nums',
   },
   sectionCard: {
     backgroundColor: 'var(--panel)',
