@@ -4,6 +4,9 @@ import useReaderStore from '../../store/useReaderStore';
 import Icons from '../common/Icons';
 
 export default function AreaZoomOverlay() {
+  // مرحله ۱۲: نمایِ فعلی — بنرِ زومِ ناحیه‌ای و کپسولِ بازگشت،
+  // فقط در نمایِ ریدر مجاز به رندر شدن هستند.
+  const currentView = useAppStore((state) => state.currentView);
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
   const setIsAreaZoomActive = useAppStore((state) => state.setIsAreaZoomActive);
   const showToast = useAppStore((state) => state.showToast);
@@ -17,6 +20,34 @@ export default function AreaZoomOverlay() {
   const [dragBox, setDragBox] = useState(null);
   const startPosRef = useRef(null);
   const isDrawingRef = useRef(false);
+
+  // مرحله ۱۲: جمع‌شدنِ خودکارِ بنرِ راهنما پس از ۱۰ ثانیه به
+  // دایرهٔ کوچکِ نیمه‌شفافِ اطلاعات. تایمر، از لحظهٔ فعال شدنِ
+  // زومِ ناحیه‌ای شروع می‌شود و با غیرفعال شدنش، وضعیت به حالتِ
+  // اول برمی‌گردد تا فعال‌سازیِ بعدی، دوباره ۱۰ ثانیهٔ کامل،
+  // کپسولِ راهنما را نشان بدهد.
+  const [bannerCollapsed, setBannerCollapsed] = useState(false);
+  const [bannerHovered, setBannerHovered] = useState(false);
+  useEffect(() => {
+    if (!isAreaZoomActive) {
+      setBannerCollapsed(false);
+      setBannerHovered(false);
+      return;
+    }
+    const timer = setTimeout(() => setBannerCollapsed(true), 10000);
+    return () => clearTimeout(timer);
+  }, [isAreaZoomActive]);
+
+  // مرحله ۱۲: پاک‌سازیِ کمربند و شانه‌بند — اگر به هر راهی
+  // (مثلاً شورت‌کاتِ Alt+Z روی نمایِ دیگر، که در مرحله ۱۲ در
+  // useKeyboard هم گیت شد)، زومِ ناحیه‌ای بیرون از ریدر فعال
+  // بماند، با عوض شدنِ نما، خودکار خاموش می‌شود. (setCurrentView
+  // در استور هم همین کار را می‌کند؛ این effect، دفاعِ دوم است.)
+  useEffect(() => {
+    if (currentView !== 'reader' && isAreaZoomActive) {
+      setIsAreaZoomActive(false);
+    }
+  }, [currentView, isAreaZoomActive, setIsAreaZoomActive]);
 
   // لغو حالت کشیدن باکس با کلید Escape یا کلیک راست
   useEffect(() => {
@@ -178,7 +209,9 @@ export default function AreaZoomOverlay() {
     [dragBox, applyAreaZoom, setIsAreaZoomActive, showToast]
   );
 
-  if (!comicData) return null;
+  // مرحله ۱۲: بیرون از نمایِ ریدر، هیچ‌چیز از این اورلی رندر
+  // نمی‌شود — نه بنرِ راهنما و نه کپسولِ بازگشت به زومِ قبلی.
+  if (!comicData || currentView !== 'reader') return null;
 
   // محاسبه زوم تخمینی زنده هنگام کشیدن کادر
   let previewZoomPercent = Math.round(zoomLevel * 100);
@@ -227,11 +260,38 @@ export default function AreaZoomOverlay() {
           }}
           style={styles.overlayBackdrop}
         >
-          {/* بنر راهنمای بالای صفحه */}
-          <div style={styles.topInstructionBanner}>
-            <Icons.ScanSearch size={16} />
-            <span>کادر مورد نظر برای بزرگ‌نمایی را با ماوس بکشید</span>
-            <span style={styles.escBadge}>Esc = لغو</span>
+          {/* بنر راهنمای بالای صفحه — مرحله ۱۲: پس از ۱۰ ثانیه،
+              به دایرهٔ کوچکِ نیمه‌شفافِ اطلاعات جمع می‌شود؛
+              هاور یا کلیک، کپسولِ راهنما (همراه با دکمهٔ خروج)
+              را دوباره باز می‌کند و با کنار رفتنِ ماوس، دوباره
+              به دایره برمی‌گردد. pointerDown روی بنر، جلوی شروعِ
+              کشیدنِ باکس را می‌گیرد. */}
+          <div
+            style={bannerCollapsed && !bannerHovered ? styles.topInstructionCollapsed : styles.topInstructionBanner}
+            onMouseEnter={() => setBannerHovered(true)}
+            onMouseLeave={() => setBannerHovered(false)}
+            onClick={() => setBannerHovered(true)}
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            {bannerCollapsed && !bannerHovered ? (
+              <Icons.Info size={17} />
+            ) : (
+              <>
+                <Icons.ScanSearch size={16} />
+                <span>کادر مورد نظر برای بزرگ‌نمایی را با ماوس بکشید</span>
+                <span style={styles.escBadge}>Esc = لغو</span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setIsAreaZoomActive(false);
+                  }}
+                  style={styles.bannerExitBtn}
+                >
+                  خروج از زوم ناحیه‌ای
+                </button>
+              </>
+            )}
           </div>
 
           {/* مستطیل انتخابی زنده */}
@@ -285,9 +345,13 @@ const styles = {
     gap: '10px',
     padding: '8px 18px',
     borderRadius: '24px',
-    backgroundColor: 'rgba(13, 18, 24, 0.94)',
-    backdropFilter: 'blur(16px)',
-    WebkitBackdropFilter: 'blur(16px)',
+    // مرحله ۱۲: نیمه‌شفاف‌تر (۰٫۵۸) تا محتوای کتاب در پشتِ بنر
+    // کاملاً خوانا بماند؛ transition، جمع‌شدنِ نرم به دایره را
+    // می‌سازد؛ pointerEvents فعال است تا هاور/کلیکِ دایره کار کند.
+    background: 'rgba(15, 23, 42, 0.58)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    transition: 'all 300ms cubic-bezier(0.16, 1, 0.3, 1)',
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: 'rgba(167, 139, 250, 0.45)',
@@ -296,8 +360,48 @@ const styles = {
     fontSize: '12.5px',
     fontWeight: 700,
     boxShadow: '0 12px 32px rgba(0, 0, 0, 0.7)',
-    pointerEvents: 'none',
+    pointerEvents: 'auto',
     direction: 'rtl',
+  },
+  // مرحله ۱۲: حالتِ جمع‌شدهٔ بنر — دایرهٔ ۳۸ پیکسلیِ نیمه‌شفاف
+  // با آیکونِ اطلاعات (i) که جلوی دیدِ صفحه را نمی‌گیرد.
+  topInstructionCollapsed: {
+    position: 'fixed',
+    top: '66px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '38px',
+    height: '38px',
+    padding: 0,
+    borderRadius: '50%',
+    background: 'rgba(15, 23, 42, 0.58)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+    transition: 'all 300ms cubic-bezier(0.16, 1, 0.3, 1)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(167, 139, 250, 0.45)',
+    color: '#e6edf3',
+    boxShadow: '0 12px 32px rgba(0, 0, 0, 0.7)',
+    pointerEvents: 'auto',
+    cursor: 'pointer',
+  },
+  bannerExitBtn: {
+    backgroundColor: 'rgba(167, 139, 250, 0.2)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: '#a78bfa',
+    color: '#ffffff',
+    borderRadius: '12px',
+    padding: '3px 10px',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    outline: 'none',
   },
   escBadge: {
     fontFamily: 'var(--font-mono)',

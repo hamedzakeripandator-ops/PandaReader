@@ -335,6 +335,7 @@ export default function RecentView({ onOpenComic }) {
 
   return (
     <div ref={scrollContainerRef} onScroll={handleScroll} style={styles.container}>
+      <div style={styles.containerInner}>
       {/* هدر بالای تاریخچه */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -457,6 +458,7 @@ export default function RecentView({ onOpenComic }) {
       {visibleCount < filteredRecents.length && (
         <div ref={sentinelRef} style={{ height: '1px' }} aria-hidden="true" />
       )}
+      </div>
     </div>
   );
 }
@@ -469,9 +471,21 @@ const styles = {
     flexDirection: 'column',
     gap: '18px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },  // مرحله ۱۲: محتوای درونیِ اسکرول‌خور — جهتِ راست‌به‌چپِ
+  // فارسی، دقیقاً با همان فاصله‌ها (gap) حفظ می‌شود؛ فقط
+  // خودِ کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا کرومیوم،
+  // نوارِ اسکرول را در لبهٔ سمتِ راست رندر کند.
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '18px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
   },
+
   header: {
     display: 'flex',
     alignItems: 'center',

@@ -261,6 +261,34 @@ function extractDataUrlFromImgElement(imgEl) {
 // ============================================================================
 // ۲. کامپوننت ایزوله هر صفحه PDF مجهز به رندر دو مرحله‌ای (Base + HiDPI Pass)
 // ============================================================================
+// مرحله ۱۲: آرایهٔ مشترکِ «صفحه بدونِ حاشیه‌نویسی» — پیش از این،
+ // در رندرِ والد، برای هر صفحهٔ بدونِ حاشیه‌نویسی، یک آرایهٔ
+ // تازه (`|| []`) ساخته می‌شد و مقایسهٔ سطحیِ React.memo را
+ // برای PdfPageItem و لایهٔ Konvaی درونِ آن، در هر رندرِ والد،
+// شکست می‌داد. این آرایه، فریز شده و در همهٔ صفحه‌ها مشترک است.
+const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
+
+// مرحله ۱۲: مقایسه‌گرِ دقیقِ PdfPageItem — تنها تفاوتش با
+// مقایسهٔ پیش‌فرض، نادیده گرفتنِ `distanceFromActive` است: این
+// مقدار، در هر تغییرِ صفحهٔ فعال، برای همهٔ آیتم‌های مانت‌شده
+// عوض می‌شود، ولی فقط برای تأخیرِ اولویت‌دارِ رندرِ پایه و گیتِ
+// HiDPI لازم است که هر دو، حالا از راهِ `isNearViewport` /
+// `isActivePage` (بولین‌های مرزی) و `distanceRef` دنبال
+// می‌شوند. بقیهٔ پراپ‌ها، دقیقاً با `===` مقایسه می‌شوند (از
+// جمله `zoomLevel` و `expectedHeight` که در زوم، واقعاً عوض
+// می‌شوند و چیدمان، به‌روزرسانی‌شان را لازم دارد).
+function arePdfPagePropsEqual(prev, next) {
+  const { distanceFromActive: _prevDistance, ...prevRest } = prev;
+  const { distanceFromActive: _nextDistance, ...nextRest } = next;
+  const prevKeys = Object.keys(prevRest);
+  const nextKeys = Object.keys(nextRest);
+  if (prevKeys.length !== nextKeys.length) return false;
+  for (const key of prevKeys) {
+    if (prevRest[key] !== nextRest[key]) return false;
+  }
+  return true;
+}
+
 const PdfPageItem = React.memo(function PdfPageItem({
   filePath,
   pageNumber,
@@ -270,6 +298,9 @@ const PdfPageItem = React.memo(function PdfPageItem({
   zoomLevel,
   hiDpiRenderTick,
   distanceFromActive,
+  isNearViewport,
+  isActivePage,
+  renderZoomLevel,
   shouldRender,
   cachedBlobUrl,
   onStorePageBlob,
@@ -287,7 +318,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
 }) {
   const [blobUrl, setBlobUrl] = useState(cachedBlobUrl || null);
   const [hiDpiUrl, setHiDpiUrl] = useState(() =>
-    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, zoomLevel)
+    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel)
   );
   const [renderFailed, setRenderFailed] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
@@ -296,6 +327,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const renderTaskRef = useRef(null);
   const erroredUrlsRef = useRef(new Set());
   const imgErrorCountRef = useRef(0);
+  // مرحله ۱۲: فاصلهٔ زنده از صفحهٔ فعال، برای تأخیرِ اولویت‌دار،
+  // بدونِ اینکه وابستگیِ effectِ رندرِ پایه باشد (وگرنه، هر
+  // تغییرِ صفحهٔ فعال، effectِ همهٔ صفحه‌ها را از نو راه
+  // می‌انداخت).
+  const distanceRef = useRef(distanceFromActive);
+  distanceRef.current = distanceFromActive;
 
   // Stage 8 Part A: a cached/blob URL that was revoked by eviction is
   // treated as absent everywhere below; otherwise the render effect
@@ -328,8 +365,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
     // مرحله ۷ ـ نهاییِ دوم: صفحهٔ فعال، بدونِ هیچ تأخیری (۰
     // میلی‌ثانیه) در همان فریم رندر می‌شود؛ صفحه‌های مجاور، مثلِ
     // قبل با تأخیرِ اولویت‌دار.
+    // مرحله ۱۲: فاصله از distanceRef خوانده می‌شود، نه از پراپ —
+    // effect، دیگر به distanceFromActive وابسته نیست.
+    const distanceNow = distanceRef.current;
     const priorityDelay =
-      distanceFromActive === 0 ? 0 : distanceFromActive === 1 ? 40 : 100;
+      distanceNow === 0 ? 0 : distanceNow === 1 ? 40 : 100;
 
     // Stage 8 Part B: the Part A settle loop (up to 25 x 60ms re-arms
     // driven by a motion ref) is REMOVED. It delayed every non-active
@@ -442,7 +482,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
     shouldRender,
     pdfDoc,
     pageNumber,
-    distanceFromActive,
     effectiveCachedBlobUrl,
     effectiveBlobUrl,
     retryTick,
@@ -451,24 +490,31 @@ const PdfPageItem = React.memo(function PdfPageItem({
   ]);
 
   // ب: پاس دوم (Crystal-Clear HiDPI Re-render) پس از تثبیت زوم یا توقف روی صفحه
+  // مرحله ۱۲: این effect، دیگر به زومِ زنده (`zoomLevel`) وابسته
+  // نیست — رندرِ سنگینِ HiDPI، فقط با زومِ تثبیت‌شده
+  // (`renderZoomLevel`، ۱۵۰ میلی‌ثانیه پس از آخرین تیکِ زوم)
+  // انجام می‌شود و تصویرِ موجود، تا آن لحظه با ابعادِ جدیدِ
+  // کادر، مقیاس می‌گیرد (چیدمانِ فوری، رسترایزِ دیبانس‌شده).
+  // گیتِ نزدیکی هم از `isNearViewport`ی مرزی می‌آید، نه از
+  // `distanceFromActive` که در هر قدمِ اسکرول عوض می‌شود.
   useEffect(() => {
-    if (!pdfDoc || distanceFromActive > 1) return;
+    if (!pdfDoc || !isNearViewport) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const needsHiDpi = zoomLevel > 1.08 || dpr > 1.15;
+    const needsHiDpi = renderZoomLevel > 1.08 || dpr > 1.15;
     if (!needsHiDpi) {
       setHiDpiUrl(null);
       return;
     }
 
-    const cachedSharp = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, zoomLevel);
+    const cachedSharp = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel);
     if (cachedSharp) {
       setHiDpiUrl(cachedSharp);
       return;
     }
 
     let isCancelled = false;
-    const debounceMs = distanceFromActive === 0 ? 170 : 320;
+    const debounceMs = isActivePage ? 170 : 320;
 
     const timer = setTimeout(async () => {
       if (isCancelled) return;
@@ -476,7 +522,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
         pdfDoc,
         filePath,
         pageNumber,
-        zoomLevel,
+        zoomLevel: renderZoomLevel,
       });
       if (!isCancelled && sharpUrl) {
         setHiDpiUrl(sharpUrl);
@@ -487,7 +533,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
       isCancelled = true;
       clearTimeout(timer);
     };
-  }, [pdfDoc, filePath, pageNumber, zoomLevel, hiDpiRenderTick, distanceFromActive]);
+  }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage]);
 
   const handleFrameContextMenu = useCallback(
     (e) => {
@@ -746,7 +792,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
       </div>
     </div>
   );
-});
+}, arePdfPagePropsEqual);
 
 // ============================================================================
 // ۳. کامپوننت اصلی PdfViewer (مجهز به Dual-Pass HiDPI و Area Box Zoom)
@@ -904,6 +950,25 @@ export default function PdfViewer({ filePath }) {
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
   const safePageGap = Math.max(0, Math.min(48, Math.round(Number(pdfPageGap) ?? 12)));
+
+  // مرحله ۱۲: زومِ «تثبیت‌شده» برای رسترایزِ سنگین — در حینِ
+  // زومِ پیوسته (ترک‌پد/اسلایدر)، فقط چیدمان (ارتفاع‌ها/عرض‌ها)
+  // با زومِ زنده به‌روز می‌شود و تصویرِ موجود، مقیاس می‌گیرد؛
+  // رندرِ مجددِ pdf.js، فقط ۱۵۰ میلی‌ثانیه پس از آخرین تیکِ
+  // زوم انجام می‌شود. `rasterZoomRef`، جلوی ست‌شدنِ دوبارهٔ
+  // همان مقدار را می‌گیرد تا حلقهٔ effect/state نسازد. تیکِ
+  // `hiDpiRenderTick` در استور (مرحله ۶-ب) دست‌نخورده می‌ماند:
+  // همان ماشهٔ «توقفِ اسکرول» برای شارپ شدنِ صفحه‌هاست.
+  const [rasterZoomLevel, setRasterZoomLevel] = useState(safeZoom);
+  const rasterZoomRef = useRef(safeZoom);
+  useEffect(() => {
+    if (rasterZoomRef.current === safeZoom) return;
+    const timer = setTimeout(() => {
+      rasterZoomRef.current = safeZoom;
+      setRasterZoomLevel(safeZoom);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [safeZoom]);
 
   const clearAllCachedPageBlobs = useCallback(() => {
     for (const [, url] of pageBlobCacheRef.current.entries()) {
@@ -1402,6 +1467,10 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
+      // مرحله ۱۲: در حالِ ضبطِ شورت‌کات در تنظیمات، هیچ‌کاری نکن.
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
       // مرحله ۷ ـ بخش ب: وقتی فوکوس داخلِ کادرِ متنی است (جستجوی
       // PDF، ویرایشگرِ متن/استیکی، سرچ‌بار)، Ctrl+Z/Y باید Undoی
       // متنیِ خودِ مرورگر باشد، نه Undoی حاشیه‌نویسی — وگرنه تایپِ
@@ -1447,6 +1516,10 @@ export default function PdfViewer({ filePath }) {
   // وقتی فوکوس داخلِ یک کادرِ متنی است، هیچ‌کدام دخالت نمی‌کنند.
   useEffect(() => {
     const onKeyDown = (e) => {
+      // مرحله ۱۲: در حالِ ضبطِ شورت‌کات در تنظیمات، هیچ‌کاری نکن.
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
       // مرحله ۷ ـ بخش الف: فقط از مرجعِ واحد (findInPdf). پیش از
       // این، Ctrl+F هاردکدشده بود و تغییرِ میانبرِ جستجو در
       // تنظیمات، روی ریدرِ PDF اثری نداشت.
@@ -2953,7 +3026,7 @@ export default function PdfViewer({ filePath }) {
                 ? (signedDistance >= -2 && signedDistance <= 5)
                 : (signedDistance >= -5 && signedDistance <= 2);
               const cachedUrl = pageBlobCacheRef.current.get(pageNum) || null;
-              const pageAnnots = annotationsByPage[String(pageNum)] || [];
+              const pageAnnots = annotationsByPage[String(pageNum)] || EMPTY_PAGE_ANNOTATIONS;
 
               return (
                 <PdfPageItem
@@ -2966,6 +3039,9 @@ export default function PdfViewer({ filePath }) {
                   zoomLevel={safeZoom}
                   hiDpiRenderTick={hiDpiRenderTick}
                   distanceFromActive={distance}
+                  isNearViewport={distance <= 1}
+                  isActivePage={pageNum === activePage}
+                  renderZoomLevel={rasterZoomLevel}
                   shouldRender={shouldRender}
                   cachedBlobUrl={cachedUrl}
                   onStorePageBlob={storePageBlobInCache}

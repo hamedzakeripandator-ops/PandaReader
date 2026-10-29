@@ -15,6 +15,19 @@ export default function KeybindRecorder({
   useEffect(() => {
     if (!isRecording) return;
 
+    // مرحله ۱۲: پرچمِ سراسریِ «در حالِ ضبطِ شورت‌کات» — شنوندهٔ
+    // capture در useKeyboard (که هنگامِ بالا آمدنِ برنامه، زودتر
+    // ثبت شده) با دیدنِ این پرچم، بلافاصله برمی‌گردد و کلیدِ در
+    // حالِ ضبط (مثلِ Ctrl + F) را نمی‌بلعد. پیش از این، هیچ‌کس
+    // این پرچم را ست نمی‌کرد و فقط خودِ گیتِ useKeyboard به آن
+    // نگاه می‌کرد؛ به همین دلیل، فوکوس به سرچِ TopBar می‌پرید.
+    // ویژگیِ data رویِ body هم ست می‌شود تا هر شنوندهٔ دیگری هم
+    // بتواند همین وضعیت را بخواند.
+    window.__isRecordingShortcut = true;
+    if (typeof document !== 'undefined' && document.body && document.body.dataset) {
+      document.body.dataset.recordingShortcut = 'true';
+    }
+
     const handleClickOutside = (e) => {
       if (recorderRef.current && !recorderRef.current.contains(e.target)) {
         setIsRecording(false);
@@ -25,6 +38,11 @@ export default function KeybindRecorder({
     const handleKeyDown = (e) => {
       e.preventDefault();
       e.stopPropagation();
+      // مرحله ۱۲: جلویِ شنونده‌هایِ هم‌فازِ دیگری که بعد از این
+      // شنونده ثبت شده‌اند را هم می‌گیرد تا کلیدِ ضبط‌شده، هیچ
+      // اثرِ جانبیِ دیگری نداشته باشد. (شنونده‌هایِ قبل‌تر، با
+      // پرچمِ بالا مهار می‌شوند.)
+      e.stopImmediatePropagation();
 
       if (e.key === 'Escape' && !e.ctrlKey && !e.altKey && !e.shiftKey) {
         setIsRecording(false);
@@ -69,6 +87,10 @@ export default function KeybindRecorder({
     document.addEventListener('mousedown', handleClickOutside);
 
     return () => {
+      window.__isRecordingShortcut = false;
+      if (typeof document !== 'undefined' && document.body && document.body.dataset) {
+        delete document.body.dataset.recordingShortcut;
+      }
       window.removeEventListener('keydown', handleKeyDown, true);
       document.removeEventListener('mousedown', handleClickOutside);
     };

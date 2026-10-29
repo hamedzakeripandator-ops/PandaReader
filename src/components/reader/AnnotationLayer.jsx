@@ -2431,6 +2431,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // ورودیِ Undo ثبت شود.
   useEffect(() => {
     const onKeyDown = (e) => {
+      // مرحله ۱۲: در حالِ ضبطِ شورت‌کات در تنظیمات، هیچ‌کاری نکن.
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
       if (e.key !== 'Delete' && e.key !== 'Backspace') return;
       const tag = e.target?.tagName;
       if (tag === 'TEXTAREA' || tag === 'INPUT') return;

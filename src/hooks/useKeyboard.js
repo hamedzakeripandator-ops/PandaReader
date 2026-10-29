@@ -4,6 +4,7 @@ import useReaderStore from '../store/useReaderStore';
 import useLibraryStore from '../store/useLibraryStore';
 import useSettingsStore from '../store/useSettingsStore';
 import { coreApi } from '../services/coreApi';
+import { flattenOutline } from '../utils/pdfOutline';
 
 // مرحله ۷ ـ بخش الف: نگاشتِ ابزار ← اکشنِ تنظیمات. این جدول، فقط
 // «کدام اکشن، کدام ابزار است» را می‌گوید؛ خودِ کلیدها، فقط از
@@ -29,6 +30,63 @@ function resolveStudioToolId(settingsState, e) {
   return null;
 }
 
+// مرحله ۱۲: صفحه‌هایِ شروعِ فصل‌هایِ کمیک — دقیقاً همان قاعده‌ای
+// که RightPanel برای منویِ «فصل‌ها» استفاده می‌کند: مرزِ فصل،
+// جایی است که `item.chapter` (یا بخشِ اولِ `item.name` پیش از
+// ' / ') عوض می‌شود.
+function comicChapterStartPages(items) {
+  const starts = [];
+  let currentChapterTitle = null;
+  for (let index = 0; index < (items || []).length; index++) {
+    const item = items[index];
+    const chapterName =
+      item.chapter ||
+      (item.name && item.name.includes(' / ') ? item.name.split(' / ')[0] : null);
+    if (chapterName && chapterName !== currentChapterTitle) {
+      currentChapterTitle = chapterName;
+      starts.push(index + 1);
+    }
+  }
+  return starts;
+}
+
+// مرحله ۱۲: پرش به فصلِ بعدی/قبلیِ داخلِ همان کتاب. برای PDF،
+// از فهرستِ استخراج‌شدهٔ سند (pdfOutline) استفاده می‌شود و فقط
+// وقتی فهرست، متعلق به همین فایلِ جاری است؛ برای کمیک، از
+// گروه‌هایِ فصلِ مشتق از آیتم‌ها. اگر فصلی برای پرش نباشد
+// (تک‌فصل یا انتهایِ کتاب)، false برمی‌گردد تا فراخواننده، به
+// سراغِ فایلِ بعدی/قبلیِ پوشه برود.
+function jumpToChapterInBook(readerState, direction) {
+  const { comicData, currentPage } = readerState;
+  if (!comicData) return false;
+  let starts = [];
+  if (
+    comicData.type === 'pdf' &&
+    Array.isArray(readerState.pdfOutline) &&
+    readerState.pdfOutlineFile === (comicData.filePath || comicData.path)
+  ) {
+    starts = flattenOutline(readerState.pdfOutline)
+      .map((entry) => entry.page)
+      .filter((page) => Number.isFinite(page) && page > 0);
+    starts = [...new Set(starts)].sort((a, b) => a - b);
+  } else {
+    starts = comicChapterStartPages(comicData.items);
+  }
+  if (starts.length < 2) return false;
+  let target = null;
+  if (direction > 0) {
+    target = starts.find((page) => page > currentPage) ?? null;
+  } else {
+    for (const page of starts) {
+      if (page < currentPage) target = page;
+      else break;
+    }
+  }
+  if (target == null) return false;
+  readerState.jumpToPage?.(target);
+  return true;
+}
+
 export default function useKeyboard(callbacks = {}) {
   const isCopyingRef = useRef(false);
   const callbacksRef = useRef(callbacks);
@@ -40,8 +98,17 @@ export default function useKeyboard(callbacks = {}) {
 
   useEffect(() => {
     const handleKeyDown = async (e) => {
-      // ۰. توقف کامل در صورت ضبط شورت‌کات در تنظیمات
-      if (window.__isRecordingShortcut) return;
+      // ۰. توقف کامل در صورت ضبط شورت‌کات در تنظیمات.
+      // مرحله ۱۲: ضبط‌کننده (KeybindRecorder) از این مرحله، پرچمِ
+      // window و ویژگیِ data رویِ body را با هم ست می‌کند؛ هر دو
+      // خوانده می‌شوند تا هیچ مسیری، کلیدِ در حالِ ضبط را نبلعد.
+      if (
+        window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')
+      ) {
+        return;
+      }
 
       const appState = useAppStore.getState();
       const readerState = useReaderStore.getState();
@@ -366,8 +433,14 @@ export default function useKeyboard(callbacks = {}) {
         return;
       }
 
-      // ۱۰. میانبر زوم ناحیه‌ای با کشیدن باکس (Alt + Z)
-      if (comicData && settingsState.matchesShortcut?.('areaZoom', e)) {
+      // ۱۰. میانبر زوم ناحیه‌ای با کشیدن باکس (Alt + Z) — فقط در
+      // نمایِ ریدر؛ وگرنه لایهٔ تمام‌صفحهٔ زوم، رویِ تنظیمات/خانه/
+      // کتابخانه هم ظاهر می‌شد (مرحله ۱۲، محورِ ۲).
+      if (
+        comicData &&
+        appState.currentView === 'reader' &&
+        settingsState.matchesShortcut?.('areaZoom', e)
+      ) {
         e.preventDefault();
         e.stopPropagation();
         const activeNow = appState.toggleAreaZoom?.();
@@ -462,12 +535,73 @@ export default function useKeyboard(callbacks = {}) {
         return;
       }
 
-      // ۱۶. فصل یا فایل بعدی در پوشه (PageDown یا شورت‌کات اختصاصی)
-      if (comicData && settingsState.matchesShortcut?.('nextChapter', e)) {
+      // ۱۵-الف. باز و بسته کردنِ پنل‌هایِ کناری (پیش‌فرض: بدونِ
+      // کلید — کاربر خودش ضبط می‌کند). مرحله ۱۲: این دو اکشن، از
+      // مرحلهٔ ۷ ورودیِ تنظیمات داشتند ولی هیچ شاخه‌ای در این‌جا
+      // نداشتند؛ یعنی کلیدِ ضبط‌شده، هیچ کاری نمی‌کرد.
+      if (settingsState.matchesShortcut?.('toggleLeftSidebar', e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        appState.toggleLeftSidebar?.();
+        return;
+      }
+
+      if (settingsState.matchesShortcut?.('toggleRightSidebar', e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        appState.toggleRightSidebar?.();
+        return;
+      }
+
+      // ۱۵-ب. ورق زدنِ صفحه (PageDown / PageUp) — مرحله ۱۲: این
+      // اکشن‌ها تا امروز وجود نداشتند و PageDown/PageUp، اسمِ
+      // مستعارِ فصل بودند؛ به همین دلیل، ورق زدن، فایلِ دیگری را
+      // باز می‌کرد. حالا دقیقاً همان تابعی اجرا می‌شود که پرشِ
+      // TopBar هم صدا می‌زند (jumpToPage) و هر دو ویوور به آن گوش
+      // می‌دهند. فقط در نمایِ ریدر، تا اسکرولِ کتابخانه/خانه،
+      // مختل نشود.
+      if (
+        comicData &&
+        appState.currentView === 'reader' &&
+        settingsState.matchesShortcut?.('nextPage', e)
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        const totalPages =
+          comicData.items?.length || comicData.savedTotalPages || comicData.totalPages || 0;
+        const next = totalPages > 0 ? Math.min(totalPages, currentPage + 1) : currentPage + 1;
+        readerState.jumpToPage?.(next);
+        return;
+      }
+
+      if (
+        comicData &&
+        appState.currentView === 'reader' &&
+        settingsState.matchesShortcut?.('prevPage', e)
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        readerState.jumpToPage?.(Math.max(1, currentPage - 1));
+        return;
+      }
+
+      // ۱۶. فصلِ بعدیِ داخلِ کتاب؛ وگرنه فایلِ بعدیِ پوشه — فقط با
+      // Ctrl نگه‌داشته‌شده (Ctrl + PageDown). مرحله ۱۲: کلیدهایِ
+      // سادهٔ D و PageDownِ بدونِ Ctrl دیگر فایل را عوض نمی‌کنند.
+      // گیتِ قدیمیِ KeyA هم حذف شد، چون A دیگر به این اکشن بسته
+      // نیست (A، ابزارِ فلشِ استودیو است و شاخهٔ ابزار، بالاتر آن
+      // را می‌گیرد).
+      if (
+        comicData &&
+        appState.currentView === 'reader' &&
+        settingsState.matchesShortcut?.('nextChapter', e)
+      ) {
+        if (e.repeat) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (jumpToChapterInBook(readerState, +1)) return;
         const nextComic = comicData.nextComic;
         if (nextComic?.path) {
-          e.preventDefault();
-          e.stopPropagation();
           if (callbacksRef.current?.onOpenComic) {
             callbacksRef.current.onOpenComic(nextComic.path);
           } else {
@@ -481,22 +615,20 @@ export default function useKeyboard(callbacks = {}) {
         return;
       }
 
-      // ۱۷. فصل یا فایل قبلی در پوشه (PageUp یا شورت‌کات اختصاصی)
-      if (comicData && settingsState.matchesShortcut?.('prevChapter', e)) {
-        // Refinement Final: کلیدِ سادهٔ A (prevChapter) وقتی استودیو
-        // روشن است، هرگز فصلِ قبلی را باز نمی‌کند — چون A ابزارِ فلش
-        // است و شاخهٔ ابزار (بالا) وقتی comicData باشد آن را گرفته
-        // است؛ این گیت، حالتِ مرزیِ بدونِ comicData و هر مسیرِ دیگری
-        // را هم می‌بندد. PageUp در حالتِ استودیو همچنان فصلِ قبلی را
-        // می‌آورد (فقط KeyA گیت شده است، طبقِ TASK).
-        const isPlainA =
-          (e.code === 'KeyA' || (e.key || '').toLowerCase() === 'a') &&
-          !e.ctrlKey && !e.altKey && !e.metaKey;
-        if (!(appState.isAnnotationActive && isPlainA)) {
+      // ۱۷. فصلِ قبلیِ داخلِ کتاب؛ وگرنه فایلِ قبلیِ پوشه — فقط با
+      // Ctrl نگه‌داشته‌شده (Ctrl + PageUp). مرحله ۱۲: مانندِ
+      // nextChapter.
+      if (
+        comicData &&
+        appState.currentView === 'reader' &&
+        settingsState.matchesShortcut?.('prevChapter', e)
+      ) {
+        if (e.repeat) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (jumpToChapterInBook(readerState, -1)) return;
         const prevComic = comicData.prevComic;
         if (prevComic?.path) {
-          e.preventDefault();
-          e.stopPropagation();
           if (callbacksRef.current?.onOpenComic) {
             callbacksRef.current.onOpenComic(prevComic.path);
           } else {
@@ -508,7 +640,6 @@ export default function useKeyboard(callbacks = {}) {
           appState.showToast('این اولین فایل در پوشه جاری است', { type: 'info' });
         }
         return;
-        } // پایانِ گیتِ KeyA (Refinement Final)
       }
 
       // =========================================================================

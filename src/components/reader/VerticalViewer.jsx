@@ -29,6 +29,12 @@ function buildComicImageUrl(filePath) {
 }
 
 // کامپوننت فریم ایزوله‌شده با حذف درز سیاه زیرپیکسلی، پاس دوم وضوح بالا (HiDPI) و لایه استودیو ویرایش
+// مرحله ۱۲: آرایهٔ مشترکِ «صفحه بدونِ حاشیه‌نویسی» — مثلِ
+// PdfViewer: `|| []`ی تازه در هر رندرِ والد، مقایسهٔ سطحیِ
+// React.memo را برای ComicPageFrame و لایهٔ Konvaی درونِ آن،
+// شکست می‌داد. این آرایه، فریز شده و در همهٔ صفحه‌ها مشترک است.
+const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
+
 const ComicPageFrame = React.memo(function ComicPageFrame({
   item,
   index,
@@ -493,6 +499,10 @@ export default function VerticalViewer() {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
+      // مرحله ۱۲: در حالِ ضبطِ شورت‌کات در تنظیمات، هیچ‌کاری نکن.
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
       // مرحله ۷ ـ بخش ب: وقتی فوکوس داخلِ کادرِ متنی است (جستجوی
       // PDF، ویرایشگرِ متن/استیکی، سرچ‌بار)، Ctrl+Z/Y باید Undoی
       // متنیِ خودِ مرورگر باشد، نه Undoی حاشیه‌نویسی — وگرنه تایپِ
@@ -876,7 +886,7 @@ export default function VerticalViewer() {
             const item = comicData.items[index];
             if (!item) return null;
             const pageNum = index + 1;
-            const pageAnnots = annotationsByPage[String(pageNum)] || [];
+            const pageAnnots = annotationsByPage[String(pageNum)] || EMPTY_PAGE_ANNOTATIONS;
             const isNearCenter = Math.abs(index - activePageIndex) <= 1;
 
             return (

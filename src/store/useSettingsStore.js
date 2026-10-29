@@ -191,36 +191,65 @@ export const DEFAULT_SHORTCUTS = {
     key: 'd',
     label: 'Ctrl + D',
   },
-  nextChapter: {
-    id: 'nextChapter',
-    title: 'رفتن به فصل / فایل بعدی پوشه',
+  // مرحله ۱۲: اکشن‌های ورق زدنِ صفحه که تا امروز هیچ ورودی‌ای در
+  // تنظیمات و هیچ شاخه‌ای در useKeyboard نداشتند؛ به همین دلیل،
+  // PageDown/PageUp (که اسمِ مستعارِ فصل بودند) به‌جای ورق زدن،
+  // فایلِ دیگری را باز می‌کردند. حالا ورق زدن، اکشنِ رسمیِ خودش
+  // را دارد و PageDown/PageUp، کلیدِ اصلیِ آن‌اند؛ شاخهٔ
+  // useKeyboard، دقیقاً jumpToPage را صدا می‌زند (همان تابعی که
+  // پرشِ TopBar هم استفاده می‌کند).
+  nextPage: {
+    id: 'nextPage',
+    title: 'رفتن به صفحهٔ بعد',
     category: 'ناوبری و مطالعه',
     ctrl: false,
     shift: false,
     alt: false,
-    code: 'KeyD',
-    key: 'd',
-    label: 'D / PageDown',
-    // مرحله ۷ ـ بخش الف: PageDown، پیش از این با `||` هاردکدشده در
-    // useKeyboard، همیشه فصلِ بعدی را می‌آورد — حتی وقتی کاربر،
-    // این اکشن را به کلیدِ دیگری بسته بود. حالا PageDown، اسمِ
-    // مستعارِ رسمیِ همین ورودی است و در matchesShortcut بررسی
-    // می‌شود؛ با همان قانونِ مرجعِ واحد.
-    aliases: [{ code: 'PageDown', key: 'PageDown', ctrl: false, shift: false, alt: false }],
+    code: 'PageDown',
+    key: 'PageDown',
+    label: 'PageDown',
+  },
+  prevPage: {
+    id: 'prevPage',
+    title: 'رفتن به صفحهٔ قبل',
+    category: 'ناوبری و مطالعه',
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'PageUp',
+    key: 'PageUp',
+    label: 'PageUp',
+  },
+  nextChapter: {
+    id: 'nextChapter',
+    title: 'فصلِ بعدیِ کتاب یا فایلِ بعدیِ پوشه',
+    category: 'ناوبری و مطالعه',
+    ctrl: true,
+    shift: false,
+    alt: false,
+    code: 'PageDown',
+    key: 'PageDown',
+    label: 'Ctrl + PageDown',
+    // مرحله ۱۲: کلیدهایِ سادهٔ بدونِ Modifier (D و PageDownِ بدونِ
+    // Ctrl) دیگر هرگز فایلِ بازشدهٔ کاربر را نمی‌بندند؛ ناوبریِ
+    // فصل/فایل، فقط با Ctrlِ نگه‌داشته‌شده انجام می‌شود. در
+    // useKeyboard، اول پرشِ درون‌کتابی (فهرستِ PDF یا گروه‌هایِ
+    // فصلِ کمیک) امتحان می‌شود و فقط وقتی فصلی نیست، فایلِ بعدیِ
+    // پوشه باز می‌شود. اسمِ مستعارِ PageDownِ بدونِ Ctrl حذف شد،
+    // چون حالا کلیدِ اصلیِ nextPage است.
   },
   prevChapter: {
     id: 'prevChapter',
-    title: 'رفتن به فصل / فایل قبلی پوشه',
+    title: 'فصلِ قبلیِ کتاب یا فایلِ قبلیِ پوشه',
     category: 'ناوبری و مطالعه',
-    ctrl: false,
+    ctrl: true,
     shift: false,
     alt: false,
-    code: 'KeyA',
-    key: 'a',
-    label: 'A / PageUp',
-    // مرحله ۷ ـ بخش الف: PageUp، اسمِ مستعارِ رسمیِ همین ورودی
-    // است (مثلِ nextChapter)؛ دیگر `||` هاردکدشده‌ای در کار نیست.
-    aliases: [{ code: 'PageUp', key: 'PageUp', ctrl: false, shift: false, alt: false }],
+    code: 'PageUp',
+    key: 'PageUp',
+    label: 'Ctrl + PageUp',
+    // مرحله ۱۲: مانندِ nextChapter — کلیدهایِ سادهٔ A و PageUpِ
+    // بدونِ Ctrl دیگر فایل را عوض نمی‌کنند؛ فقط Ctrl + PageUp.
   },
   rotatePage: {
     id: 'rotatePage',
@@ -478,18 +507,132 @@ const LEGACY_ZOOM_DEFAULTS = {
   resetZoom: { ctrl: false, shift: false, alt: false, code: 'Digit0', key: '0', label: '0' },
 };
 const LEGACY_ZOOM_LABELS = { zoomIn: 'Ctrl + +', zoomOut: 'Ctrl + -', resetZoom: 'Ctrl + 0' };
+
+// مرحله ۱۲: پیش‌فرض‌هایِ قدیمیِ فصل (کلیدهایِ سادهٔ D/A + اسمِ
+// مستعارِ PageDown/PageUpِ بدونِ Ctrl) که فایلِ کاربر را
+// بی‌هوا عوض می‌کردند. فقط ورودی‌ای که دقیقاً همین شکلِ قدیمی
+// را دارد، به پیش‌فرضِ جدیدِ مرحلهٔ ۱۲ (Ctrl + PageDown/Up)
+// مهاجرت می‌کند؛ ورودی‌ای که کاربر، خودش عوضش کرده باشد، دست
+// نمی‌خورد (همان انضباطِ ترمیمِ زوم).
+const LEGACY_CHAPTER_DEFAULTS = {
+  nextChapter: {
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyD',
+    key: 'd',
+    label: 'D / PageDown',
+    aliases: [{ code: 'PageDown', key: 'PageDown', ctrl: false, shift: false, alt: false }],
+  },
+  prevChapter: {
+    ctrl: false,
+    shift: false,
+    alt: false,
+    code: 'KeyA',
+    key: 'a',
+    label: 'A / PageUp',
+    aliases: [{ code: 'PageUp', key: 'PageUp', ctrl: false, shift: false, alt: false }],
+  },
+};
+const LEGACY_CHAPTER_REPLACEMENTS = {
+  nextChapter: { ctrl: true, shift: false, alt: false, code: 'PageDown', key: 'PageDown', label: 'Ctrl + PageDown' },
+  prevChapter: { ctrl: true, shift: false, alt: false, code: 'PageUp', key: 'PageUp', label: 'Ctrl + PageUp' },
+};
+function aliasesEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  return a.every((alias, i) => {
+    const other = b[i];
+    return (
+      alias &&
+      other &&
+      Boolean(alias.ctrl) === Boolean(other.ctrl) &&
+      Boolean(alias.shift) === Boolean(other.shift) &&
+      Boolean(alias.alt) === Boolean(other.alt) &&
+      alias.code === other.code &&
+      alias.key === other.key
+    );
+  });
+}
+
+// مرحله ۱۲: اعتبارسنجیِ ساختاریِ ورودیِ میانبر. ورودیِ خراب یا
+// ناقص (از جمله کلیدهایِ ناقصی که در دورهٔ باگِ پرشِ فوکوسِ
+// ضبط‌کننده ثبت شده باشند) هرگز نباید رفتارِ اشتباه بسازد:
+// ورودیِ غیرِآبجکتی، به پیش‌فرضِ همان اکشن برمی‌گردد؛ فیلدهایِ
+// نامعتبر، به نوعِ درست برگردانده می‌شوند؛ اسم‌هایِ مستعارِ
+// نامعتبر، حذف می‌شوند.
+function sanitizeShortcutEntry(id, entry) {
+  const fallback = DEFAULT_SHORTCUTS[id];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+    return fallback ? { ...fallback } : entry;
+  }
+  const clean = { ...(fallback || {}), ...entry, id };
+  clean.ctrl = Boolean(clean.ctrl);
+  clean.shift = Boolean(clean.shift);
+  clean.alt = Boolean(clean.alt);
+  clean.ignoreShift = Boolean(clean.ignoreShift);
+  clean.code = typeof clean.code === 'string' ? clean.code : '';
+  clean.key = typeof clean.key === 'string' ? clean.key : '';
+  clean.label = typeof clean.label === 'string' ? clean.label : '';
+  clean.title =
+    typeof clean.title === 'string' && clean.title ? clean.title : fallback?.title || id;
+  clean.category =
+    typeof clean.category === 'string' && clean.category ? clean.category : fallback?.category || '';
+  if (clean.aliases !== undefined) {
+    if (Array.isArray(clean.aliases)) {
+      clean.aliases = clean.aliases
+        .filter(
+          (alias) =>
+            alias &&
+            typeof alias === 'object' &&
+            (typeof alias.code === 'string' || typeof alias.key === 'string')
+        )
+        .map((alias) => ({
+          ...alias,
+          ctrl: Boolean(alias.ctrl),
+          shift: Boolean(alias.shift),
+          alt: Boolean(alias.alt),
+          code: typeof alias.code === 'string' ? alias.code : '',
+          key: typeof alias.key === 'string' ? alias.key : '',
+        }));
+      if (clean.aliases.length === 0) delete clean.aliases;
+    } else {
+      delete clean.aliases;
+    }
+  }
+  return clean;
+}
+
 function normalizeLegacyShortcut(id, entry) {
+  const clean = sanitizeShortcutEntry(id, entry);
   const legacy = LEGACY_ZOOM_DEFAULTS[id];
-  if (!legacy || !entry) return entry;
-  const isLegacy =
-    Boolean(entry.ctrl) === legacy.ctrl &&
-    Boolean(entry.shift) === legacy.shift &&
-    Boolean(entry.alt) === legacy.alt &&
-    entry.code === legacy.code &&
-    entry.key === legacy.key &&
-    entry.label === legacy.label;
-  if (!isLegacy) return entry;
-  return { ...entry, ctrl: true, label: LEGACY_ZOOM_LABELS[id] };
+  if (legacy && clean) {
+    const isLegacy =
+      Boolean(clean.ctrl) === legacy.ctrl &&
+      Boolean(clean.shift) === legacy.shift &&
+      Boolean(clean.alt) === legacy.alt &&
+      clean.code === legacy.code &&
+      clean.key === legacy.key &&
+      clean.label === legacy.label;
+    if (isLegacy) return { ...clean, ctrl: true, label: LEGACY_ZOOM_LABELS[id] };
+  }
+  const chapterLegacy = LEGACY_CHAPTER_DEFAULTS[id];
+  if (chapterLegacy && clean) {
+    const isChapterLegacy =
+      Boolean(clean.ctrl) === chapterLegacy.ctrl &&
+      Boolean(clean.shift) === chapterLegacy.shift &&
+      Boolean(clean.alt) === chapterLegacy.alt &&
+      clean.code === chapterLegacy.code &&
+      clean.key === chapterLegacy.key &&
+      clean.label === chapterLegacy.label &&
+      aliasesEqual(clean.aliases, chapterLegacy.aliases);
+    if (isChapterLegacy) {
+      const replacement = LEGACY_CHAPTER_REPLACEMENTS[id];
+      const migrated = { ...clean, ...replacement };
+      delete migrated.aliases;
+      return migrated;
+    }
+  }
+  return clean;
 }
 
 const buildInitialShortcuts = () => {
@@ -534,6 +677,13 @@ const useSettingsStore = create((set, get) => ({
       if (scRes?.shortcuts && Object.keys(scRes.shortcuts).length > 0) {
         const mergedShortcuts = { ...get().shortcuts, ...scRes.shortcuts };
         Object.keys(mergedShortcuts).forEach((id) => {
+          // مرحله ۱۲: شناسهٔ ناشناخته (اکشنِ حذف‌شده یا ورودیِ
+          // خرابِ دیتابیس)، از ادغام حذف می‌شود تا ردیفِ مرده
+          // نسازد؛ بقیه، اعتبارسنجی و مهاجرتِ قدیمی را می‌گذرانند.
+          if (!DEFAULT_SHORTCUTS[id]) {
+            delete mergedShortcuts[id];
+            return;
+          }
           mergedShortcuts[id] = normalizeLegacyShortcut(id, mergedShortcuts[id]);
         });
         set({ shortcuts: mergedShortcuts });

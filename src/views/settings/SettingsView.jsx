@@ -138,6 +138,7 @@ export default function SettingsView() {
 
   return (
     <div style={styles.container}>
+      <div style={styles.containerInner}>
       {/* هدر بالای تنظیمات */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -372,6 +373,7 @@ export default function SettingsView() {
           </div>
         )}
       </div>
+      </div>
     </div>
   );
 }
@@ -384,9 +386,21 @@ const styles = {
     flexDirection: 'column',
     gap: '20px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },  // مرحله ۱۲: محتوای درونیِ اسکرول‌خور — جهتِ راست‌به‌چپِ
+  // فارسی، دقیقاً با همان فاصله‌ها (gap) حفظ می‌شود؛ فقط
+  // خودِ کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا کرومیوم،
+  // نوارِ اسکرول را در لبهٔ سمتِ راست رندر کند.
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
   },
+
   header: {
     display: 'flex',
     alignItems: 'center',

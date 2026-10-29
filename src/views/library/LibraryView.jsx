@@ -340,6 +340,7 @@ export default function LibraryView({ onOpenComic }) {
 
   return (
     <div style={styles.container}>
+      <div style={styles.containerInner}>
       {/* =====================================================================
           ۱. اسلایدر Kinetic Typography + Split Navigation
       ===================================================================== */}
@@ -690,6 +691,7 @@ export default function LibraryView({ onOpenComic }) {
           </div>
         )}
       </section>
+      </div>
     </div>
   );
 }
@@ -702,9 +704,21 @@ const styles = {
     flexDirection: 'column',
     gap: '20px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },  // مرحله ۱۲: محتوای درونیِ اسکرول‌خور — جهتِ راست‌به‌چپِ
+  // فارسی، دقیقاً با همان فاصله‌ها (gap) حفظ می‌شود؛ فقط
+  // خودِ کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا کرومیوم،
+  // نوارِ اسکرول را در لبهٔ سمتِ راست رندر کند.
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
   },
+
   gridSection: {
     display: 'flex',
     flexDirection: 'column',

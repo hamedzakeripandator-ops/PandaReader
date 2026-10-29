@@ -140,6 +140,7 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
 
   return (
     <div style={styles.container}>
+      <div style={styles.containerInner}>
 
       {/* بنر هیرو (Landing Hero) طبق جدول استاندارد تایپوگرافی */}
       <div style={styles.heroBanner}>
@@ -353,6 +354,7 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
       <div style={{ marginTop: '2px' }}>
         <StorageSection compact />
       </div>
+      </div>
     </div>
   );
 }
@@ -366,9 +368,21 @@ const styles = {
     flexDirection: 'column',
     gap: '22px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },  // مرحله ۱۲: محتوای درونیِ اسکرول‌خور — جهتِ راست‌به‌چپِ
+  // فارسی، دقیقاً با همان فاصله‌ها (gap) حفظ می‌شود؛ فقط
+  // خودِ کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا کرومیوم،
+  // نوارِ اسکرول را در لبهٔ سمتِ راست رندر کند.
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '22px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
   },
+
   heroBanner: {
     backgroundColor: 'var(--panel)',
     borderWidth: '1px',

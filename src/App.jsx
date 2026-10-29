@@ -251,6 +251,10 @@ export default function App() {
   useEffect(() => {
     if (!isLoading) return;
     const handleEscCancel = (e) => {
+      // مرحله ۱۲: در حالِ ضبطِ شورت‌کات در تنظیمات، هیچ‌کاری نکن.
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
       if (e.key === 'Escape' || e.code === 'Escape') {
         e.preventDefault();
         handleCancelLoading();
