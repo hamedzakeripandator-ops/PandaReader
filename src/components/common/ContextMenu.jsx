@@ -46,6 +46,15 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [menuDimensions, setMenuDimensions] = useState({ width: 256, height: 340 });
 
+  // Stage 8 Part A (Axis 5): mount/close lifecycle so the menu animates
+  // OUT instead of vanishing, and accordion sections keep their
+  // sub-items mounted for the exit animation.
+  const [menuMounted, setMenuMounted] = useState(false);
+  const [menuClosing, setMenuClosing] = useState(false);
+  const [closingSection, setClosingSection] = useState(null);
+  const menuCloseTimerRef = useRef(null);
+  const sectionCloseTimerRef = useRef(null);
+
   const menuRef = useRef(null);
   const itemsRef = useRef({});
 
@@ -99,6 +108,38 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       [normPath]
     )
   );
+
+  // Stage 8 Part A (Axis 5): closing retention. Reopening inside the
+  // 190ms exit window cancels the close and keeps the menu mounted.
+  useEffect(() => {
+    if (isContextMenuOpen) {
+      if (menuCloseTimerRef.current) {
+        clearTimeout(menuCloseTimerRef.current);
+        menuCloseTimerRef.current = null;
+      }
+      if (sectionCloseTimerRef.current) {
+        clearTimeout(sectionCloseTimerRef.current);
+        sectionCloseTimerRef.current = null;
+      }
+      setClosingSection(null);
+      setMenuMounted(true);
+      setMenuClosing(false);
+      return;
+    }
+    if (!menuMounted) return;
+    setMenuClosing(true);
+    menuCloseTimerRef.current = setTimeout(() => {
+      setMenuMounted(false);
+      setMenuClosing(false);
+      menuCloseTimerRef.current = null;
+    }, 190);
+    return () => {
+      if (menuCloseTimerRef.current) {
+        clearTimeout(menuCloseTimerRef.current);
+        menuCloseTimerRef.current = null;
+      }
+    };
+  }, [isContextMenuOpen, menuMounted]);
 
   // ریست زیرمنوها هنگام بسته شدن و اندازه‌گیری دقیق ارتفاع برای مهار لبه‌های صفحه
   useEffect(() => {
@@ -171,6 +212,18 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
 
     return { x, y };
   }, [contextMenuPos, menuDimensions]);
+
+  // Stage 8 Part A (Axis 5): the menu grows out of the click point —
+  // transformOrigin is the click position inside the clamped menu box.
+  const menuTransformOrigin = useMemo(() => {
+    const w = menuDimensions.width || 256;
+    const h = menuDimensions.height || 340;
+    const px = contextMenuPos?.x || 0;
+    const py = contextMenuPos?.y || 0;
+    const ox = Math.max(0, Math.min(1, (px - safePosition.x) / w));
+    const oy = Math.max(0, Math.min(1, (py - safePosition.y) / h));
+    return `${Math.round(ox * 100)}% ${Math.round(oy * 100)}%`;
+  }, [contextMenuPos, safePosition, menuDimensions]);
 
   const triggerExplosion = (x, y, isDanger = false) => {
     const container = document.createElement('div');
@@ -254,11 +307,39 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
 
   const toggleSection = (secId) => {
     setHighlightStyle((prev) => ({ ...prev, opacity: 0 }));
-    setExpandedSection((prev) => (prev === secId ? null : secId));
+    // Stage 8 Part A (Axis 5): closing a section keeps its sub-items
+    // mounted for 180ms with the exit animation; opening another
+    // section cancels the pending unmount. The decision reads the
+    // current expandedSection directly (no side effects inside a
+    // state updater).
+    if (sectionCloseTimerRef.current) {
+      clearTimeout(sectionCloseTimerRef.current);
+      sectionCloseTimerRef.current = null;
+    }
+    if (expandedSection === secId) {
+      setClosingSection(secId);
+      sectionCloseTimerRef.current = setTimeout(() => {
+        setClosingSection(null);
+        sectionCloseTimerRef.current = null;
+      }, 180);
+      setExpandedSection(null);
+    } else {
+      setClosingSection(null);
+      setExpandedSection(secId);
+    }
     if (secId !== 'library') {
       setShowFolderPicker(false);
     }
   };
+
+  // Stage 8 Part A (Axis 5): sections whose sub-items render — the open
+  // one plus a closing one during its exit animation.
+  const sectionsToRender = useMemo(() => {
+    const out = [];
+    if (expandedSection) out.push(expandedSection);
+    if (closingSection && closingSection !== expandedSection) out.push(closingSection);
+    return out;
+  }, [expandedSection, closingSection]);
 
   // لیست اکشن‌های منو با ساختار بازشونده (Accordion) و خلوت
   const actions = useMemo(() => {
@@ -358,11 +439,12 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       },
     ];
 
-    if (expandedSection === 'library' && hasComic) {
+    if (sectionsToRender.includes('library') && hasComic) {
       list.push(
         {
           id: 'pinLibrary',
           isSubItem: true,
+          section: 'library',
           label: isPinned ? 'برداشتن پین از صدر کتابخانه' : 'پین کردن در صدر کتابخانه',
           shortcut: isPinned ? '📌' : '',
           icon: <Icons.Pin size={14} filled={isPinned} />,
@@ -377,6 +459,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'customCover',
           isSubItem: true,
+          section: 'library',
           label: 'تنظیم تصویر کاور سفارشی...',
           icon: <Icons.Image size={14} />,
           onClick: async () => {
@@ -391,6 +474,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'moveToFolder',
           isSubItem: true,
+          section: 'library',
           label: 'انتقال به پوشه کتابخانه...',
           shortcut: showFolderPicker ? '▲' : '▼',
           icon: <Icons.FolderPlus size={14} />,
@@ -400,6 +484,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'explorer',
           isSubItem: true,
+          section: 'library',
           label: 'نمایش در فایل اکسپلورر',
           icon: <Icons.Folder size={14} />,
           onClick: () => filePath && coreApi.showItemInFolder(filePath),
@@ -417,11 +502,12 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       onClick: () => toggleSection('view'),
     });
 
-    if (expandedSection === 'view') {
+    if (sectionsToRender.includes('view')) {
       list.push(
         {
           id: 'rotate',
           isSubItem: true,
+          section: 'view',
           label: 'چرخش ۹۰ درجه صفحه',
           shortcut: shortcuts?.rotatePage?.label || 'R',
           icon: <Icons.RotateCw size={14} />,
@@ -431,6 +517,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'zoomReset',
           isSubItem: true,
+          section: 'view',
           label: 'اندازه طبیعی (100%)',
           shortcut: shortcuts?.resetZoom?.label || '0',
           icon: <Icons.Maximize size={14} />,
@@ -440,6 +527,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'fullscreen',
           isSubItem: true,
+          section: 'view',
           label: 'حالت تمام‌صفحه ویندوز',
           shortcut: shortcuts?.fullscreen?.label || 'F11',
           icon: <Icons.Maximize size={14} />,
@@ -448,6 +536,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'openFile',
           isSubItem: true,
+          section: 'view',
           label: 'باز کردن فایل جدید',
           shortcut: shortcuts?.openFile?.label || 'Ctrl+O',
           icon: <Icons.FolderOpen size={14} />,
@@ -456,6 +545,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         {
           id: 'settings',
           isSubItem: true,
+          section: 'view',
           label: 'تنظیمات و میانبرها',
           shortcut: shortcuts?.openSettings?.label || 'Ctrl+,',
           icon: <Icons.Settings size={14} />,
@@ -489,6 +579,8 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     isPinned,
     copyFeedback,
     expandedSection,
+    closingSection,
+    sectionsToRender,
     showFolderPicker,
     shortcuts,
     contextMenuData,
@@ -507,7 +599,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     showToast,
   ]);
 
-  if (!isContextMenuOpen) return null;
+  if (!menuMounted) return null;
 
   return (
     <>
@@ -515,6 +607,18 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         @keyframes contextMenuFadeIn {
           from { opacity: 0; transform: scale(0.94) translateY(-6px); }
           to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        @keyframes contextMenuFadeOut {
+          from { opacity: 1; transform: scale(1) translateY(0); }
+          to { opacity: 0; transform: scale(0.94) translateY(-6px); }
+        }
+        @keyframes contextSubItemIn {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes contextSubItemOut {
+          from { opacity: 1; transform: translateY(0); }
+          to { opacity: 0; transform: translateY(-4px); }
         }
         @keyframes indicatorPulse {
           0%, 100% { opacity: 1; box-shadow: 0 0 8px #22d3ee; }
@@ -578,6 +682,11 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           ...styles.ctxMenu,
           left: `${safePosition.x}px`,
           top: `${safePosition.y}px`,
+          transformOrigin: menuTransformOrigin,
+          pointerEvents: menuClosing ? 'none' : undefined,
+          animation: menuClosing
+            ? 'contextMenuFadeOut 0.19s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+            : 'contextMenuFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards',
         }}
       >
         <div style={styles.menuList}>
@@ -615,6 +724,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
             }
 
             const isAccordion = action.type === 'accordion';
+            const isClosingItem = Boolean(closingSection && action.section === closingSection);
             const isHovered = hoveredActionId === action.id;
             const isClicked = clickedActionId === action.id;
             const isDimmed = isListHovered && !isHovered && !action.disabled;
@@ -641,6 +751,14 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                   style={{
                     ...styles.menuItem,
                     ...(action.isSubItem ? styles.subMenuItem : {}),
+                    ...(action.isSubItem
+                      ? {
+                          animation: isClosingItem
+                            ? 'contextSubItemOut 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+                            : 'contextSubItemIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                          pointerEvents: isClosingItem ? 'none' : undefined,
+                        }
+                      : {}),
                     ...(isAccordion && action.isOpen ? styles.accordionOpenItem : {}),
                     color: action.disabled
                       ? '#484F58'
@@ -715,7 +833,12 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                 {/* زیرمنوی انتخاب پوشه در داخل آکاردئون کتابخانه */}
                 {action.id === 'moveToFolder' && showFolderPicker && hasComic && (
                   <div
-                    style={styles.folderPickerBox}
+                    style={{
+                      ...styles.folderPickerBox,
+                      animation: isClosingItem
+                        ? 'contextSubItemOut 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards'
+                        : 'contextSubItemIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                    }}
                     onMouseEnter={handleMenuMouseLeave}
                     onWheel={(e) => e.stopPropagation()}
                   >

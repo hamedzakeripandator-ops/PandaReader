@@ -33,11 +33,17 @@ function isAbsolutePath(p) {
 // تصمیمِ محلِ دیتا (حالتِ Portable در برابرِ حالتِ عادی).
 // ترتیبِ بررسی:
 //   ۱) متغیرِ محیطیِ COMIC_READER_PORTABLE=1 → portable-data در کنارِ فایلِ اجرایی.
-//   ۲) پوشهٔ portable-data در کنارِ فایلِ اجرایی وجود دارد → Portable.
-//   ۳) فایلِ نشانگرِ .portable در کنارِ فایلِ اجرایی یا کنارِ appPath وجود دارد → Portable.
-//   ۴) فقط در حالتِ توسعه (app.isPackaged === false): پوشهٔ portable-data
+//   ۲) فقط در حالتِ بسته‌بندی‌شده (isPackaged): پوشهٔ portable-data یا
+//      نشانگرِ .portable در کنارِ فایلِ اجرایی یا کنارِ appPath → Portable.
+//   ۳) فقط در حالتِ توسعه (isPackaged === false): پوشهٔ portable-data
 //      در کنارِ ریشهٔ پروژه (appPath) → Portable.
-//   ۵) در غیرِ این صورت، ~/.comic-reader دقیقاً مثلِ قبل.
+//   ۴) در غیرِ این صورت، ~/.comic-reader دقیقاً مثلِ قبل.
+// مرحله ۷ ـ بخش ب: نشانگرِ .portable، فقط در حالتِ بسته‌بندی‌شده
+// بررسی می‌شود. پیش از این، در حالتِ توسعه، «کنارِ appPath» یعنی
+// پوشهٔ والدِ ریشهٔ پروژه (مثلاً Desktop) بررسی می‌شد و یک فایلِ
+// ‎.portableِ بی‌ربط روی Desktop، به‌اشتباه دیتابیسِ ~/.comic-reader
+// را نادیده می‌گرفت و برنامه را به portable-dataی داخلِ
+// node_modules می‌برد.
 // app، همان شیءِ appی Electron است (getPath('exe') و getAppPath و
 // isPackaged). اگر app در دسترس نباشد (تستِ واحد)، فقط قانونِ ۵
 // اعمال می‌شود.
@@ -51,14 +57,15 @@ function resolveComicDataDir(app) {
     const portableDir = path.join(exeDir, 'portable-data');
 
     const envPortable = process.env.COMIC_READER_PORTABLE === '1';
-    const portableFolderBesideExe = fs.existsSync(portableDir);
-    const markerBesideExe = fs.existsSync(path.join(exeDir, '.portable'));
-    const markerBesideApp = appDir ? fs.existsSync(path.join(appDir, '.portable')) : false;
-
-    if (envPortable || portableFolderBesideExe || markerBesideExe || markerBesideApp) {
-      return portableDir;
-    }
-    if (!app.isPackaged && appPath) {
+    if (envPortable) return portableDir;
+    if (app.isPackaged) {
+      const portableFolderBesideExe = fs.existsSync(portableDir);
+      const markerBesideExe = fs.existsSync(path.join(exeDir, '.portable'));
+      const markerBesideApp = appDir ? fs.existsSync(path.join(appDir, '.portable')) : false;
+      if (portableFolderBesideExe || markerBesideExe || markerBesideApp) {
+        return portableDir;
+      }
+    } else if (appPath) {
       const devPortableDir = path.join(appPath, 'portable-data');
       if (fs.existsSync(devPortableDir)) return devPortableDir;
     }

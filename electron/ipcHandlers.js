@@ -1118,7 +1118,12 @@ module.exports = function(app) {
       if (normalizedMode === 'in-place') {
         closeComicReadStreams(app, pdfPath);
       }
-      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode });
+      // مرحله ۷ ـ نهایی: لاگرِ دیسک به saver تزریق می‌شود تا
+      // تشخیصِ آبجکت‌های غیرقابل‌پارس (شماره + آفست + ۲۰۰ بایتِ
+      // اطراف) در logs/app.log ثبت شود.
+      let saveLogger = null;
+      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger });
       if (result && result.success && (result.mode === 'in-place' || path.resolve(finalPath) === path.resolve(pdfPath))) {
         invalidateComicRamCache(app, pdfPath);
       }
@@ -1135,6 +1140,94 @@ module.exports = function(app) {
       // برنامه هم قابلِ بررسی باشد. قراردادِ برگشتی، عیناً قبل است.
       try { const lg = getIpcLogger(); if (lg) lg.error('export-annotated-pdf failed', err); } catch (_) { /* ignore */ }
       return { success: false, error: 'خطا در ساختِ PDFِ حاشیه‌نویسی‌شده: ' + err.message };
+    }
+  });
+
+  // مرحله ۸ ـ بخش الف: استراتژیِ Xodo برای PDFهای محافظت‌شده.
+  // بررسیِ محافظت، فقط هنگامِ کلیک روی دکمهٔ استودیو انجام می‌شود
+  // (نه هنگامِ باز کردنِ فایل)؛ پس خواندنِ صرفِ فایل، هیچ مزاحمتی
+  // ندارد. سقفِ ۵۰۰ مگابایت، همان سقفِ probe در saver است.
+  ipcMain.handle('check-pdf-protection', async (event, payload) => {
+    const unknown = { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
+    try {
+      const filePath = payload && payload.filePath;
+      if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) return unknown;
+      if (path.extname(filePath).toLowerCase() !== '.pdf') return { protected: false, reason: 'not-pdf', pageCount: -1, hasEncryptToken: false };
+      const stat = fs.statSync(filePath);
+      if (!stat || stat.size > 500 * 1024 * 1024) return unknown;
+      let saver;
+      try {
+        saver = require('./services/pdfAnnotationSaver');
+      } catch (_) {
+        return unknown;
+      }
+      let saveLogger = null;
+      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+      const bytes = await fs.promises.readFile(filePath);
+      const result = await saver.probePdfProtection(bytes, saveLogger);
+      return {
+        protected: Boolean(result && result.protected),
+        reason: (result && result.reason) || 'unknown',
+        pageCount: (result && result.pageCount) || -1,
+        hasEncryptToken: Boolean(result && result.hasEncryptToken),
+      };
+    } catch (err) {
+      try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection failed', err && err.message); } catch (_) { /* ignore */ }
+      return unknown;
+    }
+  });
+
+  // مرحله ۸ ـ بخش الف: ساختِ نسخهٔ کپیِ بدونِ قفلِ /Encrypt.
+  // ذخیره، خودکار و کنارِ فایلِ اصلی است (<نام>-editable.pdf و در
+  // صورتِ تکراری، <نام>-editable-2.pdf و … تا سقفِ ۱۰۰)؛ دیالوگِ
+  // Save As ندارد تا جریانِ «کلیک روی استودیو → کپی → ویرایش»
+  // با یک تأیید انجام شود. فایلِ اصلی هرگز دست نمی‌خورد و برای
+  // کپی، .orig.bak ساخته نمی‌شود.
+  ipcMain.handle('create-unlocked-pdf-copy', async (event, payload) => {
+    try {
+      const filePath = payload && payload.filePath;
+      if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
+        return { success: false, error: 'فایل PDF پیدا نشد.' };
+      }
+      if (path.extname(filePath).toLowerCase() !== '.pdf') {
+        return { success: false, error: 'فقط فایل‌های PDF می‌توانند نسخهٔ کپیِ قابل‌ویرایش داشته باشند.' };
+      }
+      let saver;
+      try {
+        saver = require('./services/pdfAnnotationSaver');
+      } catch (_) {
+        return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد؛ فایل را در پوشهٔ electron/services قرار دهید.' };
+      }
+      let saveLogger = null;
+      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+      const bytes = await fs.promises.readFile(filePath);
+      const copy = await saver.createUnlockedPdfCopy({ bytes, logger: saveLogger });
+      if (!copy || !copy.success) {
+        return { success: false, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
+      }
+      const dir = path.dirname(filePath);
+      const baseName = path.basename(filePath, path.extname(filePath));
+      let copyPath = path.join(dir, baseName + '-editable.pdf');
+      for (let i = 2; i <= 100 && fs.existsSync(copyPath); i++) {
+        copyPath = path.join(dir, baseName + '-editable-' + i + '.pdf');
+      }
+      if (fs.existsSync(copyPath)) {
+        return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
+      }
+      await atomicWriteBuffer(copyPath, Buffer.from(copy.bytes));
+      return {
+        success: true,
+        copyPath,
+        pageCount: copy.pageCount,
+        textGate: copy.textGate,
+        alreadyUnlocked: Boolean(copy.alreadyUnlocked),
+      };
+    } catch (err) {
+      if (err && err.code === 'FILE_LOCKED') {
+        return { success: false, locked: true, error: err.message };
+      }
+      try { const lg = getIpcLogger(); if (lg) lg.error('create-unlocked-pdf-copy failed', err); } catch (_) { /* ignore */ }
+      return { success: false, error: 'خطا در ساختِ نسخهٔ کپی: ' + err.message };
     }
   });
 

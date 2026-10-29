@@ -21,7 +21,6 @@
 // ============================================================================
 
 import {
-  getStrokeOptions,
   resolvePillFill,
   detectTextDirection,
   getColorLuminance,
@@ -218,10 +217,13 @@ function displayedFractionsToPdf(fx, fy, geometry) {
 // و با پهنای لایه‌ایِ `sw*2.4` برای قلم و `sw*5.5` برای هایلایتر
 // رسم می‌شود (نه `sw*2.2`ی انجین). پس پختِ ۱۰۰٪ باید همان الگوریتمِ
 // لایه را در فضای بوم تکرار کند؛ outlineی perfect-freehand، شکلی
-// متفاوت (کانتورِ پرشده) می‌ساخت. هایلایتر روی بومِ شفاف، با آلفای
-// دقیقِ ۰٫۳۵ و source-over رسم می‌شود؛ حالتِ multiplyی لایه، بدونِ
-// پیکسل‌های صفحهٔ زیرین قابلِ بازتولید روی PNGِ شفاف نیست (در
-// گزارش، §۳٫۴ آمده است).
+// متفاوت (کانتورِ پرشده) می‌ساخت. هایلایتر، در گذرِ جداگانه‌ای
+// (highlightPng) با همان آلفای ۰٫۳۵ و source-over رسم می‌شود و
+// main آن را با BlendMode.Multiply روی صفحه می‌نشاند — دقیقاً همان
+// ترکیبِ multiplyی لایه روی متنِ زیرین (مرحله ۷ ـ بخش ب). داخلِ
+// خودِ بومِ هایلایتر، هم‌پوشانیِ دو استروک با source-over ترکیب
+// می‌شود (کمی روشن‌تر از multiplyِ دوباره در لایه)؛ این تفاوتِ
+// مرتبهٔ دوم، آگاهانه پذیرفته شده است.
 
 /** نقطهٔ فضای یکنواخت (ux, uy) → پیکسلِ بومِ جهتِ خام. */
 function uniformToCanvasPoint(ux, uy, geometry, canvasW, canvasH) {
@@ -416,7 +418,11 @@ function drawArrowItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
 // --- تبدیلِ آیتم‌ها به بردار ------------------------------------------------
 
 function strokeLineWidthPoints(tool, strokeWidth, geometry) {
-  const size = getStrokeOptions(tool, strokeWidth).size;
+  // مرحله ۷ ـ بخش ب: پهنای لایه (نه انجین) — قلم sw*2.4 (انجین
+  // ۲٫۲ می‌داد و بردارِ fallback، ۸٪ باریک‌تر از روی صفحه بود)؛
+  // هایلایتر sw*5.5 (مثلِ لایه).
+  const factor = tool === 'highlighter' ? 5.5 : 2.4;
+  const size = Math.max(1, finiteNumber(strokeWidth, 4)) * factor;
   return (size / 1000) * geometry.viewport.width / geometry.pdfScale;
 }
 
@@ -694,8 +700,11 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
   const text = String(item.text || '');
   ctx.save();
   ctx.globalAlpha = opacity;
-  // زیره + سایه.
-  ctx.shadowColor = '#000000';
+  // زیره + سایه. مرحله ۷ ـ بخش ب: سایهٔ لایه، shadowOpacityی
+  // ۰٫۲۲ دارد (Konva)؛ رنگِ سایهٔ کاملاً مات ('#000000')، در PDF
+  // سایه‌ای ~۴ برابر تیره‌تر از روی صفحه می‌ساخت. آلفای ۰٫۲۲، با
+  // globalAlphaی opacity ضرب می‌شود — دقیقاً مثلِ Groupِ لایه.
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.22)';
   ctx.shadowBlur = 4 * unitScale;
   ctx.shadowOffsetY = 6 * unitScale;
   ctx.shadowOffsetX = 0;
@@ -806,8 +815,11 @@ function drawCloudBoxItem(ctx, item, geometry, canvasW, canvasH, unitScaleArg) {
 /**
  * رندرِ overlayِ یک صفحه (همهٔ آیتم‌ها: قلم، هایلایتر، باکس، فلش،
  * متن، استیکی) روی بومِ Canvas 2D در جهتِ خامِ صفحه — پختِ کاملِ
- * لایهٔ شفاف. برمی‌گرداند: dataURL یا null (اگر آیتمی نیست).
- * وقتی overlay ساخته شد، main دیگر /Annotِ تکراری نمی‌سازد.
+ * لایهٔ شفاف. برمی‌گرداند: { overlayPng, highlightPng } یا null
+ * (اگر آیتمی نیست). overlayPng، همهٔ آیتم‌ها به‌جز هایلایترهاست
+ * و highlightPng فقط هایلایترهاست تا main، گذرِ هایلایتر را با
+ * BlendMode.Multiply بنشاند (مرحله ۷ ـ بخش ب). وقتی overlay ساخته
+ * شد، main دیگر /Annotِ تکراری نمی‌سازد.
  */
 export async function renderPageOverlay(items, geometry) {
   const overlayItems = items || [];
@@ -822,15 +834,25 @@ export async function renderPageOverlay(items, geometry) {
   const scale = Math.min(3, Math.max(1.5, 3000 / maxDim));
   const canvasW = Math.max(1, Math.round(geometry.rawWidth * scale));
   const canvasH = Math.max(1, Math.round(geometry.rawHeight * scale));
-  const canvas = document.createElement('canvas');
-  canvas.width = canvasW;
-  canvas.height = canvasH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  ctx.clearRect(0, 0, canvasW, canvasH);
+  const makeCanvas = () => {
+    const c = document.createElement('canvas');
+    c.width = canvasW;
+    c.height = canvasH;
+    const c2d = c.getContext('2d');
+    if (c2d) c2d.clearRect(0, 0, canvasW, canvasH);
+    return [c, c2d];
+  };
+  const [canvas, ctx] = makeCanvas();
+  const [hlCanvas, hlCtx] = makeCanvas();
+  if (!ctx || !hlCtx) return null;
 
   // مقیاسِ واحدِ یکنواخت → پیکسلِ بوم: بر اساسِ عرضِ دیده‌شده (viewport).
   const unitScale = (scale * geometry.viewport.width) / 1000;
+
+  const hasHighlight = overlayItems.some(
+    (it) => it && it.tool === 'highlighter' && Array.isArray(it.points) && it.points.length > 0
+  );
+  const hasMain = overlayItems.some((it) => it && it.tool !== 'highlighter');
 
   for (const item of overlayItems) {
     const fx = finiteNumber(item.x ?? item.startX) / 1000;
@@ -838,19 +860,24 @@ export async function renderPageOverlay(items, geometry) {
     const [rx, ry] = displayedFractionsToRaw(fx, fy, geometry);
     const px = rx * canvasW;
     const py = ry * canvasH;
+    // هایلایترها روی بومِ جداگانه (گذرِ Multiply)؛ بقیه روی بومِ اصلی.
+    const targetCtx = item.tool === 'highlighter' ? hlCtx : ctx;
     if (item.tool === 'text') {
-      drawTextItem(ctx, item, px, py, unitScale);
+      drawTextItem(targetCtx, item, px, py, unitScale);
     } else if (item.tool === 'sticky') {
-      drawStickyItem(ctx, item, px, py, unitScale);
+      drawStickyItem(targetCtx, item, px, py, unitScale);
     } else if (item.tool === 'pen' || item.tool === 'highlighter') {
-      drawPenItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale);
+      drawPenItemCanvas(targetCtx, item, geometry, canvasW, canvasH, unitScale);
     } else if (item.tool === 'box') {
-      drawBoxItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale);
+      drawBoxItemCanvas(targetCtx, item, geometry, canvasW, canvasH, unitScale);
     } else if (item.tool === 'arrow') {
-      drawArrowItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale);
+      drawArrowItemCanvas(targetCtx, item, geometry, canvasW, canvasH, unitScale);
     }
   }
-  return canvas.toDataURL('image/png');
+  return {
+    overlayPng: hasMain ? canvas.toDataURL('image/png') : null,
+    highlightPng: hasHighlight ? hlCanvas.toDataURL('image/png') : null,
+  };
 }
 
 // --- ارکستراسیونِ کلِ خروجی -------------------------------------------------
@@ -877,15 +904,18 @@ export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageView
     totalItems += items.length;
     const viewport = await getPageViewport(pageNum);
     const geometry = buildPageGeometry(viewport, cssRotation);
-    const overlayPng = await renderPageOverlay(items, geometry);
+    const rendered = await renderPageOverlay(items, geometry);
+    const overlayPng = rendered ? rendered.overlayPng : null;
+    const highlightPng = rendered ? rendered.highlightPng : null;
     // شبحِ دوتایی ممنوع: اگر overlayِ کامل هست، بردارِ تکراری نفرست
     // (saver هم، دفاعِ دوم، در حضورِ overlay بردار را نادیده می‌گیرد).
-    // بردار فقط fallbackِ وقتی است که overlay ساخته نشده باشد.
-    const vector = overlayPng ? [] : convertPageItemsToVector(items, geometry);
-    if (vector.length > 0 || overlayPng) {
+    // بردار فقط fallbackِ وقتی است که هیچ تصویری ساخته نشده باشد.
+    const vector = overlayPng || highlightPng ? [] : convertPageItemsToVector(items, geometry);
+    if (vector.length > 0 || overlayPng || highlightPng) {
       pages[pageNum] = {
         vector,
         overlayPng,
+        highlightPng,
         pageWidth: geometry.rawWidth,
         pageHeight: geometry.rawHeight,
       };

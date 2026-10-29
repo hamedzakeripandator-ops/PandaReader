@@ -493,6 +493,20 @@ export default function VerticalViewer() {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
+      // مرحله ۷ ـ بخش ب: وقتی فوکوس داخلِ کادرِ متنی است (جستجوی
+      // PDF، ویرایشگرِ متن/استیکی، سرچ‌بار)، Ctrl+Z/Y باید Undoی
+      // متنیِ خودِ مرورگر باشد، نه Undoی حاشیه‌نویسی — وگرنه تایپِ
+      // کاربر، بی‌صدا حاشیه‌نویسی را برمی‌گرداند. (شنوندهٔ تولبار و
+      // useKeyboard، از پیش همین گیت را داشتند؛ این شنونده نداشت.)
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      )
+        return;
       // مرحله ۷ ـ بخش الف: مالکیتِ این شنونده (فقط وقتی استودیو
       // خاموش است) دقیقاً مثلِ قبل می‌ماند؛ فقط گزاره، از
       // مرجعِ واحد (matchesShortcut) خوانده می‌شود تا تغییرِ

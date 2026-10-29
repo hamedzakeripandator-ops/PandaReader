@@ -197,6 +197,7 @@ export function AnnotationToolbar({
   onClearPage,
   onExportAnnotatedPdf,
   isExportingPdf = false,
+  pdfSaveState = 'idle',
 } = {}) {
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
@@ -262,6 +263,34 @@ export function AnnotationToolbar({
   const toolbarWrapRef = useRef(null);
   const toolbarDragRef = useRef(null);
   const toolbarPosRef = useRef(null);
+
+  // Stage 8 Part A (Axis 4): user-defined tool order, persisted in
+  // localStorage. Unknown ids are dropped, missing tools are appended
+  // in default order, so a stale saved order can never lose a tool.
+  const [toolOrder, setToolOrder] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem('comicReader.studioToolOrder.v1');
+      if (!raw) return TOOLS.map((t) => t.id);
+      const saved = JSON.parse(raw);
+      if (!Array.isArray(saved)) return TOOLS.map((t) => t.id);
+      const known = TOOLS.map((t) => t.id);
+      const ordered = saved.filter((id) => known.includes(id));
+      for (const id of known) if (!ordered.includes(id)) ordered.push(id);
+      return ordered;
+    } catch (_) {
+      return TOOLS.map((t) => t.id);
+    }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem('comicReader.studioToolOrder.v1', JSON.stringify(toolOrder)); } catch (_) {}
+  }, [toolOrder]);
+  // Stage 8 Part A (Axis 4): live drag session state. toolDrag holds
+  // the dragged id, ghost position and live insertion index; the
+  // session ref holds the pointer session (start point, moved flag,
+  // latest insertion index) for the window listeners.
+  const [toolDrag, setToolDrag] = useState(null);
+  const toolDragSessionRef = useRef(null);
+  const suppressToolClickUntilRef = useRef(0);
 
   // فاز ۳ پالت — همهٔ هوک‌های دراور، این‌جا و قبل از returnِ
   // زودهنگام‌اند (قانونِ هوک‌های ری‌اکت): وضعیتِ باز بودن، موقعیتِ
@@ -512,15 +541,74 @@ export function AnnotationToolbar({
   // مرحله ۵ — بخش ب: هاورِ دو دکمهٔ ذخیرهٔ دوگانه (قبل از returnِ زودهنگام، طبقِ قانونِ هوک‌ها — مثلِ doneHover/exportHover).
   const [saveInPlaceHover, setSaveInPlaceHover] = useState(false);
   const [saveAsHover, setSaveAsHover] = useState(false);
+  // مرحله ۷ ـ نهایی: درخششِ سبزِ ۳ ثانیه‌ایِ دکمهٔ ذخیره پس از موفقیت (بنر، ۴٫۵ ثانیه است).
+  const [saveFlash, setSaveFlash] = useState(false);
+  const saveFlashTimerRef = useRef(null);
+  useEffect(() => {
+    if (pdfSaveState === 'saved-inplace' || pdfSaveState === 'saved-as') {
+      setSaveFlash(true);
+      if (saveFlashTimerRef.current) clearTimeout(saveFlashTimerRef.current);
+      saveFlashTimerRef.current = setTimeout(() => setSaveFlash(false), 3000);
+    } else {
+      setSaveFlash(false);
+    }
+    return () => {
+      if (saveFlashTimerRef.current) clearTimeout(saveFlashTimerRef.current);
+    };
+  }, [pdfSaveState]);
   const [hoverUserHex, setHoverUserHex] = useState(null);
   const [viewportW, setViewportW] = useState(() => window.innerWidth);
+  // Stage 8 Part A: viewport height drives the horizontal flyout/drawer
+  // smart flip (open below in the top half, above in the bottom half).
+  const [viewportH, setViewportH] = useState(() => window.innerHeight);
   const setIsAnnotationActive = useAppStore((s) => s.setIsAnnotationActive);
   const clearSelection = useAppStore((s) => s.clearSelection);
   useEffect(() => {
-    const onResize = () => setViewportW(window.innerWidth);
+    const onResize = () => {
+      setViewportW(window.innerWidth);
+      setViewportH(window.innerHeight);
+    };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
+  // Stage 8 Part A (Axis 5): mount/exit lifecycle for the flyout card
+  // and the palette drawer, so closing animates instead of vanishing.
+  // The formulas mirror showSecondary/colorDrawerOpen below (same
+  // inputs, computed here because hooks must stay above the early
+  // return); the canonical consts after the return stay untouched.
+  const showSecondaryForAnim = (annotationTool !== 'select' || hasSelection) && !panelClosed;
+  const [flyoutMounted, setFlyoutMounted] = useState(false);
+  const [flyoutExiting, setFlyoutExiting] = useState(false);
+  useEffect(() => {
+    if (showSecondaryForAnim) {
+      setFlyoutMounted(true);
+      setFlyoutExiting(false);
+      return;
+    }
+    if (!flyoutMounted) return;
+    setFlyoutExiting(true);
+    const t = setTimeout(() => {
+      setFlyoutMounted(false);
+      setFlyoutExiting(false);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [showSecondaryForAnim, flyoutMounted]);
+  const [drawerMounted, setDrawerMounted] = useState(false);
+  const [drawerExiting, setDrawerExiting] = useState(false);
+  useEffect(() => {
+    if (colorDrawerOpen) {
+      setDrawerMounted(true);
+      setDrawerExiting(false);
+      return;
+    }
+    if (!drawerMounted) return;
+    setDrawerExiting(true);
+    const t = setTimeout(() => {
+      setDrawerMounted(false);
+      setDrawerExiting(false);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [colorDrawerOpen, drawerMounted]);
 
   // تایید دو مرحله‌ای برای پاک کردن همه (بدون window.confirm زشت)
   const [armClear, setArmClear] = useState(false);
@@ -671,7 +759,17 @@ export function AnnotationToolbar({
     if (!isAnnotationActive) return;
     const onKey = (e) => {
       const tag = e.target?.tagName;
-      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      // مرحله ۷ ـ بخش ب: گیتِ فوکوس، با SELECT و contentEditable
+      // هم کامل شد تا هیچ کادرِ متنی‌ای، زیرِ شورت‌کات‌های استودیو
+      // نرود (ویرایشگرهای متن/استیکی، textarea هستند و از پیش
+      // پوشش داده می‌شدند).
+      if (
+        tag === 'TEXTAREA' ||
+        tag === 'INPUT' ||
+        tag === 'SELECT' ||
+        e.target?.isContentEditable
+      )
+        return;
       // Undo/Redo: فقط وقتی رویداد، با میانبرِ فعلیِ تنظیمات جور
       // است — و فقط یک بار، بدونِ رسیدن به PdfViewer. پیش از این،
       // هر Ctrl+Z/Y (حتی پس از تغییرِ میانبر در تنظیمات) این‌جا
@@ -831,16 +929,105 @@ export function AnnotationToolbar({
   // - actionsContent: Undo/Redo/پاک‌کردن.
   // - orientationToggle: دکمهٔ سوییچِ جهت با آیکونِ Columns لوسید که در
   //   حالتِ عمودی ۹۰ درجه می‌چرخد (ترنزیشن روی خودِ svg است).
+  // Stage 8 Part A (Axis 4): render order follows the persisted
+  // toolOrder; any tool missing from a stale saved order is appended.
+  const orderedTools = toolOrder
+    .map((id) => TOOLS.find((t) => t.id === id))
+    .filter(Boolean);
+  for (const t of TOOLS) {
+    if (!orderedTools.some((o) => o.id === t.id)) orderedTools.push(t);
+  }
+  // During a drag, the dragged tool is shown at the live insertion
+  // index so the row visibly makes room for the drop.
+  const displayTools = (() => {
+    if (!toolDrag) return orderedTools;
+    const without = orderedTools.filter((t) => t.id !== toolDrag.id);
+    const dragged = orderedTools.find((t) => t.id === toolDrag.id);
+    if (!dragged) return orderedTools;
+    const idx = Math.max(0, Math.min(without.length, toolDrag.insertIndex ?? without.length));
+    without.splice(idx, 0, dragged);
+    return without;
+  })();
+  const dragGhostTool = toolDrag ? orderedTools.find((t) => t.id === toolDrag.id) : null;
+
+  // Stage 8 Part A (Axis 4): insertion index from the other tool
+  // buttons' centers along the toolbar's main axis. Horizontal runs in
+  // RTL, so DOM order is right-to-left: the index counts buttons whose
+  // center is to the RIGHT of the pointer. Vertical is top-to-bottom.
+  const computeToolInsertIndex = (clientX, clientY, draggedId) => {
+    const wrap = toolsWrapRef.current;
+    if (!wrap) return toolOrder.length;
+    const btns = Array.from(wrap.querySelectorAll('[data-tool-btn="1"]')).filter(
+      (b) => b.getAttribute('data-tool-id') !== draggedId
+    );
+    if (btns.length === 0) return 0;
+    let idx = 0;
+    for (const b of btns) {
+      const r = b.getBoundingClientRect();
+      if (isVertical) {
+        if (r.top + r.height / 2 < clientY) idx += 1;
+      } else if (r.left + r.width / 2 > clientX) {
+        idx += 1;
+      }
+    }
+    return idx;
+  };
+
+  // Stage 8 Part A (Axis 4): pointer-based drag with a 5px threshold,
+  // so an ordinary click still selects the tool. Window listeners in
+  // capture phase keep tracking even if the pointer leaves the button.
+  const beginToolDrag = (e, id) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    const session = { id, startX: e.clientX, startY: e.clientY, dragging: false, insertIndex: null };
+    toolDragSessionRef.current = session;
+    const onMove = (ev) => {
+      if (!session.dragging) {
+        if (Math.hypot(ev.clientX - session.startX, ev.clientY - session.startY) < 5) return;
+        session.dragging = true;
+        hideTooltip();
+        setHoverToolId(null);
+      }
+      session.insertIndex = computeToolInsertIndex(ev.clientX, ev.clientY, id);
+      setToolDrag({ id, x: ev.clientX, y: ev.clientY, insertIndex: session.insertIndex });
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', onUp, true);
+      window.removeEventListener('pointercancel', onUp, true);
+      toolDragSessionRef.current = null;
+      if (session.dragging) {
+        const target = session.insertIndex;
+        setToolDrag(null);
+        suppressToolClickUntilRef.current = Date.now() + 120;
+        if (typeof target === 'number') {
+          setToolOrder((prev) => {
+            const without = prev.filter((t) => t !== id);
+            const idx = Math.max(0, Math.min(without.length, target));
+            without.splice(idx, 0, id);
+            return without;
+          });
+        }
+      }
+    };
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+    window.addEventListener('pointercancel', onUp, true);
+  };
+
   const toolsButtons = (
     <>
       {/* ابزارها */}
-      {TOOLS.map(({ id, label, Icon, danger }) => {
+      {displayTools.map(({ id, label, Icon, danger }) => {
         const active = activeId === id;
         return (
           <button
             key={id}
+            data-tool-btn="1"
+            data-tool-id={id}
             aria-label={label}
+            onPointerDown={(e) => beginToolDrag(e, id)}
             onMouseEnter={(e) => {
+              if (toolDragSessionRef.current && toolDragSessionRef.current.dragging) return;
               setHoverToolId(id);
               positionToolGlow(e.currentTarget);
               showTooltipDelayed(e, label);
@@ -851,6 +1038,9 @@ export function AnnotationToolbar({
               hideTooltip();
             }}
             onClick={() => {
+              // Stage 8 Part A (Axis 4): a click that ends a tool drag
+              // must not select the tool underneath the pointer.
+              if (Date.now() < suppressToolClickUntilRef.current) return;
               // میکروانیمیشن‌ها §۳ — منطقِ پنل: کلیک روی ابزارِ
               // دیگر، یا کلیکِ تکی روی ابزارِ فعالی که پنلش بسته
               // است، پنل را باز می‌کند؛ کلیکِ تکی روی ابزارِ فعالِ
@@ -893,6 +1083,12 @@ export function AnnotationToolbar({
                 : {}),
               cursor: 'pointer',
               pointerEvents: 'auto',
+              touchAction: 'none',
+              // Stage 8 Part A (Axis 4): the dragged slot stays visible
+              // but dimmed with a dashed outline while the ghost moves.
+              ...(toolDrag && toolDrag.id === id
+                ? { opacity: 0.35, outline: '1.5px dashed rgba(34, 211, 238, 0.7)', outlineOffset: -1 }
+                : {}),
               width: 38,
               height: 38,
               borderRadius: 11,
@@ -971,21 +1167,31 @@ export function AnnotationToolbar({
     const rect = paletteBtnRef.current ? paletteBtnRef.current.getBoundingClientRect() : null;
     if (!rect) {
       setColorDrawerPos(isVertical
-        ? { top: '50%', left: 10, transform: 'translate(0, -50%)' }
-        : { top: 80, left: '50%', transform: 'translateX(-50%)' });
+        ? { top: '50%', left: 10, transform: 'translate(0, -50%)', above: false }
+        : { top: 80, left: '50%', transform: 'translateX(-50%)', above: false });
     } else if (isVertical) {
       const cy = rect.top + rect.height / 2;
       const fitsLeft = rect.left - 10 >= 300;
       const fitsRight = viewportW - rect.right - 10 >= 300;
       const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
       if (openRight) {
-        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 300)), transform: 'translate(0, -50%)' });
+        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 300)), transform: 'translate(0, -50%)', above: false });
       } else {
-        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 300), transform: 'translate(-100%, -50%)' });
+        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 300), transform: 'translate(-100%, -50%)', above: false });
       }
     } else {
       const cx = Math.max(160, Math.min(rect.left + rect.width / 2, window.innerWidth - 160));
-      setColorDrawerPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)' });
+      // Stage 8 Part A (Axis 3): smart flip — if there is not enough
+      // room below the bar (drawer ~320px) but more room above, the
+      // drawer opens ABOVE the bar so it is never clipped by the
+      // bottom edge of the monitor.
+      const spaceBelow = viewportH - rect.bottom;
+      const spaceAbove = rect.top;
+      if (spaceBelow < 330 && spaceAbove > spaceBelow) {
+        setColorDrawerPos({ top: rect.top - 10, left: cx, transform: 'translateX(-50%) translateY(-100%)', above: true });
+      } else {
+        setColorDrawerPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)', above: false });
+      }
     }
     setColorDrawerOpen(true);
   };
@@ -1757,6 +1963,8 @@ export function AnnotationToolbar({
   //    دیالوگِ Save As با نامِ پیش‌فرضِ `<نام>-annotated.pdf`.
   // هر دو دکمه، هر دو کارِ هاور (تولتیپ + حالتِ هاور) را در یک
   // هندلر انجام می‌دهند (الگوی درستِ دکمهٔ خروجیِ بخش الف).
+  const inPlaceSaving = pdfSaveState === 'saving-inplace';
+  const inPlaceFlashed = saveFlash && pdfSaveState === 'saved-inplace';
   const saveInPlaceButton = typeof onExportAnnotatedPdf === 'function' ? (
     <button
       aria-label="ذخیره روی همین فایل"
@@ -1771,17 +1979,17 @@ export function AnnotationToolbar({
         width: 38,
         height: 38,
         borderRadius: 11,
-        background: 'rgba(251,191,36,0.16)',
-        color: '#fcd34d',
-        outline: '1px solid rgba(251,191,36,0.45)',
+        background: inPlaceFlashed ? '#059669' : 'rgba(251,191,36,0.16)',
+        color: inPlaceFlashed ? '#ffffff' : '#fcd34d',
+        outline: inPlaceFlashed ? '1px solid rgba(5,150,105,0.9)' : '1px solid rgba(251,191,36,0.45)',
         outlineOffset: -1,
-        boxShadow: saveInPlaceHover && !isExportingPdf ? '0 0 14px rgba(251,191,36,0.55)' : 'none',
-        opacity: isExportingPdf ? 0.55 : 1,
+        boxShadow: inPlaceFlashed ? '0 0 16px rgba(5,150,105,0.65)' : (saveInPlaceHover && !isExportingPdf ? '0 0 14px rgba(251,191,36,0.55)' : 'none'),
+        opacity: inPlaceFlashed ? 1 : (isExportingPdf ? 0.55 : 1),
         cursor: isExportingPdf ? 'default' : 'pointer',
         transition: 'all 0.2s ease',
       }}
     >
-      {Icons.Save ? <Icons.Save size={18} /> : (
+      {inPlaceFlashed ? <Icons.Check size={20} /> : inPlaceSaving ? <Icons.Loader size={18} /> : Icons.Save ? <Icons.Save size={18} /> : (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
           <path d="M17 21v-8H7v8" />
@@ -1790,6 +1998,8 @@ export function AnnotationToolbar({
       )}
     </button>
   ) : null;
+  const saveAsSaving = pdfSaveState === 'saving-as';
+  const saveAsFlashed = saveFlash && pdfSaveState === 'saved-as';
   const saveAsButton = typeof onExportAnnotatedPdf === 'function' ? (
     <button
       aria-label="ذخیره به عنوان فایل جدید"
@@ -1804,17 +2014,17 @@ export function AnnotationToolbar({
         width: 38,
         height: 38,
         borderRadius: 11,
-        background: 'rgba(34,211,238,0.16)',
-        color: '#67e8f9',
-        outline: '1px solid rgba(34,211,238,0.45)',
+        background: saveAsFlashed ? '#059669' : 'rgba(34,211,238,0.16)',
+        color: saveAsFlashed ? '#ffffff' : '#67e8f9',
+        outline: saveAsFlashed ? '1px solid rgba(5,150,105,0.9)' : '1px solid rgba(34,211,238,0.45)',
         outlineOffset: -1,
-        boxShadow: saveAsHover && !isExportingPdf ? '0 0 14px rgba(34,211,238,0.55)' : 'none',
-        opacity: isExportingPdf ? 0.55 : 1,
+        boxShadow: saveAsFlashed ? '0 0 16px rgba(5,150,105,0.65)' : (saveAsHover && !isExportingPdf ? '0 0 14px rgba(34,211,238,0.55)' : 'none'),
+        opacity: saveAsFlashed ? 1 : (isExportingPdf ? 0.55 : 1),
         cursor: isExportingPdf ? 'default' : 'pointer',
         transition: 'all 0.2s ease',
       }}
     >
-      {Icons.Download ? <Icons.Download size={18} /> : (
+      {saveAsFlashed ? <Icons.Check size={20} /> : saveAsSaving ? <Icons.Loader size={18} /> : Icons.Download ? <Icons.Download size={18} /> : (
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
           <path d="M7 10l5 5 5-5" />
@@ -1874,7 +2084,9 @@ export function AnnotationToolbar({
   // (تا انیمیشنِ ورودِ درونی، با transformی موقعیتِ بیرونی تداخل
   // نکند — همان الگوی typoConsoleIn). پنل، stopPropagationی pointer
   // دارد تا کلیک‌هایش به کانتینرِ حاشیه‌نویسی نرسد.
-  const colorDrawer = colorDrawerOpen && colorDrawerPos && (
+  // Stage 8 Part A (Axis 5): drawerMounted keeps the drawer alive
+  // for the 200ms exit animation after colorDrawerOpen closes.
+  const colorDrawer = drawerMounted && colorDrawerPos && (
     <div
       dir="rtl"
       style={{
@@ -1894,7 +2106,10 @@ export function AnnotationToolbar({
         style={{
           width: 300,
           maxHeight: 'calc(100vh - 40px)',
-          pointerEvents: 'auto',
+          pointerEvents: drawerExiting ? 'none' : 'auto',
+          // transformOrigin follows the smart flip so the drawer grows
+          // out of the bar edge it opened from.
+          transformOrigin: colorDrawerPos.above ? '50% 100%' : '50% 0',
           overflowY: 'auto',
           scrollbarWidth: 'none',
           padding: 12,
@@ -1905,7 +2120,13 @@ export function AnnotationToolbar({
           backdropFilter: 'blur(20px)',
           WebkitBackdropFilter: 'blur(20px)',
           userSelect: 'none',
-          animation: 'paletteDrawerIn 0.22s ease',
+          animation: drawerExiting
+            ? (colorDrawerPos.above
+              ? 'drawerOutUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+              : 'drawerOutDown 0.2s cubic-bezier(0.16, 1, 0.3, 1)')
+            : (colorDrawerPos.above
+              ? 'drawerInUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+              : 'drawerInDown 0.2s cubic-bezier(0.16, 1, 0.3, 1)'),
         }}
         onPointerDown={(e) => e.stopPropagation()}
         onPointerMove={(e) => e.stopPropagation()}
@@ -2058,6 +2279,79 @@ export function AnnotationToolbar({
     </div>
   );
 
+  // Stage 8 Part A (Axes 3+5): smart flip + animated flyout cards.
+  // The flip decision uses the bar's anchor point (floating y, or the
+  // docked top 26) against the viewport middle; the card then opens
+  // toward the roomier half so it is never clipped by the monitor edge.
+  const flyoutBelow = (toolbarPos ? toolbarPos.y : 26) + 26 < viewportH / 2;
+  const flyoutGlass = {
+    borderRadius: 16,
+    background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
+    border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+    backdropFilter: 'blur(16px)',
+    WebkitBackdropFilter: 'blur(16px)',
+    userSelect: 'none',
+  };
+  const verticalFlyoutCard = flyoutMounted && (
+    <div
+      dir="rtl"
+      style={{
+        ...flyoutGlass,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 12px',
+        pointerEvents: flyoutExiting ? 'none' : shellPointerEvents,
+        alignSelf: 'flex-start',
+        animation: flyoutExiting
+          ? 'submenuOut 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+          : 'submenuIn 0.25s ease',
+        maxHeight: 'calc(100vh - 120px)',
+        overflowY: 'auto',
+        scrollbarWidth: 'none',
+      }}
+      onMouseMove={handleSpotMove}
+      onMouseLeave={handleSpotLeave}
+    >
+      {secondaryContent}
+    </div>
+  );
+  const horizontalFlyoutCard = flyoutMounted && (
+    <div
+      dir="rtl"
+      style={{
+        ...flyoutGlass,
+        display: 'flex',
+        flexDirection: 'row',
+        flexWrap: 'wrap',
+        justifyContent: 'center',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 12px',
+        pointerEvents: flyoutExiting ? 'none' : shellPointerEvents,
+        alignSelf: 'center',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: 'calc(100vh - 120px)',
+        overflowX: 'auto',
+        overflowY: 'auto',
+        scrollbarWidth: 'none',
+        animation: flyoutExiting
+          ? (flyoutBelow
+            ? 'flyoutOutDown 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+            : 'flyoutOutUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)')
+          : (flyoutBelow
+            ? 'flyoutInDown 0.2s cubic-bezier(0.16, 1, 0.3, 1)'
+            : 'flyoutInUp 0.2s cubic-bezier(0.16, 1, 0.3, 1)'),
+      }}
+      onMouseMove={handleSpotMove}
+      onMouseLeave={handleSpotLeave}
+    >
+      {secondaryContent}
+    </div>
+  );
+
   return (
     <>
       {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
@@ -2066,7 +2360,7 @@ export function AnnotationToolbar({
           translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
           دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
           (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes paletteDrawerIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); }`}</style>
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } @keyframes submenuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(4px) scale(0.97); } } @keyframes flyoutInDown { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.96); } } @keyframes flyoutInUp { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.96); } } @keyframes drawerInDown { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.97); } } @keyframes drawerInUp { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.97); } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); }`}</style>
       {isVertical ? (
         // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
         // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً
@@ -2113,37 +2407,7 @@ export function AnnotationToolbar({
           onMouseEnter={handleToolbarEnter}
           onMouseLeave={(e) => { handleSpotLeave(e); handleToolbarLeave(); }}
         >
-          {showSecondary && (
-          <div
-            dir="rtl"
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              gap: 8,
-              padding: '10px 12px',
-              // پوستهٔ مرئیِ فلای‌اوت، با ارتفاعِ محتوای خودش؛
-              // alignSelf از کش‌آمدن در فضای flex جلوگیری می‌کند تا
-              // کارت، هرگز بلندتر از محتوایش نشود.
-              pointerEvents: shellPointerEvents,
-              alignSelf: 'flex-start',
-              borderRadius: 16,
-              background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
-              border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
-              animation: 'submenuIn 0.25s ease',
-              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-              backdropFilter: 'blur(16px)',
-              WebkitBackdropFilter: 'blur(16px)',
-              userSelect: 'none',
-              maxHeight: 'calc(100vh - 120px)',
-              overflowY: 'auto',
-              scrollbarWidth: 'none',
-            }}
-            onMouseMove={handleSpotMove}
-            onMouseLeave={handleSpotLeave}
-          >
-            {secondaryContent}
-          </div>)}
+          {verticalFlyoutCard}
           <div
             dir="rtl"
             ref={toolsWrapRef}
@@ -2182,7 +2446,7 @@ export function AnnotationToolbar({
       ) : (
         <div
           dir="rtl"
-          ref={(el) => { toolbarWrapRef.current = el; toolsWrapRef.current = el; }}
+          ref={toolbarWrapRef}
           style={{
             position: 'absolute',
             top: 26,
@@ -2190,25 +2454,16 @@ export function AnnotationToolbar({
             transform: 'translateX(-50%)',
             ...floatingStyle,
             zIndex: 30,
-            // در حالتِ افقی، همین کپسول، پوستهٔ مرئی است (پس‌زمینه
-            // روی همین div است و فضای خالیِ بیرونی ندارد)؛ فقط حینِ
-            // ژست، none می‌شود تا خط از زیرش رد شود.
-            pointerEvents: shellPointerEvents,
+            // Stage 8 Part A (Axis 3): hitbox isolation, exactly like
+            // the vertical wrap — the wrapper is none, only the
+            // capsule and the flyout card are auto, so the empty
+            // space left/right of the card never blocks drawing.
+            pointerEvents: 'none',
             display: 'flex',
-            flexDirection: 'row',
+            flexDirection: 'column',
             alignItems: 'center',
-            gap: 4,
-            padding: '6px 10px',
-            borderRadius: 16,
-            background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
-            border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-            backdropFilter: 'blur(16px)',
-            WebkitBackdropFilter: 'blur(16px)',
-            userSelect: 'none',
+            gap: 8,
             maxWidth: 'calc(100% - 24px)',
-            overflowX: 'auto',
-            scrollbarWidth: 'none',
             transition: isToolbarDragging ? 'none' : 'transform 0.25s ease, top 0.25s ease, left 0.25s ease, right 0.25s ease, opacity 0.3s ease',
             opacity: toolbarIdle ? 0.72 : 1,
           }}
@@ -2219,18 +2474,75 @@ export function AnnotationToolbar({
           onMouseEnter={handleToolbarEnter}
           onMouseLeave={(e) => { handleSpotLeave(e); handleToolbarLeave(); }}
         >
+          {!flyoutBelow && horizontalFlyoutCard}
+          <div
+            dir="rtl"
+            ref={toolsWrapRef}
+            style={{
+              pointerEvents: shellPointerEvents,
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 4,
+              padding: '6px 10px',
+              borderRadius: 16,
+              background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(8, 12, 16, 0.92)',
+              border: `1px solid ${withAlpha(annotationColor, 0.35)}`,
+              boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              userSelect: 'none',
+              maxWidth: 'calc(100vw - 24px)',
+              overflowX: 'auto',
+              scrollbarWidth: 'none',
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerMove={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+            onMouseMove={handleSpotMove}
+            onMouseEnter={handleToolbarEnter}
+            onMouseLeave={(e) => { handleSpotLeave(e); handleToolbarLeave(); }}
+          >
           {toolGlow}
           {dragHandle}
           {toolsButtons}
-          {showSecondary && (<div style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'submenuIn 0.25s ease' }}>{secondaryContent}</div>)}
+
           {divider}
           {actionsContent}
           {orientationToggle}
           {exportButtons}
           {doneButton}
+          </div>
+          {flyoutBelow && horizontalFlyoutCard}
         </div>
       )}
       {colorDrawer}
+      {toolDrag && dragGhostTool && (
+        <div
+          style={{
+            position: 'fixed',
+            left: toolDrag.x,
+            top: toolDrag.y,
+            transform: 'translate(-50%, -50%) scale(1.08)',
+            width: 38,
+            height: 38,
+            borderRadius: 11,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(34, 211, 238, 0.25)',
+            color: '#67e8f9',
+            outline: '1.5px solid #22d3ee',
+            outlineOffset: -1,
+            boxShadow: '0 0 16px rgba(34, 211, 238, 0.65)',
+            opacity: 0.92,
+            pointerEvents: 'none',
+            zIndex: 70,
+          }}
+        >
+          <dragGhostTool.Icon size={18} />
+        </div>
+      )}
       {tooltip && (
         <div
           dir="rtl"

@@ -271,6 +271,9 @@ const PdfPageItem = React.memo(function PdfPageItem({
   shouldRender,
   cachedBlobUrl,
   onStorePageBlob,
+  revokedBlobUrls,
+  onDropPageBlob,
+  viewportMotionRef,
   expectedHeight,
   rotation,
   pageWidth,
@@ -290,26 +293,49 @@ const PdfPageItem = React.memo(function PdfPageItem({
 
   const imgRef = useRef(null);
   const renderTaskRef = useRef(null);
+  const erroredUrlsRef = useRef(new Set());
+  const imgErrorCountRef = useRef(0);
+
+  // Stage 8 Part A: a cached/blob URL that was revoked by eviction is
+  // treated as absent everywhere below; otherwise the render effect
+  // would trust the dead string and the page would stay blank forever.
+  const effectiveCachedBlobUrl =
+    cachedBlobUrl && revokedBlobUrls && revokedBlobUrls.has(cachedBlobUrl) ? null : cachedBlobUrl;
+  const effectiveBlobUrl =
+    blobUrl && revokedBlobUrls && revokedBlobUrls.has(blobUrl) ? null : blobUrl;
 
   useEffect(() => {
+    if (cachedBlobUrl && revokedBlobUrls && revokedBlobUrls.has(cachedBlobUrl)) {
+      if (blobUrl === cachedBlobUrl) setBlobUrl(null);
+      setRenderFailed(false);
+      return;
+    }
     if (cachedBlobUrl && cachedBlobUrl !== blobUrl) {
       setBlobUrl(cachedBlobUrl);
       setRenderFailed(false);
     }
-  }, [cachedBlobUrl, blobUrl]);
+  }, [cachedBlobUrl, blobUrl, revokedBlobUrls]);
 
   // الف: پاس اول (Fast Base Render) برای اسکرول بدون لگ
   useEffect(() => {
-    if (!shouldRender || !pdfDoc || cachedBlobUrl || blobUrl) return;
+    if (!shouldRender || !pdfDoc || effectiveCachedBlobUrl || effectiveBlobUrl) return;
 
     let isCancelled = false;
     let tempCanvas = null;
     let activePageObj = null;
 
+    // مرحله ۷ ـ نهاییِ دوم: صفحهٔ فعال، بدونِ هیچ تأخیری (۰
+    // میلی‌ثانیه) در همان فریم رندر می‌شود؛ صفحه‌های مجاور، مثلِ
+    // قبل با تأخیرِ اولویت‌دار.
     const priorityDelay =
-      distanceFromActive === 0 ? 6 : distanceFromActive === 1 ? 40 : 100;
+      distanceFromActive === 0 ? 0 : distanceFromActive === 1 ? 40 : 100;
 
-    const timerId = setTimeout(async () => {
+    // Stage 8 Part A: settle-aware scheduling. During a fast scroll the
+    // viewport moves every few ms; a page the user flies past in a
+    // fraction of a second must not seize the pdf.js worker. Non-active
+    // pages wait until the viewport has been still for 60ms (bounded
+    // re-arms); the active page always renders immediately.
+    const runRender = async () => {
       if (isCancelled) return;
       try {
         setRenderFailed(false);
@@ -387,7 +413,25 @@ const PdfPageItem = React.memo(function PdfPageItem({
           setRenderFailed(true);
         }
       }
-    }, priorityDelay);
+    };
+
+    let timerId = null;
+    let rearmCount = 0;
+    const scheduleRender = () => {
+      timerId = setTimeout(async () => {
+        if (isCancelled) return;
+        if (distanceFromActive > 0 && rearmCount < 25) {
+          const motion = viewportMotionRef && viewportMotionRef.current;
+          if (motion && performance.now() - motion.lastScrollAt < 60) {
+            rearmCount += 1;
+            scheduleRender();
+            return;
+          }
+        }
+        await runRender();
+      }, rearmCount === 0 ? priorityDelay : 60);
+    };
+    scheduleRender();
 
     return () => {
       isCancelled = true;
@@ -409,11 +453,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
     pdfDoc,
     pageNumber,
     distanceFromActive,
-    cachedBlobUrl,
-    blobUrl,
+    effectiveCachedBlobUrl,
+    effectiveBlobUrl,
     retryTick,
     onPageRatioMeasured,
     onStorePageBlob,
+    viewportMotionRef,
   ]);
 
   // ب: پاس دوم (Crystal-Clear HiDPI Re-render) پس از تثبیت زوم یا توقف روی صفحه
@@ -465,8 +510,35 @@ const PdfPageItem = React.memo(function PdfPageItem({
     [onContextMenu, pageNumber]
   );
 
+  // Stage 8 Part A: a revoked/corrupt image URL recovers instead of
+  // leaving a blank page: the dead entry is dropped (parent cache) and
+  // the page re-renders. After 3 consecutive failures the retry UI
+  // takes over instead of looping.
+  const handleImgError = useCallback(() => {
+    const badSrc = activeSrc;
+    if (!badSrc) return;
+    imgErrorCountRef.current += 1;
+    if (imgErrorCountRef.current >= 3) {
+      setRenderFailed(true);
+      return;
+    }
+    if (!erroredUrlsRef.current.has(badSrc)) {
+      erroredUrlsRef.current.add(badSrc);
+      if (erroredUrlsRef.current.size > 50) erroredUrlsRef.current.clear();
+      if (badSrc === hiDpiUrl) {
+        setHiDpiUrl(null);
+      } else {
+        if (onDropPageBlob) onDropPageBlob(pageNumber, badSrc);
+        setBlobUrl(null);
+      }
+    } else {
+      setBlobUrl(null);
+    }
+    setRenderFailed(false);
+  }, [activeSrc, hiDpiUrl, onDropPageBlob, pageNumber]);
+
   // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
-  const activeSrc = hiDpiUrl || cachedBlobUrl || blobUrl;
+  const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
 
   // کالبدشکافیِ ناحیه‌های مردهٔ جزئی: برای چرخشِ ۹۰/۲۷۰، کادرِ
   // چیدمانِ wrapper باید ابعادِ جابه‌جا شده (ارتفاعِ کارت × عرضِ
@@ -531,6 +603,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
           <img
             ref={imgRef}
             src={activeSrc}
+            onError={handleImgError}
+            onLoad={() => {
+              imgErrorCountRef.current = 0;
+            }}
             alt={`صفحه ${pageNumber}`}
             loading="eager"
             decoding="async"
@@ -671,6 +747,25 @@ export default function PdfViewer({ filePath }) {
   // مرحله ۵ ـ بخش الف: وضعیتِ «در حالِ ساختِ خروجیِ PDF» برای غیرفعال
   // کردنِ دکمهٔ خروجیِ تولبار در طولِ پردازش.
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  // مرحله ۷ ـ نهایی: وضعیتِ نمایانِ ذخیرهٔ PDF — بنرِ شناورِ وضعیت + حالتِ دکمه‌های تولبار.
+  const [pdfSaveState, setPdfSaveState] = useState('idle');
+  const [pdfSaveMessage, setPdfSaveMessage] = useState('');
+  const saveStateTimerRef = useRef(null);
+  const showSaveStatus = useCallback((state, message, ms) => {
+    if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+    setPdfSaveState(state);
+    setPdfSaveMessage(message || '');
+    if (ms > 0) {
+      saveStateTimerRef.current = setTimeout(() => {
+        setPdfSaveState('idle');
+        setPdfSaveMessage('');
+        saveStateTimerRef.current = null;
+      }, ms);
+    }
+  }, []);
+  useEffect(() => () => {
+    if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+  }, []);
   const [errorMsg, setErrorMsg] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
@@ -707,6 +802,14 @@ export default function PdfViewer({ filePath }) {
   const pageBlobCacheRef = useRef(new Map());
   // فاز ۳: صفحه‌های در دید، برای تخلیهٔ هوشمندِ کش (مراجعهٔ زیر).
   const visiblePageNumbersRef = useRef([]);
+  // Stage 8 Part A: URLs whose object URL was revoked while a page
+  // item still holds it (eviction race). The set is append-only and
+  // capped; a revoked URL is never trusted again as a cached image.
+  const revokedBlobUrlsRef = useRef(new Set());
+  // Stage 8 Part A: last scroll-event instant/position, written
+  // synchronously in handleScroll so render scheduling can tell a
+  // settled viewport from a fast fly-through.
+  const viewportMotionRef = useRef({ lastScrollAt: 0, lastScrollTop: 0 });
   const prevZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
@@ -745,6 +848,7 @@ export default function PdfViewer({ filePath }) {
   const clearAllCachedPageBlobs = useCallback(() => {
     for (const [, url] of pageBlobCacheRef.current.entries()) {
       if (url) {
+        revokedBlobUrlsRef.current.add(url);
         try {
           URL.revokeObjectURL(url);
         } catch (_) {}
@@ -772,15 +876,23 @@ export default function PdfViewer({ filePath }) {
     // نیفتند. اگر همهٔ صفحه‌های کش در دید بودند، قدیمی‌ترین می‌رود
     // تا سقف، همیشه برقرار بماند. (سقف از قبل ۱۸ بود — کمتر از
     // ۳۰ای که تسک گفته بود — پس بالا برده نشد.)
+    // Stage 8 Part A: eviction keeps a margin around the active page
+    // (visible window +/- 8) because visiblePageNumbersRef updates only
+    // during render and can lag behind a fast scroll; evicting a page
+    // the user is flying toward produced permanently blank pages.
     while (cache.size >= MAX_CACHED_BLOBS) {
       const visible = visiblePageNumbersRef.current || [];
+      const guarded = new Set(visible);
+      const center = activePageRef.current || 1;
+      for (let pn = center - 8; pn <= center + 8; pn++) guarded.add(pn);
       let evictKey = null;
       for (const key of cache.keys()) {
-        if (!visible.includes(key)) { evictKey = key; break; }
+        if (!guarded.has(key)) { evictKey = key; break; }
       }
       if (evictKey == null) evictKey = cache.keys().next().value;
       const evictUrl = cache.get(evictKey);
       if (evictUrl) {
+        revokedBlobUrlsRef.current.add(evictUrl);
         try {
           URL.revokeObjectURL(evictUrl);
         } catch (_) {}
@@ -789,6 +901,21 @@ export default function PdfViewer({ filePath }) {
     }
 
     cache.set(pageNum, blobUrl);
+  }, []);
+
+  // Stage 8 Part A: a page item reports that its <img> failed on a
+  // revoked URL. The entry is dropped from the cache and the URL is
+  // registered as revoked, so the item re-renders from scratch instead
+  // of trusting the dead URL forever (the previous blank-page stall).
+  const handleDropPageBlob = useCallback((pageNum, blobUrl) => {
+    if (!pageNum || !blobUrl) return;
+    revokedBlobUrlsRef.current.add(blobUrl);
+    if (revokedBlobUrlsRef.current.size > 500) revokedBlobUrlsRef.current.clear();
+    const cache = pageBlobCacheRef.current;
+    if (cache.get(pageNum) === blobUrl) cache.delete(pageNum);
+    try {
+      URL.revokeObjectURL(blobUrl);
+    } catch (_) {}
   }, []);
 
   // ۱. واکشی یادداشت‌ها و هایلایت‌های ذخیره‌شده از دیتابیس
@@ -924,6 +1051,9 @@ export default function PdfViewer({ filePath }) {
   const handleExportAnnotatedPdf = useCallback(async (mode = 'save-as') => {
     if (isExportingPdf) return;
     if (!coreApi.isAvailable()) {
+      // مرحله ۷ ـ نهاییِ دوم: حتی در این شاخهٔ برگشتِ زودهنگام هم
+      // بنر، بلافاصله در همان میلی‌ثانیهٔ کلیک دیده می‌شود.
+      showSaveStatus('error', 'خروجیِ PDF فقط در نسخهٔ دسکتاپ (Electron) در دسترس است.', 6000);
       showToast('خروجیِ PDF فقط در نسخهٔ دسکتاپ (Electron) در دسترس است.', { type: 'warning' });
       return;
     }
@@ -936,15 +1066,21 @@ export default function PdfViewer({ filePath }) {
     // صفر آیتم، فقط در حالتِ درجا معنا دارد: برگرداندنِ فایل به
     // پایهٔ تمیز. در Save As، مثلِ قبل فقط پیام داده می‌شود.
     if (annotatedCount === 0 && saveMode !== 'in-place') {
+      // مرحله ۷ ـ نهاییِ دوم: کلیکِ ذخیره بدونِ حاشیه‌نویسی، دیگر
+      // «هیچ اتفاقی» نیست — بنرِ خنثی (info) پیام می‌دهد و دکمه‌ها
+      // را عوض نمی‌کند.
+      showSaveStatus('info', 'هنوز حاشیه‌نویسی‌ای روی این فایل نیست.', 4500);
       showToast('هنوز حاشیه‌نویسی‌ای روی این فایل نیست.', { type: 'info' });
       return;
     }
     const doc = pdfDocRef.current;
     if (!doc) {
+      showSaveStatus('error', 'سندِ PDF هنوز کامل بارگذاری نشده است.', 6000);
       showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
       return;
     }
     setIsExportingPdf(true);
+    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', saveMode === 'in-place' ? 'در حال ذخیرهٔ حاشیه‌نویسی‌ها روی فایل PDF…' : 'در حال نوشتنِ فایلِ PDF…', 0);
     showToast('در حال آماده‌سازیِ خروجیِ PDF…', { type: 'info' });
     try {
       const prepared = annotatedCount > 0
@@ -965,6 +1101,7 @@ export default function PdfViewer({ filePath }) {
           })
         : { pages: {}, totalItems: 0, annotatedPages: 0 };
       if (annotatedCount > 0 && prepared.annotatedPages === 0) {
+        showSaveStatus('info', 'آیتمِ قابلِ خروجی پیدا نشد.', 4500);
         showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
         return;
       }
@@ -975,18 +1112,29 @@ export default function PdfViewer({ filePath }) {
         mode: saveMode,
       });
       if (result && result.canceled) {
+        showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
         showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
         return;
       }
       if (result && result.success) {
+        // مرحله ۷ ـ نهاییِ دوم: پیامِ موفقیت، نامِ فایلِ ذخیره‌شده
+        // و زمانِ ذخیره را هم دارد تا کاربر ۱۰۰٪ مطمئن شود فایلِ
+        // واقعی روی دیسک آپدیت شده است؛ اگر مسیرِ افزایشی
+        // (incremental) استفاده شد، همان‌جا نوشته می‌شود.
+        const savedName = String((result && result.outputPath) || filePath || '').split(/[\\/]/).pop() || '';
+        const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + (result.incremental ? '، ذخیرهٔ افزایشی' : '') + ')' : '';
         if (result.restoredClean) {
+          showSaveStatus('saved-inplace', 'فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.' + savedSuffix, 4500);
           showToast('فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.', { type: 'success' });
         } else if (saveMode === 'in-place') {
+          showSaveStatus('saved-inplace', '✓ تغییرات با موفقیت روی همین فایل PDF ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`,
             { type: 'success' }
           );
         } else {
+          showSaveStatus('saved-as', '✓ فایل PDF جدید با موفقیت ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `فایلِ PDF با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`,
             { type: 'success' }
@@ -994,16 +1142,19 @@ export default function PdfViewer({ filePath }) {
         }
       } else if (result && result.locked) {
         // هات‌فیکسِ مرحله ۶: پیامِ دقیقِ قفل، به‌جای خطای عمومی.
+        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
         showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
       } else {
+        showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
         showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
       }
     } catch (err) {
+      showSaveStatus('error', 'خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), 6000);
       showToast('خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
     } finally {
       setIsExportingPdf(false);
     }
-  }, [filePath, rotation, showToast, isExportingPdf]);
+  }, [filePath, rotation, showToast, isExportingPdf, showSaveStatus]);
 
   // Refinement Final: مالکیتِ Ctrl+Z/Y وارونه شد تا Undoی مضاعف
   // رفع شود. قبلاً این شنونده فقط وقتی استودیو روشن بود ثبت می‌شد
@@ -1018,6 +1169,20 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     if (isAnnotationActive) return;
     const onKeyDown = (e) => {
+      // مرحله ۷ ـ بخش ب: وقتی فوکوس داخلِ کادرِ متنی است (جستجوی
+      // PDF، ویرایشگرِ متن/استیکی، سرچ‌بار)، Ctrl+Z/Y باید Undoی
+      // متنیِ خودِ مرورگر باشد، نه Undoی حاشیه‌نویسی — وگرنه تایپِ
+      // کاربر، بی‌صدا حاشیه‌نویسی را برمی‌گرداند. (شنوندهٔ تولبار و
+      // useKeyboard، از پیش همین گیت را داشتند؛ این شنونده نداشت.)
+      const t = e.target;
+      if (
+        t &&
+        (t.tagName === 'INPUT' ||
+          t.tagName === 'TEXTAREA' ||
+          t.tagName === 'SELECT' ||
+          t.isContentEditable)
+      )
+        return;
       // مرحله ۷ ـ بخش الف: مالکیتِ این شنونده (فقط وقتی استودیو
       // خاموش است) دقیقاً مثلِ قبل می‌ماند؛ فقط گزاره، از
       // مرجعِ واحد (matchesShortcut) خوانده می‌شود تا تغییرِ
@@ -1102,6 +1267,7 @@ export default function PdfViewer({ filePath }) {
 
     let activeDoc = null;
     let loadingTask = null;
+    let outlineTimerId = null;
 
     const loadPdfData = async () => {
       try {
@@ -1285,15 +1451,25 @@ export default function PdfViewer({ filePath }) {
         {
           const outlineRunId = (outlineRunRef.current += 1);
           setPdfOutline([], filePath, 'loading');
-          extractPdfOutline(doc).then((outline) => {
-            if (isMounted && outlineRunRef.current === outlineRunId) {
-              setPdfOutline(outline, filePath, 'done');
-            }
-          }).catch(() => {
-            if (isMounted && outlineRunRef.current === outlineRunId) {
-              setPdfOutline([], filePath, 'done');
-            }
-          });
+          // مرحله ۷ ـ نهاییِ دوم: استخراجِ فهرست، ۶۰۰ میلی‌ثانیه
+          // به تعویق می‌افتد تا در لحظهٔ باز شدنِ کتاب، صفِ ورکرِ
+          // pdf.js و پایپ‌لاینِ Range، ۱۰۰٪ صرفِ نمایشِ فوریِ
+          // صفحهٔ اول شوند (ده‌ها getDestination/getPageIndex،
+          // دیگر با رندرِ صفحهٔ اول رقابت نمی‌کنند). محافظِ runId
+          // و isMounted، مثلِ قبل، از setStateِ کهنه جلوگیری
+          // می‌کنند؛ تایمر هم در cleanupِ همین افکت پاک می‌شود.
+          outlineTimerId = setTimeout(() => {
+            if (!isMounted) return;
+            extractPdfOutline(doc).then((outline) => {
+              if (isMounted && outlineRunRef.current === outlineRunId) {
+                setPdfOutline(outline, filePath, 'done');
+              }
+            }).catch(() => {
+              if (isMounted && outlineRunRef.current === outlineRunId) {
+                setPdfOutline([], filePath, 'done');
+              }
+            });
+          }, 600);
         }
       } catch (err) {
         if (err?.name === 'AbortError') return;
@@ -1312,6 +1488,7 @@ export default function PdfViewer({ filePath }) {
 
     return () => {
       isMounted = false;
+      if (outlineTimerId) clearTimeout(outlineTimerId);
       readingActivity.end();
       abortController.abort();
       clearAllCachedPageBlobs();
@@ -1914,6 +2091,8 @@ export default function PdfViewer({ filePath }) {
     };
 
     const handleScroll = () => {
+      viewportMotionRef.current.lastScrollAt = performance.now();
+      viewportMotionRef.current.lastScrollTop = container.scrollTop;
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = null;
@@ -2115,7 +2294,41 @@ export default function PdfViewer({ filePath }) {
         onClearPage={handleClearCurrentPageAnnotations}
         onExportAnnotatedPdf={handleExportAnnotatedPdf}
         isExportingPdf={isExportingPdf}
+        pdfSaveState={pdfSaveState}
       />
+
+      {/* مرحله ۷ ـ نهایی: بنرِ شناورِ وضعیتِ ذخیرهٔ PDF — مستقل از ToastHUD سراسری، همیشه روی همهٔ لایه‌ها. */}
+      {pdfSaveState !== 'idle' && (
+        <div
+          dir="rtl"
+          role="status"
+          aria-live="polite"
+          style={{
+            position: 'fixed',
+            top: '72px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 99999,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            padding: '10px 20px',
+            borderRadius: '999px',
+            backgroundColor: pdfSaveState === 'error' ? '#dc2626' : pdfSaveState === 'info' ? '#334155' : (pdfSaveState === 'saving-inplace' || pdfSaveState === 'saving-as') ? '#d97706' : '#059669',
+            color: '#ffffff',
+            fontSize: '13px',
+            fontWeight: 700,
+            boxShadow: '0 10px 30px rgba(0, 0, 0, 0.45)',
+            maxWidth: 'min(92vw, 680px)',
+            textAlign: 'center',
+            pointerEvents: 'none',
+            userSelect: 'none',
+          }}
+        >
+          {(pdfSaveState === 'saving-inplace' || pdfSaveState === 'saving-as') && <Icons.Loader size={18} />}
+          <span>{pdfSaveMessage}</span>
+        </div>
+      )}
 
       {/* مرحله ۴ — نوارِ شناورِ جستجوی درون‌متنی PDF (بالای اسکرول، زیر TopBar) — بخش ب: وقتی استودیو فعال است، نوار پایین‌تر می‌نشیند تا روی داکِ پیش‌فرضِ افقیِ تولبار (بالا وسط) نیفتد. */}
       {searchOpen && (
@@ -2229,6 +2442,9 @@ export default function PdfViewer({ filePath }) {
                   shouldRender={shouldRender}
                   cachedBlobUrl={cachedUrl}
                   onStorePageBlob={storePageBlobInCache}
+                  revokedBlobUrls={revokedBlobUrlsRef.current}
+                  onDropPageBlob={handleDropPageBlob}
+                  viewportMotionRef={viewportMotionRef}
                   expectedHeight={pageHeights[index]}
                   pageWidth={containerWidth * (Math.round(safeZoom * 100) / 100)}
                   rotation={rotation}

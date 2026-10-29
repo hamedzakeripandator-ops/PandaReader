@@ -92,8 +92,30 @@ if (!gotSingleInstanceLock) {
 
 // مخزن بافر مقیم در حافظه رم کمیک فعال با سقف ایمن ۳۵۰ مگابایت (LRU Eviction)
 const MAX_RAM_CACHE_BYTES = 350 * 1024 * 1024;
-// سقف مجاز کش شدن مستقیم فایل PDF در رم (۱۲۰ مگابایت)؛ فایل‌های بزرگ‌تر مستقیماً استریم می‌شوند
-const MAX_PDF_RAM_CACHE_BYTES = 120 * 1024 * 1024;
+// سقف مجاز کش شدن مستقیم فایل PDF در رم (۸ مگابایت)؛ فایل‌های بزرگ‌تر مستقیماً استریم می‌شوند
+// مرحله ۷ ـ نهاییِ دوم: سقفِ بارگذاریِ کاملِ PDF در رم، از ۱۲۰
+// مگابایت به ۸ مگابایت کم شد. درخواستِ کاملِ (بدونِ Range) یک کتابِ
+// ۶۸ مگابایتی، پیش‌تر کلِ فایل را یکجا با readComicPageToRam به رم
+// می‌خواند؛ حالا فقط فایل‌های کوچکِ زیرِ ۸ مگابایت این مسیر را
+// می‌روند و کتاب‌های بزرگ، همیشه استریم می‌شوند (شاخهٔ ج، پایین).
+const MAX_PDF_RAM_CACHE_BYTES = 8 * 1024 * 1024;
+
+// مرحله ۷ ـ نهاییِ دوم (سرعتِ باز شدنِ PDF): کشِ سبکِ مسیرِ سروِ PDF.
+// resolvePdfServePath در هر درخواستِ Range، سه فراخوانیِ همگامِ دیسک
+// (statSync/openSync/readSync) می‌زد؛ وقتی pdf.js برای باز شدنِ یک
+// کتاب، بیست درخواستِ Range می‌فرستد، همین‌ها تردِ اصلی را قفل
+// می‌کردند. حالا نتیجهٔ resolve تا ۱۰ ثانیه در رم می‌ماند و
+// درخواست‌های پیاپی، با صفر I/Oی همگام پاسخ داده می‌شوند. کش، پس از
+// هر ذخیره (invalidateComicRamCache) و پیش از هر ذخیره
+// (closeComicReadStreams) خالی می‌شود تا ساختِ `.orig.bak`،
+// بلافاصله در سروِ بعدی دیده شود. توجه: statِ ناهمگامِ شاخهٔ PDF
+// (برای ETag/304/Range) سرِ جایش می‌ماند — آن، برای درستیِ کشِ
+// مرورگر لازم است و تردِ اصلی را قفل نمی‌کند.
+const PDF_SERVE_PATH_CACHE_TTL_MS = 10000;
+const pdfServePathCache = new Map();
+function clearPdfServePathCache() {
+  try { pdfServePathCache.clear(); } catch (_) {}
+}
 let currentRamCacheBytes = 0;
 
 app.activeComicRamCache = new Map();
@@ -144,6 +166,9 @@ function trackComicReadStream(cacheKey, nodeStream) {
 // از invalidateComicRamCache پس از آن صدا زده می‌شود.
 app.closeComicReadStreams = (rawPath) => {
   if (!rawPath || typeof rawPath !== 'string') return;
+  // مرحله ۷ ـ نهاییِ دوم: کشِ مسیرِ سرو هم خالی می‌شود تا resolveِ
+  // بعدی، وضعیتِ تازهٔ `.orig.bak` را از روی دیسک بخواند.
+  clearPdfServePathCache();
   closeComicReadStreamsForKey(app.normalizeComicCacheKey(rawPath));
   closeComicReadStreamsForKey(app.normalizeComicCacheKey(String(rawPath) + '.orig.bak'));
 };
@@ -160,15 +185,22 @@ app.closeComicReadStreams = (rawPath) => {
 function resolvePdfServePath(normalizedPath) {
   if (!normalizedPath || typeof normalizedPath !== 'string') return normalizedPath;
   if (path.extname(normalizedPath).toLowerCase() !== '.pdf') return normalizedPath;
+  // مرحله ۷ ـ نهاییِ دوم: ضربهٔ کش = صفر فراخوانیِ همگامِ دیسک.
+  const cached = pdfServePathCache.get(normalizedPath);
+  if (cached && (Date.now() - cached.at) < PDF_SERVE_PATH_CACHE_TTL_MS) {
+    return cached.servePath;
+  }
   const origPath = normalizedPath + '.orig.bak';
+  let servePath = normalizedPath;
   let fd = -1;
   try {
     const stat = fs.statSync(origPath);
-    if (!stat.isFile() || stat.size <= 5) return normalizedPath;
-    fd = fs.openSync(origPath, 'r');
-    const head = Buffer.alloc(5);
-    const read = fs.readSync(fd, head, 0, 5, 0);
-    if (read === 5 && head.toString('ascii') === '%PDF-') return origPath;
+    if (stat.isFile() && stat.size > 5) {
+      fd = fs.openSync(origPath, 'r');
+      const head = Buffer.alloc(5);
+      const read = fs.readSync(fd, head, 0, 5, 0);
+      if (read === 5 && head.toString('ascii') === '%PDF-') servePath = origPath;
+    }
   } catch (_) {
     // هر خطا (نیست، دایرکتوری، غیرقابلِ خواندن) = سرو از فایلِ اصلی.
   } finally {
@@ -176,7 +208,14 @@ function resolvePdfServePath(normalizedPath) {
       try { fs.closeSync(fd); } catch (_) {}
     }
   }
-  return normalizedPath;
+  pdfServePathCache.set(normalizedPath, { servePath, at: Date.now() });
+  // سقفِ ساده: اگر بیش از ۵۱۲ ورودی شد، قدیمی‌ترین ورودی دور
+  // ریخته می‌شود تا کش، بی‌نهایت رشد نکند.
+  if (pdfServePathCache.size > 512) {
+    const oldestKey = pdfServePathCache.keys().next().value;
+    pdfServePathCache.delete(oldestKey);
+  }
+  return servePath;
 }
 
 // مرحله ۲ ـ بخش الف: ورودی‌های کشِ رم حالا متادیتا هم دارند
@@ -227,6 +266,9 @@ app.invalidateComicRamCache = (rawPath) => {
   if (!rawPath || typeof rawPath !== 'string') return;
   const key = app.normalizeComicCacheKey(rawPath);
   if (!key) return;
+  // مرحله ۷ ـ نهاییِ دوم: کشِ مسیرِ سروِ PDF هم باطل می‌شود تا
+  // باز شدنِ بعدی، مسیرِ تازه (پایهٔ خامِ تازه‌ساخته‌شده) را بگیرد.
+  clearPdfServePathCache();
   const entry = app.activeComicRamCache.get(key);
   if (entry && app.activeComicRamCache.delete(key)) {
     currentRamCacheBytes -= entry.buffer ? entry.buffer.length : 0;
@@ -703,7 +745,11 @@ app.whenReady().then(() => {
           });
         }
 
-        // ب) درخواست کامل فایل PDF: برای فایل‌های تا ۱۲۰ مگابایت از کش رم ادغام‌شده استفاده کن
+        // ب) درخواست کامل فایل PDF: فقط فایل‌های کوچک (تا ۸
+        // مگابایت) از کشِ رمِ ادغام‌شده استفاده می‌کنند؛ کتاب‌های
+        // بزرگ‌تر، مثلِ شاخهٔ ج، استریم می‌شوند و هرگز یکجا به رم
+        // خوانده نمی‌شوند (درخواست‌های Range، از همان اول، فقط
+        // چانکِ درخواستی را با createSafeWebFileStream می‌خواندند).
         if (totalSize <= MAX_PDF_RAM_CACHE_BYTES) {
           const pdfBuffer = await app.readComicPageToRam(servePath);
           return new Response(pdfBuffer, {
@@ -715,7 +761,7 @@ app.whenReady().then(() => {
           });
         }
 
-        // ج) برای کتاب‌های PDF بسیار حجیم (بالای ۱۲۰ مگابایت)، استریم مستقیم با بافر ۵۱۲ کیلوبایتی
+        // ج) برای کتاب‌های PDF بزرگ (بالای ۸ مگابایت)، استریم مستقیم با بافر ۵۱۲ کیلوبایتی
         const fullWebStream = createSafeWebFileStream(
           servePath,
           { highWaterMark: 512 * 1024 },

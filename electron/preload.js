@@ -99,6 +99,22 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('export-annotated-pdf', sanitizePayload(payload));
   },
 
+  // مرحله ۸ ـ بخش الف: استراتژیِ Xodo — بررسیِ محافظت و ساختِ
+  // نسخهٔ کپیِ بدونِ قفل، فقط هنگامِ ورود به استودیو.
+  checkPdfProtection: (filePath) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false });
+    }
+    return ipcRenderer.invoke('check-pdf-protection', { filePath: filePath.trim() });
+  },
+
+  createUnlockedPdfCopy: (filePath) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ success: false, error: 'مسیر فایل مشخص نشده است.' });
+    }
+    return ipcRenderer.invoke('create-unlocked-pdf-copy', { filePath: filePath.trim() });
+  },
+
   exportBackup: () => {
     return ipcRenderer.invoke('export-backup');
   },

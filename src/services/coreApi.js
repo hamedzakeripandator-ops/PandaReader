@@ -236,6 +236,45 @@ export const coreApi = {
     }
   },
 
+  // مرحله ۸ ـ بخش الف: بررسیِ محافظتِ PDF هنگامِ ورود به استودیو.
+  // تایم‌اوتِ ۱۰ ثانیه‌ای دارد: خواندنِ فایلِ ۶۸ مگابایتی + پروب،
+  // روی فایل‌های بزرگ، بیشتر از ۶ ثانیهٔ مرسوم طول می‌کشد. در
+  // تایم‌اوت یا هر خطا، نتیجهٔ «نامشخص» برمی‌گردد تا استودیو مثلِ
+  // همیشه روشن شود (رفتارِ قبلی) و کاربر، معطلِ پروب نماند.
+  checkPdfProtection: async (filePath) => {
+    const api = getApi();
+    if (!api?.checkPdfProtection) return { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
+    if (!filePath || typeof filePath !== 'string') {
+      return { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
+    }
+    try {
+      return await withTimeout(api.checkPdfProtection(filePath), 10000, {
+        protected: false,
+        reason: 'unknown',
+        pageCount: -1,
+        hasEncryptToken: false,
+      });
+    } catch (err) {
+      return { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
+    }
+  },
+
+  // مرحله ۸ ـ بخش الف: ساختِ نسخهٔ کپیِ بدونِ قفل. عمداً بدونِ
+  // withTimeout است (مثلِ exportAnnotatedPdf): رمزگشایی و اعتبارسنجیِ
+  // فایلِ بزرگ، زمان‌بر است و نباید تایم‌اوتِ کاذب بسازد.
+  createUnlockedPdfCopy: async (filePath) => {
+    const api = getApi();
+    if (!api?.createUnlockedPdfCopy) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!filePath || typeof filePath !== 'string') {
+      return { success: false, error: 'مسیر فایل مشخص نشده است.' };
+    }
+    try {
+      return await api.createUnlockedPdfCopy(filePath);
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ساختِ نسخهٔ کپی' };
+    }
+  },
+
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی (دیالوگ‌دار،
   // بدونِ تایم‌اوتِ رندرر — همان استدلالِ exportAnnotatedPdf).
   exportBackup: async () => {

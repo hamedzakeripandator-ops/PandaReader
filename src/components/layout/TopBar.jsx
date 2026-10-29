@@ -62,6 +62,15 @@ export default function TopBar({
   const [closeHover, setCloseHover] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(-1);
   const [showBar, setShowBar] = useState(true);
+  // Stage 8 Part A: Xodo strategy for protected PDFs. The modal only
+  // opens on studio entry; the probe cache checks each file once per
+  // session; the memory-only choice is per file per session.
+  const [protectedModal, setProtectedModal] = useState(null);
+  const [isCreatingCopy, setIsCreatingCopy] = useState(false);
+  const [pendingCopySwitch, setPendingCopySwitch] = useState(null);
+  const probeCacheRef = useRef(new Map());
+  const probeInFlightRef = useRef(false);
+  const memoryOnlyRef = useRef(new Set());
 
   const headerRef = useRef(null);
   const searchContainerRef = useRef(null);
@@ -337,18 +346,132 @@ export default function TopBar({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [setIsSearchFocused]);
 
+  // Stage 8 Part A: activating the studio only when it is off, since
+  // toggleAnnotationMode flips the state; an unconditional call would
+  // close an already-open studio.
+  const activateStudio = useCallback(() => {
+    if (!useAppStore.getState().isAnnotationActive) toggleAnnotationMode?.();
+    showToast('استودیو ویرایش و کادربندی فعال شد', { type: 'success' });
+  }, [toggleAnnotationMode, showToast]);
+
   const handleToggleAnnotationStudio = useCallback(
     (e) => {
       e.stopPropagation();
-      toggleAnnotationMode?.();
-      const nextState = useAppStore.getState().isAnnotationActive;
-      showToast(
-        nextState ? 'استودیو ویرایش و کادربندی فعال شد' : 'استودیو ویرایش بسته شد',
-        { type: nextState ? 'success' : 'info' }
-      );
+      // Closing the studio: always direct, no probe.
+      if (useAppStore.getState().isAnnotationActive) {
+        toggleAnnotationMode?.();
+        showToast('استودیو ویرایش بسته شد', { type: 'info' });
+        return;
+      }
+      const filePath = useReaderStore.getState().comicData?.filePath || '';
+      const isPdf = typeof filePath === 'string' && /\.pdf$/i.test(filePath);
+      // Non-PDF, or a previous memory-only choice for this file: the
+      // studio opens as before, without interruption.
+      if (!isPdf || !filePath || memoryOnlyRef.current.has(filePath)) {
+        activateStudio();
+        return;
+      }
+      const cached = probeCacheRef.current.get(filePath);
+      if (cached && cached.protected === false) {
+        activateStudio();
+        return;
+      }
+      if (cached && cached.protected === true) {
+        setProtectedModal({
+          filePath,
+          pageCount: cached.pageCount,
+          reason: cached.reason,
+          preservedPage: useReaderStore.getState().currentPage || 1,
+        });
+        return;
+      }
+      if (probeInFlightRef.current) return;
+      probeInFlightRef.current = true;
+      coreApi
+        .checkPdfProtection(filePath)
+        .then((res) => {
+          const result = res || { protected: false, reason: 'unknown', pageCount: -1 };
+          probeCacheRef.current.set(filePath, result);
+          if (result.protected) {
+            setProtectedModal({
+              filePath,
+              pageCount: result.pageCount,
+              reason: result.reason,
+              preservedPage: useReaderStore.getState().currentPage || 1,
+            });
+          } else {
+            // Unknown (timeout/error) lands here too: the studio opens
+            // as before and the user is not left waiting on the probe.
+            activateStudio();
+          }
+        })
+        .finally(() => {
+          probeInFlightRef.current = false;
+        });
     },
-    [toggleAnnotationMode, showToast]
+    [toggleAnnotationMode, showToast, activateStudio]
   );
+
+  // Stage 8 Part A: once the active file becomes the copy path after
+  // the automatic switch, the studio turns on.
+  useEffect(() => {
+    if (!pendingCopySwitch) return;
+    if (currentFilePath && currentFilePath === pendingCopySwitch.copyPath) {
+      setPendingCopySwitch(null);
+      activateStudio();
+    }
+  }, [pendingCopySwitch, currentFilePath, activateStudio]);
+
+  // Stage 8 Part A: build the unlocked copy and switch to it.
+  const handleProtectedCopyConfirm = useCallback(async () => {
+    if (!protectedModal || isCreatingCopy) return;
+    const { filePath, preservedPage } = protectedModal;
+    setIsCreatingCopy(true);
+    try {
+      const result = await coreApi.createUnlockedPdfCopy(filePath);
+      if (!result || !result.success) {
+        showToast(result?.error || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
+        return;
+      }
+      const copyPath = result.copyPath;
+      setProtectedModal(null);
+      // Seed recents/progress for the new file BEFORE switching, so the
+      // open flow resumes on the same page and history stays correct.
+      try {
+        const fileName = copyPath.split(/[\\/]/).pop() || 'copy.pdf';
+        await useLibraryStore.getState().addToRecent({
+          path: copyPath,
+          name: fileName,
+          type: 'pdf',
+          fileSize: '',
+          cover: null,
+          totalPages: Number(result.pageCount) > 0 ? Number(result.pageCount) : totalPages,
+          lastPage: preservedPage || 1,
+        });
+      } catch (_) {}
+      setPendingCopySwitch({ copyPath, page: preservedPage || 1 });
+      showToast('نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', { type: 'success' });
+      window.dispatchEvent(new CustomEvent('app:navigate-comic', { detail: copyPath }));
+    } catch (err) {
+      showToast(err?.message || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
+    } finally {
+      setIsCreatingCopy(false);
+    }
+  }, [protectedModal, isCreatingCopy, showToast, totalPages]);
+
+  // Stage 8 Part A: memory-only — the studio opens, but a direct save
+  // is later refused loudly by the saver guard.
+  const handleProtectedMemoryOnly = useCallback(() => {
+    if (!protectedModal) return;
+    memoryOnlyRef.current.add(protectedModal.filePath);
+    setProtectedModal(null);
+    activateStudio();
+    showToast('حاشیه‌نویسی فقط در حافظهٔ برنامه انجام می‌شود؛ ذخیرهٔ مستقیم روی این فایلِ محافظت‌شده ممکن نیست.', { type: 'info' });
+  }, [protectedModal, activateStudio, showToast]);
+
+  const handleProtectedCancel = useCallback(() => {
+    setProtectedModal(null);
+  }, []);
 
   const handleToggleAreaZoom = useCallback(
     (e) => {
@@ -500,6 +623,10 @@ export default function TopBar({
         }
         .topbar-drag-spacer {
           -webkit-app-region: drag !important;
+        }
+        @keyframes protectedPdfModalIn {
+          from { opacity: 0; transform: scale(0.96) translateY(8px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
         }
         #global-topbar-search-box,
         #global-topbar-search-input {
@@ -830,6 +957,153 @@ export default function TopBar({
           </button>
         </div>
       </header>
+
+      {protectedModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="فایل PDF محافظت‌شده است"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget && !isCreatingCopy) handleProtectedCancel();
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100002,
+            backgroundColor: 'rgba(0, 0, 0, 0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+          }}
+        >
+          <div
+            style={{
+              width: 'min(440px, calc(100vw - 32px))',
+              backgroundColor: 'var(--panel)',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.45)',
+              padding: '22px',
+              fontFamily: 'var(--font-fa)',
+              color: 'var(--text)',
+              animation: 'protectedPdfModalIn 0.18s cubic-bezier(0.16, 1, 0.3, 1)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+              <span
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                  color: '#f59e0b',
+                  flexShrink: 0,
+                }}
+              >
+                <Icons.AlertTriangle size={20} />
+              </span>
+              <div style={{ fontSize: '15px', fontWeight: 800, lineHeight: 1.5 }}>
+                این فایل PDF محافظت‌شده است
+              </div>
+            </div>
+            <div style={{ fontSize: '13px', lineHeight: 1.9, color: 'var(--muted)', marginBottom: '16px' }}>
+              امکانِ ذخیرهٔ مستقیمِ تغییرات روی این فایل وجود ندارد. آیا مایلید یک نسخهٔ کپیِ
+              قابل‌ویرایش از این فایل ساخته و باز شود تا بتوانید حاشیه‌نویسی‌های خود را روی آن
+              انجام دهید؟ فایلِ اصلی دست نمی‌خورد.
+            </div>
+            <div
+              style={{
+                fontSize: '12px',
+                lineHeight: 1.8,
+                color: 'var(--muted)',
+                backgroundColor: 'var(--panel2)',
+                border: '1px solid var(--border)',
+                borderRadius: '10px',
+                padding: '8px 12px',
+                marginBottom: '18px',
+                direction: 'ltr',
+                textAlign: 'left',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {(protectedModal.filePath.split(/[\\/]/).pop() || '').replace(/\.pdf$/i, '') + '-editable.pdf'}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={handleProtectedCopyConfirm}
+                disabled={isCreatingCopy}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--accent)',
+                  backgroundColor: 'var(--accent)',
+                  color: '#fff',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: isCreatingCopy ? 'wait' : 'pointer',
+                  opacity: isCreatingCopy ? 0.75 : 1,
+                }}
+              >
+                {isCreatingCopy ? <Icons.Loader size={16} /> : <Icons.Copy size={16} />}
+                <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : 'ساخت نسخهٔ کپی و شروع ویرایش'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleProtectedMemoryOnly}
+                disabled={isCreatingCopy}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: 'var(--panel2)',
+                  color: 'var(--text)',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: isCreatingCopy ? 'wait' : 'pointer',
+                }}
+              >
+                <Icons.Edit3 size={15} />
+                <span>فقط حاشیه‌نویسی در حافظهٔ برنامه</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleProtectedCancel}
+                disabled={isCreatingCopy}
+                style={{
+                  padding: '9px 14px',
+                  borderRadius: '10px',
+                  border: 'none',
+                  backgroundColor: 'transparent',
+                  color: 'var(--muted)',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: isCreatingCopy ? 'wait' : 'pointer',
+                }}
+              >
+                انصراف
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
