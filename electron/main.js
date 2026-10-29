@@ -406,19 +406,31 @@ function createSafeWebFileStream(filePath, options, abortSignal) {
     try { nodeStream.destroy(); } catch (_) {}
   });
 
+  // Stage 8 Part B: the per-request abort listener is NAMED and is
+  // removed when the node stream closes/errors, so a finished
+  // request never leaves a listener behind on its AbortSignal.
+  // (The WebContents 'destroyed' warning itself comes from the
+  // single site in ipcHandlers.js, fixed there; this is hygiene
+  // for the one per-request listener this file DOES add.)
+  let onAbort = null;
+  const cleanupAbortListener = () => {
+    if (onAbort && abortSignal && typeof abortSignal.removeEventListener === 'function') {
+      try { abortSignal.removeEventListener('abort', onAbort); } catch (_) {}
+    }
+    onAbort = null;
+  };
+  nodeStream.once('close', cleanupAbortListener);
+  nodeStream.once('error', cleanupAbortListener);
   if (abortSignal) {
     if (abortSignal.aborted) {
       nodeStream.destroy();
     } else {
-      abortSignal.addEventListener(
-        'abort',
-        () => {
-          try {
-            nodeStream.destroy();
-          } catch (_) {}
-        },
-        { once: true }
-      );
+      onAbort = () => {
+        try {
+          nodeStream.destroy();
+        } catch (_) {}
+      };
+      abortSignal.addEventListener('abort', onAbort, { once: true });
     }
   }
 

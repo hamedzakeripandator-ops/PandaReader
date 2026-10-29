@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { coreApi } from '../../services/coreApi';
 import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
@@ -67,10 +68,22 @@ export default function TopBar({
   // session; the memory-only choice is per file per session.
   const [protectedModal, setProtectedModal] = useState(null);
   const [isCreatingCopy, setIsCreatingCopy] = useState(false);
+  // مرحله ۸ ـ اصلاحِ نهایی: چرخشِ دکمهٔ استودیو هنگامِ پروب (پروب
+  // حالا در ورکر است و تا ۶۰ ثانیه طول می‌کشد؛ کاربر باید ببیند
+  // که کلیکش ثبت شده) + پیشرفتِ زندهٔ ساختِ کپی در مودال.
+  const [isCheckingProtection, setIsCheckingProtection] = useState(false);
+  const [copyProgress, setCopyProgress] = useState(null);
   const [pendingCopySwitch, setPendingCopySwitch] = useState(null);
   const probeCacheRef = useRef(new Map());
   const probeInFlightRef = useRef(false);
   const memoryOnlyRef = useRef(new Set());
+  // مرحله ۹: آینهٔ ref برای مودالِ محافظت — نگهبان‌هایِ ماوس/هاید
+  // (releaseOverlappingBlockers و scheduleAutoHide) باید تازه‌ترین
+  // وضعیتِ مودال را بدونِ وابستگی به رندرِ بعدی ببینند.
+  const protectedModalRef = useRef(null);
+  useEffect(() => {
+    protectedModalRef.current = protectedModal;
+  }, [protectedModal]);
 
   const headerRef = useRef(null);
   const searchContainerRef = useRef(null);
@@ -104,6 +117,10 @@ export default function TopBar({
     const barEl = searchBarRef.current;
     const hdrEl = headerRef.current;
     if (!barEl || !hdrEl) return;
+    // مرحله ۹: وقتی مودالِ محافظت (پورتالِ روی body) باز است، این
+    // اسکن اصلاً اجرا نمی‌شود؛ مودال، خودش pointerEvents دارد و
+    // جهشِ ماوس به سمتِ وسطِ صفحه، نباید روی آن بنویسد.
+    if (protectedModalRef.current) return;
 
     const appState = useAppStore.getState();
     if (
@@ -129,6 +146,9 @@ export default function TopBar({
         if (el === hdrEl || hdrEl.contains(el)) {
           break; // به خود TopBar رسیدیم؛ هیچ مانعی بالاتر از آن نیست
         }
+        if (el.closest?.('[data-modal-overlay]')) {
+          continue;
+        }
         if (
           el.id === 'custom-context-menu' ||
           el.closest?.('#custom-context-menu') ||
@@ -147,6 +167,11 @@ export default function TopBar({
     (delayMs = 1600) => {
       clearHideTimer();
       hideTimerRef.current = setTimeout(() => {
+        // مرحله ۹: تا وقتی مودالِ محافظت باز است، نوار مخفی نمی‌شود.
+        if (protectedModalRef.current) {
+          hideTimerRef.current = null;
+          return;
+        }
         const appState = useAppStore.getState();
         const isInputActive =
           appState.isSearchFocused ||
@@ -257,7 +282,7 @@ export default function TopBar({
       if (e.clientY <= activeSafeZone || isBarHoveredRef.current) {
         clearHideTimer();
         if (!showBarRef.current) updateShowBar(true);
-      } else if (showBarRef.current && !hideTimerRef.current) {
+      } else if (showBarRef.current && !hideTimerRef.current && !protectedModalRef.current) {
         scheduleAutoHide(1600);
       }
     };
@@ -292,6 +317,9 @@ export default function TopBar({
 
     const handlePointerUp = (e) => {
       if (!effectiveReaderMode) return;
+      // مرحله ۹: تا وقتی مودالِ محافظت باز است، کلیکِ وسطِ صفحه
+      // (روی خودِ مودال) هرگز نوار را مخفی نمی‌کند.
+      if (protectedModalRef.current) return;
 
       const { x, y, time } = pointerDownRef.current;
       const dist = Math.hypot(e.clientX - x, e.clientY - y);
@@ -372,11 +400,11 @@ export default function TopBar({
         return;
       }
       const cached = probeCacheRef.current.get(filePath);
-      if (cached && cached.protected === false) {
+      if (cached && cached.protected === false && !cached.readOnly) {
         activateStudio();
         return;
       }
-      if (cached && cached.protected === true) {
+      if (cached && (cached.protected === true || cached.readOnly === true)) {
         setProtectedModal({
           filePath,
           pageCount: cached.pageCount,
@@ -387,12 +415,26 @@ export default function TopBar({
       }
       if (probeInFlightRef.current) return;
       probeInFlightRef.current = true;
+      setIsCheckingProtection(true);
+      // مرحله ۹: تایم‌اوتِ سختِ ۱۲۰۰ میلی‌ثانیه‌ای در سمتِ کلاینت.
+      // اگر پروب (ورکرِ ۶۰ ثانیه‌ای) بیش از ۱.۲ ثانیه طول کشید،
+      // استودیو مستقیم باز می‌شود و دکمه، هرگز قفل نمی‌ماند؛
+      // نتیجهٔ دیررسِ پروب، فقط کش را پر می‌کند و برای همین
+      // کلیک، مودال را باز نمی‌کند.
+      let probeTimedOut = false;
+      const probeTimeoutId = setTimeout(() => {
+        probeTimedOut = true;
+        probeInFlightRef.current = false;
+        setIsCheckingProtection(false);
+        activateStudio();
+      }, 1200);
       coreApi
         .checkPdfProtection(filePath)
         .then((res) => {
           const result = res || { protected: false, reason: 'unknown', pageCount: -1 };
           probeCacheRef.current.set(filePath, result);
-          if (result.protected) {
+          if (probeTimedOut) return;
+          if (result.protected || result.readOnly) {
             setProtectedModal({
               filePath,
               pageCount: result.pageCount,
@@ -405,8 +447,13 @@ export default function TopBar({
             activateStudio();
           }
         })
+        .catch(() => {
+          if (!probeTimedOut) activateStudio();
+        })
         .finally(() => {
+          clearTimeout(probeTimeoutId);
           probeInFlightRef.current = false;
+          setIsCheckingProtection(false);
         });
     },
     [toggleAnnotationMode, showToast, activateStudio]
@@ -427,10 +474,34 @@ export default function TopBar({
     if (!protectedModal || isCreatingCopy) return;
     const { filePath, preservedPage } = protectedModal;
     setIsCreatingCopy(true);
+    setCopyProgress({ fraction: 0, label: 'در حالِ شروع…' });
+    let unsubscribeProgress = null;
     try {
+      if (typeof coreApi.onPdfCopyProgress === 'function') {
+        unsubscribeProgress = coreApi.onPdfCopyProgress((progress) => {
+          if (progress && progress.filePath === filePath) {
+            setCopyProgress({ fraction: progress.fraction || 0, label: progress.label || '' });
+          }
+        });
+      }
       const result = await coreApi.createUnlockedPdfCopy(filePath);
+      if (result && result.cancelled) {
+        // لغوِ کاربر: مودال باز می‌ماند تا دوباره تصمیم بگیرد.
+        showToast('ساختِ نسخهٔ کپی لغو شد.', { type: 'info' });
+        return;
+      }
       if (!result || !result.success) {
         showToast(result?.error || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
+        return;
+      }
+      if (result.alreadyUnlocked) {
+        // فایل، قفلِ فعالی ندارد (پروب، /Encrypt دیده بود ولی سند،
+        // ارجاعِ معلق بود): هیچ کپی‌ای ساخته نشده؛ استودیو روی
+        // همان فایل فعال می‌شود و کشِ پروب، اصلاح می‌شود.
+        probeCacheRef.current.set(filePath, { protected: false, readOnly: false, reason: 'clean', pageCount: result.pageCount || -1, hasEncryptToken: false });
+        setProtectedModal(null);
+        activateStudio();
+        showToast('این فایل، قفلِ فعالی ندارد؛ استودیو فعال شد.', { type: 'success' });
         return;
       }
       const copyPath = result.copyPath;
@@ -450,14 +521,27 @@ export default function TopBar({
         });
       } catch (_) {}
       setPendingCopySwitch({ copyPath, page: preservedPage || 1 });
-      showToast('نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', { type: 'success' });
+      if (result.binaryCopy) {
+        // کپیِ باینری، بایت‌به‌بایت همان فایل است و قفل را باز
+        // نمی‌کند؛ ذخیره روی آن، رمزگشایی را امتحان می‌کند. کاربر
+        // باید این را همین‌جا بداند، نه موقعِ ذخیره.
+        showToast(result.stillEncrypted
+          ? 'نسخهٔ کپی ساخته شد و در حالِ باز شدن است؛ فایل همچنان قفل است و ذخیرهٔ آن، رمزگشایی با رمزِ خالی را امتحان می‌کند.'
+          : 'نسخهٔ کپی ساخته شد؛ در حالِ باز کردنِ آن…', { type: 'success' });
+      } else {
+        showToast('نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', { type: 'success' });
+      }
       window.dispatchEvent(new CustomEvent('app:navigate-comic', { detail: copyPath }));
     } catch (err) {
       showToast(err?.message || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
     } finally {
+      if (typeof unsubscribeProgress === 'function') {
+        try { unsubscribeProgress(); } catch (_) {}
+      }
+      setCopyProgress(null);
       setIsCreatingCopy(false);
     }
-  }, [protectedModal, isCreatingCopy, showToast, totalPages]);
+  }, [protectedModal, isCreatingCopy, showToast, totalPages, activateStudio]);
 
   // Stage 8 Part A: memory-only — the studio opens, but a direct save
   // is later refused loudly by the saver guard.
@@ -565,6 +649,24 @@ export default function TopBar({
     [setIsSearchFocused, clearSearch, onOpenComic]
   );
 
+  // مرحله ۹: «جستجو در فایلِ کنونی» — فقط وقتی PDF در حالتِ
+  // مطالعه باز است و عبارتی تایپ شده. triggerPdfSearch از
+  // getState خوانده می‌شود تا نوار، با هر کلید، دوباره رندر نشود
+  // و گزینه، جزوِ ناوبریِ ArrowUp/Down نیست.
+  const isCurrentPdf =
+    effectiveReaderMode &&
+    typeof currentFilePath === 'string' &&
+    /\.pdf$/i.test(currentFilePath);
+  const showSearchInCurrentFile = Boolean(isCurrentPdf && searchQuery.trim().length > 0);
+
+  const handleSearchInCurrentFile = useCallback(() => {
+    const q = (searchQuery || '').trim();
+    setIsSearchFocused(false);
+    setSelectedIndex(-1);
+    inputRef.current?.blur();
+    useReaderStore.getState().triggerPdfSearch?.(q);
+  }, [searchQuery, setIsSearchFocused]);
+
   const handleKeyDown = (e) => {
     const totalItems = (pageJumpNumber ? 1 : 0) + matchedResults.length;
 
@@ -595,6 +697,13 @@ export default function TopBar({
         executePageJump(pageJumpNumber);
         return;
       }
+      // مرحله ۹: در حالتِ مطالعهٔ PDF، Enterِ بدونِ انتخابِ صریح،
+      // جستجو در فایلِ کنونی را آغاز می‌کند (نه باز کردنِ اولین
+      // نتیجهٔ کتابخانه).
+      if (showSearchInCurrentFile) {
+        handleSearchInCurrentFile();
+        return;
+      }
       if (matchedResults.length > 0) {
         handleSelectResult(matchedResults[0]);
       }
@@ -611,8 +720,9 @@ export default function TopBar({
   // غیرخواندن نوار همیشه مرئی است (پنل‌ها زیرِ آن‌اند و هم‌پوشانی
   // ندارند)؛ در حالتِ خواندن، باز بودنِ هر پنلِ کناری نوارِ شناور را
   // مخفی می‌کند.
+  // مرحله ۹: تا وقتی مودالِ محافظت باز است، نوار باز می‌ماند.
   const isVisibleNow =
-    !effectiveReaderMode || ((showBar || isSearchFocused) && !isSidePanelOpen);
+    !effectiveReaderMode || ((showBar || isSearchFocused || Boolean(protectedModal)) && !isSidePanelOpen);
 
   return (
     <>
@@ -627,6 +737,13 @@ export default function TopBar({
         @keyframes protectedPdfModalIn {
           from { opacity: 0; transform: scale(0.96) translateY(8px); }
           to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        .protected-modal-btn {
+          transition: transform 0.12s ease, filter 0.12s ease;
+        }
+        .protected-modal-btn:active {
+          transform: scale(0.98);
+          filter: brightness(1.08);
         }
         #global-topbar-search-box,
         #global-topbar-search-input {
@@ -653,7 +770,7 @@ export default function TopBar({
         }}
         onMouseLeave={(e) => {
           isBarHoveredRef.current = false;
-          if (effectiveReaderMode && !useAppStore.getState().isSearchFocused) {
+          if (effectiveReaderMode && !useAppStore.getState().isSearchFocused && !protectedModalRef.current) {
             scheduleAutoHide(1600);
           }
           onMouseLeave?.(e);
@@ -851,6 +968,20 @@ export default function TopBar({
                   </div>
                 )
               )}
+              {showSearchInCurrentFile && (
+                <div
+                  onClick={handleSearchInCurrentFile}
+                  style={styles.searchInFileOption}
+                >
+                  <span style={{ display: 'flex', alignItems: 'center' }}>
+                    <Icons.Search size={15} />
+                  </span>
+                  <span style={{ flex: 1, textAlign: 'right' }}>
+                    جستجوی «{searchQuery.trim()}» در فایلِ کنونی
+                  </span>
+                  <span style={styles.enterBadge}>Enter</span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -909,8 +1040,8 @@ export default function TopBar({
               }}
               title="فعال/غیرفعال کردن استودیو ویرایش، کادر ابری و هایلایت"
             >
-              <Icons.Edit3 size={14} />
-              <span>استودیو ویرایش</span>
+              {isCheckingProtection ? <Icons.Loader size={14} /> : <Icons.Edit3 size={14} />}
+              <span>{isCheckingProtection ? 'در حالِ بررسی…' : 'استودیو ویرایش'}</span>
             </button>
           )}
 
@@ -958,8 +1089,9 @@ export default function TopBar({
         </div>
       </header>
 
-      {protectedModal && (
+      {protectedModal && createPortal(
         <div
+          data-modal-overlay="protected-pdf"
           role="dialog"
           aria-modal="true"
           aria-label="فایل PDF محافظت‌شده است"
@@ -970,6 +1102,7 @@ export default function TopBar({
             position: 'fixed',
             inset: 0,
             zIndex: 100002,
+            pointerEvents: 'auto',
             backgroundColor: 'rgba(0, 0, 0, 0.55)',
             display: 'flex',
             alignItems: 'center',
@@ -980,6 +1113,7 @@ export default function TopBar({
           <div
             style={{
               width: 'min(440px, calc(100vw - 32px))',
+              pointerEvents: 'auto',
               backgroundColor: 'var(--panel)',
               border: '1px solid var(--border)',
               borderRadius: '16px',
@@ -1007,13 +1141,15 @@ export default function TopBar({
                 <Icons.AlertTriangle size={20} />
               </span>
               <div style={{ fontSize: '15px', fontWeight: 800, lineHeight: 1.5 }}>
-                این فایل PDF محافظت‌شده است
+                {protectedModal.reason === 'read-only'
+                  ? 'این فایل فقط‌خواندنی است'
+                  : 'این فایل PDF محافظت‌شده است'}
               </div>
             </div>
             <div style={{ fontSize: '13px', lineHeight: 1.9, color: 'var(--muted)', marginBottom: '16px' }}>
-              امکانِ ذخیرهٔ مستقیمِ تغییرات روی این فایل وجود ندارد. آیا مایلید یک نسخهٔ کپیِ
-              قابل‌ویرایش از این فایل ساخته و باز شود تا بتوانید حاشیه‌نویسی‌های خود را روی آن
-              انجام دهید؟ فایلِ اصلی دست نمی‌خورد.
+              {protectedModal.reason === 'read-only'
+                ? 'امکانِ ذخیرهٔ مستقیمِ تغییرات روی این فایل وجود ندارد، چون فقط‌خواندنی است. آیا مایلید یک نسخهٔ کپیِ قابل‌ویرایش از این فایل ساخته و باز شود تا بتوانید حاشیه‌نویسی‌های خود را روی آن انجام دهید؟ فایلِ اصلی دست نمی‌خورد.'
+                : 'امکانِ ذخیرهٔ مستقیمِ تغییرات روی این فایل وجود ندارد. آیا مایلید یک نسخهٔ کپیِ قابل‌ویرایش از این فایل ساخته و باز شود تا بتوانید حاشیه‌نویسی‌های خود را روی آن انجام دهید؟ فایلِ اصلی دست نمی‌خورد.'}
             </div>
             <div
               style={{
@@ -1034,9 +1170,38 @@ export default function TopBar({
             >
               {(protectedModal.filePath.split(/[\\/]/).pop() || '').replace(/\.pdf$/i, '') + '-editable.pdf'}
             </div>
+            {isCreatingCopy && copyProgress && (
+              <div style={{ marginBottom: '18px' }} aria-live="polite">
+                <div
+                  style={{
+                    height: '8px',
+                    borderRadius: '999px',
+                    backgroundColor: 'var(--panel2)',
+                    border: '1px solid var(--border)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    style={{
+                      height: '100%',
+                      width: Math.round(Math.max(0, Math.min(1, Number(copyProgress.fraction) || 0)) * 100) + '%',
+                      backgroundColor: 'var(--accent)',
+                      borderRadius: '999px',
+                      transition: 'width 0.3s ease',
+                    }}
+                  />
+                </div>
+                <div style={{ fontSize: '12px', lineHeight: 1.8, color: 'var(--muted)', marginTop: '6px', textAlign: 'center' }}>
+                  {copyProgress.label || 'در حالِ ساختِ نسخهٔ کپی…'}
+                  {' '}
+                  {Math.round(Math.max(0, Math.min(1, Number(copyProgress.fraction) || 0)) * 100)}٪
+                </div>
+              </div>
+            )}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <button
                 type="button"
+                className="protected-modal-btn"
                 onClick={handleProtectedCopyConfirm}
                 disabled={isCreatingCopy}
                 style={{
@@ -1059,8 +1224,34 @@ export default function TopBar({
                 {isCreatingCopy ? <Icons.Loader size={16} /> : <Icons.Copy size={16} />}
                 <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : 'ساخت نسخهٔ کپی و شروع ویرایش'}</span>
               </button>
+              {isCreatingCopy && (
+                <button
+                  type="button"
+                  className="protected-modal-btn"
+                  onClick={() => { try { coreApi.cancelPdfCopy(); } catch (_) {} }}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    padding: '10px 14px',
+                    borderRadius: '10px',
+                    border: '1px solid var(--border)',
+                    backgroundColor: 'var(--panel2)',
+                    color: 'var(--text)',
+                    fontFamily: 'var(--font-fa)',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <Icons.X size={15} />
+                  <span>لغوِ ساختِ کپی</span>
+                </button>
+              )}
               <button
                 type="button"
+                className="protected-modal-btn"
                 onClick={handleProtectedMemoryOnly}
                 disabled={isCreatingCopy}
                 style={{
@@ -1084,6 +1275,7 @@ export default function TopBar({
               </button>
               <button
                 type="button"
+                className="protected-modal-btn"
                 onClick={handleProtectedCancel}
                 disabled={isCreatingCopy}
                 style={{
@@ -1102,7 +1294,8 @@ export default function TopBar({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
@@ -1339,6 +1532,25 @@ const styles = {
     textAlign: 'center',
     color: 'var(--muted)',
     fontSize: '12px',
+  },
+  // مرحله ۹: گزینهٔ «جستجو در فایلِ کنونی» — متمایز و هم‌خانواده
+  // با گزینهٔ پرشِ مستقیم.
+  searchInFileOption: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    padding: '10px 12px',
+    borderRadius: '10px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(34, 211, 238, 0.35)',
+    backgroundColor: 'rgba(34, 211, 238, 0.12)',
+    color: 'var(--accent)',
+    fontSize: '12.5px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    marginTop: '6px',
+    transition: 'background-color 0.15s ease',
   },
   windowControls: {
     display: 'flex',

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import ComicCard from '../library/ComicCard';
@@ -22,7 +22,7 @@ function formatRelativeTime(dateString) {
 }
 
 // ردیف اختصاصی نمایش فهرستی مجهز به خودترمیمی کاور و حذف تداخل استایل React
-function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
+const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
   const filePath = item?.path || item?.filePath || '';
   const title = item?.name || item?.fileName || filePath.split(/[\\/]/).pop() || 'Untitled';
 
@@ -49,6 +49,9 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
 
     return () => {
       isMounted = false;
+      // مرحله ۹: اگر کاور هنوز به دست نیامده، درخواستِ در صف را
+      // لغو کن تا صفِ کاورها با کارت‌هایِ خارج از دید، پر نشود.
+      if (!existing) thumbnailService.cancelThumbnailRequest(filePath);
     };
   }, [filePath, item?.cover]);
 
@@ -63,6 +66,12 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
       });
     }
   }, [filePath]);
+
+  // مرحله ۹: برچسبِ زمان، فقط وقتی مهرِ زمانی عوض شود محاسبه می‌شود.
+  const timeLabel = useMemo(
+    () => formatRelativeTime(item?.lastReadAt || item?.updatedAt),
+    [item?.lastReadAt, item?.updatedAt]
+  );
 
   const lastPage = item?.lastPage || item?.currentPage || 1;
   const totalPages = item?.totalPages || 1;
@@ -90,6 +99,8 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
           <img
             src={coverUrl}
             alt={title}
+            loading="lazy"
+            decoding="async"
             style={styles.thumbImg}
             onError={handleImageError}
           />
@@ -123,7 +134,7 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
           <div style={{ ...styles.progressFill, width: `${Math.max(4, progress)}%` }} />
         </div>
         <span style={styles.timeTag}>
-          {formatRelativeTime(item?.lastReadAt || item?.updatedAt)}
+          {timeLabel}
         </span>
       </div>
 
@@ -148,6 +159,71 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
       </div>
     </div>
   );
+});
+
+// مرحله ۹: اسلاتِ تنبل — دقیقاً الگویِ LazyLibraryCardِ مرحلهٔ ۴
+// (IntersectionObserver با rootMargin 400px + قفلِ ارتفاعِ
+// اندازه‌گیری‌شده) تا در تاریخچه‌هایِ شلوغ، فقط آیتم‌هایِ داخلِ
+// دید مانت شوند و درخواستِ کاور بدهند؛ وقتی آیتمی از دید خارج
+// شد، آنمانت می‌شود و پاک‌سازیِ ردیف، درخواستِ کاورِ در صف را
+// لغو می‌کند.
+function LazyRecentSlot({ children, skeletonStyle }) {
+  const slotRef = useRef(null);
+  const measuredHeightRef = useRef(0);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    const el = slotRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') {
+      setIsVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry) setIsVisible(entry.isIntersecting);
+      },
+      { root: null, rootMargin: '400px 0px', threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!isVisible) return;
+    const el = slotRef.current;
+    if (!el) return;
+    const measure = () => {
+      const h = el.offsetHeight || 0;
+      if (h > 0) measuredHeightRef.current = h;
+    };
+    measure();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [isVisible]);
+
+  const lockedHeight = measuredHeightRef.current;
+
+  return (
+    <div ref={slotRef}>
+      {isVisible ? (
+        children
+      ) : (
+        <div
+          style={
+            lockedHeight > 0
+              ? { ...skeletonStyle, height: lockedHeight, boxSizing: 'border-box', overflow: 'hidden' }
+              : skeletonStyle
+          }
+        />
+      )}
+    </div>
+  );
 }
 
 export default function RecentView({ onOpenComic }) {
@@ -167,22 +243,57 @@ export default function RecentView({ onOpenComic }) {
     });
   }, [recentItems, searchQuery]);
 
+  // مرحله ۹: دسته‌بندیِ زمانی — در خودِ فایل، هیچ گروه‌بندی‌ای
+  // وجود نداشت؛ گروه‌ها (امروز / دیروز / هفتهٔ گذشته /
+  // قدیمی‌تر) اینجا و در useMemo ساخته می‌شوند تا با هر رندر،
+  // دوباره محاسبه نشوند. مبنا، شروعِ روزِ محلی است.
+  const groupedRecents = useMemo(() => {
+    const startOfDay = (date) => {
+      const d = new Date(date);
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    };
+    const todayStart = startOfDay(new Date());
+    const yesterdayStart = todayStart - 86400000;
+    const weekStart = todayStart - 6 * 86400000;
+    const groups = [
+      { id: 'today', title: 'امروز', items: [] },
+      { id: 'yesterday', title: 'دیروز', items: [] },
+      { id: 'week', title: 'هفتهٔ گذشته', items: [] },
+      { id: 'older', title: 'قدیمی‌تر', items: [] },
+    ];
+    for (const item of filteredRecents) {
+      const t = new Date(item?.lastReadAt || item?.updatedAt || 0).getTime();
+      const dayStart = Number.isFinite(t) && t > 0 ? startOfDay(new Date(t)) : 0;
+      if (dayStart >= todayStart) groups[0].items.push(item);
+      else if (dayStart >= yesterdayStart) groups[1].items.push(item);
+      else if (dayStart >= weekStart) groups[2].items.push(item);
+      else groups[3].items.push(item);
+    }
+    return groups.filter((group) => group.items.length > 0);
+  }, [filteredRecents]);
+
   const handleClearAll = () => {
     clearRecents();
     setConfirmClear(false);
     showToast('تاریخچه مطالعه به طور کامل پاک شد', { type: 'info' });
   };
 
-  const handleRemoveItem = (e, filePath, title) => {
-    e.stopPropagation();
-    removeFromRecent(filePath);
-    showToast(`«${title}» از تاریخچه حذف شد`, { type: 'info' });
-  };
+  // مرحله ۹: کال‌بک‌هایِ پایدار — اگر این هندلرها در هر رندر،
+  // تابعِ تازه بسازند، React.memoِ ردیف‌ها بی‌اثر می‌شود.
+  const handleRemoveItem = useCallback(
+    (e, filePath, title) => {
+      e.stopPropagation();
+      removeFromRecent(filePath);
+      showToast(`«${title}» از تاریخچه حذف شد`, { type: 'info' });
+    },
+    [removeFromRecent, showToast]
+  );
 
-  const handleShowInFolder = (e, filePath) => {
+  const handleShowInFolder = useCallback((e, filePath) => {
     e.stopPropagation();
     if (filePath) coreApi.showItemInFolder(filePath);
-  };
+  }, []);
 
   return (
     <div style={styles.container}>
@@ -272,30 +383,45 @@ export default function RecentView({ onOpenComic }) {
             با باز کردن هر کمیک یا مانهوا، پیشرفت و آخرین صفحه مطالعه شما به صورت خودکار در اینجا ذخیره می‌شود.
           </span>
         </div>
-      ) : viewMode === 'grid' ? (
-        <div style={styles.grid}>
-          {filteredRecents.map((item, idx) => (
-            <ComicCard
-              key={item.path || item.filePath || `recent-grid-${idx}`}
-              item={item}
-              onOpenComic={onOpenComic}
-              onRemove={(path) => removeFromRecent(path)}
-              showRemoveBtn={true}
-            />
-          ))}
-        </div>
       ) : (
-        <div style={styles.list}>
-          {filteredRecents.map((item, index) => (
-            <RecentListRow
-              key={item.path || item.filePath || `recent-list-${index}`}
-              item={item}
-              onOpenComic={onOpenComic}
-              onShowInFolder={handleShowInFolder}
-              onRemoveItem={handleRemoveItem}
-            />
-          ))}
-        </div>
+        groupedRecents.map((group) => (
+          <div key={group.id}>
+            <div style={styles.sectionHeader}>{group.title}</div>
+            {viewMode === 'grid' ? (
+              <div style={styles.grid}>
+                {group.items.map((item, idx) => (
+                  <LazyRecentSlot
+                    key={item.path || item.filePath || `recent-grid-${idx}`}
+                    skeletonStyle={styles.cardSkeleton}
+                  >
+                    <ComicCard
+                      item={item}
+                      onOpenComic={onOpenComic}
+                      onRemove={(path) => removeFromRecent(path)}
+                      showRemoveBtn={true}
+                    />
+                  </LazyRecentSlot>
+                ))}
+              </div>
+            ) : (
+              <div style={styles.list}>
+                {group.items.map((item, index) => (
+                  <LazyRecentSlot
+                    key={item.path || item.filePath || `recent-list-${index}`}
+                    skeletonStyle={styles.rowSkeleton}
+                  >
+                    <RecentListRow
+                      item={item}
+                      onOpenComic={onOpenComic}
+                      onShowInFolder={handleShowInFolder}
+                      onRemoveItem={handleRemoveItem}
+                    />
+                  </LazyRecentSlot>
+                ))}
+              </div>
+            )}
+          </div>
+        ))
       )}
     </div>
   );
@@ -444,6 +570,32 @@ const styles = {
     flexDirection: 'column',
     gap: '10px',
   },
+  // مرحله ۹: سربرگِ بخشِ زمانی + اسکلت‌هایِ اسلاتِ تنبل. هیچ
+  // backdrop-filterای در این فایل نیست و هیچ‌کدام هم اضافه
+  // نشده است؛ پس‌زمینه‌ها همان پنلِ نیمه‌شفافِ سبکِ قبلی‌اند.
+  sectionHeader: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 800,
+    color: 'var(--muted)',
+    margin: '6px 2px 10px',
+  },
+  rowSkeleton: {
+    backgroundColor: 'var(--panel)',
+    borderRadius: '14px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    minHeight: '84px',
+  },
+  cardSkeleton: {
+    backgroundColor: 'var(--panel)',
+    borderRadius: '14px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    minHeight: '230px',
+  },
   listItem: {
     display: 'flex',
     alignItems: 'center',
@@ -455,7 +607,11 @@ const styles = {
     borderStyle: 'solid',
     borderColor: 'var(--border)',
     cursor: 'pointer',
-    transition: 'all 0.18s ease',
+    // مرحله ۹: فقط transform و border-color انیمیشن دارند ('all'،
+    // هر تغییرِ استایل را به کامپوزیتور می‌کشاند) + ایزولاسیونِ
+    // چیدمان/رنگ برای اسکرولِ ۶۰ فریم.
+    transition: 'transform 0.18s ease, border-color 0.18s ease',
+    contain: 'layout paint',
   },
   thumbBox: {
     width: '48px',

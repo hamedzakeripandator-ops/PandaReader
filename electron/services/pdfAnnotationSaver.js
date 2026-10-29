@@ -230,6 +230,95 @@ const MAX_HEAL_OBJECTS = 64;
 const MAX_HEAL_OBJECT_BYTES = 1024 * 1024;
 const INVALID_OBJECT_WARN_RE = /Trying to parse invalid object|Invalid object ref/;
 
+// مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: پوششِ سراسریِ مهارِ هشدارهای
+// pdf-lib — withSilencedPdfLibWarnings(fn).
+//
+// pdf-lib، هشدارهای پارس را فقط از راهِ console.warnِ سراسری صادر
+// می‌کند و هیچ APIای برای آن ندارد؛ پس تنها راهِ «مهارِ مطلقِ
+// ۱۰۰٪»، تعویضِ موقتِ console.warn در مدتِ اجرای عملیاتِ pdf-lib
+// است. این پوشش، دقیقاً همان کار را می‌کند، با سه تضمین:
+//   ۱) فقط دو الگوی «Trying to parse invalid object» و «Invalid
+//      object ref» بلعیده می‌شوند؛ بقیهٔ هشدارها، بلافاصله به
+//      console.warnِ اصلی پاس داده می‌شوند (هیچ هشداری گم نمی‌شود).
+//   ۲) شمارندهٔ عمق (depth): فراخوانی‌های تودرتو و بارگذاری‌های
+//      درهم‌تنیده (awaitهای هم‌زمان)، console.warn را زودتر از
+//      موعد برنمی‌گردانند؛ فقط بیرونی‌ترین پوشش، آن را نصب و
+//      فقط بیرونی‌ترین خروج، آن را برمی‌گرداند.
+//   ۳) بازیابی در finally: حتی اگر fn خطا بدهد، console.warn
+//      همیشه به حالتِ اول برمی‌گردد.
+// فراخواننده می‌تواند آرایهٔ collect بدهد تا هشدارهای بلعیده‌شده،
+// برای ثبتِ خلاصه در لاگِ دیسک، جمع شوند (بارگذاریِ رصدشده، از
+// همین راه استفاده می‌کند).
+// دو حالتِ جدا که نباید قاطی شوند: «نصب بودنِ» console.warn
+// (با شمارندهٔ عمقِ همهٔ فراخوانی‌ها، با collect یا بی‌collect) و
+// «پشتهٔ جمع‌کننده‌ها» (فقط فراخوانی‌های دارایِ collect). نسخهٔ
+// قبلی، خالی‌شدنِ پشته را با پایانِ همهٔ پوشش‌ها اشتباه می‌گرفت
+// و swap را به‌عنوانِ مقدارِ «بازیابی‌شده» نشت می‌داد.
+let silencedPdfLibDepth = 0;
+let silencedPdfLibCollectors = [];
+let silencedPdfLibOrigWarn = null;
+async function withSilencedPdfLibWarnings(fn, options) {
+  const collect = options && Array.isArray(options.collect) ? options.collect : null;
+  if (silencedPdfLibDepth === 0) {
+    silencedPdfLibOrigWarn = console.warn;
+    console.warn = (...args) => {
+      let text = '';
+      try { text = args.map((a) => String(a)).join(' '); } catch (_) { text = ''; }
+      if (INVALID_OBJECT_WARN_RE.test(text)) {
+        // پشتهٔ جمع‌کننده‌ها: هشدار، به همهٔ پوشش‌های فعال
+        // می‌رسد تا بارگذاریِ درونی (که collector دارد) آن را
+        // بگیرد، حتی وقتی پوششِ بیرونی (بدونِ collector) نصب
+        // شده است. فقط بیرونی‌ترین پوشش، console.warn را نصب
+        // و برمی‌گرداند.
+        for (const arr of silencedPdfLibCollectors) {
+          try { arr.push(text); } catch (_) {}
+        }
+        return;
+      }
+      try { silencedPdfLibOrigWarn.apply(console, args); } catch (_) {}
+    };
+  }
+  silencedPdfLibDepth++;
+  if (collect) silencedPdfLibCollectors.push(collect);
+  try {
+    return await fn();
+  } finally {
+    if (collect) {
+      const idx = silencedPdfLibCollectors.lastIndexOf(collect);
+      if (idx >= 0) silencedPdfLibCollectors.splice(idx, 1);
+    }
+    silencedPdfLibDepth--;
+    if (silencedPdfLibDepth <= 0) {
+      silencedPdfLibDepth = 0;
+      if (silencedPdfLibOrigWarn) {
+        try { console.warn = silencedPdfLibOrigWarn; } catch (_) {}
+        silencedPdfLibOrigWarn = null;
+      }
+    }
+  }
+}
+
+// پوشش‌های سراسری (مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده): تک‌تکِ
+// عملیات‌های pdf-lib در این فایل — پروب، کپی، ذخیره و هر دو
+// اعتبارسنجی — از withSilencedPdfLibWarnings می‌گذرند تا هشدارهای
+// «Trying to parse invalid object» و «Invalid object ref» هرگز و
+// تحتِ هیچ شرایطی در ترمینال چاپ نشوند.
+async function saveAnnotatedPdf(args) {
+  return withSilencedPdfLibWarnings(() => saveAnnotatedPdfImpl(args));
+}
+async function probePdfProtection(bytes, logger, onProgress) {
+  return withSilencedPdfLibWarnings(() => probePdfProtectionImpl(bytes, logger, onProgress));
+}
+async function createUnlockedPdfCopy(args) {
+  return withSilencedPdfLibWarnings(() => createUnlockedPdfCopyImpl(args));
+}
+async function validateSavedPdfBytes(outBytes, expectedPageCount, logger, baselineInvalidCount) {
+  return withSilencedPdfLibWarnings(() => validateSavedPdfBytesImpl(outBytes, expectedPageCount, logger, baselineInvalidCount));
+}
+async function validateIncrementalBytes(outBytes, expectedPageCount, baselineInvalidCount, pagePlacements, buildDoc, logger, baseBytes) {
+  return withSilencedPdfLibWarnings(() => validateIncrementalBytesImpl(outBytes, expectedPageCount, baselineInvalidCount, pagePlacements, buildDoc, logger, baseBytes));
+}
+
 /** لاگِ تشخیصیِ ذخیره: از لاگرِ تزریق‌شده (لاگِ دیسک) یا console. هرگز throw نمی‌کند. */
 function logSaveDiag(logger, level, message, detail) {
   try {
@@ -277,46 +366,39 @@ function parseInvalidObjectWarnings(rawWarnings) {
  * هشدارهای آبجکتِ نامعتبر جمع می‌شوند. console.warn همیشه
  * برگردانده می‌شود (حتی اگر load خطا بدهد).
  */
-async function loadPdfDocumentWithWarnings(bytes) {
+async function loadPdfDocumentWithWarnings(bytes, options) {
   const { PDFDocument } = getPdfLib();
+  const ignoreEncryption = !options || options.ignoreEncryption !== false;
   const rawWarnings = [];
-  const origWarn = console.warn;
-  console.warn = (...args) => {
-    const text = args.map((a) => String(a)).join(' ');
-    if (INVALID_OBJECT_WARN_RE.test(text)) {
-      rawWarnings.push(text);
-    } else {
-      try {
-        origWarn.apply(console, args);
-      } catch (_) {}
-    }
-  };
-  try {
-    const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
-    let pageCount = -1;
+  // بارگذاری، از پوششِ سراسری می‌گذرد: حتی اگر بارگذاریِ دیگری
+  // هم‌زمان در حالِ اجراست، شمارندهٔ عمق، از برگرداندنِ زودهنگامِ
+  // console.warn جلوگیری می‌کند.
+  return withSilencedPdfLibWarnings(async () => {
     try {
-      pageCount = pdfDoc.getPageCount();
-    } catch (_) {
-      pageCount = -1;
+      const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption, updateMetadata: false });
+      let pageCount = -1;
+      try {
+        pageCount = pdfDoc.getPageCount();
+      } catch (_) {
+        pageCount = -1;
+      }
+      return {
+        pdfDoc,
+        warnings: rawWarnings,
+        invalidObjects: parseInvalidObjectWarnings(rawWarnings),
+        pageCount,
+        loadError: null,
+      };
+    } catch (err) {
+      return {
+        pdfDoc: null,
+        warnings: rawWarnings,
+        invalidObjects: parseInvalidObjectWarnings(rawWarnings),
+        pageCount: -1,
+        loadError: err,
+      };
     }
-    return {
-      pdfDoc,
-      warnings: rawWarnings,
-      invalidObjects: parseInvalidObjectWarnings(rawWarnings),
-      pageCount,
-      loadError: null,
-    };
-  } catch (err) {
-    return {
-      pdfDoc: null,
-      warnings: rawWarnings,
-      invalidObjects: parseInvalidObjectWarnings(rawWarnings),
-      pageCount: -1,
-      loadError: err,
-    };
-  } finally {
-    console.warn = origWarn;
-  }
+  }, { collect: rawWarnings });
 }
 
 /** ۲۰۰ بایتِ اطرافِ آفستِ گزارش‌شده، به‌صورتِ متنِ چاپ‌پذیر (برای لاگِ دیباگِ ساختارِ آبجکت). */
@@ -454,7 +536,7 @@ function healUnparseableIndirectObjectsInBuffer(buffer, invalidObjects) {
  * بررسیِ pdf.js، بهترینِ تلاش است: اگر ماژولِ pdf.js در main در
  * دسترس نبود، فقط همان بررسیِ pdf-lib اعمال می‌شود.
  */
-async function validateSavedPdfBytes(outBytes, expectedPageCount, logger) {
+async function validateSavedPdfBytesImpl(outBytes, expectedPageCount, logger, baselineInvalidCount) {
   const check = await loadPdfDocumentWithWarnings(Buffer.from(outBytes));
   if (check.loadError) {
     return { ok: false, reason: 'بارگذاریِ دوبارهٔ خروجی با pdf-lib انجام نشد: ' + String((check.loadError && check.loadError.message) || check.loadError) };
@@ -462,8 +544,14 @@ async function validateSavedPdfBytes(outBytes, expectedPageCount, logger) {
   if (check.pageCount !== expectedPageCount) {
     return { ok: false, reason: 'شمارِ صفحه‌های خروجی (' + check.pageCount + ') با شمارِ موردِ انتظار (' + expectedPageCount + ') برابر نیست.' };
   }
-  if (check.invalidObjects.length > 0) {
-    return { ok: false, reason: 'خروجی، ' + check.invalidObjects.length + ' آبجکتِ غیرقابل‌پارس دارد.' };
+  // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: وقتی ذخیره، رمزگشایی‌شده
+  // است (decryptedThisSave)، خروجیِ بازنویسیِ کامل، آبجکت‌های
+  // نامعتبرِ ورودی را با همان بایت‌ها دور می‌زند؛ گیت، «بیشتر از
+  // خطِ مبنا نشود» است، نه صفر. در بقیهٔ حالت‌ها، گیتِ صفرِ قبلی
+  // (baselineInvalidCount پیش‌فرض ۰) سرِ جایش است.
+  const baselineInvalid = Number.isFinite(baselineInvalidCount) ? baselineInvalidCount : 0;
+  if (check.invalidObjects.length > baselineInvalid) {
+    return { ok: false, reason: 'خروجی، ' + check.invalidObjects.length + ' آبجکتِ غیرقابل‌پارس دارد (خطِ مبنا: ' + baselineInvalid + ').' };
   }
   let pdfjs = null;
   try {
@@ -961,6 +1049,14 @@ function buildAnnotDictForIncremental(pdfDoc, item) {
 
 // --- main builder ---
 async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
+  // دفاعِ عمقی: الحاق، هرگز روی سندِ دارایِ /Encrypt اجرا
+  // نمی‌شود — بایت‌های پایهٔ رمزگذاری‌شده با آبجکت‌هایِ رمزنشدهٔ
+  // الحاقی، ترکیبِ فاسد می‌سازند. فراخواننده (saveAnnotatedPdf)،
+  // پیش‌تر رمزگشایی می‌کند یا رد می‌کند؛ این بررسی، فقط تورِ امن
+  // است.
+  if (pdfDoc && trailerEncryptPresent(pdfDoc)) {
+    throw new Error('الحاقِ افزایشی روی فایلِ محافظت‌شده (/Encrypt) مجاز نیست.');
+  }
   const log = (level, msg, detail) => {
     if (logger && typeof logger[level] === 'function') {
       try { logger[level](msg, detail); } catch (_) {}
@@ -1217,7 +1313,7 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
  * صفحه دیده شوند؛ سپس بررسیِ pdf.js. هر ردی، یعنی هیچ‌چیز نوشته
  * نمی‌شود.
  */
-async function validateIncrementalBytes(outBytes, expectedPageCount, baselineInvalidCount, pagePlacements, buildDoc, logger, baseBytes) {
+async function validateIncrementalBytesImpl(outBytes, expectedPageCount, baselineInvalidCount, pagePlacements, buildDoc, logger, baseBytes) {
   // NOTE (Stage 8): expectedPageCount از دیدِ pdf-lib است. وقتی فایلِ
   // پایه آبجکتِ خراب دارد، pdf-lib ممکن است صفحه‌ای را که pdf.js
   // (خوانندهٔ واقعی) می‌بیند، گم کند؛ در این حالت، شمارِ درستِ
@@ -2282,7 +2378,7 @@ async function buildOutputBytes(pdfDoc, pages, options = {}) {
  *   می‌شود. پیش‌فرض: 'save-as' (سازگاری با فراخوانِ بخش الف).
  * @returns {Promise<{success: boolean, outputPath?: string, pagesAnnotated?: number, annotationsPlaced?: number, backupPath?: string|null, origBackupPath?: string, usedOrigBackup?: boolean, origCreated?: boolean, restoredClean?: boolean, mode?: string, error?: string, canceled?: boolean}>}
  */
-async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
+async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, password }) {
   try {
     if (!pdfPath || !fs.existsSync(pdfPath)) {
       return { success: false, error: 'فایل PDF پیدا نشد.' };
@@ -2294,6 +2390,7 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
       return { success: false, error: 'مسیر فایل خروجی مشخص نشده است.' };
     }
     const normalizedMode = mode === 'in-place' ? 'in-place' : 'save-as';
+    const savePassword = typeof password === 'string' ? password : '';
     // خروجی روی خودِ فایلِ اصلی = درجا، هرچه mode گفته شده باشد.
     const effectiveMode = path.resolve(outputPath) === path.resolve(pdfPath) ? 'in-place' : normalizedMode;
     const pageNumbers = Object.keys(pages || {})
@@ -2376,13 +2473,22 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
     if (!buildDoc) {
       throw firstLoad.loadError || new Error('ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.');
     }
-    // مرحله ۸ ـ بخش الف: فایلِ محافظت‌شده (‎/Encrypt) هرگز در مسیرِ
-    // ذخیرهٔ معمولی بازنویسی نمی‌شود: بارگذاری با ignoreEncryption
-    // انجام می‌شود و save()، دیکشنریِ ‎/Encrypt را دوباره صادر
-    // می‌کند؛ پس خروجی، همچنان قفل می‌ماند (و اگر محتوای استریم‌ها
-    // واقعاً رمز شده باشد، بازنویسی/الحاق، آن را خراب می‌کند). ذخیره،
-    // با خطایِ راهنما رد می‌شود تا کاربر از مسیرِ «نسخهٔ کپیِ بدونِ
-    // قفل» (استراتژیِ Xodo، هنگامِ ورود به استودیو) استفاده کند.
+    // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: گاردِ مسدودکنندهٔ مرحلهٔ ۸
+    // الف، به «رمزگشایی-اول» تبدیل شد. فایلِ دارایِ /Encrypt،
+    // دیگر بی‌قیدوشرط رد نمی‌شود: اگر رمزگشایی با رمزِ خالی ممکن
+    // باشد (دامنهٔ decryptEncryptedDocument: Standard، V=1/2/4،
+    // R=2/3/4، بدونِ ObjStm)، محتوا همین‌جا رمزگشایی، /Encrypt از
+    // تریلر حذف و ذخیره با بازنویسیِ کاملِ بدونِ قفل انجام
+    // می‌شود. فقط وقتی رمزگشایی ذاتاً ممکن نیست (رمزِ عبورِ واقعی،
+    // AES-256، ObjStm)، ذخیره با پیامِ راهنما رد می‌شود — چون
+    // هیچ بازنویسیِ سالمی برای آن فایل‌ها بدونِ رمز وجود ندارد
+    // (به گزارش، §۲.۴ مراجعه کنید).
+    //
+    // قیدِ حیاتی: ذخیرهٔ رمزگشایی‌شده، هرگز الحاقِ افزایشی
+    // نمی‌شود. بایت‌های پایه، هنوز رمزگذاری‌شده‌اند؛ الحاقِ
+    // آبجکت‌هایِ رمزنشده روی آن‌ها + حذفِ /Encrypt از تریلر،
+    // استریم‌های قدیمی را ناخوانا می‌کند. پس decryptedThisSave،
+    // همهٔ مسیرهای الحاق را می‌بندد و فقط بازنویسیِ کامل می‌ماند.
     const encryptRefForGuard = buildDoc.context && buildDoc.context.trailerInfo
       ? buildDoc.context.trailerInfo.Encrypt
       : null;
@@ -2394,8 +2500,57 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
         isEncryptedForGuard = true;
       }
     }
+    let decryptedThisSave = false;
+    let ghostNeutralizedThisSave = false;
     if (isEncryptedForGuard) {
-      return { success: false, error: 'این فایل PDF محافظت‌شده است و امکانِ ذخیرهٔ مستقیمِ تغییرات روی آن وجود ندارد. از دکمهٔ استودیو، «ساخت نسخهٔ کپی و شروع ویرایش» را انتخاب کنید تا نسخه‌ای قابل‌ویرایش ساخته شود.' };
+      let decryptOutcome = null;
+      try {
+        decryptOutcome = decryptEncryptedDocument(buildDoc, saveLogger, savePassword);
+      } catch (err) {
+        if (err && (err.code === 'PDF_COPY_PASSWORD_REQUIRED' || err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+          // مرحله ۹: پیش از ردِ نهایی، «رمزِ صوری» (Ghost) را امتحان
+          // کن: اگر استریم‌ها واقعاً رمز نشده‌اند، خنثی‌سازیِ هم‌طولِ
+          // /Encrypt در تریلر + راستی‌آزماییِ pdf.js (شمارِ صفحه +
+          // فهرستِ عملگرها)، مبنایِ امنِ ذخیره است. اگر راستی‌آزمایی
+          // شکست خورد، فایلِ واقعاً رمزدار است و همان خطایِ قبلی
+          // برمی‌گردد؛ هیچ بایتی با /Encryptِ نیمه‌کاره نوشته نمی‌شود.
+          let ghost = null;
+          try {
+            ghost = await tryGhostNeutralizedBase(buildBytes, buildDoc.getPageCount(), saveLogger);
+          } catch (_) { ghost = null; }
+          if (ghost) {
+            buildBytes = ghost.bytes;
+            buildDoc = ghost.pdfDoc;
+            buildInvalidCount = ghost.invalidCount;
+            ghostNeutralizedThisSave = true;
+            isEncryptedForGuard = false;
+            logSaveDiag(saveLogger, 'info', 'pdf-save: ghost /Encrypt neutralized for this save (streams were never encrypted)', 'pages=' + buildDoc.getPageCount());
+          } else {
+            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (' + String(err.message) + '). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.' };
+          }
+        } else {
+          return { success: false, error: 'رمزگشاییِ فایل برای ذخیره انجام نشد: ' + String((err && err.message) || err) };
+        }
+      }
+      if (!ghostNeutralizedThisSave) {
+        if (decryptOutcome && decryptOutcome.decrypted) {
+          decryptedThisSave = true;
+          logSaveDiag(saveLogger, 'info', 'pdf-save: encrypted file decrypted with empty password for this save', 'streams=' + (decryptOutcome.streamCount || 0) + ' strings=' + (decryptOutcome.stringCount || 0));
+        } else {
+          // ارجاعِ /Encryptِ معلق (دیکشنری وجود ندارد): فایل، عملاً
+          // قفل نیست؛ فقط ارجاعِ مرده حذف می‌شود تا خروجی، تریلرِ
+          // معلق نداشته باشد.
+          logSaveDiag(saveLogger, 'warn', 'pdf-save: dangling /Encrypt reference treated as unlocked', String((decryptOutcome && decryptOutcome.reason) || ''));
+        }
+        // حذفِ /Encrypt از تریلر (همان مکانیزمِ مسیرِ کپی): writer،
+        // تریلر را از trailerInfo می‌سازد.
+        try {
+          const { PDFName: GuardPDFName } = getPdfLib();
+          if (buildDoc.context.trailerInfo) delete buildDoc.context.trailerInfo.Encrypt;
+          const trailerDict = buildDoc.context.trailer;
+          if (trailerDict && typeof trailerDict.delete === 'function') trailerDict.delete(GuardPDFName.of('Encrypt'));
+        } catch (_) {}
+      }
     }
     const hadInvalidObjectWarnings = firstLoad.invalidObjects.length > 0;
     const preferNoObjectStreams = healedObjects.length > 0;
@@ -2419,6 +2574,10 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
     }
     let incrementalFailureReason = '';
     const attemptIncrementalFallback = async (useFreshDoc) => {
+      if (decryptedThisSave) {
+        incrementalFailureReason = 'الحاقِ افزایشی روی فایلِ رمزگشایی‌شده ممنوع است (بایت‌های پایه، رمزگذاری‌شده‌اند).';
+        return null;
+      }
       let incDoc = buildDoc;
       if (useFreshDoc) {
         // پس از تلاشِ ناموفقِ مسیرِ کامل، سندِ بارگذاری‌شده ممکن
@@ -2464,7 +2623,7 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
         return null;
       }
     };
-    if (hadInvalidObjectWarnings) {
+    if (hadInvalidObjectWarnings && !decryptedThisSave) {
       const fb = await attemptIncrementalFallback(false);
       if (fb) return fb;
       return { success: false, error: 'ذخیرهٔ افزایشی انجام نشد و فایلِ اصلی دست نخورده باقی ماند. (' + incrementalFailureReason + ')' };
@@ -2500,6 +2659,21 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
         if (!retryLoad.pdfDoc) {
           throw firstLoad.loadError || new Error('ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.');
         }
+        if (isEncryptedForGuard) {
+          // سندِ تازه هم از همان بایت‌های رمزگذاری‌شده آمده است:
+          // رمزگشایی + حذفِ /Encrypt، دقیقاً مثلِ سندِ اول.
+          try {
+            decryptEncryptedDocument(retryLoad.pdfDoc, saveLogger, savePassword);
+          } catch (err) {
+            throw firstError || err;
+          }
+          try {
+            const { PDFName: RetryPDFName } = getPdfLib();
+            if (retryLoad.pdfDoc.context.trailerInfo) delete retryLoad.pdfDoc.context.trailerInfo.Encrypt;
+            const retryTrailer = retryLoad.pdfDoc.context.trailer;
+            if (retryTrailer && typeof retryTrailer.delete === 'function') retryTrailer.delete(RetryPDFName.of('Encrypt'));
+          } catch (_) {}
+        }
         const built2 = await buildOutputBytes(retryLoad.pdfDoc, pages, { hadInvalidObjectWarnings, preferNoObjectStreams });
         annotatedPages = built2.annotatedPages;
         placed = built2.placed;
@@ -2509,9 +2683,12 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
         rebuiltClean = true;
       } catch (_) {
         // بازسازیِ تمیز هم شکست: آخرین شانس، الحاقِ افزایشی روی
-        // سندِ تازه است؛ اگر آن هم نشد، خطایِ تلاشِ اول برمی‌گردد.
-        const fb = await attemptIncrementalFallback(true);
-        if (fb) return fb;
+        // سندِ تازه است — مگر در ذخیرهٔ رمزگشایی‌شده که الحاق،
+        // ممنوع است؛ آنجا خطایِ تلاشِ اول برمی‌گردد.
+        if (!decryptedThisSave) {
+          const fb = await attemptIncrementalFallback(true);
+          if (fb) return fb;
+        }
         throw firstError || new Error('ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.');
       }
     }
@@ -2524,13 +2701,15 @@ async function saveAnnotatedPdf({ pdfPath, pages, outputPath, mode, logger }) {
     // هیچ‌چیز نوشته نمی‌شود و فایلِ اصلی + `.orig.bak` سالم
     // می‌مانند.
     let outputValidated = false;
-    if (healedObjects.length > 0 || pageTreeRecovered || rebuiltClean) {
-      const validation = await validateSavedPdfBytes(outBytes, expectedPageCount, saveLogger);
+    if (healedObjects.length > 0 || pageTreeRecovered || rebuiltClean || decryptedThisSave) {
+      const validation = await validateSavedPdfBytes(outBytes, expectedPageCount, saveLogger, decryptedThisSave ? buildInvalidCount : 0);
       if (!validation.ok) {
-        logSaveDiag(saveLogger, 'error', 'pdf-save: output validation failed; trying incremental append', validation.reason);
-        const fb = await attemptIncrementalFallback(true);
-        if (fb) return fb;
-        logSaveDiag(saveLogger, 'error', 'pdf-save: incremental fallback also failed; nothing written', incrementalFailureReason);
+        logSaveDiag(saveLogger, 'error', 'pdf-save: output validation failed', validation.reason);
+        if (!decryptedThisSave) {
+          const fb = await attemptIncrementalFallback(true);
+          if (fb) return fb;
+        }
+        logSaveDiag(saveLogger, 'error', 'pdf-save: no fallback available; nothing written', incrementalFailureReason);
         return { success: false, error: 'خروجیِ ساخته‌شده، اعتبارسنجی نشد و روی دیسک نوشته نشد؛ فایلِ اصلی دست نخورده باقی ماند. (' + validation.reason + ')' };
       }
       outputValidated = true;
@@ -2645,14 +2824,84 @@ function padPdfPassword(pwdBytes) {
   return Buffer.concat([b, PDF_ENCRYPTION_PADDING.slice(0, 32 - b.length)]);
 }
 
+// مرحله ۹: رمزِ عبورِ PDF، بایت است (Latin-1)؛ نه رشتهٔ UTF-8.
+function passwordToBytes(password) {
+  if (Buffer.isBuffer(password)) return password;
+  if (typeof password === 'string' && password.length > 0) return Buffer.from(password, 'latin1');
+  return Buffer.alloc(0);
+}
+
+// مرحله ۹ — الگوریتم ۳.۷ (ISO 32000): استخراجِ رمزِ کاربر از /O با
+// رمزِ مالک. برای R=2 یک RC4، برای R>=3 کلیدِ ۵۰ مرحله‌ایِ MD5 و
+// ۲۰ دور RC4 با XOR معکوس (۱۹ تا ۰).
+function stripPdfPasswordPadding(padded) {
+  const b = Buffer.isBuffer(padded) ? padded : Buffer.from(padded || []);
+  for (let len = 0; len <= 32; len++) {
+    if (b.slice(len).equals(PDF_ENCRYPTION_PADDING.slice(0, 32 - len))) return b.slice(0, len);
+  }
+  return b.slice(0, 32);
+}
+function deriveUserPasswordFromOwner({ O, R, keyLengthBytes, ownerPasswordBytes }) {
+  if (!O || O.length === 0 || !nodeCrypto) return null;
+  try {
+    const ownerPad = padPdfPassword(ownerPasswordBytes || Buffer.alloc(0));
+    let key = pdfMd5(ownerPad);
+    if (R >= 3) {
+      // نکتهٔ ظریفِ الگوریتم ۳.۷ (تأییدشده با سورسِ pdf.js،
+      // #decodeUserPassword): برخلافِ کلیدِ کاربر (۳.۲) که هر تکرار،
+      // روی n بایتِ اولِ دایجست است، اینجا هر ۵۰ تکرار روی دایجستِ
+      // کاملِ ۱۶ بایتی انجام می‌شود و فقط در پایان، n بایتِ اول
+      // برداشته می‌شود. برشِ زودهنگام، رمزِ مالک را خراب می‌کند.
+      for (let i = 0; i < 50; i++) key = pdfMd5(key);
+    }
+    key = key.slice(0, Math.max(5, Math.min(16, keyLengthBytes || 5)));
+    let data = Buffer.from(O);
+    if (R >= 3) {
+      for (let i = 19; i >= 0; i--) {
+        const kj = Buffer.from(key);
+        for (let k = 0; k < kj.length; k++) kj[k] ^= i;
+        data = rc4CryptBytes(kj, data);
+      }
+    } else {
+      data = rc4CryptBytes(key, data);
+    }
+    return stripPdfPasswordPadding(data);
+  } catch (_) { return null; }
+}
+
+// مرحله ۹: کلیدِ فایل را اول با رمزِ داده‌شده (به‌عنوانِ رمزِ کاربر)
+// می‌سازد؛ اگر بررسیِ /U شکست خورد، همان رمز را به‌عنوانِ رمزِ مالک
+// امتحان می‌کند و رمزِ کاربرِ مشتق‌شده را می‌سنجد.
+function findWorkingFileKey(info, passwordBytes) {
+  const candidates = [{ bytes: passwordBytes || Buffer.alloc(0), viaOwner: false }];
+  const derived = deriveUserPasswordFromOwner({
+    O: info.O, R: info.R, keyLengthBytes: info.keyLengthBytes,
+    ownerPasswordBytes: passwordBytes || Buffer.alloc(0),
+  });
+  if (derived && derived.length > 0 && !derived.equals(passwordBytes || Buffer.alloc(0))) {
+    candidates.push({ bytes: derived, viaOwner: true });
+  }
+  for (const cand of candidates) {
+    const fileKey = computePdfFileKey({
+      O: info.O, P: info.P, id0: info.id0,
+      keyLengthBytes: info.keyLengthBytes, R: info.R,
+      encryptMetadata: info.encryptMetadata, passwordBytes: cand.bytes,
+    });
+    if (verifyPdfUserPassword({ fileKey, U: info.U, id0: info.id0, R: info.R })) {
+      return { fileKey, viaOwner: cand.viaOwner, passwordBytes: cand.bytes };
+    }
+  }
+  return null;
+}
+
 function int32LEBytes(value) {
   const buf = Buffer.alloc(4);
   buf.writeInt32LE(value | 0, 0);
   return buf;
 }
 
-function computePdfFileKey({ O, P, id0, keyLengthBytes, R, encryptMetadata }) {
-  let seed = Buffer.concat([padPdfPassword(Buffer.alloc(0)), O, int32LEBytes(P)]);
+function computePdfFileKey({ O, P, id0, keyLengthBytes, R, encryptMetadata, passwordBytes }) {
+  let seed = Buffer.concat([padPdfPassword(passwordBytes || Buffer.alloc(0)), O, int32LEBytes(P)]);
   if (id0 && id0.length > 0) seed = Buffer.concat([seed, id0]);
   if (R >= 4 && encryptMetadata === false) {
     seed = Buffer.concat([seed, Buffer.from([0xff, 0xff, 0xff, 0xff])]);
@@ -2826,7 +3075,7 @@ function parsePdfEncryptionInfo(pdfDoc) {
   };
 }
 
-function decryptEncryptedDocument(pdfDoc, logger) {
+function decryptEncryptedDocument(pdfDoc, logger, password) {
   if (!nodeCrypto) {
     throw pdfCopyCryptoError('PDF_COPY_UNSUPPORTED_ENCRYPTION', 'رمزگشایی در این محیط در دسترس نیست (ماژولِ crypto پیدا نشد).');
   }
@@ -2851,13 +3100,15 @@ function decryptEncryptedDocument(pdfDoc, logger) {
     throw pdfCopyCryptoError('PDF_COPY_UNSUPPORTED_ENCRYPTION', 'دیکشنریِ /Encrypt ناقص است (‎/O یا ‎/U ندارد).');
   }
   const keyLengthBytes = Math.max(5, Math.min(16, Math.floor(info.lengthBits / 8) || 5));
-  const fileKey = computePdfFileKey({
-    O: info.O, P: info.P, id0: info.id0,
+  const passwordBytes = passwordToBytes(password);
+  const working = findWorkingFileKey({
+    O: info.O, U: info.U, P: info.P, id0: info.id0,
     keyLengthBytes, R: info.R, encryptMetadata: info.encryptMetadata,
-  });
-  if (!verifyPdfUserPassword({ fileKey, U: info.U, id0: info.id0, R: info.R })) {
-    throw pdfCopyCryptoError('PDF_COPY_PASSWORD_REQUIRED', 'این فایل با رمزِ عبور محافظت شده است و با رمزِ خالی باز نمی‌شود. برای ساختِ نسخهٔ کپی، ابتدا فایل را با رمزِ آن در یک PDFخوان باز و بدونِ رمز ذخیره کنید.');
+  }, passwordBytes);
+  if (!working) {
+    throw pdfCopyCryptoError('PDF_COPY_PASSWORD_REQUIRED', 'این فایل با رمزِ عبور محافظت شده است و با رمزِ داده‌شده باز نمی‌شود. برای ساختِ نسخهٔ کپی، ابتدا فایل را با رمزِ آن در یک PDFخوان باز و بدونِ رمز ذخیره کنید.');
   }
+  const fileKey = working.fileKey;
 
   const { PDFDict, PDFArray, PDFString, PDFHexString, PDFRef } = getPdfLib();
   const context = pdfDoc.context;
@@ -2981,7 +3232,7 @@ function decryptEncryptedDocument(pdfDoc, logger) {
   }
 
   logSaveDiag(logger, 'info', 'pdf-copy: decrypted objects with empty password', 'streams=' + streamCount + ' strings=' + stringCount);
-  return { decrypted: true, streamCount, stringCount };
+  return { decrypted: true, streamCount, stringCount, effectivePassword: working.passwordBytes ? working.passwordBytes.toString('latin1') : '' };
 }
 
 function safeProbePageCount(pdfDoc) {
@@ -3007,8 +3258,155 @@ function trailerEncryptPresent(pdfDoc) {
   }
 }
 
-async function probePdfProtection(bytes, logger) {
-  const { PDFDocument } = getPdfLib();
+// مرحله ۸ ـ اصلاحِ نهایی: پروب، هرگز PDFDocument.loadِ خام صدا
+// نمی‌زند. هر سه تلاشِ بارگذاری، از loadPdfDocumentWithWarnings
+// می‌گذرند تا هشدارهای «Invalid object ref» و «Trying to parse
+// invalid object» (آبجکت‌های 3948/3950/3951/4998 و امثالِ آن در
+// فایلِ ۶۸ مگابایتی) به‌جای ترمینال، فقط یک‌بار به‌صورتِ خلاصه در
+// لاگِ دیسک ثبت شوند. onProgress اختیاری است و برای گزارشِ پیشرفت
+// به ورکرِ کپی/پروب به کار می‌رود.
+// ===========================================================================
+// مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: پروبِ فوق‌سریع (بدونِ پارسِ کلِ فایل).
+//
+// probePdfProtectionFast(filePath): فقط ۳۲ کیلوبایتِ انتهاییِ فایل
+// را با دو خوانشِ ناهمگام می‌خواند، آخرین startxref را پیدا می‌کند
+// و دیکشنریِ تریلرِ فعال (یا دیکشنریِ استریمِ xref) را برای کلیدِ
+// واقعیِ /Encrypt بررسی می‌کند. هیچ PDFDocument.loadای، هیچ پارسِ
+// کلِ فایلی، هیچ هشداری، هیچ هنگی — روی فایلِ ۶۸ مگابایتی هم چند
+// میلی‌ثانیه است. هم‌زمان، فقط‌خواندنی بودنِ فایل (W_OK) هم
+// سنجیده می‌شود، چون فایلِ فقط‌خواندنی هم مثلِ فایلِ قفل‌دار،
+// به «نسخهٔ کپی» نیاز دارد (درجا نمی‌شود روی آن نوشت).
+//
+// محدودیتِ صادقانه: اگر دمِ فایل، startxref یا دیکشنریِ تریلرِ
+// قابلِ خواندن نداشته باشد (فایلِ ناقص/غیراستاندارد)، نتیجه
+// «نامشخص» (conclusive:false) برمی‌گردد و فراخواننده، به پروبِ
+// کاملِ (بایت‌محورِ رصدشده، در ورکر) می‌افتد. اسکنِ خامِ ۶۴
+// کیلوبایتیِ قبلی (hasEncryptToken) کاملاً حذف شد: تصمیم، فقط
+// از روی کلیدِ /Encrypt در تریلرِ فعال گرفته می‌شود، نه از روی
+// حضورِ رشته در هر کجای فایل.
+// ===========================================================================
+
+function extractBalancedDict(text, startIdx) {
+  // دیکشنریِ << ... >> با عمقِ متوازن؛ رشته‌های لفظیِ (...) و
+  // رشته‌های هگزِ <...>، داخلِ اسکن نادیده گرفته می‌شوند تا >> یا
+  // <<ِ داخلِ آن‌ها، عمق را خراب نکند.
+  let depth = 0;
+  let i = startIdx;
+  const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    if (ch === '(') {
+      // رشتهٔ لفظی: تا پرانتزِ بستهٔ escapeنشده جلو برو.
+      i++;
+      while (i < n) {
+        if (text[i] === '\\') { i += 2; continue; }
+        if (text[i] === '(') {
+          let d = 1; i++;
+          while (i < n && d > 0) { if (text[i] === '\\') { i += 2; continue; } if (text[i] === '(') d++; else if (text[i] === ')') d--; i++; }
+          continue;
+        }
+        if (text[i] === ')') { i++; break; }
+        i++;
+      }
+      continue;
+    }
+    if (ch === '<') {
+      if (text[i + 1] === '<') { depth++; i += 2; continue; }
+      // رشتهٔ هگز: تا '>' جلو برو.
+      const end = text.indexOf('>', i + 1);
+      if (end < 0) return null;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '>' && text[i + 1] === '>') {
+      depth--;
+      i += 2;
+      if (depth === 0) return text.slice(startIdx, i);
+      continue;
+    }
+    i++;
+  }
+  return null;
+}
+
+async function probePdfProtectionFast(filePath, logger) {
+  const base = { protected: false, readOnly: false, reason: 'inconclusive', pageCount: -1, hasEncryptToken: false, fast: true, conclusive: false, invalidObjects: 0, warningsCount: 0 };
+  let handle = null;
+  try {
+    try {
+      await fs.promises.access(filePath, fs.constants.W_OK);
+    } catch (_) {
+      base.readOnly = true;
+    }
+    handle = await fs.promises.open(filePath, 'r');
+    const stat = await handle.stat();
+    const size = stat.size;
+    // فقط‌خواندنی بودن، فقط با access سنجیده نمی‌شود: وقتی پروسه
+    // با دسترسیِ بالا (root) اجرا می‌شود، access(W_OK) حتی برای
+    // فایلِ 0444 هم موفق است. بیت‌های mode (در ویندوز، از روی
+    // ویژگیِ Read-Only ساخته می‌شوند) هم بررسی می‌شوند.
+    if ((stat.mode & 0o222) === 0) base.readOnly = true;
+    if (size < 9) return { ...base, reason: 'too-small' };
+    const tailLen = Math.min(32768, size);
+    const tailBuf = Buffer.alloc(tailLen);
+    await handle.read(tailBuf, 0, tailLen, size - tailLen);
+    const tailText = tailBuf.toString('latin1');
+    const sxIdx = tailText.lastIndexOf('startxref');
+    if (sxIdx < 0) return base;
+    const m = /(\d+)/.exec(tailText.slice(sxIdx + 9));
+    if (!m) return base;
+    const xrefOffset = Number(m[1]);
+    if (!Number.isFinite(xrefOffset) || xrefOffset < 0 || xrefOffset >= size) return base;
+    const chunkLen = Math.min(16384, size - xrefOffset);
+    const chunk = Buffer.alloc(chunkLen);
+    await handle.read(chunk, 0, chunkLen, xrefOffset);
+    const chunkText = chunk.toString('latin1');
+    // استریمِ xref: دیکشنری، همان دیکشنریِ تریلر است (<<...>> پیش
+    // از کلمهٔ stream). جدولِ کلاسیک: دیکشنری، پس از کلمهٔ trailer.
+    const dictIdx = chunkText.indexOf('<<');
+    const trailerIdx = chunkText.indexOf('trailer');
+    let dictText = null;
+    if (dictIdx >= 0 && (trailerIdx < 0 || dictIdx < trailerIdx)) {
+      dictText = extractBalancedDict(chunkText, dictIdx);
+    } else if (trailerIdx >= 0) {
+      const dIdx = chunkText.indexOf('<<', trailerIdx);
+      if (dIdx >= 0) dictText = extractBalancedDict(chunkText, dIdx);
+    }
+    if (!dictText) return base;
+    // /Encrypt، یا ارجاعِ غیرمستقیم است (N G R) یا دیکشنریِ
+    // مستقیم (<<). ‎/EncryptMetadata، با این الگو match نمی‌شود
+    // (پس از Encrypt، حرفِ M می‌آید، نه فاصله/عدد).
+    const hasEncrypt = /\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/.test(dictText);
+    return {
+      ...base,
+      protected: hasEncrypt,
+      reason: hasEncrypt ? 'encrypt-dict' : (base.readOnly ? 'read-only' : 'clean'),
+      hasEncryptToken: hasEncrypt,
+      conclusive: true,
+    };
+  } catch (err) {
+    logSaveDiag(logger, 'warn', 'pdf-probe-fast: tail parse failed, falling back to full probe', String((err && err.message) || err));
+    return base;
+  } finally {
+    if (handle) { try { await handle.close(); } catch (_) {} }
+  }
+}
+
+// پروبِ مسیری: اول سریع؛ فقط وقتی دمِ فایل خوانا نبود، پروبِ
+// کاملِ بایت‌محور (در ورکر، با هشدارهای مهارشده).
+async function probePdfProtectionForPath(filePath, logger, onProgress) {
+  if (typeof onProgress === 'function') { try { onProgress(0.02, 'در حالِ بررسیِ انتهایِ فایل…'); } catch (_) {} }
+  const fast = await probePdfProtectionFast(filePath, logger);
+  if (fast.conclusive) {
+    if (typeof onProgress === 'function') { try { onProgress(1, 'بررسیِ محافظت انجام شد.'); } catch (_) {} }
+    return fast;
+  }
+  const bytes = await fs.promises.readFile(filePath);
+  const full = await probePdfProtection(bytes, logger, onProgress);
+  return { ...full, readOnly: Boolean(fast.readOnly || full.readOnly), fast: false };
+}
+
+async function probePdfProtectionImpl(bytes, logger, onProgress) {
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
   let hasEncryptToken = false;
   try {
@@ -3016,59 +3414,85 @@ async function probePdfProtection(bytes, logger) {
     hasEncryptToken = /\/Encrypt\s+\d+\s+\d+\s+R/.test(tail) || /\/Encrypt\s*<</.test(tail);
   } catch (_) {}
   // تلاشِ اول: بارگذاریِ معمولی (بدونِ ignoreEncryption). فایلِ
-  // رمزگذاری‌شده، همین‌جا EncryptedPDFError می‌دهد.
+  // رمزگذاری‌شده، همین‌جا EncryptedPDFError می‌دهد. هشدارهای پارس،
+  // با رصدِ هشدار جمع می‌شوند و هرگز به ترمینال نمی‌رسند.
+  if (typeof onProgress === 'function') { try { onProgress(0.03, 'در حالِ بررسیِ ساختارِ فایل…'); } catch (_) {} }
+  let firstWarnings = [];
+  let firstInvalid = [];
   try {
-    const doc = await PDFDocument.load(buf, { ignoreEncryption: false, updateMetadata: false });
-    const present = trailerEncryptPresent(doc);
-    return {
-      protected: present,
-      reason: present ? 'encrypt-dict' : 'clean',
-      pageCount: safeProbePageCount(doc),
-      hasEncryptToken,
-      loadError: null,
-    };
+    const first = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: false });
+    firstWarnings = first.warnings || [];
+    firstInvalid = first.invalidObjects || [];
+    if (first.pdfDoc) {
+      const present = trailerEncryptPresent(first.pdfDoc);
+      if (firstInvalid.length > 0) {
+        logSaveDiag(logger, 'info', 'pdf-probe: clean load, invalid objects summarized',
+          'invalidObjects=' + firstInvalid.length + ' refs=' + firstInvalid.map((o) => o.num + ' ' + o.gen + ' R').join(', '));
+      }
+      return {
+        protected: present,
+        reason: present ? 'encrypt-dict' : 'clean',
+        pageCount: first.pageCount,
+        hasEncryptToken,
+        loadError: null,
+        invalidObjects: firstInvalid,
+        warningsCount: firstWarnings.length,
+      };
+    }
+    var firstLoadError = first.loadError;
   } catch (err) {
+    var firstLoadError = err;
+  }
+  {
+    const err = firstLoadError;
     const errText = String((err && err.message) || err);
     const errName = String((err && err.name) || '');
+    if (firstInvalid.length > 0) {
+      logSaveDiag(logger, 'info', 'pdf-probe: invalid objects summarized (load did not complete cleanly)',
+        'invalidObjects=' + firstInvalid.length + ' refs=' + firstInvalid.map((o) => o.num + ' ' + o.gen + ' R').join(', '));
+    }
     if (/encrypt/i.test(errName) || /encrypt/i.test(errText)) {
       // فقط شمارِ صفحه‌ها را هم با چشم‌پوشی از رمز بخوان تا
       // فراخواننده، اطلاعاتِ کامل‌تری داشته باشد (خودِ حفاظت،
       // همین‌جا قطعی است).
       let counted = -1;
       try {
-        const docCounted = await PDFDocument.load(buf, { ignoreEncryption: true, updateMetadata: false });
-        counted = safeProbePageCount(docCounted);
+        const countedLoad = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
+        counted = countedLoad.pageCount;
       } catch (_) {}
-      return { protected: true, reason: 'encrypted-error', pageCount: counted, hasEncryptToken, loadError: errText };
+      return { protected: true, reason: 'encrypted-error', pageCount: counted, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length };
     }
     // بارگذاری به دلیلِ دیگری شکست خورد (مثلاً آبجکتِ خراب)؛ با
     // ignoreEncryption دوباره امتحان کن تا ‎/Encrypt از خرابیِ
     // ساختاری، قابلِ تمایز بماند.
-    try {
-      const doc2 = await PDFDocument.load(buf, { ignoreEncryption: true, updateMetadata: false });
-      const present = trailerEncryptPresent(doc2);
-      return {
-        protected: present,
-        reason: present ? 'encrypt-dict' : 'load-failed-other',
-        pageCount: safeProbePageCount(doc2),
-        hasEncryptToken,
-        loadError: errText,
-      };
-    } catch (err2) {
-      logSaveDiag(logger, 'warn', 'pdf-probe: load failed even with ignoreEncryption', String((err2 && err2.message) || err2));
-      return { protected: hasEncryptToken, reason: 'unparseable', pageCount: -1, hasEncryptToken, loadError: errText };
+    {
+      const doc2Load = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
+      if (doc2Load.pdfDoc) {
+        const present = trailerEncryptPresent(doc2Load.pdfDoc);
+        return {
+          protected: present,
+          reason: present ? 'encrypt-dict' : 'load-failed-other',
+          pageCount: doc2Load.pageCount,
+          hasEncryptToken,
+          loadError: errText,
+          invalidObjects: doc2Load.invalidObjects || firstInvalid,
+          warningsCount: (doc2Load.warnings || []).length,
+        };
+      }
+      logSaveDiag(logger, 'warn', 'pdf-probe: load failed even with ignoreEncryption', String((doc2Load.loadError && doc2Load.loadError.message) || doc2Load.loadError));
+      return { protected: hasEncryptToken, reason: 'unparseable', pageCount: -1, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length };
     }
   }
 }
 
-async function extractPdfTextSample(pdfjsModule, bytes, logger) {
+async function extractPdfTextSample(pdfjsModule, bytes, logger, password) {
   // متنِ صفحهٔ اول و صفحهٔ میانی؛ خروجی، رشتهٔ نرمال‌شده.
   // اگر pdf.js نتواند سند را باز کند (رمزِ واقعی، خرابیِ ساختاری)،
   // خطا پرتاب می‌شود تا گیتِ متنی، کپی را رد کند — نه اینکه با
   // «skipped-unavailable» قبول شود. فقط نبودِ خودِ ماژولِ pdf.js
   // (خطای import در بیرونِ این تابع) باعثِ رد شدنِ گیت می‌شود.
   try {
-    const doc = await pdfjsModule.getDocument({ data: new Uint8Array(bytes), verbosity: 0 }).promise;
+    const doc = await pdfjsModule.getDocument({ data: new Uint8Array(bytes), verbosity: 0, password: typeof password === 'string' ? password : '' }).promise;
     try {
       const total = doc.numPages || 0;
       if (total <= 0) return '';
@@ -3107,13 +3531,14 @@ function loosePdfTextSample(text) {
   }
 }
 
-async function createUnlockedPdfCopy({ bytes, logger }) {
+async function createUnlockedPdfCopyImpl({ bytes, logger, onProgress, password }) {
   const { PDFDocument, PDFName } = getPdfLib();
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
   if (buf.length < 8 || buf.slice(0, 5).toString('latin1') !== '%PDF-') {
     return { success: false, error: 'بایت‌های ورودی، یک فایلِ PDF معتبر نیستند.' };
   }
-  const probe = await probePdfProtection(buf, logger);
+  if (typeof onProgress === 'function') { try { onProgress(0.05, 'در حالِ بررسیِ محافظتِ فایل…'); } catch (_) {} }
+  const probe = await probePdfProtection(buf, logger, onProgress);
   if (!probe.protected) {
     return { success: true, alreadyUnlocked: true, pageCount: probe.pageCount, textGate: 'not-needed' };
   }
@@ -3122,44 +3547,63 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
   // بارگذاری با رصدِ هشدار؛ اگر آبجکتِ خراب بود، ترمیمِ هم‌طولِ
   // مرحلهٔ ۷ ـ نهایی را هم امتحان کن (فقط وقتی ترمیم، بارگذاریِ
   // تمیز بدهد، مبنا عوض می‌شود).
+  if (typeof onProgress === 'function') { try { onProgress(0.2, 'در حالِ بارگذاریِ سند…'); } catch (_) {} }
   let load = await loadPdfDocumentWithWarnings(buf);
   let baseBytes = buf;
   let healed = false;
   if ((!load.pdfDoc || load.invalidObjects.length > 0) && load.invalidObjects.length > 0) {
     try {
-      const healedBuf = healUnparseableIndirectObjectsInBuffer(buf, load.invalidObjects);
-      if (healedBuf) {
-        const recheck = await loadPdfDocumentWithWarnings(healedBuf);
+      // اصلاحِ نهایی: heal، شیءِ {buffer, healedRefs} برمی‌گرداند،
+      // نه Buffer؛ نسخهٔ قبلی، خودِ شیء را به‌عنوانِ بایت پاس
+      // می‌داد و ترمیم، همیشه بی‌اثر می‌ماند.
+      const healResult = healUnparseableIndirectObjectsInBuffer(buf, load.invalidObjects);
+      if (healResult && healResult.buffer) {
+        const recheck = await loadPdfDocumentWithWarnings(healResult.buffer);
         if (recheck.pdfDoc && !recheck.loadError && recheck.invalidObjects.length === 0 && recheck.pageCount > 0) {
           load = recheck;
-          baseBytes = healedBuf;
+          baseBytes = healResult.buffer;
           healed = true;
         }
       }
     } catch (_) {}
   }
+  // خطِ مبنای خرابی: شمارِ آبجکت‌های غیرقابل‌پارسِ ورودی، پس از
+  // تصمیمِ ترمیم. آبجکت‌های نامعتبر، در خروجیِ pdf-lib دقیقاً با
+  // همان بایت‌های خام، دور می‌زنند؛ پس گیتِ خروجی، «صفر» نیست،
+  // بلکه «بیشتر از خطِ مبنا نشود» است (همان منطقِ اعتبارسنجیِ
+  // افزایشیِ مرحلهٔ ۷ ـ نهایی).
+  const baselineInvalidCount = (load.invalidObjects || []).length;
   if (!load.pdfDoc) {
     return { success: false, error: 'بازسازیِ نسخهٔ بدونِ قفل انجام نشد؛ فایل، حتی با چشم‌پوشی از رمز هم بارگذاری نمی‌شود.' };
   }
   const doc = load.pdfDoc;
-  // اگر بایت‌های پایه هنوز آبجکتِ غیرقابل‌پارس دارند، مدلِ
-  // پارس‌شده قابلِ اعتماد نیست و ترکیبِ «خرابیِ ساختاری + رمز»،
-  // با پیامِ صریح رد می‌شود.
-  if (load.invalidObjects.length > 0) {
-    return { success: false, error: 'فایل، هم خرابیِ ساختاری دارد و هم محافظت‌شده است؛ ساختِ نسخهٔ بدونِ قفلِ امن ممکن نیست.' };
+  // اصلاحِ نهایی: آبجکت‌های غیرقابل‌پارس، به‌تنهایی رد نمی‌شوند.
+  // pdf.js همین فایل را باز می‌کند و PDFInvalidObject، بایت‌های
+  // خام را دست‌نخورده دور می‌زند؛ ردِ کلی، دقیقاً همان «ساختِ کپی
+  // ممکن نیست»ِ گزارش‌شده روی فایلِ ۶۸ مگابایتی بود. گیت‌های
+  // واقعی، پایین‌تر باقی‌اند: شمارِ صفحه‌ها، نبودِ /Encrypt،
+  // «خروجی، خراب‌تر از ورودی نشود» و گیتِ متنیِ pdf.js.
+  if (baselineInvalidCount > 0) {
+    logSaveDiag(logger, 'warn', 'pdf-copy: proceeding with unparseable objects (baseline)',
+      'baselineInvalidObjects=' + baselineInvalidCount + ' refs=' + (load.invalidObjects || []).map((o) => o.num + ' ' + o.gen + ' R').join(', '));
   }
   // رمزگشایی با رمزِ خالی، پیش از حذفِ ‎/Encrypt: اگر محتوا واقعاً
   // رمز شده باشد، آبجکت‌ها همین‌جا به بایت‌های خوانا برمی‌گردند؛
   // اگر رمزِ عبورِ واقعی لازم باشد یا نسخهٔ رمز پشتیبانی نشود،
   // با پیامِ صریح رد می‌شود و هیچ‌چیز نوشته نمی‌شود.
+  if (typeof onProgress === 'function') { try { onProgress(0.5, 'در حالِ رمزگشایی با رمزِ خالی…'); } catch (_) {} }
+  let decryptOutcomeForGate = null;
   try {
-    decryptEncryptedDocument(doc, logger);
+    decryptOutcomeForGate = decryptEncryptedDocument(doc, logger, password);
   } catch (err) {
+    // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: ردِ رمزگشایی، کددار
+    // برمی‌گردد تا ورکر بتواند برای فایل‌های ObjStm/AES-256، به
+    // کپیِ باینری بیفتد (به‌جای خطای «نمی‌تواند کپی بسازد»).
     if (err && err.code === 'PDF_COPY_PASSWORD_REQUIRED') {
-      return { success: false, error: String(err.message) };
+      return { success: false, code: err.code, error: String(err.message) };
     }
     if (err && err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION') {
-      return { success: false, error: String(err.message) };
+      return { success: false, code: err.code, error: String(err.message) };
     }
     return { success: false, error: 'رمزگشاییِ فایل انجام نشد: ' + String((err && err.message) || err) };
   }
@@ -3180,6 +3624,7 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
     if (trailer && typeof trailer.delete === 'function') trailer.delete(PDFName.of('Encrypt'));
   } catch (_) {}
 
+  if (typeof onProgress === 'function') { try { onProgress(0.72, 'در حالِ نوشتنِ نسخهٔ بدونِ قفل…'); } catch (_) {} }
   let outBytes;
   try {
     outBytes = await doc.save({ useObjectStreams: false });
@@ -3189,7 +3634,8 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
   const outBuf = Buffer.from(outBytes);
 
   // اعتبارسنجیِ ساختاری: بارگذاریِ دوباره، شمارِ صفحه‌ها + نبودِ
-  // /Encrypt + صفر آبجکتِ نامعتبر.
+  // /Encrypt + «خراب‌تر از خطِ مبنا نشود».
+  if (typeof onProgress === 'function') { try { onProgress(0.85, 'در حالِ اعتبارسنجیِ نسخهٔ ساخته‌شده…'); } catch (_) {} }
   const check = await loadPdfDocumentWithWarnings(outBuf);
   if (check.loadError || !check.pdfDoc) {
     return { success: false, error: 'نسخهٔ ساخته‌شده، دوباره بارگذاری نشد و رد شد؛ فایلِ اصلی دست نخورده است.' };
@@ -3201,19 +3647,31 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
   if (trailerEncryptPresent(check.pdfDoc)) {
     return { success: false, error: 'حذفِ قفلِ /Encrypt از خروجی انجام نشد؛ کپی رد شد.' };
   }
+  if (check.invalidObjects.length > baselineInvalidCount) {
+    return { success: false, error: 'نسخهٔ ساخته‌شده (' + check.invalidObjects.length + ' آبجکتِ غیرقابل‌پارس) از فایلِ اصلی (' + baselineInvalidCount + ') خراب‌تر است؛ کپی رد شد.' };
+  }
   if (check.invalidObjects.length > 0) {
-    return { success: false, error: 'نسخهٔ ساخته‌شده، آبجکتِ غیرقابل‌پارس دارد؛ کپی رد شد.' };
+    logSaveDiag(logger, 'warn', 'pdf-copy: output keeps baseline invalid objects (round-tripped verbatim)',
+      'outputInvalidObjects=' + check.invalidObjects.length + ' baseline=' + baselineInvalidCount);
   }
 
   // گیتِ متنیِ pdf.js: اگر متنِ اصلی (رمزگشایی‌شده با رمزِ خالی)
   // با متنِ کپی نخواند، یعنی محتوای استریم‌ها واقعاً رمز شده و
   // کپی، فقط بایت‌های رمز را بدونِ /Encrypt دارد → رد.
   let textGate = 'skipped-unavailable';
+  if (typeof onProgress === 'function') { try { onProgress(0.94, 'در حالِ بررسیِ محتوای نسخهٔ ساخته‌شده…'); } catch (_) {} }
   try {
     const pdfjsModule = await import('pdfjs-dist/legacy/build/pdf.mjs');
     let origText;
     try {
-      origText = await extractPdfTextSample(pdfjsModule, baseBytes, logger);
+      // مرحله ۹: متنِ اصلی باید با رمزِ «مؤثر» خوانده شود: رمزی
+      // که واقعاً قفل را باز کرد (رمزِ کاربر، یا رمزِ مشتق‌شده از
+      // رمزِ مالک). خواندن با رمزِ خامِ ورودی، برای فایل‌های
+      // user-secret/owner-empty در pdf.js شکست می‌خورد.
+      const gatePassword = (decryptOutcomeForGate && typeof decryptOutcomeForGate.effectivePassword === 'string')
+        ? decryptOutcomeForGate.effectivePassword
+        : (typeof password === 'string' ? password : '');
+      origText = await extractPdfTextSample(pdfjsModule, baseBytes, logger, gatePassword);
     } catch (err) {
       // pdf.js نمی‌تواند فایلِ اصلی را با رمزِ خالی باز کند → کپی،
       // قابل‌اعتماد نیست؛ رد می‌شود (نه skip).
@@ -3241,6 +3699,7 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
     logSaveDiag(logger, 'warn', 'pdf-copy: text gate skipped (pdf.js import failed)', String((err && err.message) || err));
   }
 
+  if (typeof onProgress === 'function') { try { onProgress(1, 'نسخهٔ کپی آماده است.'); } catch (_) {} }
   return {
     success: true,
     alreadyUnlocked: false,
@@ -3248,7 +3707,272 @@ async function createUnlockedPdfCopy({ bytes, logger }) {
     pageCount: checkCount,
     healed,
     textGate,
+    baselineInvalidObjects: baselineInvalidCount,
+    outputInvalidObjects: check.invalidObjects.length,
   };
 }
 
-module.exports = { saveAnnotatedPdf, origBackupPathFor, healUnparseableIndirectObjectsInBuffer, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy };
+
+// =========================================================================
+// مرحله ۹ — خنثی‌سازیِ «رمزِ صوری» و آماده‌سازیِ خواندنِ فایل‌های محافظت‌شده
+// =========================================================================
+
+// خنثی‌سازیِ هم‌طولِ ورودیِ /Encrypt در دیکشنریِ تریلر (و دیکشنریِ
+// استریمِ xref): بایت‌های «/Encrypt <مقدار>» با فاصله (0x20) پر
+// می‌شوند تا طولِ فایل و همهٔ آفست‌ها دقیقاً سرِ جایشان بمانند.
+// فقط ورودی‌هایی خنثی می‌شوند که در بافتِ تریلر/xref باشند؛
+///Encryptِ داخلِ دادهٔ استریم‌ها دست نمی‌خورد. راستی‌آزماییِ
+// verifyNeutralizedBytes، تنها مرجعِ قبولِ نتیجه است.
+function neutralizeEncryptTrailer(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? Buffer.from(bytes) : Buffer.from(bytes || []);
+  const text = buf.toString('latin1');
+  let count = 0;
+  let searchFrom = 0;
+  while (true) {
+    const idx = text.indexOf('/Encrypt', searchFrom);
+    if (idx < 0) break;
+    searchFrom = idx + 8;
+    let j = idx + 8;
+    while (j < text.length && (text[j] === ' ' || text[j] === '\t' || text[j] === '\r' || text[j] === '\n' || text[j] === '\0' || text[j] === '\f')) j++;
+    let end = -1;
+    if (text[j] === '<' && text[j + 1] === '<') {
+      let depth = 0;
+      let k = j;
+      while (k < text.length) {
+        if (text[k] === '<' && text[k + 1] === '<') { depth++; k += 2; continue; }
+        if (text[k] === '>' && text[k + 1] === '>') { depth--; k += 2; if (depth === 0) break; continue; }
+        k++;
+      }
+      if (depth === 0) end = k;
+    } else {
+      const m = /^(\d+)\s+(\d+)\s+R/.exec(text.slice(j));
+      if (m) end = j + m[0].length;
+    }
+    if (end < 0) continue;
+    const winStart = Math.max(0, idx - 4096);
+    const before = text.slice(winStart, idx);
+    const lastStream = before.lastIndexOf('stream');
+    const lastEndStream = before.lastIndexOf('endstream');
+    const lastTrailer = before.lastIndexOf('trailer');
+    const lastObjStart = before.lastIndexOf(' obj');
+    const isXrefDict = /\/Type\s*\/XRef/.test(text.slice(Math.max(0, idx - 512), idx));
+    const inTrailer = lastTrailer > lastStream && lastTrailer > lastEndStream;
+    const inXrefStreamDict = isXrefDict && lastObjStart > lastStream && lastObjStart > lastEndStream;
+    if (!inTrailer && !inXrefStreamDict) continue;
+    buf.fill(0x20, idx, end);
+    count++;
+  }
+  return { bytes: buf, count };
+}
+
+let cachedPdfJsForVerify = null;
+async function getPdfJsForVerify() {
+  if (cachedPdfJsForVerify) return cachedPdfJsForVerify;
+  cachedPdfJsForVerify = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  return cachedPdfJsForVerify;
+}
+
+// راستی‌آزماییِ بایت‌های خنثی‌شده با pdf.js (نه pdf-lib): فایل باید
+// باز شود، شمارِ صفحه با شمارِ ساختاری برابر باشد، و دست‌کم یک صفحهٔ
+// نمونه، فهرستِ عملگرِ ناتهی داشته باشد. برای فایلِ واقعاً رمزدار،
+// استریم‌ها رمزگشایی نمی‌شوند و فهرستِ عملگر، خالی می‌ماند (اثباتِ
+// تجربی: ghost=11 عملگر، real-encrypted=0).
+async function verifyNeutralizedBytes(bytes, expectedPageCount, logger) {
+  let pdfjsModule;
+  try {
+    pdfjsModule = await getPdfJsForVerify();
+  } catch (err) {
+    return { ok: false, reason: 'pdfjs-unavailable' };
+  }
+  let task = null;
+  try {
+    task = pdfjsModule.getDocument({ data: new Uint8Array(bytes), verbosity: 0 });
+    const doc = await task.promise;
+    const total = doc.numPages || 0;
+    if (total <= 0 || (expectedPageCount > 0 && total !== expectedPageCount)) {
+      return { ok: false, reason: 'page-count-mismatch', pageCount: total };
+    }
+    const wanted = Array.from(new Set([1, Math.floor(total / 2) + 1, total])).filter((n) => n >= 1 && n <= total);
+    let anyOps = false;
+    for (const pno of wanted) {
+      try {
+        const page = await doc.getPage(pno);
+        const ops = await page.getOperatorList();
+        if (ops && ops.fnArray && ops.fnArray.length > 0) { anyOps = true; break; }
+      } catch (_) { /* صفحهٔ نمونهٔ بعد */ }
+    }
+    return { ok: anyOps, reason: anyOps ? 'verified' : 'no-decodable-content', pageCount: total };
+  } catch (err) {
+    return { ok: false, reason: 'pdfjs-load-failed', detail: String((err && err.message) || err) };
+  } finally {
+    if (task && typeof task.destroy === 'function') {
+      try { await task.destroy(); } catch (_) {}
+    }
+  }
+}
+
+// تلاشِ خنثی‌سازیِ صوری روی بایت‌های پایه: خروجی، سندِ pdf-libِ
+// بارگذاری‌شده از بایت‌های خنثی‌شده است، یا null اگر راستی‌آزمایی
+// رد شد.
+async function tryGhostNeutralizedBase(baseBytes, expectedPageCount, logger) {
+  const neutralized = neutralizeEncryptTrailer(baseBytes);
+  if (neutralized.count <= 0) return null;
+  const load = await loadPdfDocumentWithWarnings(neutralized.bytes);
+  if (!load.pdfDoc) return null;
+  const verified = await verifyNeutralizedBytes(neutralized.bytes, expectedPageCount, logger);
+  if (!verified.ok) {
+    logSaveDiag(logger, 'info', 'ghost neutralization rejected by pdf.js verification', String(verified.reason || ''));
+    return null;
+  }
+  return { bytes: neutralized.bytes, pdfDoc: load.pdfDoc, invalidCount: load.invalidObjects.length };
+}
+
+function preparedCacheKey({ size, mtimeMs, bytes }) {
+  const head = bytes.subarray(0, Math.min(bytes.length, 1048576));
+  const tail = bytes.subarray(Math.max(0, bytes.length - 1048576));
+  return nodeCrypto.createHash('sha256')
+    .update(Buffer.from(String(size) + ':' + String(mtimeMs) + ':'))
+    .update(head)
+    .update(tail)
+    .digest('hex');
+}
+
+// مرحله ۹: کلیدِ کشِ «unlocked» به رمز وابسته است: کشی که با رمزِ
+// غیرخالی ساخته شده، فقط با همان رمز برگردانده می‌شود تا کشِ
+// ماندگار، به حافظهٔ دائمیِ رمز تبدیل نشود (رمز، فقط در نشست
+// می‌ماند). اثرِ انگشت، هشِ رمز است، نه خودِ رمز. کشِ «ghost»
+// به رمز وابسته نیست، چون استریم‌ها اصلاً رمزنگاری نشده‌اند و
+// رازی در کار نیست.
+function preparedUnlockedCacheKey(identityKey, password) {
+  const pwBytes = passwordToBytes(password);
+  if (!identityKey || !pwBytes || pwBytes.length === 0 || !nodeCrypto) return identityKey;
+  const fp = nodeCrypto.createHash('sha256').update(pwBytes).digest('hex').slice(0, 16);
+  return identityKey + '-' + fp;
+}
+
+async function writePreparedCache({ cacheDir, cacheKey, kind, outBytes, logger }) {
+  if (!cacheDir || !nodeCrypto) return null;
+  try {
+    await fs.promises.mkdir(cacheDir, { recursive: true });
+    const target = path.join(cacheDir, cacheKey + '.' + kind + '.pdf');
+    await atomicWriteFile(target, Buffer.from(outBytes));
+    return target;
+  } catch (err) {
+    logSaveDiag(logger, 'warn', 'prepare: cache write failed', String((err && err.message) || err));
+    return null;
+  }
+}
+
+// مرحله ۹ — لایهٔ ۱: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده، در
+// بک‌اند و با راستی‌آزماییِ کامل. ترتیب، عمداً: (الف) رمزِ صوری،
+// (ب) رمزگشایی با رمزِ داده‌شده/خالی (شاملِ مشتقِ مالک)، (ج) نیازِ
+// رمز. هیچ‌وقت /Encryptِ نیمه‌کاره برنمی‌گردد و هیچ‌وقت فایلِ اصلی
+// دست نمی‌خورد؛ خروجی، همیشه یک فایلِ کشِ کامل و راستی‌آزمایی‌شده
+// است.
+async function prepareProtectedPdfForReadingImpl(args) {
+  const { filePath, password, cacheDir, logger, onProgress } = args || {};
+  const progress = (f, label) => { try { if (typeof onProgress === 'function') onProgress(f, label); } catch (_) {} };
+  if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
+    return { status: 'error', reason: 'file-missing', pageCount: -1 };
+  }
+  progress(0.05, 'خواندنِ فایل…');
+  const stat = fs.statSync(filePath);
+  // مرحله ۹: میان‌برِ کش — اگر فایلِ آماده‌ای با همین هش (اندازه +
+  // mtime + سر/دمِ ۱ مگابایتی) از قبل ساخته و راستی‌آزمایی شده،
+  // بدونِ خواندنِ کاملِ فایل و بدونِ پارسِ دوباره برگردان. این،
+  // فراخوانی‌های تکراریِ prepare (کاورها، بارگذاریِ دوباره) را از
+  // چند ثانیه به چند میلی‌ثانیه می‌رساند. کشِ unlocked، به رمزِ
+  // همین فراخوان وابسته است (بالا را ببین).
+  let cacheKeyEarly = null;
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const headLen = Math.min(stat.size, 1048576);
+      const headBuf = Buffer.alloc(headLen);
+      if (headLen > 0) fs.readSync(fd, headBuf, 0, headLen, 0);
+      const tailLen = Math.min(stat.size, 1048576);
+      const tailBuf = Buffer.alloc(tailLen);
+      if (tailLen > 0) fs.readSync(fd, tailBuf, 0, tailLen, Math.max(0, stat.size - tailLen));
+      cacheKeyEarly = preparedCacheKey({ size: stat.size, mtimeMs: stat.mtimeMs, bytes: Buffer.concat([headBuf, tailBuf]) });
+    } finally {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  } catch (_) { cacheKeyEarly = null; }
+  const unlockedCacheKeyEarly = cacheKeyEarly
+    ? preparedUnlockedCacheKey(cacheKeyEarly, password)
+    : null;
+  if (cacheKeyEarly && cacheDir) {
+    const cacheCandidates = [
+      { kind: 'ghost', key: cacheKeyEarly, status: 'ghost-neutralized' },
+      { kind: 'unlocked', key: unlockedCacheKeyEarly, status: 'unlocked-copy' },
+    ];
+    for (const cand of cacheCandidates) {
+      if (!cand.key) continue;
+      try {
+        const cachedPath = path.join(cacheDir, cand.key + '.' + cand.kind + '.pdf');
+        const cachedStat = fs.statSync(cachedPath);
+        if (cachedStat.isFile() && cachedStat.size > 8) {
+          progress(1, 'تمام شد.');
+          return { status: cand.status, path: cachedPath, pageCount: -1 };
+        }
+      } catch (_) { /* کشِ بعدی */ }
+    }
+  }
+  const bytes = await fs.promises.readFile(filePath);
+  progress(0.2, 'بررسیِ ساختار…');
+  const first = await loadPdfDocumentWithWarnings(bytes);
+  if (!first.pdfDoc) {
+    return { status: 'error', reason: 'unparseable', pageCount: -1 };
+  }
+  const pageCount = first.pdfDoc.getPageCount();
+  if (!trailerEncryptPresent(first.pdfDoc)) {
+    return { status: 'original-ok', path: filePath, pageCount };
+  }
+  progress(0.4, 'بررسیِ رمزِ صوری…');
+  const ghost = await tryGhostNeutralizedBase(bytes, pageCount, logger);
+  if (ghost) {
+    const cacheKey = cacheKeyEarly || preparedCacheKey({ size: stat.size, mtimeMs: stat.mtimeMs, bytes });
+    const cachePath = await writePreparedCache({ cacheDir, cacheKey, kind: 'ghost', outBytes: ghost.bytes, logger });
+    progress(1, 'تمام شد.');
+    if (cachePath) return { status: 'ghost-neutralized', path: cachePath, pageCount };
+    return { status: 'error', reason: 'cache-write-failed', pageCount };
+  }
+  progress(0.7, 'رمزگشایی…');
+  try {
+    const copy = await createUnlockedPdfCopyImpl({
+      bytes,
+      logger,
+      password: typeof password === 'string' ? password : '',
+      onProgress: (f) => progress(0.7 + 0.25 * (typeof f === 'number' ? f : 0), 'رمزگشایی…'),
+    });
+    if (copy && copy.success && copy.bytes) {
+      const identityKey = cacheKeyEarly || preparedCacheKey({ size: stat.size, mtimeMs: stat.mtimeMs, bytes });
+      const cacheKey = preparedUnlockedCacheKey(identityKey, password);
+      const cachePath = await writePreparedCache({ cacheDir, cacheKey, kind: 'unlocked', outBytes: copy.bytes, logger });
+      progress(1, 'تمام شد.');
+      if (cachePath) return { status: 'unlocked-copy', path: cachePath, pageCount: copy.pageCount || pageCount };
+      return { status: 'error', reason: 'cache-write-failed', pageCount };
+    }
+    if (copy && copy.code === 'PDF_COPY_PASSWORD_REQUIRED') {
+      return { status: 'password-required', pageCount, reason: 'password-required' };
+    }
+    if (copy && copy.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION') {
+      return { status: 'password-required', pageCount, reason: 'unsupported-encryption' };
+    }
+    return { status: 'password-required', pageCount, reason: 'decrypt-failed' };
+  } catch (err) {
+    if (err && err.code === 'PDF_COPY_PASSWORD_REQUIRED') {
+      return { status: 'password-required', pageCount, reason: 'password-required' };
+    }
+    if (err && err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION') {
+      return { status: 'password-required', pageCount, reason: 'unsupported-encryption' };
+    }
+    logSaveDiag(logger, 'warn', 'prepare: decrypt attempt failed', String((err && err.message) || err));
+    return { status: 'password-required', pageCount, reason: 'decrypt-failed' };
+  }
+}
+async function prepareProtectedPdfForReading(args) {
+  return withSilencedPdfLibWarnings(() => prepareProtectedPdfForReadingImpl(args));
+}
+
+module.exports = { saveAnnotatedPdf, origBackupPathFor, healUnparseableIndirectObjectsInBuffer, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes };

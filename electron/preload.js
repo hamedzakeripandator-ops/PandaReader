@@ -108,11 +108,27 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('check-pdf-protection', { filePath: filePath.trim() });
   },
 
-  createUnlockedPdfCopy: (filePath) => {
+  createUnlockedPdfCopy: (filePath, password) => {
     if (!filePath || typeof filePath !== 'string') {
       return Promise.resolve({ success: false, error: 'مسیر فایل مشخص نشده است.' });
     }
-    return ipcRenderer.invoke('create-unlocked-pdf-copy', { filePath: filePath.trim() });
+    return ipcRenderer.invoke('create-unlocked-pdf-copy', { filePath: filePath.trim(), password: typeof password === 'string' ? password : '' });
+  },
+
+  // مرحله ۹ — لایهٔ ۱: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده
+  // (رمزِ صوری / رمزگشایی با رمزِ نشست / نیازِ رمز). رمزِ عبور، فقط
+  // برای این فراخوانی به پروسهٔ اصلی می‌رود و هیچ‌جا ذخیره نمی‌شود.
+  prepareProtectedPdfForReading: (filePath, password) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ status: 'error', reason: 'file-missing', pageCount: -1 });
+    }
+    return ipcRenderer.invoke('prepare-protected-pdf-for-reading', { filePath: filePath.trim(), password: typeof password === 'string' ? password : '' });
+  },
+
+  // مرحله ۸ ـ اصلاحِ نهایی: لغوِ ساختِ نسخهٔ کپی (کارهای فعالِ
+  // همین رندرر خاتمه می‌یابند).
+  cancelPdfCopy: () => {
+    return ipcRenderer.invoke('cancel-pdf-copy');
   },
 
   exportBackup: () => {
@@ -151,6 +167,29 @@ contextBridge.exposeInMainWorld('api', {
     return () => {
       try {
         ipcRenderer.removeListener('extraction-progress', subscription);
+      } catch (_) {}
+    };
+  },
+
+  // مرحله ۸ ـ اصلاحِ نهایی: پیشرفتِ پروب/کپیِ PDF (ورکرِ جدا).
+  // الگو، همان onExtractionProgress است: اشتراک + تابعِ لغوِ
+  // اشتراک، بدونِ نشتِ شنونده.
+  onPdfCopyProgress: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+
+    const subscription = (event, progress) => {
+      try {
+        callback(progress);
+      } catch (err) {
+        console.error('PDF copy progress listener error:', err);
+      }
+    };
+
+    ipcRenderer.on('pdf-copy-progress', subscription);
+
+    return () => {
+      try {
+        ipcRenderer.removeListener('pdf-copy-progress', subscription);
       } catch (_) {}
     };
   },

@@ -1,0 +1,226 @@
+// مرحله ۸ ـ اصلاحِ نهایی: ورکرِ پروب/کپیِ PDFهای محافظت‌شده.
+//
+// چرا ورکر؟ پروب و ساختِ کپی روی فایلِ ۶۸ مگابایتی، چند پارسِ
+// کاملِ pdf-lib + رمزگشایی + سریال‌سازیِ کامل + دو استخراجِ متنِ
+// pdf.js را پشتِ سرِ هم در پروسهٔ اصلی انجام می‌دادند و حلقهٔ
+// رویدادِ Electron را برای ده‌ها ثانیه قفل می‌کردند (هنگِ ظاهریِ
+// برنامه روی CPUهای قدیمی). این ورکر، همان منطقِ saver را در یک
+// worker_thread جدا اجرا می‌کند؛ پروسهٔ اصلی، فقط پیشرفت را به
+// رندرر می‌رساند و نامِ نهایی را تغییر می‌دهد.
+//
+// قراردادِ پیام‌ها (از والد):
+//   { type: 'probe', filePath }
+//   { type: 'copy', filePath, tempPath, password }
+//   { type: 'prepare', filePath, password, cacheDir }
+// پیام‌های خروجی:
+//   { type: 'progress', stage, fraction, label }
+//   { type: 'log', level, message, detail }
+//   { type: 'done', result }   — result همان خروجیِ saver است؛ در
+//                               حالتِ کپیِ موفق، بایت‌ها در tempPath
+//                               نوشته شده‌اند و result.tempPath دارد.
+//   { type: 'error', message }
+//
+// این ورکر، هرگز electron را require نمی‌کند (مثلِ fileExtractor.js).
+// لاگرِ دیسک، مستقیم در ورکر ساخته نمی‌شود تا حالتِ Portable و
+// COMIC_READER_DATA_DIR، فقط در پروسهٔ اصلی حل شوند؛ خط‌های لاگ،
+// به والد فرستاده می‌شوند و والد با getIpcLogger می‌نویسد. saver،
+// فقط به شیئی با متدهای info/warn/error نیاز دارد.
+'use strict';
+
+const { parentPort } = require('worker_threads');
+const fs = require('fs');
+const path = require('path');
+
+let saver = null;
+try {
+  saver = require('../services/pdfAnnotationSaver');
+} catch (err) {
+  if (parentPort) {
+    parentPort.postMessage({ type: 'error', message: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد: ' + String((err && err.message) || err) });
+  }
+}
+
+function postProgress(stage, fraction, label) {
+  try {
+    if (parentPort) parentPort.postMessage({ type: 'progress', stage, fraction, label: String(label || '') });
+  } catch (_) {}
+}
+
+function makeLogger() {
+  const send = (level, message, detail) => {
+    try {
+      if (parentPort) {
+        parentPort.postMessage({
+          type: 'log',
+          level,
+          message: String(message),
+          detail: detail === undefined || detail === null ? '' : String(detail && detail.stack ? detail.stack : detail),
+        });
+      }
+    } catch (_) {}
+  };
+  return {
+    info(message, detail) { send('info', message, detail); },
+    warn(message, detail) { send('warn', message, detail); },
+    error(message, detail) { send('error', message, detail); },
+  };
+}
+
+// مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: پروبِ مسیریِ فوق‌سریع —
+// فقط دمِ فایل خوانده می‌شود (۳۲ کیلوبایت)، نه کلِ فایل؛ پس
+// پروبِ فایلِ ۶۸ مگابایتی هم چند میلی‌ثانیه است و هیچ PDFDocument
+// .loadای در کار نیست (مگر وقتی دمِ فایل خوانا نباشد).
+async function handleProbe(filePath) {
+  const result = await saver.probePdfProtectionForPath(filePath, makeLogger(), (fraction, label) => {
+    postProgress('probe', fraction, label);
+  });
+  postProgress('probe-done', 1, 'بررسیِ محافظت انجام شد.');
+  return {
+    protected: Boolean(result && result.protected),
+    readOnly: Boolean(result && result.readOnly),
+    reason: (result && result.reason) || 'unknown',
+    pageCount: (result && result.pageCount) || -1,
+    hasEncryptToken: Boolean(result && result.hasEncryptToken),
+    fast: Boolean(result && result.fast),
+    invalidObjects: Array.isArray(result && result.invalidObjects) ? result.invalidObjects.length : 0,
+    warningsCount: (result && result.warningsCount) || 0,
+  };
+}
+
+// آستانهٔ پرامپت: فایل‌های بالای ۱۵ مگابایت، مسیرِ رمزگشایی را
+// نمی‌روند؛ مستقیم کپیِ باینری می‌شوند.
+const COPY_DECRYPT_MAX_BYTES = 15 * 1024 * 1024;
+
+async function handleCopy(filePath, tempPath, password) {
+  // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: تصمیمِ مسیر، پیش از هر
+  // پارسِ سنگینی، با پروبِ سریع + اندازه گرفته می‌شود:
+  //   • نه قفل، نه فقط‌خواندنی → alreadyUnlocked (بدونِ خواندنِ فایل).
+  //   • قفل‌دار و ≤۱۵ مگابایت → مسیرِ رمزگشایی؛ اگر رمزگشایی
+  //     ذاتاً ممکن نبود (ObjStm/AES-256/رمزِ واقعی) → کپیِ باینری.
+  //   • بقیه (بزرگ، یا فقط‌خواندنیِ بدونِ قفل) → کپیِ باینریِ
+  //     فوری با copyFile. کپیِ باینری، «باز کردنِ قفل» نیست —
+  //     بایت‌به‌بایت همان فایل است؛ ذخیره روی آن، در
+  //     saveAnnotatedPdf با «رمزگشایی-اول» انجام می‌شود (به گزارش
+  //     مراجعه کنید) و فقط برای فایل‌های ذاتاً رمزگشایی‌ناپذیر،
+  //     با پیامِ راهنما رد می‌شود.
+  const stat = await fs.promises.stat(filePath);
+  const size = stat.size;
+  const probe = await saver.probePdfProtectionForPath(filePath, makeLogger(), (fraction, label) => {
+    postProgress('copy-probe', fraction * 0.05, label);
+  });
+  postProgress('copy-probe', 0.05, 'بررسیِ محافظت انجام شد.');
+  if (!probe.protected && !probe.readOnly) {
+    return { success: true, alreadyUnlocked: true, pageCount: probe.pageCount, textGate: 'not-needed' };
+  }
+  if (probe.protected && size <= COPY_DECRYPT_MAX_BYTES) {
+    const bytes = await fs.promises.readFile(filePath);
+    postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل…');
+    const result = await saver.createUnlockedPdfCopy({
+      bytes,
+      logger: makeLogger(),
+      password: typeof password === 'string' ? password : '',
+      onProgress: (fraction, label) => { postProgress('copy', 0.08 + fraction * 0.85, label); },
+    });
+    if (result && result.success) {
+      const done = await writeCopyTemp(result, tempPath);
+      if (done && done.tempPath) postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
+      if (done) return done;
+      return result;
+    }
+    if (result && (result.code === 'PDF_COPY_PASSWORD_REQUIRED' || result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+      // رمزگشایی ذاتاً ممکن نیست → به کپیِ باینری بیفت (پرامپت،
+      // مسیرِ دوم)؛ خطای «نمی‌تواند کپی بسازد» دیگر صادر نمی‌شود.
+      postProgress('copy-fallback', 0.1, 'رمزگشایی ممکن نیست؛ کپیِ باینری ساخته می‌شود…');
+    } else {
+      return result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' };
+    }
+  }
+  // مسیرِ کپیِ باینری: ناهمگام، بدونِ پارس، بدونِ هنگ.
+  postProgress('copy-binary', 0.1, 'در حالِ ساختِ کپیِ باینری…');
+  await fs.promises.copyFile(filePath, tempPath);
+  const tempStat = await fs.promises.stat(tempPath);
+  if (tempStat.size !== size) {
+    throw new Error('کپیِ باینری ناقص نوشته شد (' + tempStat.size + ' از ' + size + ' بایت).');
+  }
+  postProgress('copy-binary', 1, 'نسخهٔ کپی آماده است.');
+  return {
+    success: true,
+    alreadyUnlocked: false,
+    binaryCopy: true,
+    stillEncrypted: Boolean(probe.protected),
+    readOnlyCopy: Boolean(probe.readOnly),
+    pageCount: -1,
+    textGate: 'skipped-binary-copy',
+    tempPath,
+  };
+}
+
+// مرحله ۹ — لایهٔ ۱ در ورکر: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده
+// (رمزِ صوری → رمزگشایی با رمزِ نشست → نیازِ رمز)، با همان
+// راستی‌آزماییِ saver. خروجی، مسیرِ فایلِ کش است؛ بایت‌ها هرگز از
+// ورکر به پروسهٔ اصلی برنمی‌گردند.
+async function handlePrepare(filePath, password, cacheDir) {
+  const result = await saver.prepareProtectedPdfForReading({
+    filePath,
+    password: typeof password === 'string' ? password : '',
+    cacheDir: typeof cacheDir === 'string' ? cacheDir : '',
+    logger: makeLogger(),
+    onProgress: (fraction, label) => { postProgress('prepare', fraction, label); },
+  });
+  postProgress('prepare-done', 1, 'آماده‌سازی انجام شد.');
+  return {
+    status: result.status,
+    path: result.path || null,
+    pageCount: typeof result.pageCount === 'number' ? result.pageCount : -1,
+    reason: result.reason || null,
+  };
+}
+
+async function writeCopyTemp(result, tempPath) {
+  if (result.alreadyUnlocked || !result.bytes) {
+    // فایل، قفلِ فعالی ندارد: چیزی نوشته نمی‌شود؛ والد، همین
+    // نتیجه را به رندرر برمی‌گرداند (بدونِ Buffer.from(undefined)).
+    return { success: true, alreadyUnlocked: true, pageCount: result.pageCount, textGate: 'not-needed' };
+  }
+  // بایت‌های کپی، در فایلِ موقتِ همان پوشه نوشته می‌شوند تا والد،
+  // فقط با renameِ اتمی (با retry برای قفلِ ویندوز) نامِ نهایی را
+  // بدهد؛ خودِ ورکر، نامِ نهایی را لمس نمی‌کند.
+  await fs.promises.writeFile(tempPath, Buffer.from(result.bytes));
+  return {
+    success: true,
+    alreadyUnlocked: false,
+    binaryCopy: false,
+    pageCount: result.pageCount,
+    textGate: result.textGate,
+    healed: Boolean(result.healed),
+    baselineInvalidObjects: result.baselineInvalidObjects || 0,
+    outputInvalidObjects: result.outputInvalidObjects || 0,
+    tempPath,
+  };
+}
+
+if (parentPort && saver) {
+  parentPort.on('message', async (msg) => {
+    try {
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'probe') {
+        const result = await handleProbe(msg.filePath);
+        parentPort.postMessage({ type: 'done', result });
+      } else if (msg.type === 'prepare') {
+        const result = await handlePrepare(msg.filePath, msg.password, msg.cacheDir);
+        parentPort.postMessage({ type: 'done', result });
+      } else if (msg.type === 'copy') {
+        if (!msg.tempPath || typeof msg.tempPath !== 'string') {
+          parentPort.postMessage({ type: 'error', message: 'مسیرِ فایلِ موقتِ کپی مشخص نشده است.' });
+          return;
+        }
+        const result = await handleCopy(msg.filePath, msg.tempPath, msg.password);
+        parentPort.postMessage({ type: 'done', result: result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' } });
+      }
+    } catch (err) {
+      try {
+        parentPort.postMessage({ type: 'error', message: String((err && err.message) || err) });
+      } catch (_) {}
+    }
+  });
+}

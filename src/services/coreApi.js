@@ -237,8 +237,11 @@ export const coreApi = {
   },
 
   // مرحله ۸ ـ بخش الف: بررسیِ محافظتِ PDF هنگامِ ورود به استودیو.
-  // تایم‌اوتِ ۱۰ ثانیه‌ای دارد: خواندنِ فایلِ ۶۸ مگابایتی + پروب،
-  // روی فایل‌های بزرگ، بیشتر از ۶ ثانیهٔ مرسوم طول می‌کشد. در
+  // مرحله ۸ ـ اصلاحِ نهایی: تایم‌اوت، ۱۰ ثانیه به ۶۰ ثانیه رسید؛
+  // پروب حالا در ورکرِ جدا اجرا می‌شود و پروسهٔ اصلی قفل نیست،
+  // اما خواندن + پارسِ کاملِ فایلِ ۶۸ مگابایتی روی CPUهای قدیمی،
+  // هنوز بیشتر از ۱۰ ثانیه طول می‌کشد و تایم‌اوتِ کوتاه، نتیجهٔ
+  // «نامشخصِ» کاذب می‌ساخت (استودیو، بدونِ مودال باز می‌شد). در
   // تایم‌اوت یا هر خطا، نتیجهٔ «نامشخص» برمی‌گردد تا استودیو مثلِ
   // همیشه روشن شود (رفتارِ قبلی) و کاربر، معطلِ پروب نماند.
   checkPdfProtection: async (filePath) => {
@@ -248,7 +251,7 @@ export const coreApi = {
       return { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
     }
     try {
-      return await withTimeout(api.checkPdfProtection(filePath), 10000, {
+      return await withTimeout(api.checkPdfProtection(filePath), 60000, {
         protected: false,
         reason: 'unknown',
         pageCount: -1,
@@ -262,16 +265,60 @@ export const coreApi = {
   // مرحله ۸ ـ بخش الف: ساختِ نسخهٔ کپیِ بدونِ قفل. عمداً بدونِ
   // withTimeout است (مثلِ exportAnnotatedPdf): رمزگشایی و اعتبارسنجیِ
   // فایلِ بزرگ، زمان‌بر است و نباید تایم‌اوتِ کاذب بسازد.
-  createUnlockedPdfCopy: async (filePath) => {
+  createUnlockedPdfCopy: async (filePath, password) => {
     const api = getApi();
     if (!api?.createUnlockedPdfCopy) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
     if (!filePath || typeof filePath !== 'string') {
       return { success: false, error: 'مسیر فایل مشخص نشده است.' };
     }
     try {
-      return await api.createUnlockedPdfCopy(filePath);
+      return await api.createUnlockedPdfCopy(filePath, typeof password === 'string' ? password : '');
     } catch (err) {
       return { success: false, error: err?.message || 'خطا در ساختِ نسخهٔ کپی' };
+    }
+  },
+
+  // مرحله ۹ — لایهٔ ۱: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده.
+  // تایم‌اوتِ ۱۲۰ ثانیه‌ای (پارسِ فایلِ بزرگ در ورکر)؛ در تایم‌اوت
+  // یا خطا، وضعیتِ خطا برمی‌گردد تا رندرر، مودالِ رمز را نشان دهد.
+  prepareProtectedPdfForReading: async (filePath, options) => {
+    const api = getApi();
+    if (!api?.prepareProtectedPdfForReading) return { status: 'error', reason: 'unavailable', pageCount: -1 };
+    if (!filePath || typeof filePath !== 'string') {
+      return { status: 'error', reason: 'file-missing', pageCount: -1 };
+    }
+    const password = options && typeof options.password === 'string' ? options.password : '';
+    try {
+      return await withTimeout(api.prepareProtectedPdfForReading(filePath, password), 120000, {
+        status: 'error',
+        reason: 'timeout',
+        pageCount: -1,
+      });
+    } catch (err) {
+      return { status: 'error', reason: 'failed', pageCount: -1 };
+    }
+  },
+
+  // مرحله ۸ ـ اصلاحِ نهایی: پیشرفتِ پروب/کپی و لغوِ ساختِ کپی.
+  // onPdfCopyProgress، تابعِ لغوِ اشتراک را برمی‌گرداند (الگوی
+  // onExtractionProgress در preload).
+  onPdfCopyProgress: (callback) => {
+    const api = getApi();
+    if (!api?.onPdfCopyProgress) return () => {};
+    try {
+      return api.onPdfCopyProgress(callback) || (() => {});
+    } catch (_) {
+      return () => {};
+    }
+  },
+
+  cancelPdfCopy: async () => {
+    const api = getApi();
+    if (!api?.cancelPdfCopy) return { cancelled: 0 };
+    try {
+      return await api.cancelPdfCopy();
+    } catch (err) {
+      return { cancelled: 0, error: err?.message || 'لغو انجام نشد.' };
     }
   },
 

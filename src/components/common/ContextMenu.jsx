@@ -41,19 +41,16 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const [clickedActionId, setClickedActionId] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
 
+  // مرحله ۹: نوارِ جستجویِ بالایِ منو — عبارت، با بسته شدنِ منو
+  // پاک می‌شود تا باز شدنِ بعدی، همیشه خالی شروع شود.
+  const [menuSearchQuery, setMenuSearchQuery] = useState('');
+  const menuSearchInputRef = useRef(null);
+
   // استیت بخش‌های بازشونده (Collapsible Accordions) برای جلوگیری از شلوغی منو
   const [expandedSection, setExpandedSection] = useState(null); // 'library' | 'view' | null
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [menuDimensions, setMenuDimensions] = useState({ width: 256, height: 340 });
 
-  // Stage 8 Part A (Axis 5): mount/close lifecycle so the menu animates
-  // OUT instead of vanishing, and accordion sections keep their
-  // sub-items mounted for the exit animation.
-  const [menuMounted, setMenuMounted] = useState(false);
-  const [menuClosing, setMenuClosing] = useState(false);
-  const [closingSection, setClosingSection] = useState(null);
-  const menuCloseTimerRef = useRef(null);
-  const sectionCloseTimerRef = useRef(null);
 
   const menuRef = useRef(null);
   const itemsRef = useRef({});
@@ -109,38 +106,6 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     )
   );
 
-  // Stage 8 Part A (Axis 5): closing retention. Reopening inside the
-  // 190ms exit window cancels the close and keeps the menu mounted.
-  useEffect(() => {
-    if (isContextMenuOpen) {
-      if (menuCloseTimerRef.current) {
-        clearTimeout(menuCloseTimerRef.current);
-        menuCloseTimerRef.current = null;
-      }
-      if (sectionCloseTimerRef.current) {
-        clearTimeout(sectionCloseTimerRef.current);
-        sectionCloseTimerRef.current = null;
-      }
-      setClosingSection(null);
-      setMenuMounted(true);
-      setMenuClosing(false);
-      return;
-    }
-    if (!menuMounted) return;
-    setMenuClosing(true);
-    menuCloseTimerRef.current = setTimeout(() => {
-      setMenuMounted(false);
-      setMenuClosing(false);
-      menuCloseTimerRef.current = null;
-    }, 190);
-    return () => {
-      if (menuCloseTimerRef.current) {
-        clearTimeout(menuCloseTimerRef.current);
-        menuCloseTimerRef.current = null;
-      }
-    };
-  }, [isContextMenuOpen, menuMounted]);
-
   // ریست زیرمنوها هنگام بسته شدن و اندازه‌گیری دقیق ارتفاع برای مهار لبه‌های صفحه
   useEffect(() => {
     if (!isContextMenuOpen) {
@@ -148,6 +113,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       setShowFolderPicker(false);
       setHoveredActionId(null);
       setIsListHovered(false);
+      setMenuSearchQuery('');
       setHighlightStyle((prev) => ({ ...prev, opacity: 0 }));
       return;
     }
@@ -158,6 +124,9 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           setMenuDimensions({ width: rect.width, height: rect.height });
         }
       }
+      // مرحله ۹: فوکوسِ مستقیمِ کادرِ جستجو هنگامِ باز شدنِ منو،
+      // تا کاربر بی‌درنگ تایپ کند و کلیدها به شورت‌کات‌ها نروند.
+      try { menuSearchInputRef.current?.focus({ preventScroll: true }); } catch (_) { menuSearchInputRef.current?.focus(); }
     });
     return () => cancelAnimationFrame(rafId);
   }, [isContextMenuOpen, expandedSection, showFolderPicker, hasComic]);
@@ -187,6 +156,25 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     return () => el.removeEventListener('wheel', handleWheelTrap);
   }, [isContextMenuOpen]);
 
+  // مرحله ۹: حالتِ جستجو — اگر PDFای در ریدر باز است، جستجو در
+  // فایلِ کنونی است؛ وگرنه جستجو در کتابخانه (از طریقِ سرچِ
+  // سراسریِ TopBar).
+  const isPdfReading = Boolean(
+    comicData?.filePath && /\.pdf$/i.test(String(comicData.filePath))
+  );
+
+  const executeMenuSearch = useCallback(() => {
+    const q = (menuSearchQuery || '').trim();
+    closeContextMenu();
+    if (isPdfReading) {
+      // عبارتِ خالی = فقط باز کردنِ نوارِ جستجویِ PDF و فوکوس.
+      useReaderStore.getState().triggerPdfSearch?.(q);
+    } else {
+      useAppStore.getState().setSearchQuery?.(q);
+      useAppStore.getState().setIsSearchFocused?.(true);
+    }
+  }, [menuSearchQuery, isPdfReading, closeContextMenu]);
+
   const nextComic = comicData?.nextComic;
   const prevComic = comicData?.prevComic;
 
@@ -212,18 +200,6 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
 
     return { x, y };
   }, [contextMenuPos, menuDimensions]);
-
-  // Stage 8 Part A (Axis 5): the menu grows out of the click point —
-  // transformOrigin is the click position inside the clamped menu box.
-  const menuTransformOrigin = useMemo(() => {
-    const w = menuDimensions.width || 256;
-    const h = menuDimensions.height || 340;
-    const px = contextMenuPos?.x || 0;
-    const py = contextMenuPos?.y || 0;
-    const ox = Math.max(0, Math.min(1, (px - safePosition.x) / w));
-    const oy = Math.max(0, Math.min(1, (py - safePosition.y) / h));
-    return `${Math.round(ox * 100)}% ${Math.round(oy * 100)}%`;
-  }, [contextMenuPos, safePosition, menuDimensions]);
 
   const triggerExplosion = (x, y, isDanger = false) => {
     const container = document.createElement('div');
@@ -305,41 +281,21 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     }, 160);
   };
 
+  // Stage 8 Part B: plain toggle again. The grid accordion keeps
+  // sections mounted and animates their height, so no closing
+  // timer/retention state is needed at all.
   const toggleSection = (secId) => {
     setHighlightStyle((prev) => ({ ...prev, opacity: 0 }));
-    // Stage 8 Part A (Axis 5): closing a section keeps its sub-items
-    // mounted for 180ms with the exit animation; opening another
-    // section cancels the pending unmount. The decision reads the
-    // current expandedSection directly (no side effects inside a
-    // state updater).
-    if (sectionCloseTimerRef.current) {
-      clearTimeout(sectionCloseTimerRef.current);
-      sectionCloseTimerRef.current = null;
-    }
     if (expandedSection === secId) {
-      setClosingSection(secId);
-      sectionCloseTimerRef.current = setTimeout(() => {
-        setClosingSection(null);
-        sectionCloseTimerRef.current = null;
-      }, 180);
       setExpandedSection(null);
+      if (secId === 'library') setShowFolderPicker(false);
     } else {
-      setClosingSection(null);
       setExpandedSection(secId);
     }
     if (secId !== 'library') {
       setShowFolderPicker(false);
     }
   };
-
-  // Stage 8 Part A (Axis 5): sections whose sub-items render — the open
-  // one plus a closing one during its exit animation.
-  const sectionsToRender = useMemo(() => {
-    const out = [];
-    if (expandedSection) out.push(expandedSection);
-    if (closingSection && closingSection !== expandedSection) out.push(closingSection);
-    return out;
-  }, [expandedSection, closingSection]);
 
   // لیست اکشن‌های منو با ساختار بازشونده (Accordion) و خلوت
   const actions = useMemo(() => {
@@ -439,7 +395,10 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       },
     ];
 
-    if (sectionsToRender.includes('library') && hasComic) {
+    // Stage 8 Part B: sub-items stay mounted; the grid accordion
+    // below animates their height. (Part A conditionally mounted
+    // them, so their height snapped 0 <-> full in 0ms.)
+    if (hasComic) {
       list.push(
         {
           id: 'pinLibrary',
@@ -502,8 +461,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       onClick: () => toggleSection('view'),
     });
 
-    if (sectionsToRender.includes('view')) {
-      list.push(
+    list.push(
         {
           id: 'rotate',
           isSubItem: true,
@@ -552,7 +510,6 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           onClick: () => setCurrentView('settings'),
         }
       );
-    }
 
     list.push(
       { type: 'separator' },
@@ -579,8 +536,6 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     isPinned,
     copyFeedback,
     expandedSection,
-    closingSection,
-    sectionsToRender,
     showFolderPicker,
     shortcuts,
     contextMenuData,
@@ -599,7 +554,126 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     showToast,
   ]);
 
-  if (!menuMounted) return null;
+  // Stage 8 Part B: one menu row. Extracted verbatim from the old
+  // flat map so row behaviour (hover, click, highlight, chevron)
+  // is unchanged; only the accordion grouping around it is new.
+  // The chevron now rotates on the prompt's 250ms spring curve.
+  const renderMenuItem = (action) => {
+    const isAccordion = action.type === 'accordion';
+    const isHovered = hoveredActionId === action.id;
+    const isClicked = clickedActionId === action.id;
+    const isDimmed = isListHovered && !isHovered && !action.disabled;
+    const isDanger = Boolean(action.isDanger);
+    return (
+                <div
+                  ref={(el) => (itemsRef.current[action.id] = el)}
+                  className={isClicked ? 'menu-item-clicked' : ''}
+                  onMouseEnter={() =>
+                    !action.disabled && handleItemMouseEnter(action.id, isDanger)
+                  }
+                  onClick={(e) =>
+                    !action.disabled &&
+                    handleActionClick(
+                      e,
+                      action.onClick,
+                      action.id,
+                      isDanger,
+                      Boolean(action.keepOpen || isAccordion)
+                    )
+                  }
+                  style={{
+                    ...styles.menuItem,
+                    ...(action.isSubItem ? styles.subMenuItem : {}),
+                    ...(isAccordion && action.isOpen ? styles.accordionOpenItem : {}),
+                    color: action.disabled
+                      ? '#484F58'
+                      : isDanger
+                      ? isHovered
+                        ? '#ff7b74'
+                        : '#F85149'
+                      : isAccordion && action.isOpen
+                      ? '#22d3ee'
+                      : isHovered
+                      ? '#ffffff'
+                      : '#C9D1D9',
+                    opacity: action.disabled ? 0.35 : isDimmed ? 0.78 : 1,
+                    cursor: action.disabled ? 'default' : 'pointer',
+                    // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: زوم و
+                    // برجسته‌شدنِ کلِ ردیف هنگامِ هاور، دقیقاً با
+                    // مقادیرِ پرامپت (زومِ 1.035 + لغزشِ 3px + سایهٔ
+                    // عمق‌دهنده + روشن‌تر شدنِ پس‌زمینه). ردیف‌های
+                    // غیرفعال، هرگز زوم نمی‌شوند.
+                    transform: isHovered && !action.disabled ? 'scale(1.035) translateX(-3px)' : 'scale(1) translateX(0)',
+                    boxShadow: isHovered && !action.disabled
+                      ? '0 6px 16px -4px rgba(0, 0, 0, 0.45), 0 0 12px -2px rgba(99, 102, 241, 0.25)'
+                      : 'none',
+                    backgroundColor: isHovered && !action.disabled ? 'rgba(255, 255, 255, 0.05)' : 'transparent',
+                  }}
+                >
+                  <span
+                    style={{
+                      ...styles.iconWrapper,
+                      color: action.disabled
+                        ? '#484F58'
+                        : isDanger
+                        ? '#F85149'
+                        : isHovered || (isAccordion && action.isOpen)
+                        ? '#22d3ee'
+                        : '#8B949E',
+                      transform:
+                        isHovered && !action.disabled
+                          ? 'translateX(-2px) scale(1.08)'
+                          : 'none',
+                    }}
+                  >
+                    {action.icon}
+                  </span>
+
+                  <span style={styles.label}>{action.label}</span>
+
+                  {isAccordion ? (
+                    <span
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        color: action.isOpen ? '#22d3ee' : '#8B949E',
+                        transition: 'transform 250ms cubic-bezier(0.16, 1, 0.3, 1)',
+                        transform: action.isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+                      }}
+                    >
+                      <Icons.ChevronDown size={13} />
+                    </span>
+                  ) : (
+                    action.shortcut && (
+                      <span
+                        style={{
+                          ...styles.shortcutBadge,
+                          color: isHovered && !action.disabled ? '#22d3ee' : '#6E7681',
+                          backgroundColor:
+                            isHovered && !action.disabled
+                              ? 'rgba(34, 211, 238, 0.1)'
+                              : 'rgba(255, 255, 255, 0.03)',
+                          borderColor:
+                            isHovered && !action.disabled
+                              ? 'rgba(34, 211, 238, 0.3)'
+                              : '#21262C',
+                        }}
+                      >
+                        {action.shortcut}
+                      </span>
+                    )
+                  )}
+                </div>
+
+    );
+  };
+
+  // Stage 8 Part B: menu zoom restored to the exact pre-Part-A
+  // behaviour — render only while open, no exit retention, no
+  // dynamic transformOrigin, no fade-out override. The entry
+  // keyframe below is byte-identical to the pre-Part-A one
+  // (scale(0.94) + translateY(-6px), 0.18s, spring curve).
+  if (!isContextMenuOpen) return null;
 
   return (
     <>
@@ -607,18 +681,6 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         @keyframes contextMenuFadeIn {
           from { opacity: 0; transform: scale(0.94) translateY(-6px); }
           to { opacity: 1; transform: scale(1) translateY(0); }
-        }
-        @keyframes contextMenuFadeOut {
-          from { opacity: 1; transform: scale(1) translateY(0); }
-          to { opacity: 0; transform: scale(0.94) translateY(-6px); }
-        }
-        @keyframes contextSubItemIn {
-          from { opacity: 0; transform: translateY(-4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes contextSubItemOut {
-          from { opacity: 1; transform: translateY(0); }
-          to { opacity: 0; transform: translateY(-4px); }
         }
         @keyframes indicatorPulse {
           0%, 100% { opacity: 1; box-shadow: 0 0 8px #22d3ee; }
@@ -682,14 +744,56 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           ...styles.ctxMenu,
           left: `${safePosition.x}px`,
           top: `${safePosition.y}px`,
-          transformOrigin: menuTransformOrigin,
-          pointerEvents: menuClosing ? 'none' : undefined,
-          animation: menuClosing
-            ? 'contextMenuFadeOut 0.19s cubic-bezier(0.16, 1, 0.3, 1) forwards'
-            : 'contextMenuFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards',
         }}
       >
         <div style={styles.menuList}>
+          {/* مرحله ۹: نوارِ جستجویِ بالایِ منو — تایپ داخلِ آن،
+              هرگز منو را نمی‌بندد و شورت‌کات‌ها را فعال نمی‌کند
+              (stopPropagation در همهٔ رویدادهایِ ورودی). */}
+          <div
+            style={styles.menuSearchBar}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <span style={styles.menuSearchIcon}>
+              <Icons.Search size={15} />
+            </span>
+            <input
+              ref={menuSearchInputRef}
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={menuSearchQuery}
+              placeholder={isPdfReading ? 'جستجو در فایل کنونی...' : 'جستجو در کتابخانه...'}
+              onChange={(e) => setMenuSearchQuery(e.target.value)}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  executeMenuSearch();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  closeContextMenu();
+                }
+              }}
+              style={styles.menuSearchInput}
+            />
+            <button
+              type="button"
+              title="جستجو"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                executeMenuSearch();
+              }}
+              style={styles.menuSearchBtn}
+            >
+              <Icons.Search size={14} />
+            </button>
+          </div>
           <div
             style={{
               ...styles.slidingHighlight,
@@ -718,126 +822,47 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
             />
           </div>
 
-          {actions.map((action, idx) => {
-            if (action.type === 'separator') {
-              return <div key={`sep-${idx}`} style={styles.separator} />;
+          {(() => {
+            // Stage 8 Part B: group the flat actions list into
+            // accordion segments (header + its sub-items) so each
+            // section renders inside ONE grid-height container.
+            const segments = [];
+            let pending = null;
+            for (const action of actions) {
+              if (action.type === 'accordion') {
+                pending = { header: action, children: [] };
+                segments.push(pending);
+              } else if (action.isSubItem && pending) {
+                pending.children.push(action);
+              } else {
+                pending = null;
+                segments.push({ item: action });
+              }
             }
-
-            const isAccordion = action.type === 'accordion';
-            const isClosingItem = Boolean(closingSection && action.section === closingSection);
-            const isHovered = hoveredActionId === action.id;
-            const isClicked = clickedActionId === action.id;
-            const isDimmed = isListHovered && !isHovered && !action.disabled;
-            const isDanger = Boolean(action.isDanger);
-
-            return (
-              <React.Fragment key={action.id}>
-                <div
-                  ref={(el) => (itemsRef.current[action.id] = el)}
-                  className={isClicked ? 'menu-item-clicked' : ''}
-                  onMouseEnter={() =>
-                    !action.disabled && handleItemMouseEnter(action.id, isDanger)
-                  }
-                  onClick={(e) =>
-                    !action.disabled &&
-                    handleActionClick(
-                      e,
-                      action.onClick,
-                      action.id,
-                      isDanger,
-                      Boolean(action.keepOpen || isAccordion)
-                    )
-                  }
-                  style={{
-                    ...styles.menuItem,
-                    ...(action.isSubItem ? styles.subMenuItem : {}),
-                    ...(action.isSubItem
-                      ? {
-                          animation: isClosingItem
-                            ? 'contextSubItemOut 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards'
-                            : 'contextSubItemIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-                          pointerEvents: isClosingItem ? 'none' : undefined,
-                        }
-                      : {}),
-                    ...(isAccordion && action.isOpen ? styles.accordionOpenItem : {}),
-                    color: action.disabled
-                      ? '#484F58'
-                      : isDanger
-                      ? isHovered
-                        ? '#ff7b74'
-                        : '#F85149'
-                      : isAccordion && action.isOpen
-                      ? '#22d3ee'
-                      : isHovered
-                      ? '#ffffff'
-                      : '#C9D1D9',
-                    opacity: action.disabled ? 0.35 : isDimmed ? 0.78 : 1,
-                    cursor: action.disabled ? 'default' : 'pointer',
-                  }}
-                >
-                  <span
-                    style={{
-                      ...styles.iconWrapper,
-                      color: action.disabled
-                        ? '#484F58'
-                        : isDanger
-                        ? '#F85149'
-                        : isHovered || (isAccordion && action.isOpen)
-                        ? '#22d3ee'
-                        : '#8B949E',
-                      transform:
-                        isHovered && !action.disabled
-                          ? 'translateX(-2px) scale(1.06)'
-                          : 'none',
-                    }}
-                  >
-                    {action.icon}
-                  </span>
-
-                  <span style={styles.label}>{action.label}</span>
-
-                  {isAccordion ? (
-                    <span
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        color: action.isOpen ? '#22d3ee' : '#8B949E',
-                        transition: 'transform 0.2s ease',
-                        transform: action.isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
-                      }}
-                    >
-                      <Icons.ChevronDown size={13} />
-                    </span>
-                  ) : (
-                    action.shortcut && (
-                      <span
-                        style={{
-                          ...styles.shortcutBadge,
-                          color: isHovered && !action.disabled ? '#22d3ee' : '#6E7681',
-                          backgroundColor:
-                            isHovered && !action.disabled
-                              ? 'rgba(34, 211, 238, 0.1)'
-                              : 'rgba(255, 255, 255, 0.03)',
-                          borderColor:
-                            isHovered && !action.disabled
-                              ? 'rgba(34, 211, 238, 0.3)'
-                              : '#21262C',
-                        }}
-                      >
-                        {action.shortcut}
-                      </span>
-                    )
-                  )}
-                </div>
-
-                {/* زیرمنوی انتخاب پوشه در داخل آکاردئون کتابخانه */}
-                {action.id === 'moveToFolder' && showFolderPicker && hasComic && (
+            return segments.map((seg, segIdx) => {
+              if (seg.item) {
+                const action = seg.item;
+                if (action.type === 'separator') {
+                  return <div key={`sep-${segIdx}`} style={styles.separator} />;
+                }
+                return <React.Fragment key={action.id}>{renderMenuItem(action)}</React.Fragment>;
+              }
+              const sectionId = seg.header.id === 'acc_library' ? 'library' : 'view';
+              const isOpen = expandedSection === sectionId;
+              return (
+                <React.Fragment key={seg.header.id}>
+                  {renderMenuItem(seg.header)}
+                  <div style={{ display: 'grid', gridTemplateRows: isOpen ? '1fr' : '0fr', opacity: isOpen ? 1 : 0, transition: 'grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, margin-top 240ms cubic-bezier(0.16, 1, 0.3, 1)', marginTop: isOpen ? '6px' : '0px', pointerEvents: isOpen ? 'auto' : 'none' }}>
+                    <div style={{ overflow: 'hidden', minHeight: 0 }}>
+                      {seg.children.map((child) => (
+                        <React.Fragment key={child.id}>
+                          {renderMenuItem(child)}
+                          {child.id === 'moveToFolder' && hasComic && (
+                            <div style={{ display: 'grid', gridTemplateRows: showFolderPicker ? '1fr' : '0fr', opacity: showFolderPicker ? 1 : 0, transition: 'grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, margin-top 240ms cubic-bezier(0.16, 1, 0.3, 1)', marginTop: showFolderPicker ? '6px' : '0px', pointerEvents: showFolderPicker ? 'auto' : 'none' }}>
+                              <div style={{ overflow: 'hidden', minHeight: 0 }}>
                   <div
                     style={{
                       ...styles.folderPickerBox,
-                      animation: isClosingItem
-                        ? 'contextSubItemOut 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards'
-                        : 'contextSubItemIn 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
                     }}
                     onMouseEnter={handleMenuMouseLeave}
                     onWheel={(e) => e.stopPropagation()}
@@ -902,10 +927,17 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                       </div>
                     )}
                   </div>
-                )}
-              </React.Fragment>
-            );
-          })}
+                              </div>
+                            </div>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+                </React.Fragment>
+              );
+            });
+          })()}
         </div>
       </div>
     </>
@@ -943,6 +975,58 @@ const styles = {
     width: '100%',
     boxSizing: 'border-box',
   },
+  // مرحله ۹: نوارِ جستجویِ بالایِ منو — هم‌خانواده با طراحیِ
+  // شیشه‌ایِ منو، بدونِ backdrop-filterِ اضافه.
+  menuSearchBar: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '5px 8px',
+    marginBottom: '4px',
+    borderRadius: '8px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: '#30363D',
+    backgroundColor: 'rgba(255, 255, 255, 0.04)',
+    position: 'relative',
+    zIndex: 2,
+    boxSizing: 'border-box',
+  },
+  menuSearchIcon: {
+    color: '#8B949E',
+    display: 'flex',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
+  menuSearchInput: {
+    flex: 1,
+    minWidth: 0,
+    background: 'transparent',
+    border: 'none',
+    outline: 'none',
+    color: '#C9D1D9',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    direction: 'rtl',
+    textAlign: 'right',
+    padding: '2px 0',
+  },
+  menuSearchBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '24px',
+    height: '24px',
+    borderRadius: '6px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(34, 211, 238, 0.35)',
+    backgroundColor: 'rgba(34, 211, 238, 0.12)',
+    color: '#22d3ee',
+    cursor: 'pointer',
+    flexShrink: 0,
+    padding: 0,
+  },
   slidingHighlight: {
     position: 'absolute',
     top: 0,
@@ -978,7 +1062,13 @@ const styles = {
     position: 'relative',
     zIndex: 2,
     boxSizing: 'border-box',
-    transition: 'color 0.15s ease, opacity 0.18s ease',
+    // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: transitionِ فنریِ دقیقِ
+    // پرامپت، به‌همراهِ opacity برای نرمیِ کم‌رنگ‌شدنِ ردیف‌های
+    // غیرِهاور (رفتارِ قبلیِ isDimmed). transform-origin، مرکزِ
+    // ردیف است تا زوم، متقارن باشد.
+    transition: 'transform 220ms cubic-bezier(0.16, 1, 0.3, 1), background 180ms ease, border-color 180ms ease, box-shadow 220ms ease, color 150ms ease, opacity 0.18s ease',
+    transformOrigin: 'center center',
+    willChange: 'transform',
   },
   subMenuItem: {
     paddingRight: '22px',

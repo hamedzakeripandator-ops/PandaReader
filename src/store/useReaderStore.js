@@ -65,6 +65,8 @@ const useReaderStore = create((set, get) => ({
   isLoading: false,
   loadingProgress: 0,
   pdfSearchOpen: false,
+  pdfSearchQuery: '',
+  pdfSearchRequestId: 0,
   pdfOutline: [],
   pdfOutlineFile: '',
   pdfOutlineStatus: 'idle',
@@ -126,6 +128,8 @@ const useReaderStore = create((set, get) => ({
         areaZoomTarget: null,
         rotation: 0,
         pdfSearchOpen: false,
+        pdfSearchQuery: '',
+        pdfSearchRequestId: 0,
         pdfOutline: [],
         pdfOutlineFile: '',
         pdfOutlineStatus: 'idle',
@@ -365,6 +369,18 @@ const useReaderStore = create((set, get) => ({
   // فایل، افکتِ [filePath] در PdfViewer آن را خاموش می‌کند.
   setPdfSearchOpen: (open) => set({ pdfSearchOpen: Boolean(open) }),
 
+  // مرحله ۹: آغازِ جستجو در PDFِ فعلی از هر کامپوننتی (TopBar،
+  // ContextMenu). pdfSearchRequestId، شناسهٔ یکتای هر درخواست است
+  // تا همان عبارتِ قبلی هم دوباره اجرا شود؛ PdfViewer با دیدنِ
+  // شناسهٔ تازه، نوار را باز می‌کند، عبارت را می‌گذارد و فوکوس
+  // می‌کند. عبارتِ خالی = فقط باز کردنِ نوار و فوکوس.
+  triggerPdfSearch: (query) =>
+    set((state) => ({
+      pdfSearchOpen: true,
+      pdfSearchQuery: typeof query === 'string' ? query : '',
+      pdfSearchRequestId: (state.pdfSearchRequestId || 0) + 1,
+    })),
+
   setIsLoading: (status) => set({ isLoading: Boolean(status) }),
   setLoadingProgress: (progress) =>
     set({ loadingProgress: typeof progress === 'number' ? progress : 0 }),
@@ -386,6 +402,8 @@ const useReaderStore = create((set, get) => ({
       areaZoomTarget: null,
       rotation: 0,
       pdfSearchOpen: false,
+      pdfSearchQuery: '',
+      pdfSearchRequestId: 0,
     });
   },
 }));

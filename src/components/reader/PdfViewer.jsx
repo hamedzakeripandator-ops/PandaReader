@@ -6,6 +6,7 @@ import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
+import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 import thumbnailService from '../../services/thumbnailService';
 import hiDpiRenderService from '../../services/hiDpiRenderService';
@@ -273,7 +274,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
   onStorePageBlob,
   revokedBlobUrls,
   onDropPageBlob,
-  viewportMotionRef,
   expectedHeight,
   rotation,
   pageWidth,
@@ -330,11 +330,13 @@ const PdfPageItem = React.memo(function PdfPageItem({
     const priorityDelay =
       distanceFromActive === 0 ? 0 : distanceFromActive === 1 ? 40 : 100;
 
-    // Stage 8 Part A: settle-aware scheduling. During a fast scroll the
-    // viewport moves every few ms; a page the user flies past in a
-    // fraction of a second must not seize the pdf.js worker. Non-active
-    // pages wait until the viewport has been still for 60ms (bounded
-    // re-arms); the active page always renders immediately.
+    // Stage 8 Part B: the Part A settle loop (up to 25 x 60ms re-arms
+    // driven by a motion ref) is REMOVED. It delayed every non-active
+    // page by up to 1.5s during a fast scroll and added fragile
+    // cross-component motion state for no proven gain: pages already
+    // cancel in-flight renders on cleanup, and the active page is
+    // updated every animation frame by handleScroll. Every page in
+    // the virtual window now renders on its plain priority delay.
     const runRender = async () => {
       if (isCancelled) return;
       try {
@@ -415,23 +417,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
       }
     };
 
-    let timerId = null;
-    let rearmCount = 0;
-    const scheduleRender = () => {
-      timerId = setTimeout(async () => {
-        if (isCancelled) return;
-        if (distanceFromActive > 0 && rearmCount < 25) {
-          const motion = viewportMotionRef && viewportMotionRef.current;
-          if (motion && performance.now() - motion.lastScrollAt < 60) {
-            rearmCount += 1;
-            scheduleRender();
-            return;
-          }
-        }
-        await runRender();
-      }, rearmCount === 0 ? priorityDelay : 60);
-    };
-    scheduleRender();
+    const timerId = setTimeout(async () => {
+      if (isCancelled) return;
+      await runRender();
+    }, priorityDelay);
 
     return () => {
       isCancelled = true;
@@ -458,7 +447,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
     retryTick,
     onPageRatioMeasured,
     onStorePageBlob,
-    viewportMotionRef,
   ]);
 
   // ب: پاس دوم (Crystal-Clear HiDPI Re-render) پس از تثبیت زوم یا توقف روی صفحه
@@ -510,12 +498,23 @@ const PdfPageItem = React.memo(function PdfPageItem({
     [onContextMenu, pageNumber]
   );
 
-  // Stage 8 Part A: a revoked/corrupt image URL recovers instead of
-  // leaving a blank page: the dead entry is dropped (parent cache) and
-  // the page re-renders. After 3 consecutive failures the retry UI
-  // takes over instead of looping.
-  const handleImgError = useCallback(() => {
-    const badSrc = activeSrc;
+  // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
+  const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
+
+  // Stage 8 Part B (CRITICAL TDZ FIX): Part A declared handleImgError
+  // ABOVE this const, so its useCallback dependency array evaluated
+  // `activeSrc` before initialization and threw a ReferenceError on
+  // every PdfPageItem render; ChunkErrorBoundary then swallowed the
+  // whole reader with «بارگذاریِ بخشی از برنامه ناموفق بود» and no
+  // PDF could open. activeSrc is now declared FIRST, and the handler
+  // reads the failed URL from the <img> error event (activeSrc only
+  // as a fallback), so it can never again depend on a later const.
+  // A revoked/corrupt image URL recovers instead of leaving a blank
+  // page: the dead entry is dropped (parent cache) and the page
+  // re-renders. After 3 consecutive failures the retry UI takes over
+  // instead of looping.
+  const handleImgError = useCallback((e) => {
+    const badSrc = (e && e.currentTarget && e.currentTarget.src) || activeSrc;
     if (!badSrc) return;
     imgErrorCountRef.current += 1;
     if (imgErrorCountRef.current >= 3) {
@@ -536,9 +535,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
     }
     setRenderFailed(false);
   }, [activeSrc, hiDpiUrl, onDropPageBlob, pageNumber]);
-
-  // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
-  const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
 
   // کالبدشکافیِ ناحیه‌های مردهٔ جزئی: برای چرخشِ ۹۰/۲۷۰، کادرِ
   // چیدمانِ wrapper باید ابعادِ جابه‌جا شده (ارتفاعِ کارت × عرضِ
@@ -806,10 +802,6 @@ export default function PdfViewer({ filePath }) {
   // item still holds it (eviction race). The set is append-only and
   // capped; a revoked URL is never trusted again as a cached image.
   const revokedBlobUrlsRef = useRef(new Set());
-  // Stage 8 Part A: last scroll-event instant/position, written
-  // synchronously in handleScroll so render scheduling can tell a
-  // settled viewport from a fast fly-through.
-  const viewportMotionRef = useRef({ lastScrollAt: 0, lastScrollTop: 0 });
   const prevZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
@@ -838,6 +830,19 @@ export default function PdfViewer({ filePath }) {
   const setSearchOpen = useReaderStore((state) => state.setPdfSearchOpen);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  // مرحله ۹: رمزِ عبورِ فایل‌های محافظت‌شده (لایهٔ ۳) و بارگذاریِ
+  // دوباره با مسیرِ آماده‌شده (لایهٔ ۱). رمز، فقط در حافظهٔ نشست
+  // است و هرگز روی دیسک یا در استور ذخیره نمی‌شود.
+  const [passwordModal, setPasswordModal] = useState(null);
+  const [passwordValue, setPasswordValue] = useState('');
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [loadNonce, setLoadNonce] = useState(0);
+  const loadOverrideRef = useRef(null);
+  const passwordAttemptRef = useRef('');
+  const passwordFlowRef = useRef(null);
+  const prepareInFlightRef = useRef(false);
+  const pdfSearchQueryFromStore = useReaderStore((state) => state.pdfSearchQuery || '');
+  const pdfSearchRequestId = useReaderStore((state) => state.pdfSearchRequestId || 0);
   const [searchCurrentKey, setSearchCurrentKey] = useState(null);
   const [searchScanning, setSearchScanning] = useState(false);
   const [searchScannedCount, setSearchScannedCount] = useState(0);
@@ -876,15 +881,16 @@ export default function PdfViewer({ filePath }) {
     // نیفتند. اگر همهٔ صفحه‌های کش در دید بودند، قدیمی‌ترین می‌رود
     // تا سقف، همیشه برقرار بماند. (سقف از قبل ۱۸ بود — کمتر از
     // ۳۰ای که تسک گفته بود — پس بالا برده نشد.)
-    // Stage 8 Part A: eviction keeps a margin around the active page
-    // (visible window +/- 8) because visiblePageNumbersRef updates only
+    // Stage 8 Part B: eviction keeps a margin around the active page
+    // (activePage +/- 6, prompt section 1.3) because
+    // visiblePageNumbersRef updates only
     // during render and can lag behind a fast scroll; evicting a page
     // the user is flying toward produced permanently blank pages.
     while (cache.size >= MAX_CACHED_BLOBS) {
       const visible = visiblePageNumbersRef.current || [];
       const guarded = new Set(visible);
       const center = activePageRef.current || 1;
-      for (let pn = center - 8; pn <= center + 8; pn++) guarded.add(pn);
+      for (let pn = center - 6; pn <= center + 6; pn++) guarded.add(pn);
       let evictKey = null;
       for (const key of cache.keys()) {
         if (!guarded.has(key)) { evictKey = key; break; }
@@ -1110,6 +1116,9 @@ export default function PdfViewer({ filePath }) {
         pdfPath: filePath,
         pages: prepared.pages,
         mode: saveMode,
+        // مرحله ۹: رمزِ نشستِ همین فایل، تا ذخیره روی فایلِ
+        // محافظت‌شده هم با «رمزگشایی-اول» انجام شود.
+        password: getPdfSessionPassword(filePath) || '',
       });
       if (result && result.canceled) {
         showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
@@ -1258,6 +1267,13 @@ export default function PdfViewer({ filePath }) {
     setIsLoading(true);
     setPdfDoc(null);
     setNumPages(0);
+    // مرحله ۹: هر بارگذاری، با رمزِ نشستِ همین فایل شروع می‌شود؛
+    // مسیرِ آماده‌شدهٔ فایلِ قبلی، برای فایلِ تازه معتبر نیست.
+    passwordAttemptRef.current = getPdfSessionPassword(filePath) || '';
+    passwordFlowRef.current = null;
+    if (loadOverrideRef.current && loadOverrideRef.current.filePath !== filePath) {
+      loadOverrideRef.current = null;
+    }
 
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -1269,10 +1285,63 @@ export default function PdfViewer({ filePath }) {
     let loadingTask = null;
     let outlineTimerId = null;
 
+    // مرحله ۹ — لایهٔ ۱ و ۳ در کنارِ هم: pdf.js وقتی رمز لازم دارد،
+    // این هندلر را صدا می‌زند. کد ۱ (NEED_PASSWORD) یعنی رمزِ
+    // اولیه هنوز امتحان نشده: رمزِ نشست (یا خالی) داده می‌شود.
+    // کد ۲ (INCORRECT_PASSWORD) یعنی رمزِ نشست/خالی رد شد: به‌جای
+    // نمایشِ فوریِ خطا، لایهٔ ۱ (prepare) اجرا می‌شود؛ اگر مسیرِ
+    // آماده‌ای نبود، مودالِ رمز باز می‌شود. در هر دو حالتِ کد ۲،
+    // وظیفهٔ فعلی با خطایِ نشانه‌دار رها می‌شود تا بارگذاریِ دوباره
+    // (با URL یا رمزِ تازه) انجام شود؛ catchِ بیرونی، این خطا را
+    // ساکت رد می‌کند و پیامِ خطا نشان نمی‌دهد.
+    const handlePasswordRequest = (updatePassword, code) => {
+      if (code === 1) {
+        try { updatePassword(passwordAttemptRef.current || ''); } catch (_) {}
+        return;
+      }
+      if (passwordFlowRef.current || prepareInFlightRef.current) {
+        try { updatePassword(new Error('__pdf_password_flow__')); } catch (_) {}
+        return;
+      }
+      passwordFlowRef.current = 'preparing';
+      prepareInFlightRef.current = true;
+      void (async () => {
+        try {
+          const sessionPw = getPdfSessionPassword(filePath) || '';
+          const prepared = await coreApi.prepareProtectedPdfForReading(filePath, { password: sessionPw });
+          if (!isMounted) return;
+          if (prepared && (prepared.status === 'ghost-neutralized' || prepared.status === 'unlocked-copy') && prepared.path) {
+            const sanitized = String(prepared.path).trim().replace(/^[\\/]+/, '');
+            loadOverrideRef.current = { filePath, url: `comic://media/?path=${encodeURIComponent(sanitized)}` };
+            passwordFlowRef.current = null;
+            setLoadNonce((n) => n + 1);
+          } else {
+            passwordFlowRef.current = 'modal';
+            setIsLoading(false);
+            setPasswordModal({ filePath, error: '' });
+          }
+        } catch (_) {
+          if (isMounted) {
+            passwordFlowRef.current = 'modal';
+            setIsLoading(false);
+            setPasswordModal({ filePath, error: '' });
+          }
+        } finally {
+          prepareInFlightRef.current = false;
+        }
+      })();
+      try { updatePassword(new Error('__pdf_password_flow__')); } catch (_) {}
+    };
+
     const loadPdfData = async () => {
       try {
         const sanitizedPath = String(filePath || '').trim().replace(/^[\\/]+/, '');
-        const comicUrl = `comic://media/?path=${encodeURIComponent(sanitizedPath)}`;
+        // مرحله ۹: اگر لایهٔ ۱ مسیرِ آماده‌ای برگرداند، بارگذاری از
+        // همان فایلِ کش انجام می‌شود؛ هویتِ فایل (filePath) و همهٔ
+        // وضعیت‌های کتابخانه/پیشرفت، روی فایلِ اصلی می‌مانند.
+        const comicUrl = loadOverrideRef.current && loadOverrideRef.current.filePath === filePath
+          ? loadOverrideRef.current.url
+          : `comic://media/?path=${encodeURIComponent(sanitizedPath)}`;
 
         // مرحله ۲ ـ بخش الف: بارگذاریِ Range/Streaming به‌جای دانلودِ
         // کامل. pdf.js با url و پشتیبانیِ Range سرور (هدرهای
@@ -1293,10 +1362,16 @@ export default function PdfViewer({ filePath }) {
               disableRange: false,
               rangeChunkSize: 65536,
               stopAtErrors: false,
+              password: passwordAttemptRef.current || '',
+              onPassword: handlePasswordRequest,
             });
             loadingTask = rangeTask;
             return await rangeTask.promise;
           } catch (rangeErr) {
+            // مرحله ۹: اگر جریانِ رمز در حالِ اجراست، مسیرِ پشتیبانِ
+            // دانلودِ کامل، بیهوده است (همان خطا را می‌دهد)؛ خطا را
+            // بالا بفرست تا catchِ بیرونی، ساکت ردش کند.
+            if (passwordFlowRef.current) throw rangeErr;
             if (!isMounted) return null;
             try {
               if (typeof loadingTask?.destroy === 'function') await loadingTask.destroy();
@@ -1318,6 +1393,8 @@ export default function PdfViewer({ filePath }) {
             enableXfa: true,
             disableAutoFetch: true,
             stopAtErrors: false,
+            password: passwordAttemptRef.current || '',
+            onPassword: handlePasswordRequest,
           });
           loadingTask = fallbackTask;
           return await fallbackTask.promise;
@@ -1473,6 +1550,9 @@ export default function PdfViewer({ filePath }) {
         }
       } catch (err) {
         if (err?.name === 'AbortError') return;
+        // مرحله ۹: خطایِ نشانه‌دارِ جریانِ رمز، یعنی بارگذاریِ
+        // دوباره یا مودال در راه است؛ پیامِ خطا نشان نده.
+        if (err && err.message === '__pdf_password_flow__') return;
         console.error('PDF Load Error:', err);
         if (isMounted) {
           setErrorMsg('بارگذاری فایل PDF با خطا مواجه شد: ' + (err?.message || 'خطای ناشناخته'));
@@ -1505,7 +1585,7 @@ export default function PdfViewer({ filePath }) {
         } catch (_) {}
       }
     };
-  }, [filePath, clearAllCachedPageBlobs, updateReadingProgress, setPdfOutline]);
+  }, [filePath, loadNonce, clearAllCachedPageBlobs, updateReadingProgress, setPdfOutline]);
 
   // ۳. محاسبه ارتفاع دقیق صفحات و آفست‌ها
   const { pageHeights, pageOffsets, totalHeight } = useMemo(() => {
@@ -1802,6 +1882,35 @@ export default function PdfViewer({ filePath }) {
     // بدونِ هیچ درخواستِ تازه‌ای انجام می‌شود.
   }, []);
 
+  // مرحله ۹ — لایهٔ ۳: ارسالِ رمزِ مودال و بارگذاریِ دوبارهٔ سند با
+  // همان رمز (در حافظهٔ نشست). مسیرِ آماده‌شدهٔ قبلی پاک می‌شود تا
+  // بارگذاری، از فایلِ اصلی با رمزِ تازه انجام شود.
+  const handlePasswordSubmit = useCallback(() => {
+    if (!passwordModal || passwordBusy) return;
+    const pw = passwordValue;
+    // مرحله ۹: رمزِ خالی، دوباره همان مسیرِ prepare را می‌چرخاند و
+    // مودال را بی‌فایده باز می‌کند؛ ارسال، فقط با رمزِ غیرخالی.
+    if (!pw) return;
+    setPasswordBusy(true);
+    setPdfSessionPassword(passwordModal.filePath, pw);
+    loadOverrideRef.current = null;
+    passwordFlowRef.current = null;
+    setPasswordModal(null);
+    setPasswordValue('');
+    setPasswordBusy(false);
+    setErrorMsg(null);
+    setIsLoading(true);
+    setLoadNonce((n) => n + 1);
+  }, [passwordModal, passwordBusy, passwordValue]);
+
+  const handlePasswordCancel = useCallback(() => {
+    setPasswordModal(null);
+    setPasswordValue('');
+    passwordFlowRef.current = null;
+    setErrorMsg('این فایل PDF با رمزِ عبور محافظت شده است و بدونِ رمز باز نمی‌شود.');
+    setIsLoading(false);
+  }, []);
+
   // مرحله ۴ ـ بخش ب: بستنِ بیرونی (Escape در useKeyboard) فقط پرچمِ
   // استور را خاموش می‌کند؛ این افکت همان پاک‌سازیِ closeSearch را
   // برای آن مسیر هم اجرا می‌کند تا نتیجه‌ها و پرسمانِ کهنه، با باز
@@ -1878,6 +1987,19 @@ export default function PdfViewer({ filePath }) {
       }
     };
   }, [searchQuery, searchOpen, runSearch]);
+
+  // مرحله ۹: درخواستِ «جستجو در فایلِ کنونی» از TopBar یا
+  // ContextMenu — نوار باز می‌شود، عبارت گذاشته می‌شود و فوکوس
+  // می‌گیرد؛ خودِ افکتِ دیبانسِ بالا، جستجو را اجرا می‌کند. عبارتِ
+  // خالی = فقط باز کردنِ نوار و فوکوس.
+  useEffect(() => {
+    if (!pdfSearchRequestId) return;
+    setSearchOpen(true);
+    setSearchQuery(pdfSearchQueryFromStore || '');
+    setTimeout(() => {
+      if (searchInputRef.current) searchInputRef.current.focus();
+    }, 0);
+  }, [pdfSearchRequestId, pdfSearchQueryFromStore]);
 
   // تعویضِ فایل یا آنمانت: لغوِ اسکنِ جاری + پاک‌سازیِ کشِ متنِ سندِ قبلی.
   useEffect(() => {
@@ -2091,8 +2213,6 @@ export default function PdfViewer({ filePath }) {
     };
 
     const handleScroll = () => {
-      viewportMotionRef.current.lastScrollAt = performance.now();
-      viewportMotionRef.current.lastScrollTop = container.scrollTop;
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = null;
@@ -2330,6 +2450,145 @@ export default function PdfViewer({ filePath }) {
         </div>
       )}
 
+      {/* مرحله ۹ — لایهٔ ۳: مودالِ ورودِ رمزِ عبورِ فایلِ PDF. فقط
+          وقتی pdf.js رمزِ واقعی بخواهد نشان داده می‌شود؛ رمز، فقط در
+          حافظهٔ نشست می‌ماند و ساختِ کپیِ بدونِ قفل هم از همان رمز
+          استفاده می‌کند. */}
+      {passwordModal && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="ورود رمز عبور فایل PDF"
+          data-modal-overlay="pdf-password"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) handlePasswordCancel();
+          }}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 100000,
+            backgroundColor: 'rgba(0, 0, 0, 0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            pointerEvents: 'auto',
+          }}
+        >
+          <div
+            style={{
+              width: 'min(400px, calc(100vw - 32px))',
+              backgroundColor: 'var(--panel)',
+              border: '1px solid var(--border)',
+              borderRadius: '16px',
+              boxShadow: '0 24px 64px rgba(0, 0, 0, 0.45)',
+              padding: '22px',
+              fontFamily: 'var(--font-fa)',
+              color: 'var(--text)',
+              pointerEvents: 'auto',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+              <span
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                  color: '#f59e0b',
+                  flexShrink: 0,
+                }}
+              >
+                <Icons.AlertTriangle size={20} />
+              </span>
+              <div style={{ fontSize: '15px', fontWeight: 800, lineHeight: 1.5 }}>
+                این فایل PDF رمزِ عبور دارد
+              </div>
+            </div>
+            <div style={{ fontSize: '13px', lineHeight: 1.9, color: 'var(--muted)', marginBottom: '16px' }}>
+              برای باز شدنِ این فایل، رمزِ عبورِ آن را وارد کنید. رمز، فقط تا بسته شدنِ برنامه در حافظه می‌ماند و هیچ‌جا ذخیره نمی‌شود.
+            </div>
+            <input
+              type="password"
+              autoFocus
+              value={passwordValue}
+              onChange={(e) => setPasswordValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handlePasswordSubmit();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handlePasswordCancel();
+                }
+              }}
+              placeholder="رمزِ عبورِ فایل…"
+              dir="auto"
+              style={{
+                width: '100%',
+                boxSizing: 'border-box',
+                padding: '10px 12px',
+                borderRadius: '10px',
+                border: '1px solid var(--border)',
+                backgroundColor: 'var(--panel2)',
+                color: 'var(--text)',
+                fontFamily: 'var(--font-fa)',
+                fontSize: '13px',
+                outline: 'none',
+                marginBottom: '18px',
+              }}
+            />
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={handlePasswordSubmit}
+                disabled={passwordBusy || !passwordValue}
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--accent)',
+                  backgroundColor: 'var(--accent)',
+                  color: '#fff',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: passwordBusy || !passwordValue ? 'wait' : 'pointer',
+                  opacity: passwordBusy || !passwordValue ? 0.6 : 1,
+                  pointerEvents: 'auto',
+                }}
+              >
+                باز کردنِ فایل
+              </button>
+              <button
+                type="button"
+                onClick={handlePasswordCancel}
+                disabled={passwordBusy}
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: 'var(--panel2)',
+                  color: 'var(--text)',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  pointerEvents: 'auto',
+                }}
+              >
+                انصراف
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* مرحله ۴ — نوارِ شناورِ جستجوی درون‌متنی PDF (بالای اسکرول، زیر TopBar) — بخش ب: وقتی استودیو فعال است، نوار پایین‌تر می‌نشیند تا روی داکِ پیش‌فرضِ افقیِ تولبار (بالا وسط) نیفتد. */}
       {searchOpen && (
         <div
@@ -2387,21 +2646,6 @@ export default function PdfViewer({ filePath }) {
           </button>
         </div>
       )}
-      {!searchOpen && !isLoading && !isSnippingActive && !isAreaZoomActive && (
-        <button
-          type="button"
-          title="جستجو در PDF (Ctrl+F)"
-          onClick={() => {
-            setSearchOpen(true);
-            setTimeout(() => {
-              if (searchInputRef.current) searchInputRef.current.focus();
-            }, 0);
-          }}
-          style={styles.searchFab}
-        >
-          <Icons.Search size={17} />
-        </button>
-      )}
 
       <div
         ref={containerRef}
@@ -2444,7 +2688,6 @@ export default function PdfViewer({ filePath }) {
                   onStorePageBlob={storePageBlobInCache}
                   revokedBlobUrls={revokedBlobUrlsRef.current}
                   onDropPageBlob={handleDropPageBlob}
-                  viewportMotionRef={viewportMotionRef}
                   expectedHeight={pageHeights[index]}
                   pageWidth={containerWidth * (Math.round(safeZoom * 100) / 100)}
                   rotation={rotation}
@@ -2517,25 +2760,6 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: '8px',
-  },
-  searchFab: {
-    position: 'absolute',
-    top: '64px',
-    right: '16px',
-    zIndex: 55,
-    width: '34px',
-    height: '34px',
-    borderRadius: '50%',
-    backgroundColor: 'rgba(13, 20, 26, 0.92)',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'var(--border)',
-    color: 'var(--muted)',
-    cursor: 'pointer',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    boxShadow: '0 8px 22px rgba(0, 0, 0, 0.45)',
   },
   scrollContainer: {
     width: '100%',

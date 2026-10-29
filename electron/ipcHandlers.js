@@ -19,6 +19,167 @@ function getIpcLogger() {
   }
   return ipcLoggerCache;
 }
+function getIpcLogger() {
+  if (ipcLoggerCache) return ipcLoggerCache;
+  try {
+    const { createLogger } = require('./logger');
+    ipcLoggerCache = createLogger(process.env.COMIC_READER_DATA_DIR);
+  } catch (_) {
+    ipcLoggerCache = null;
+  }
+  return ipcLoggerCache;
+}
+
+// مرحله ۸ ـ اصلاحِ نهایی: زیرساختِ ورکرِ پروب/کپیِ PDFهای
+// محافظت‌شده. پروب و ساختِ کپی، دیگر در پروسهٔ اصلی پارس نمی‌شوند؛
+// مرحله ۹: پوشهٔ کشِ فایل‌های آماده‌شده برای خواندن (رمزِ صوریِ
+// خنثی‌شده / کپیِ رمزگشایی‌شده). زیرِ همان دایرکتوریِ دادهٔ برنامه
+// (Portable: COMIC_READER_DATA_DIR) تا با حالتِ Portable هم‌خوان
+// باشد؛ فایل‌ها با کلیدِ هشِ محتوا نام‌گذاری می‌شوند و هرگز روی
+// فایلِ اصلی نوشته نمی‌شوند.
+function getProtectedCacheDir() {
+  try {
+    const base = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (app && typeof app.getPath === 'function' ? app.getPath('userData') : '');
+    return base ? path.join(base, 'protected-cache') : '';
+  } catch (_) { return ''; }
+}
+
+// ورکرِ جدا (electron/workers/pdfCopyWorker.js) کارِ سنگین را
+// انجام می‌دهد و فقط پیشرفت/لاگ/نتیجه را برمی‌گرداند. اگر ساختِ
+// ورکر شکست بخورد (مثلاً در حالتِ بسته‌بندی‌شده)، مسیرِ درونِ
+// پروسهٔ اصلی با همان saverِ اصلاح‌شده (هشدارها ساکت) به‌عنوانِ
+// پشتیبان اجرا می‌شود. لغو، فقط کارهای همان فرستنده را خاتمه
+// می‌دهد و فایلِ موقت را پاک می‌کند.
+const pdfCopyJobs = new Map();
+let pdfCopyJobSeq = 0;
+
+function cleanupPdfCopyTemp(tempPath) {
+  if (!tempPath) return;
+  try { fs.promises.unlink(tempPath).catch(() => {}); } catch (_) {}
+}
+
+async function renamePdfCopyTempWithRetries(tmpPath, targetPath) {
+  let lastErr = null;
+  const delays = [120, 300, 700, 1200];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      await fs.promises.rename(tmpPath, targetPath);
+      return;
+    } catch (err) {
+      lastErr = err;
+      const retryable = err && ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(err.code);
+      if (!retryable || attempt === delays.length) break;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
+  }
+  try {
+    await fs.promises.copyFile(tmpPath, targetPath);
+    await fs.promises.unlink(tmpPath);
+    return;
+  } catch (copyErr) {
+    lastErr = copyErr;
+  }
+  try { await fs.promises.unlink(tmpPath); } catch (_) {}
+  if (lastErr && ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(lastErr.code)) {
+    const lockedErr = new Error('فایل در حال استفاده است و نمی‌توان روی آن نوشت. اگر فایل در برنامهٔ دیگری باز است، آن را ببندید و دوباره تلاش کنید.');
+    lockedErr.code = 'FILE_LOCKED';
+    throw lockedErr;
+  }
+  throw lastErr || new Error('نوشتنِ فایل انجام نشد.');
+}
+
+function runPdfCopyWorker({ kind, filePath, tempPath, sender, timeoutMs, password, cacheDir }) {
+  const workerPath = path.join(__dirname, 'workers', 'pdfCopyWorker.js');
+  let worker;
+  try {
+    worker = new Worker(workerPath);
+  } catch (err) {
+    const spawnErr = new Error('ساختِ ورکرِ کپیِ PDF انجام نشد: ' + String((err && err.message) || err));
+    spawnErr.code = 'WORKER_SPAWN_FAILED';
+    throw spawnErr;
+  }
+  const jobId = 'pdfcopy-' + (++pdfCopyJobSeq) + '-' + Date.now().toString(36);
+  const job = { worker, sender, tempPath: tempPath || null, settled: false, cancelled: false };
+  pdfCopyJobs.set(jobId, job);
+  let timer = null;
+  const finish = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    pdfCopyJobs.delete(jobId);
+    try { worker.terminate(); } catch (_) {}
+  };
+  return new Promise((resolve, reject) => {
+    const settleReject = (err) => {
+      if (job.settled) return;
+      job.settled = true;
+      finish();
+      reject(err);
+    };
+    worker.on('message', (msg) => {
+      try {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'progress') {
+          if (sender && typeof sender.isDestroyed === 'function' && !sender.isDestroyed()) {
+            try { sender.send('pdf-copy-progress', { jobId, kind, filePath, stage: msg.stage, fraction: msg.fraction, label: msg.label }); } catch (_) {}
+          }
+        } else if (msg.type === 'log') {
+          try {
+            const lg = getIpcLogger();
+            if (lg && typeof lg[msg.level] === 'function') lg[msg.level]('[pdf-copy-worker] ' + msg.message, msg.detail || '');
+          } catch (_) {}
+        } else if (msg.type === 'done') {
+          if (job.settled) return;
+          job.settled = true;
+          finish();
+          resolve(msg.result);
+        } else if (msg.type === 'error') {
+          settleReject(new Error(msg.message || 'ورکرِ کپیِ PDF خطا داد.'));
+        }
+      } catch (_) {}
+    });
+    worker.on('error', (err) => {
+      settleReject(new Error('ورکرِ کپیِ PDF خطا داد: ' + String((err && err.message) || err)));
+    });
+    worker.on('exit', (code) => {
+      if (job.settled) return;
+      if (job.cancelled) {
+        const cancelErr = new Error('ساختِ نسخهٔ کپی لغو شد.');
+        cancelErr.code = 'PDF_COPY_CANCELLED';
+        settleReject(cancelErr);
+        return;
+      }
+      settleReject(new Error('ورکرِ کپیِ PDF بدونِ نتیجه پایان یافت (کدِ خروج: ' + code + ').'));
+    });
+    if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (job.settled) return;
+        job.cancelled = true;
+        settleReject(new Error('بررسیِ محافظتِ PDF بیش از حد طول کشید.'));
+      }, timeoutMs);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+    try {
+      worker.postMessage({ type: kind, filePath, tempPath: tempPath || null, password: typeof password === 'string' ? password : '', cacheDir: typeof cacheDir === 'string' ? cacheDir : '' });
+    } catch (err) {
+      settleReject(new Error('ارسالِ کار به ورکرِ کپیِ PDF انجام نشد: ' + String((err && err.message) || err)));
+    }
+    job.cancel = () => {
+      if (job.settled) return;
+      job.cancelled = true;
+      try { worker.terminate(); } catch (_) {}
+    };
+  });
+}
+
+function cancelPdfCopyJobsForSender(sender) {
+  let count = 0;
+  for (const job of pdfCopyJobs.values()) {
+    if (job.sender === sender && !job.settled && typeof job.cancel === 'function') {
+      job.cancel();
+      count++;
+    }
+  }
+  return count;
+}
 
 const IMAGE_REGEX = /\.(jpg|jpeg|png|webp|gif|bmp|avif)$/i;
 
@@ -644,11 +805,22 @@ module.exports = function(app) {
       }
 
       let isSettled = false;
+      // Stage 8 Part B (LEAK FIX): the 'destroyed' listener below is
+      // held in this variable so terminateWorker() — the single
+      // settlement gate for done/error/exit/cancel — can remove it.
+      // Before this fix the once-listener was never removed when the
+      // window survived, so every archive extraction added one more
+      // 'destroyed' listener to the SAME WebContents until Node's
+      // 10-listener limit fired MaxListenersExceededWarning.
+      let onSenderDestroyed = null;
 
       const terminateWorker = () => {
         if (!isSettled) {
           isSettled = true;
           activeExtractionContext = null;
+          if (sender && onSenderDestroyed && typeof sender.removeListener === 'function') {
+            try { sender.removeListener('destroyed', onSenderDestroyed); } catch (_) {}
+          }
           try {
             worker.terminate();
           } catch (_) {}
@@ -664,7 +836,7 @@ module.exports = function(app) {
       };
 
       if (sender && !sender.isDestroyed()) {
-        const onSenderDestroyed = () => {
+        onSenderDestroyed = () => {
           terminateWorker();
           cleanupExtractedDiskCache(null, false);
         };
@@ -1061,7 +1233,7 @@ module.exports = function(app) {
   // مقایسه می‌کند).
   ipcMain.handle('export-annotated-pdf', async (event, payload) => {
     try {
-      const { pdfPath, pages, mode } = payload || {};
+      const { pdfPath, pages, mode, password } = payload || {};
       const normalizedMode = mode === 'in-place' ? 'in-place' : 'save-as';
       if (!pdfPath || typeof pdfPath !== 'string' || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'فایل PDF پیدا نشد.' };
@@ -1123,7 +1295,7 @@ module.exports = function(app) {
       // اطراف) در logs/app.log ثبت شود.
       let saveLogger = null;
       try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger });
+      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger, password: typeof password === 'string' ? password : '' });
       if (result && result.success && (result.mode === 'in-place' || path.resolve(finalPath) === path.resolve(pdfPath))) {
         invalidateComicRamCache(app, pdfPath);
       }
@@ -1147,6 +1319,13 @@ module.exports = function(app) {
   // بررسیِ محافظت، فقط هنگامِ کلیک روی دکمهٔ استودیو انجام می‌شود
   // (نه هنگامِ باز کردنِ فایل)؛ پس خواندنِ صرفِ فایل، هیچ مزاحمتی
   // ندارد. سقفِ ۵۰۰ مگابایت، همان سقفِ probe در saver است.
+  // مرحله ۸ ـ بخش الف: استراتژیِ Xodo برای PDFهای محافظت‌شده.
+  // بررسیِ محافظت، فقط هنگامِ کلیک روی دکمهٔ استودیو انجام می‌شود
+  // (نه هنگامِ باز کردنِ فایل)؛ پس خواندنِ صرفِ فایل، هیچ مزاحمتی
+  // ندارد. سقفِ ۵۰۰ مگابایت، همان سقفِ probe در saver است.
+  // مرحله ۸ ـ اصلاحِ نهایی: پروب در ورکرِ جدا اجرا می‌شود تا
+  // پروسهٔ اصلی قفل نشود؛ هشدارهای pdf-lib، در saver ساکت شده‌اند
+  // و فقط در لاگِ دیسک خلاصه می‌شوند.
   ipcMain.handle('check-pdf-protection', async (event, payload) => {
     const unknown = { protected: false, reason: 'unknown', pageCount: -1, hasEncryptToken: false };
     try {
@@ -1155,24 +1334,45 @@ module.exports = function(app) {
       if (path.extname(filePath).toLowerCase() !== '.pdf') return { protected: false, reason: 'not-pdf', pageCount: -1, hasEncryptToken: false };
       const stat = fs.statSync(filePath);
       if (!stat || stat.size > 500 * 1024 * 1024) return unknown;
-      let saver;
+      let result = null;
       try {
-        saver = require('./services/pdfAnnotationSaver');
-      } catch (_) {
-        return unknown;
+        result = await runPdfCopyWorker({ kind: 'probe', filePath, sender: event.sender, timeoutMs: 150000 });
+      } catch (err) {
+        if (err && err.code === 'WORKER_SPAWN_FAILED') {
+          // پشتیبانِ درونِ پروسهٔ اصلی: پروبِ مسیریِ سریع (بدونِ
+          // پارسِ کلِ فایل) و فقط در صورتِ نامشخص بودن، پروبِ کامل.
+          let saver;
+          try { saver = require('./services/pdfAnnotationSaver'); } catch (_) { return unknown; }
+          let saveLogger = null;
+          try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+          const probed = await saver.probePdfProtectionForPath(filePath, saveLogger);
+          result = {
+            protected: Boolean(probed && probed.protected),
+            readOnly: Boolean(probed && probed.readOnly),
+            reason: (probed && probed.reason) || 'unknown',
+            pageCount: (probed && probed.pageCount) || -1,
+            hasEncryptToken: Boolean(probed && probed.hasEncryptToken),
+            fast: Boolean(probed && probed.fast),
+            invalidObjects: Array.isArray(probed && probed.invalidObjects) ? probed.invalidObjects.length : 0,
+            warningsCount: (probed && probed.warningsCount) || 0,
+          };
+        } else {
+          try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection worker failed', err && err.message); } catch (_) {}
+          return unknown;
+        }
       }
-      let saveLogger = null;
-      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const bytes = await fs.promises.readFile(filePath);
-      const result = await saver.probePdfProtection(bytes, saveLogger);
       return {
         protected: Boolean(result && result.protected),
+        readOnly: Boolean(result && result.readOnly),
         reason: (result && result.reason) || 'unknown',
         pageCount: (result && result.pageCount) || -1,
         hasEncryptToken: Boolean(result && result.hasEncryptToken),
+        fast: Boolean(result && result.fast),
+        invalidObjects: (result && result.invalidObjects) || 0,
+        warningsCount: (result && result.warningsCount) || 0,
       };
     } catch (err) {
-      try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection failed', err && err.message); } catch (_) { /* ignore */ }
+      try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection failed', err && err.message); } catch (_) {}
       return unknown;
     }
   });
@@ -1183,27 +1383,21 @@ module.exports = function(app) {
   // Save As ندارد تا جریانِ «کلیک روی استودیو → کپی → ویرایش»
   // با یک تأیید انجام شود. فایلِ اصلی هرگز دست نمی‌خورد و برای
   // کپی، .orig.bak ساخته نمی‌شود.
+  // مرحله ۸ ـ اصلاحِ نهایی: کارِ سنگین در ورکرِ جدا انجام می‌شود
+  // (پروسهٔ اصلی قفل نمی‌شود)، پیشرفت با 'pdf-copy-progress' به
+  // رندرر می‌رسد، لغو با 'cancel-pdf-copy' کار را خاتمه می‌دهد، و
+  // حالتِ alreadyUnlocked دیگر با Buffer.from(undefined) کرش
+  // نمی‌کند — کپی‌ای نوشته نمی‌شود و مسیرِ فایلِ اصلی برمی‌گردد.
   ipcMain.handle('create-unlocked-pdf-copy', async (event, payload) => {
+    let tempPath = null;
     try {
       const filePath = payload && payload.filePath;
+      const copyPassword = payload && typeof payload.password === 'string' ? payload.password : '';
       if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
         return { success: false, error: 'فایل PDF پیدا نشد.' };
       }
       if (path.extname(filePath).toLowerCase() !== '.pdf') {
         return { success: false, error: 'فقط فایل‌های PDF می‌توانند نسخهٔ کپیِ قابل‌ویرایش داشته باشند.' };
-      }
-      let saver;
-      try {
-        saver = require('./services/pdfAnnotationSaver');
-      } catch (_) {
-        return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد؛ فایل را در پوشهٔ electron/services قرار دهید.' };
-      }
-      let saveLogger = null;
-      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const bytes = await fs.promises.readFile(filePath);
-      const copy = await saver.createUnlockedPdfCopy({ bytes, logger: saveLogger });
-      if (!copy || !copy.success) {
-        return { success: false, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
       }
       const dir = path.dirname(filePath);
       const baseName = path.basename(filePath, path.extname(filePath));
@@ -1214,21 +1408,142 @@ module.exports = function(app) {
       if (fs.existsSync(copyPath)) {
         return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
       }
-      await atomicWriteBuffer(copyPath, Buffer.from(copy.bytes));
+      tempPath = copyPath + '.' + process.pid + '.' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8) + '.tmp';
+      let copy = null;
+      try {
+        copy = await runPdfCopyWorker({ kind: 'copy', filePath, tempPath, sender: event.sender, password: copyPassword });
+      } catch (err) {
+        if (err && err.code === 'WORKER_SPAWN_FAILED') {
+          // پشتیبانِ درونِ پروسهٔ اصلی (saverِ اصلاح‌شده: هشدارها ساکت).
+          let saver;
+          try { saver = require('./services/pdfAnnotationSaver'); } catch (_) {
+            return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد؛ فایل را در پوشهٔ electron/services قرار دهید.' };
+          }
+          let saveLogger = null;
+          try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+          const bytes = await fs.promises.readFile(filePath);
+          const inMain = await saver.createUnlockedPdfCopy({ bytes, logger: saveLogger, password: copyPassword });
+          if (!inMain || !inMain.success) {
+            // مرحله ۹: پشتیبانِ درونِ پروسه هم، مثلِ ورکر، برای ردِ
+            // رمزگشایی به کپیِ باینری می‌افتد (نه «نمی‌تواند کپی
+            // بسازد»)؛ باز شدنِ کپیِ باینری، با لایهٔ ۱ انجام می‌شود.
+            if (inMain && (inMain.code === 'PDF_COPY_PASSWORD_REQUIRED' || inMain.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+              await fs.promises.copyFile(filePath, copyPath);
+              return { success: true, copyPath, pageCount: -1, textGate: 'skipped-binary-copy', alreadyUnlocked: false, binaryCopy: true, stillEncrypted: true };
+            }
+            return { success: false, error: (inMain && inMain.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
+          }
+          if (inMain.alreadyUnlocked || !inMain.bytes) {
+            return { success: true, copyPath: filePath, pageCount: inMain.pageCount, textGate: 'not-needed', alreadyUnlocked: true };
+          }
+          await atomicWriteBuffer(copyPath, Buffer.from(inMain.bytes));
+          return { success: true, copyPath, pageCount: inMain.pageCount, textGate: inMain.textGate, alreadyUnlocked: false };
+        }
+        throw err;
+      }
+      if (!copy || !copy.success) {
+        cleanupPdfCopyTemp(tempPath);
+        tempPath = null;
+        return { success: false, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
+      }
+      if (copy.alreadyUnlocked) {
+        // فایل، قفلِ فعالی ندارد: هیچ‌چیز نوشته نشده است؛ مسیرِ
+        // فایلِ اصلی برمی‌گردد تا رندرر، استودیو را روی همان فایل
+        // فعال کند (بدونِ جابه‌جاییِ بیهوده).
+        cleanupPdfCopyTemp(tempPath);
+        tempPath = null;
+        return { success: true, copyPath: filePath, pageCount: copy.pageCount, textGate: 'not-needed', alreadyUnlocked: true };
+      }
+      await renamePdfCopyTempWithRetries(tempPath, copyPath);
+      tempPath = null;
       return {
         success: true,
         copyPath,
         pageCount: copy.pageCount,
         textGate: copy.textGate,
-        alreadyUnlocked: Boolean(copy.alreadyUnlocked),
+        alreadyUnlocked: false,
+        binaryCopy: Boolean(copy.binaryCopy),
+        stillEncrypted: Boolean(copy.stillEncrypted),
+        healed: Boolean(copy.healed),
+        baselineInvalidObjects: copy.baselineInvalidObjects || 0,
+        outputInvalidObjects: copy.outputInvalidObjects || 0,
       };
     } catch (err) {
+      cleanupPdfCopyTemp(tempPath);
+      if (err && err.code === 'PDF_COPY_CANCELLED') {
+        return { success: false, cancelled: true, error: 'ساختِ نسخهٔ کپی لغو شد.' };
+      }
       if (err && err.code === 'FILE_LOCKED') {
         return { success: false, locked: true, error: err.message };
       }
-      try { const lg = getIpcLogger(); if (lg) lg.error('create-unlocked-pdf-copy failed', err); } catch (_) { /* ignore */ }
+      try { const lg = getIpcLogger(); if (lg) lg.error('create-unlocked-pdf-copy failed', err); } catch (_) {}
       return { success: false, error: 'خطا در ساختِ نسخهٔ کپی: ' + err.message };
     }
+  });
+
+  // مرحله ۹ — لایهٔ ۱: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده.
+  // ورکر (غیرمسدودکننده) اول؛ اگر اسپاونِ ورکر شکست خورد، همان
+  // منطق در پروسهٔ اصلی اجرا می‌شود. خروجی، همیشه مسیرِ فایلِ کشِ
+  // راستی‌آزمایی‌شده است (یا وضعیتِ نیازِ رمز)؛ بایت‌ها هرگز از
+  // این کانال برنمی‌گردند و فایلِ اصلی، دست نمی‌خورد.
+  ipcMain.handle('prepare-protected-pdf-for-reading', async (event, payload) => {
+    try {
+      const filePath = payload && payload.filePath;
+      const password = payload && typeof payload.password === 'string' ? payload.password : '';
+      if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) {
+        return { status: 'error', reason: 'file-missing', pageCount: -1 };
+      }
+      if (path.extname(filePath).toLowerCase() !== '.pdf') {
+        return { status: 'error', reason: 'not-pdf', pageCount: -1 };
+      }
+      const cacheDir = getProtectedCacheDir();
+      let result = null;
+      try {
+        result = await runPdfCopyWorker({ kind: 'prepare', filePath, sender: event.sender, timeoutMs: 150000, password, cacheDir });
+      } catch (err) {
+        if (err && err.code === 'WORKER_SPAWN_FAILED') {
+          let saver;
+          try { saver = require('./services/pdfAnnotationSaver'); } catch (_) {
+            return { status: 'error', reason: 'saver-missing', pageCount: -1 };
+          }
+          let saveLogger = null;
+          try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+          result = await saver.prepareProtectedPdfForReading({ filePath, password, cacheDir, logger: saveLogger });
+        } else if (err && err.code === 'PDF_COPY_CANCELLED') {
+          return { status: 'error', reason: 'cancelled', pageCount: -1 };
+        } else {
+          throw err;
+        }
+      }
+      if (result && (result.status === 'ghost-neutralized' || result.status === 'unlocked-copy') && result.path) {
+        try {
+          const st = await fs.promises.stat(result.path);
+          if (!st.isFile() || st.size < 8) {
+            return { status: 'error', reason: 'cache-missing', pageCount: result.pageCount || -1 };
+          }
+        } catch (_) {
+          return { status: 'error', reason: 'cache-missing', pageCount: result.pageCount || -1 };
+        }
+      }
+      return {
+        status: (result && result.status) || 'error',
+        path: (result && result.path) || null,
+        pageCount: (result && typeof result.pageCount === 'number') ? result.pageCount : -1,
+        reason: (result && result.reason) || null,
+      };
+    } catch (err) {
+      try { const lg = getIpcLogger(); if (lg) lg.error('prepare-protected-pdf-for-reading failed', err); } catch (_) {}
+      return { status: 'error', reason: 'failed', pageCount: -1 };
+    }
+  });
+
+  // مرحله ۸ ـ اصلاحِ نهایی: لغوِ ساختِ کپی. کارهای فعالِ همین
+  // فرستنده خاتمه می‌یابند؛ invokeِ در حالِ انتظار، با
+  // { success: false, cancelled: true } برمی‌گردد و مودال، باز
+  // می‌ماند تا کاربر، دوباره تصمیم بگیرد.
+  ipcMain.handle('cancel-pdf-copy', async (event) => {
+    const count = cancelPdfCopyJobsForSender(event.sender);
+    return { cancelled: count };
   });
 
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیریِ یک‌کلیکی. ساختِ ZIP در ورکرِ

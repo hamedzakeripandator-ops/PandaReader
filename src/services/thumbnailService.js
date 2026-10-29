@@ -1,4 +1,5 @@
 import { coreApi } from './coreApi';
+import { getPdfSessionPassword } from './pdfPasswordSession';
 import useLibraryStore from '../store/useLibraryStore';
 // مرحله ۳ ـ بخش ب: بارگذاریِ تنبلِ pdfjs-dist. این فایل از مسیرِ
 // بوتِ eager ایمپورت می‌شود (App → HomeView/ContextMenu →
@@ -416,10 +417,16 @@ export const thumbnailService = {
             let page = null;
             let canvas = null;
 
-            try {
+            // مرحله ۹: بارگذاریِ PDF با رمزِ خالی و هندلرِ
+            // onPassword که بی‌درنگ رد می‌کند تا فایلِ دارای رمزِ
+            // واقعی، به‌جای آویزان شدن، به مسیرِ آماده (prepare)
+            // بیفتد. فایل‌های با رمزِ خالی، مثلِ قبل مستقیم باز
+            // می‌شوند.
+            const loadPdfDocFromUrl = async (url) => {
+              let task = null;
               try {
-                loadingTask = pdfjsLib.getDocument({
-                  url: comicUrl,
+                task = pdfjsLib.getDocument({
+                  url,
                   cMapPacked: true,
                   isEvalSupported: false,
                   disableAutoFetch: true,
@@ -427,27 +434,66 @@ export const thumbnailService = {
                   disableRange: false,
                   rangeChunkSize: 65536,
                   stopAtErrors: false,
+                  password: '',
+                  onPassword: (updatePassword) => {
+                    try { updatePassword(new Error('__thumb_password__')); } catch (_) {}
+                  },
                 });
-                doc = await loadingTask.promise;
+                loadingTask = task;
+                return await task.promise;
               } catch (rangeErr) {
                 try {
-                  if (loadingTask && typeof loadingTask.destroy === 'function') await loadingTask.destroy();
+                  if (task && typeof task.destroy === 'function') await task.destroy();
                 } catch (_) {}
                 loadingTask = null;
-                doc = null;
-                const resp = await fetch(comicUrl);
+                if (rangeErr && (rangeErr.name === 'PasswordException' || rangeErr.message === '__thumb_password__')) throw rangeErr;
+                const resp = await fetch(url);
                 if (!resp.ok) return null;
                 const arrayBuffer = await resp.arrayBuffer();
-                loadingTask = pdfjsLib.getDocument({
+                task = pdfjsLib.getDocument({
                   data: new Uint8Array(arrayBuffer),
                   cMapPacked: true,
                   isEvalSupported: false,
                   disableAutoFetch: true,
                   disableStream: true,
                   stopAtErrors: false,
+                  password: '',
+                  onPassword: (updatePassword) => {
+                    try { updatePassword(new Error('__thumb_password__')); } catch (_) {}
+                  },
                 });
-                doc = await loadingTask.promise;
+                loadingTask = task;
+                return await task.promise;
               }
+            };
+
+            try {
+              try {
+                doc = await loadPdfDocFromUrl(comicUrl);
+              } catch (loadErr) {
+                // مرحله ۹: PasswordException → لایهٔ ۱: مسیرِ
+                // آماده‌شدهٔ کش (رمزِ صوری یا رمزگشایی‌شده) را
+                // امتحان کن؛ اگر نبود، کاور null می‌ماند (نه کرش).
+                if (loadErr && (loadErr.name === 'PasswordException' || loadErr.message === '__thumb_password__')) {
+                  try {
+                    // مرحله ۹: رمزِ نشست (اگر کاربر در همین نشست،
+                    // فایل را با رمز باز کرده) به prepare می‌رسد تا
+                    // کاورِ فایلِ قفل‌دار هم پس از باز شدنِ با رمز
+                    // ساخته شود؛ در غیرِ این صورت، رمزِ خالی.
+                    const sessionPw = getPdfSessionPassword(filePath) || '';
+                    const prepared = await coreApi.prepareProtectedPdfForReading(filePath, { password: sessionPw });
+                    if (prepared && (prepared.status === 'ghost-neutralized' || prepared.status === 'unlocked-copy') && prepared.path) {
+                      const pSanitized = String(prepared.path).trim().replace(/^[\\/]+/, '');
+                      doc = await loadPdfDocFromUrl(`comic://media/?path=${encodeURIComponent(pSanitized)}`);
+                    }
+                  } catch (_) {
+                    doc = null;
+                  }
+                } else {
+                  throw loadErr;
+                }
+              }
+              if (!doc) return null;
               page = await doc.getPage(1);
 
               const baseVp = page.getViewport({ scale: 1.0 });
