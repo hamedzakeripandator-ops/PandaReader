@@ -2619,6 +2619,7 @@ async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, 
     }
     let decryptedThisSave = false;
     let ghostNeutralizedThisSave = false;
+    let qpdfDecryptedThisSave = false;
     if (isEncryptedForGuard) {
       let decryptOutcome = null;
       try {
@@ -2643,16 +2644,48 @@ async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, 
             isEncryptedForGuard = false;
             logSaveDiag(saveLogger, 'info', 'pdf-save: ghost /Encrypt neutralized for this save (streams were never encrypted)', 'pages=' + buildDoc.getPageCount());
           } else {
-            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (' + String(err.message) + '). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: err.code, rebuildNeeded: err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION' };
+            // مرحله ۱۱: پیش از ردِ نهایی، QPDF را امتحان کن — برای
+            // AES-256/ObjStm و رمزِ نشستی که pdf-lib نمی‌تواند،
+            // qpdf معمولاً مبنایِ رمزگشایی‌شدهٔ سالم می‌دهد و ذخیره،
+            // بی‌اتلاف انجام می‌شود. ترتیب، عمدی است: «رمزِ صوری»
+            // اول بررسی شد، چون qpdf روی فایلی که استریم‌هایش
+            // واقعاً رمز نشده‌اند، محتوایِ خوانا را خراب می‌کرد.
+            const qpdfBase = await tryQpdfBaseForSave(buildBytes, savePassword, saveLogger, buildDoc.getPageCount());
+            if (qpdfBase) {
+              buildBytes = qpdfBase.bytes;
+              buildDoc = qpdfBase.pdfDoc;
+              buildInvalidCount = qpdfBase.invalidCount;
+              decryptedThisSave = true;
+              qpdfDecryptedThisSave = true;
+              isEncryptedForGuard = false;
+              logSaveDiag(saveLogger, 'info', 'pdf-save: qpdf decrypted the base for this save (lossless)', 'pages=' + buildDoc.getPageCount());
+            } else {
+              return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (' + String(err.message) + '). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: err.code, rebuildNeeded: err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION' };
+            }
           }
         } else {
-          if (isEncryptedForGuard && hasObjStmInBytes(buildBytes)) {
-            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (استریمِ آبجکتِ فشرده با رمز ترکیب شده است). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: 'PDF_COPY_UNSUPPORTED_ENCRYPTION', rebuildNeeded: true };
+          // مرحله ۱۱: همان تلاشِ qpdf، برای خطاهایِ غیرِ کددارِ
+          // رمزگشایی (از جمله ترکیبِ ObjStm + رمز که qpdf ذاتاً
+          // پشتیبانی می‌کند). اگر qpdf موفق شد، به‌جای برگرداندنِ
+          // خطا، ذخیره با مبنایِ رمزگشایی‌شده ادامه می‌یابد.
+          const qpdfBaseOther = await tryQpdfBaseForSave(buildBytes, savePassword, saveLogger, buildDoc.getPageCount());
+          if (qpdfBaseOther) {
+            buildBytes = qpdfBaseOther.bytes;
+            buildDoc = qpdfBaseOther.pdfDoc;
+            buildInvalidCount = qpdfBaseOther.invalidCount;
+            decryptedThisSave = true;
+            qpdfDecryptedThisSave = true;
+            isEncryptedForGuard = false;
+            logSaveDiag(saveLogger, 'info', 'pdf-save: qpdf decrypted the base for this save (lossless, non-coded decrypt error path)', 'pages=' + buildDoc.getPageCount());
+          } else {
+            if (isEncryptedForGuard && hasObjStmInBytes(buildBytes)) {
+              return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (استریمِ آبجکتِ فشرده با رمز ترکیب شده است). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: 'PDF_COPY_UNSUPPORTED_ENCRYPTION', rebuildNeeded: true };
+            }
+            return { success: false, error: 'رمزگشاییِ فایل برای ذخیره انجام نشد: ' + String((err && err.message) || err) };
           }
-          return { success: false, error: 'رمزگشاییِ فایل برای ذخیره انجام نشد: ' + String((err && err.message) || err) };
         }
       }
-      if (!ghostNeutralizedThisSave) {
+      if (!ghostNeutralizedThisSave && !qpdfDecryptedThisSave) {
         if (decryptOutcome && decryptOutcome.decrypted) {
           decryptedThisSave = true;
           logSaveDiag(saveLogger, 'info', 'pdf-save: encrypted file decrypted with empty password for this save', 'streams=' + (decryptOutcome.streamCount || 0) + ' strings=' + (decryptOutcome.stringCount || 0));
@@ -3454,7 +3487,219 @@ async function describePdfEncryption(bytes, logger) {
   return withSilencedPdfLibWarnings(() => describePdfEncryptionImpl(bytes, logger));
 }
 
+
+// ===========================================================================
+// مرحله ۱۱ — توصیفِ رمزگذاری از روی بایت‌های دمِ فایل (بدونِ
+// PDFDocument.loadِ کلِ فایل).
+//
+// مشکلِ مرحلهٔ ۹/۱۰: وقتی پروبِ سریع، /Encrypt را در تریلر می‌دید،
+// توصیفِ رمزگذاری (V/R/Filter/ObjStm) با describePdfEncryptionForPath
+// انجام می‌شد که کلِ فایلِ ۶۸ مگابایتی را می‌خواند و با pdf-lib
+// پارس می‌کرد — چند ثانیه طول می‌کشید و تایم‌اوتِ ۱.۲ ثانیه‌ایِ
+// TopBar، مودالِ محافظت را در کلیکِ اول قورت می‌داد.
+//
+// دیکشنریِ /Encrypt، یک آبجکتِ چندصد بایتیِ متنِ ساده است (نام‌ها و
+// عددها رمز نمی‌شوند؛ فقط رشته‌ها و استریم‌ها رمز می‌شوند). پس:
+//  ۱. دمِ فایل خوانده می‌شود، startxref و دیکشنریِ تریلر پیدا
+//     می‌شود و ارجاعِ /Encrypt (N G R) یا دیکشنریِ مستقیم خوانده
+//     می‌شود؛
+//  ۲. آبجکتِ /Encrypt با یک اسکنِ بایتیِ تکه‌تکه (۱ مگابایت +
+//     هم‌پوشانی) پیدا و پارس می‌شود؛ در همان گذر، حضورِ /ObjStm
+//     هم ثبت می‌شود؛
+//  ۳. اگر آبجکت پیدا نشد، unknown برمی‌گردد و فراخواننده به مسیرِ
+//     کاملِ قبلی می‌افتد (هیچ تصمیمِ اشتباهی از روی حدس گرفته
+//     نمی‌شود).
+// ===========================================================================
+
+function parseEncryptDictText(dictText) {
+  if (!dictText || typeof dictText !== 'string') return null;
+  const num = (re, fb) => {
+    const m = re.exec(dictText);
+    if (!m) return fb;
+    const n = Number(m[1]);
+    return Number.isFinite(n) ? n : fb;
+  };
+  const nameVal = (re, fb) => {
+    const m = re.exec(dictText);
+    return m ? m[1] : fb;
+  };
+  const filter = nameVal(/\/Filter\s*\/([A-Za-z0-9]+)/, 'Standard');
+  const V = num(/\/V\s+(\d+)/, 0);
+  const R = num(/\/R\s+(\d+)/, 0);
+  let lengthBits = num(/\/Length\s+(\d+)/, 0);
+  if (!lengthBits) lengthBits = V === 4 ? 128 : 40;
+  const hasO = /\/O\s*(?:\(|<|\d+\s+\d+\s+R)/.test(dictText);
+  const hasU = /\/U\s*(?:\(|<|\d+\s+\d+\s+R)/.test(dictText);
+  const stmFilterName = nameVal(/\/StmF\s*\/([A-Za-z0-9]+)/, 'StdCF');
+  const strFilterName = nameVal(/\/StrF\s*\/([A-Za-z0-9]+)/, 'StdCF');
+  const cfmByFilter = { StdCF: { cfm: 'V2', lengthBits } };
+  const cfIdx = dictText.indexOf('/CF');
+  if (cfIdx >= 0) {
+    const dictStart = dictText.indexOf('<<', cfIdx);
+    if (dictStart >= 0) {
+      const cfDict = extractBalancedDict(dictText, dictStart);
+      if (cfDict) {
+        const entryRe = /\/([A-Za-z0-9]+)\s*<<([\s\S]*?)>>/g;
+        let em;
+        while ((em = entryRe.exec(cfDict)) !== null) {
+          const fname = em[1];
+          const fbody = em[2] || '';
+          const cfmM = /\/CFM\s*\/([A-Za-z0-9]+)/.exec(fbody);
+          const lenM = /\/Length\s+(\d+)/.exec(fbody);
+          cfmByFilter[fname] = {
+            cfm: cfmM ? cfmM[1] : 'V2',
+            lengthBits: lenM ? Number(lenM[1]) : lengthBits,
+          };
+        }
+      }
+    }
+  }
+  const stmCfm = (cfmByFilter[stmFilterName] || {}).cfm || 'V2';
+  const strCfm = (cfmByFilter[strFilterName] || {}).cfm || 'V2';
+  return { filter, V, R, lengthBits, hasO, hasU, stmFilterName, strFilterName, stmCfm, strCfm };
+}
+
+function encryptionInfoFromParsedDict(parsed, hasObjStm) {
+  if (!parsed) return { present: false, decryptSupported: true, rebuildRecommended: false, unknown: false };
+  const cfmOk = ['V2', 'AESV2', 'None'].includes(parsed.stmCfm) && ['V2', 'AESV2', 'None'].includes(parsed.strCfm);
+  const decryptSupported = parsed.filter === 'Standard'
+    && [1, 2, 4].includes(parsed.V)
+    && [2, 3, 4].includes(parsed.R)
+    && cfmOk
+    && Boolean(parsed.hasO) && Boolean(parsed.hasU)
+    && !hasObjStm;
+  return {
+    present: true,
+    filter: parsed.filter,
+    V: parsed.V,
+    R: parsed.R,
+    lengthBits: parsed.lengthBits,
+    stmCfm: parsed.stmCfm,
+    strCfm: parsed.strCfm,
+    hasObjStm: Boolean(hasObjStm),
+    decryptSupported,
+    rebuildRecommended: !decryptSupported,
+    unknown: false,
+    label: (parsed.V === 5 || parsed.R >= 5) ? 'AES-256' : (hasObjStm ? 'ObjStm' : 'Standard'),
+  };
+}
+
+async function parseEncryptDictFromPath(filePath, logger) {
+  let handle = null;
+  try {
+    handle = await fs.promises.open(filePath, 'r');
+    const stat = await handle.stat();
+    const size = stat.size;
+    if (size < 9) return { present: false, unknown: true };
+    const tailLen = Math.min(32768, size);
+    const tailBuf = Buffer.alloc(tailLen);
+    await handle.read(tailBuf, 0, tailLen, size - tailLen);
+    const tailText = tailBuf.toString('latin1');
+    const sxIdx = tailText.lastIndexOf('startxref');
+    if (sxIdx < 0) return { present: false, unknown: true };
+    const sxm = /(\d+)/.exec(tailText.slice(sxIdx + 9));
+    if (!sxm) return { present: false, unknown: true };
+    const xrefOffset = Number(sxm[1]);
+    if (!Number.isFinite(xrefOffset) || xrefOffset < 0 || xrefOffset >= size) return { present: false, unknown: true };
+    const dictText = await readTrailerDictText(handle, size, xrefOffset);
+    if (!dictText) return { present: false, unknown: true };
+    // دیکشنریِ مستقیمِ /Encrypt در تریلر (نادر ولی معتبر).
+    const encIdx = dictText.indexOf('/Encrypt');
+    if (encIdx >= 0) {
+      let j = encIdx + 8;
+      while (j < dictText.length && /[ \t\r\n]/.test(dictText[j])) j++;
+      if (dictText[j] === '<' && dictText[j + 1] === '<') {
+        const direct = extractBalancedDict(dictText, j);
+        const parsed = parseEncryptDictText(direct);
+        if (!parsed) return { present: false, unknown: true };
+        const hasObjStm = await scanPathForObjStm(handle, size);
+        return encryptionInfoFromParsedDict(parsed, hasObjStm);
+      }
+    }
+    const refM = /\/Encrypt\s+(\d+)\s+(\d+)\s+R/.exec(dictText);
+    if (!refM) return { present: false, unknown: false };
+    const objNum = Number(refM[1]);
+    const objGen = Number(refM[2]);
+    // گذرِ تکه‌تکه روی کلِ فایل: آبجکتِ /Encrypt را پیدا کن و در
+    // همان گذر، حضورِ /ObjStm را ثبت کن. سربرگِ آبجکت با بایت‌های
+    // «N G obj» جستجو می‌شود و با پارسِ موفقِ دیکشنری، تأیید
+    // می‌شود (تطابقِ کاذبِ داخلِ دادهٔ استریم، پارس نمی‌شود).
+    const CHUNK = 1048576;
+    const headerNeedle = Buffer.from('\n' + objNum + ' ' + objGen + ' obj');
+    const altNeedle = Buffer.from(objNum + ' ' + objGen + ' obj');
+    let hasObjStm = false;
+    let prevTail = Buffer.alloc(0);
+    for (let off = 0; off < size; off += CHUNK) {
+      const len = Math.min(CHUNK, size - off);
+      const piece = Buffer.alloc(len);
+      await handle.read(piece, 0, len, off);
+      const windowBuf = Buffer.concat([prevTail, piece]);
+      const windowText = windowBuf.toString('latin1');
+      if (windowText.includes('/ObjStm')) hasObjStm = true;
+      let searchFrom = 0;
+      while (true) {
+        let idx = windowBuf.indexOf(headerNeedle, searchFrom);
+        let altIdx = -1;
+        if (idx < 0 && off === 0) {
+          altIdx = windowBuf.indexOf(altNeedle, searchFrom);
+          if (altIdx === 0) idx = 0;
+        }
+        if (idx < 0) break;
+        const absOff = off - prevTail.length + idx + (idx > 0 || off > 0 ? 1 : 0);
+        const probeLen = Math.min(16384, size - absOff);
+        if (probeLen > 0) {
+          const probeBuf = Buffer.alloc(probeLen);
+          await handle.read(probeBuf, 0, probeLen, absOff);
+          const probeText = probeBuf.toString('latin1');
+          const objKw = probeText.indexOf('obj');
+          if (objKw >= 0) {
+            const dStart = probeText.indexOf('<<', objKw);
+            if (dStart >= 0) {
+              const objDict = extractBalancedDict(probeText, dStart);
+              const parsed = parseEncryptDictText(objDict);
+              if (parsed) return encryptionInfoFromParsedDict(parsed, hasObjStm);
+            }
+          }
+        }
+        searchFrom = idx + 1;
+      }
+      prevTail = piece.slice(-64);
+    }
+    return { present: true, unknown: true };
+  } catch (err) {
+    logSaveDiag(logger, 'warn', 'pdf-encrypt-dict: tail parse failed, falling back to full describe', String((err && err.message) || err));
+    return { present: false, unknown: true };
+  } finally {
+    if (handle) { try { await handle.close(); } catch (_) {} }
+  }
+}
+
+async function scanPathForObjStm(handle, size) {
+  try {
+    const CHUNK = 1048576;
+    let prevTail = '';
+    for (let off = 0; off < size; off += CHUNK) {
+      const len = Math.min(CHUNK, size - off);
+      const piece = Buffer.alloc(len);
+      await handle.read(piece, 0, len, off);
+      const text = prevTail + piece.toString('latin1');
+      if (text.includes('/ObjStm')) return true;
+      prevTail = text.slice(-32);
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function describePdfEncryptionForPath(filePath, logger) {
+  // مرحله ۱۱: اول، پارسِ دمِ فایل (چند میلی‌ثانیه، بدونِ
+  // PDFDocument.load)؛ فقط وقتی آبجکتِ /Encrypt پیدا نشد، مسیرِ
+  // کاملِ قبلی (خواندنِ کلِ فایل + پارس با pdf-lib) اجرا می‌شود.
+  try {
+    const fast = await parseEncryptDictFromPath(filePath, logger);
+    if (fast && !fast.unknown) return fast;
+  } catch (_) {}
   const bytes = await fs.promises.readFile(filePath);
   return describePdfEncryption(bytes, logger);
 }
@@ -3545,6 +3790,42 @@ function extractBalancedDict(text, startIdx) {
   return null;
 }
 
+
+// مرحله ۱۱: خواندنِ دیکشنریِ تریلر از آفستِ xref، با اسکنِ روبه‌جلو.
+// جدولِ xrefِ فایل‌های پرآبجکت (مثلاً کتابِ ۶۸ مگابایتی با هزاران
+// آبجکت) از ۱۶ کیلوبایت بزرگ‌تر است؛ خوانشِ تک‌تکهٔ ۱۶ کیلوبایتی،
+// به کلمهٔ trailer نمی‌رسید و پروبِ سریع، «نامشخص» برمی‌گرداند و
+// به پروبِ کاملِ چندثانیه‌ای می‌افتاد. این تابع، تکه‌های ۱۶
+// کیلوبایتی را تا پیدا شدنِ دیکشنریِ کاملِ تریلر (سقفِ ۱
+// مگابایت) می‌خواند؛ برای استریمِ xref، دیکشنری همان ابتدایِ
+// ناحیه است و در همان تکهٔ اول پیدا می‌شود.
+async function readTrailerDictText(handle, size, xrefOffset) {
+  let regionText = '';
+  let regionOff = xrefOffset;
+  while (regionOff < size && regionText.length < 1048576) {
+    const len = Math.min(16384, size - regionOff);
+    const piece = Buffer.alloc(len);
+    await handle.read(piece, 0, len, regionOff);
+    regionText += piece.toString('latin1');
+    regionOff += len;
+    const dictIdx = regionText.indexOf('<<');
+    const trailerIdx = regionText.indexOf('trailer');
+    let dictText = null;
+    if (dictIdx >= 0 && (trailerIdx < 0 || dictIdx < trailerIdx)) {
+      dictText = extractBalancedDict(regionText, dictIdx);
+    } else if (trailerIdx >= 0) {
+      const dIdx = regionText.indexOf('<<', trailerIdx);
+      if (dIdx >= 0) dictText = extractBalancedDict(regionText, dIdx);
+    }
+    if (dictText) return dictText;
+    // تریلر دیده شد ولی دیکشنری‌اش هنوز کامل نیست (مرزِ تکه) یا
+    // بیش از ۸ کیلوبایت پس از trailer خوانده شد و دیکشنری پیدا
+    // نشد: ادامه بی‌فایده است.
+    if (trailerIdx >= 0 && regionText.length > trailerIdx + 8192) return null;
+  }
+  return null;
+}
+
 async function probePdfProtectionFast(filePath, logger) {
   const base = { protected: false, readOnly: false, reason: 'inconclusive', pageCount: -1, hasEncryptToken: false, fast: true, conclusive: false, invalidObjects: 0, warningsCount: 0 };
   let handle = null;
@@ -3573,21 +3854,7 @@ async function probePdfProtectionFast(filePath, logger) {
     if (!m) return base;
     const xrefOffset = Number(m[1]);
     if (!Number.isFinite(xrefOffset) || xrefOffset < 0 || xrefOffset >= size) return base;
-    const chunkLen = Math.min(16384, size - xrefOffset);
-    const chunk = Buffer.alloc(chunkLen);
-    await handle.read(chunk, 0, chunkLen, xrefOffset);
-    const chunkText = chunk.toString('latin1');
-    // استریمِ xref: دیکشنری، همان دیکشنریِ تریلر است (<<...>> پیش
-    // از کلمهٔ stream). جدولِ کلاسیک: دیکشنری، پس از کلمهٔ trailer.
-    const dictIdx = chunkText.indexOf('<<');
-    const trailerIdx = chunkText.indexOf('trailer');
-    let dictText = null;
-    if (dictIdx >= 0 && (trailerIdx < 0 || dictIdx < trailerIdx)) {
-      dictText = extractBalancedDict(chunkText, dictIdx);
-    } else if (trailerIdx >= 0) {
-      const dIdx = chunkText.indexOf('<<', trailerIdx);
-      if (dIdx >= 0) dictText = extractBalancedDict(chunkText, dIdx);
-    }
+    const dictText = await readTrailerDictText(handle, size, xrefOffset);
     if (!dictText) return base;
     // /Encrypt، یا ارجاعِ غیرمستقیم است (N G R) یا دیکشنریِ
     // مستقیم (<<). ‎/EncryptMetadata، با این الگو match نمی‌شود
@@ -3759,18 +4026,147 @@ function loosePdfTextSample(text) {
   }
 }
 
-async function createUnlockedPdfCopyImpl({ bytes, logger, onProgress, password }) {
+
+// ===========================================================================
+// مرحله ۱۱ — QPDFِ بی‌اتلاف، خطِ اولِ بازگشایی.
+// tryQpdfDecrypt: سرویسِ qpdfUnlockService را تنبل بارگذاری می‌کند
+// (اگر پکیج نصب نباشد، require فقط همین‌جا شکست می‌خورد و مسیرهایِ
+// قبلی ادامه می‌یابند) و بایت‌هایِ رمزگشایی‌شده را برمی‌گرداند.
+// tryQpdfBaseForSave: خروجیِ qpdf را برای مسیرِ ذخیره راستی‌آزمایی
+// می‌کند (بارگذاریِ pdf-lib + شمارِ صفحه + نبودِ /Encrypt) و سندِ
+// آمادهٔ ادامهٔ ذخیره را برمی‌گرداند.
+// ===========================================================================
+async function tryQpdfDecrypt(bytes, password, logger) {
+  try {
+    const svc = require('./qpdfUnlockService');
+    const res = await svc.unlockPdfBytes(bytes, password);
+    if (!res.ok) {
+      logSaveDiag(logger, 'info', 'pdf-qpdf: qpdf decrypt unavailable/failed, using pdf-lib path', 'reason=' + String(res.reason || ''));
+    }
+    return res;
+  } catch (err) {
+    logSaveDiag(logger, 'warn', 'pdf-qpdf: qpdf service could not be loaded', String((err && err.message) || err));
+    return { ok: false, reason: 'qpdf-require-failed' };
+  }
+}
+
+async function tryQpdfBaseForSave(buildBytes, savePassword, logger, expectedPages) {
+  let attempt = null;
+  try {
+    attempt = await tryQpdfDecrypt(buildBytes, savePassword, logger);
+  } catch (_) {
+    return null;
+  }
+  if (!attempt || !attempt.ok || !attempt.bytes) return null;
+  try {
+    const check = await loadPdfDocumentWithWarnings(attempt.bytes);
+    if (!check.pdfDoc || check.loadError) return null;
+    if (Number.isFinite(expectedPages) && expectedPages > 0 && safeProbePageCount(check.pdfDoc) !== expectedPages) return null;
+    if (trailerEncryptPresent(check.pdfDoc)) return null;
+    return { bytes: attempt.bytes, pdfDoc: check.pdfDoc, invalidCount: (check.invalidObjects || []).length };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function createUnlockedPdfCopyImpl({ bytes, logger, onProgress, password, probeHint, allowHeavyFallback }) {
   const { PDFDocument, PDFName } = getPdfLib();
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
   if (buf.length < 8 || buf.slice(0, 5).toString('latin1') !== '%PDF-') {
     return { success: false, error: 'بایت‌های ورودی، یک فایلِ PDF معتبر نیستند.' };
   }
   if (typeof onProgress === 'function') { try { onProgress(0.05, 'در حالِ بررسیِ محافظتِ فایل…'); } catch (_) {} }
-  const probe = await probePdfProtection(buf, logger, onProgress);
+  // مرحله ۱۱: فراخواننده (ورکرِ کپی) می‌تواند نتیجهٔ پروبِ سریعِ
+  // خودش را بدهد تا پارسِ کاملِ دوباره انجام نشود؛ وقتی hint هست و
+  // قفل‌دار است، پروبِ کامل رد می‌شود (شمارِ صفحه، ‎-1 می‌ماند و
+  // گیتِ شمارِ صفحه در مسیرِ qpdf رد می‌شود، نه اینکه شکست بخورد).
+  const probe = (probeHint && probeHint.protected)
+    ? { protected: true, reason: 'hint', pageCount: (probeHint.pageCount || -1), invalidObjects: Array.isArray(probeHint.invalidObjects) ? probeHint.invalidObjects : [], hasEncryptToken: true }
+    : await probePdfProtection(buf, logger, onProgress);
   if (!probe.protected) {
     return { success: true, alreadyUnlocked: true, pageCount: probe.pageCount, textGate: 'not-needed' };
   }
   const expectedPageCount = probe.pageCount;
+
+  // مرحله ۱۱: خطِ اولِ بازگشایی — QPDFِ بی‌اتلاف (حفظِ متن/بردار/
+  // Outline، حجمِ ~۱ برابر). اگر qpdf در دسترس نباشد، شکست بخورد،
+  // یا خروجی‌اش از گیت‌های ساختاری/متنی رد نشود، مسیرِ pdf-libِ
+  // زیر، بدونِ هیچ تغییری ادامه می‌یابد.
+  if (typeof onProgress === 'function') { try { onProgress(0.12, 'در حالِ بازگشاییِ بی‌اتلاف با QPDF…'); } catch (_) {} }
+  let qpdfAttempt = null;
+  try { qpdfAttempt = await tryQpdfDecrypt(buf, password, logger); } catch (_) { qpdfAttempt = null; }
+  if (qpdfAttempt && qpdfAttempt.ok && qpdfAttempt.bytes) {
+    const qpdfCheck = await loadPdfDocumentWithWarnings(qpdfAttempt.bytes);
+    const qpdfCount = qpdfCheck.pdfDoc ? safeProbePageCount(qpdfCheck.pdfDoc) : -1;
+    const qpdfBaseline = Array.isArray(probe.invalidObjects) ? probe.invalidObjects.length : 0;
+    if (!qpdfCheck.loadError && qpdfCheck.pdfDoc && !trailerEncryptPresent(qpdfCheck.pdfDoc)
+      && (expectedPageCount <= 0 || qpdfCount === expectedPageCount)
+      && qpdfCheck.invalidObjects.length <= qpdfBaseline) {
+      // گیتِ متنیِ pdf.js — همان منطقِ مسیرِ pdf-lib، برای خروجیِ
+      // qpdf. اگر متنِ اصلی با رمزِ داده‌شده قابل‌خواندن نباشد،
+      // به‌جای ردِ نهایی، به مسیرِ pdf-lib می‌افتیم (رمزِ مشتق‌شده
+      // از رمزِ مالک، فقط آن‌جا امتحان می‌شود)؛ فقط «عدمِ تطابقِ
+      // محتوایِ خوانده‌شده» ردِ قطعی است.
+      let qpdfTextGate = 'skipped-unavailable';
+      let qpdfUsable = true;
+      try {
+        const pdfjsModule = await import('pdfjs-dist/legacy/build/pdf.mjs');
+        let origText = null;
+        let copyText = null;
+        try {
+          origText = await extractPdfTextSample(pdfjsModule, buf, logger, typeof password === 'string' ? password : '');
+        } catch (_) {
+          qpdfUsable = false;
+          logSaveDiag(logger, 'info', 'pdf-copy: qpdf text gate inconclusive (original unreadable), falling back to pdf-lib path');
+        }
+        if (qpdfUsable) {
+          try {
+            copyText = await extractPdfTextSample(pdfjsModule, qpdfAttempt.bytes, logger);
+          } catch (_) {
+            qpdfUsable = false;
+            logSaveDiag(logger, 'info', 'pdf-copy: qpdf text gate inconclusive (copy unreadable), falling back to pdf-lib path');
+          }
+        }
+        if (qpdfUsable) {
+          const origNorm = normalizePdfTextSample(origText);
+          const copyNorm = normalizePdfTextSample(copyText);
+          if (origNorm.length === 0 && copyNorm.length === 0) qpdfTextGate = 'skipped-no-text';
+          else if (origNorm.length > 0 && origNorm.length < 20) qpdfTextGate = 'skipped-short-text';
+          else if (origNorm === copyNorm || loosePdfTextSample(origNorm) === loosePdfTextSample(copyNorm)) qpdfTextGate = 'passed';
+          else {
+            return { success: false, error: 'نسخهٔ ساخته‌شده، محتوای قابل‌خواندنِ فایلِ اصلی را ندارد (محتوای فایل، با رمزِ واقعی رمزگذاری شده است)؛ کپی رد شد و فایلِ اصلی دست نخورده است.' };
+          }
+        }
+      } catch (err) {
+        qpdfTextGate = 'skipped-unavailable';
+        logSaveDiag(logger, 'warn', 'pdf-copy: text gate skipped (pdf.js import failed)', String((err && err.message) || err));
+      }
+      if (qpdfUsable) {
+        if (typeof onProgress === 'function') { try { onProgress(1, 'نسخهٔ کپی آماده است.'); } catch (_) {} }
+        return {
+          success: true,
+          alreadyUnlocked: false,
+          bytes: qpdfAttempt.bytes,
+          pageCount: qpdfCount,
+          healed: false,
+          textGate: qpdfTextGate,
+          baselineInvalidObjects: qpdfBaseline,
+          outputInvalidObjects: qpdfCheck.invalidObjects.length,
+          unlockedBy: 'qpdf',
+        };
+      }
+    } else {
+      logSaveDiag(logger, 'warn', 'pdf-copy: qpdf output rejected, falling back to pdf-lib decrypt', 'reason=' + String((qpdfAttempt && qpdfAttempt.reason) || 'validation'));
+    }
+  }
+  // مرحله ۱۱: برای فایل‌های بزرگ، وقتی qpdf شکست خورد، مسیرِ
+  // سنگینِ pdf-lib (پارسِ کامل + رمزگشاییِ استریم‌به‌استریم) اجرا
+  // نمی‌شود؛ فراخواننده (ورکر) به کپیِ باینری می‌افتد. برای
+  // فایل‌های کوچک و مسیرِ آماده‌سازیِ خواندن، رفتارِ قبلی حفظ
+  // می‌شود (allowHeavyFallback پیش‌فرض true است).
+  if (allowHeavyFallback === false) {
+    return { success: false, code: 'PDF_COPY_UNSUPPORTED_ENCRYPTION', error: 'رمزگشاییِ بی‌اتلاف (QPDF) برای این فایل انجام نشد و مسیرِ سنگینِ pdf-lib برای فایل‌های بزرگ غیرفعال است.' };
+  }
 
   // بارگذاری با رصدِ هشدار؛ اگر آبجکتِ خراب بود، ترمیمِ هم‌طولِ
   // مرحلهٔ ۷ ـ نهایی را هم امتحان کن (فقط وقتی ترمیم، بارگذاریِ
@@ -4203,4 +4599,13 @@ async function prepareProtectedPdfForReading(args) {
   return withSilencedPdfLibWarnings(() => prepareProtectedPdfForReadingImpl(args));
 }
 
-module.exports = { saveAnnotatedPdf, origBackupPathFor, relocatedOrigBackupPathFor, resolveOrigBackupsDir, describePdfEncryption, describePdfEncryptionForPath, encryptionInfoFromDoc, writeOrigBackupSidecar, verifyRelocatedOrigBackup, healUnparseableIndirectObjectsInBuffer, hasObjStmInBytes, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes };
+// مرحله ۱۱: در دسترس بودنِ موتورِ qpdf (برای تصمیمِ TopBar: کپیِ
+// بی‌اتلاف یا بازسازی). تنبل و بی‌خطر: اگر ماژول نصب نباشد، false.
+function isQpdfAvailable() {
+  try {
+    const svc = require('./qpdfUnlockService');
+    return svc.isQpdfAvailable();
+  } catch (_) { return Promise.resolve(false); }
+}
+
+module.exports = { saveAnnotatedPdf, origBackupPathFor, relocatedOrigBackupPathFor, resolveOrigBackupsDir, describePdfEncryption, describePdfEncryptionForPath, encryptionInfoFromDoc, writeOrigBackupSidecar, verifyRelocatedOrigBackup, healUnparseableIndirectObjectsInBuffer, hasObjStmInBytes, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes, parseEncryptDictFromPath, parseEncryptDictText, encryptionInfoFromParsedDict, isQpdfAvailable };

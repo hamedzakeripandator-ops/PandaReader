@@ -397,6 +397,14 @@ export const DEFAULT_PREFERENCES = {
   readingTheme: 'default',
   readingBrightness: 1,
   readingWarmth: 0,
+  // مرحله ۱۱: تعدادِ «مواردِ اخیر» در صفحهٔ خانه (پیش‌فرضِ ۱۲) و
+  // عددهایِ سفارشیِ افزوده‌شده توسطِ کاربر. هر دو از طریقِ
+  // updatePreferences، برای هر کلید با SAVE_SETTING در db.json
+  // ماندگار می‌شوند و initSettings آن‌ها را روی پیش‌فرض‌ها spread
+  // می‌کند؛ پس کاربرانِ قدیمی هم مقدارِ پیش‌فرض می‌گیرند و
+  // resetPreferences هم آن‌ها را برمی‌گرداند.
+  homeRecentLimit: 12,
+  homeRecentCustomPresets: [],
 };
 
 export const DEFAULT_PROFILE = {

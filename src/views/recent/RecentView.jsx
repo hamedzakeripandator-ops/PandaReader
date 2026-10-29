@@ -188,6 +188,29 @@ export default function RecentView({ onOpenComic }) {
   const sentinelRef = useRef(null);
   const scrollIdleTimerRef = useRef(null);
 
+  // مرحله ۱۱ — اصلاحِ بحرانیِ TDZ: این useMemo باید پیش از
+  // همهٔ افکت‌ها اعلان شود. در مرحلهٔ ۱۰، افکتِ نگهبان پیش از
+  // این اعلان بود و آرایهٔ وابستگی‌اش ([filteredRecents.length
+  // , …]) در زمانِ رندر خوانده می‌شد؛ یعنی خواندنِ یک const پیش
+  // از خطِ اعلانش (ReferenceError) در هر رندرِ RecentView و فعال
+  // شدنِ ChunkErrorBoundary به‌محضِ کلیک روی تبِ «اخیر». آیتم‌هایِ
+  // تهی/نامعتبر هم همین‌جا حذف می‌شوند تا هیچ mapای کرش نکند.
+  const filteredRecents = useMemo(() => {
+    const list = Array.isArray(recentItems) ? recentItems.filter(Boolean) : [];
+    const q = (searchQuery || '').trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((item) => {
+      const name = String(item.name || item.fileName || '').toLowerCase();
+      const path = String(item.path || item.filePath || '').toLowerCase();
+      return name.includes(q) || path.includes(q);
+    });
+  }, [recentItems, searchQuery]);
+
+  // شمارِ فعلیِ فهرست برای کال‌بکِ نگهبان (بدونِ وابستگیِ اثر به
+  // visibleCount که باعثِ بازسازیِ بیهودهٔ observer می‌شد).
+  const filteredRecentsLengthRef = useRef(0);
+  filteredRecentsLengthRef.current = filteredRecents.length;
+
   useEffect(() => {
     setVisibleCount(24);
   }, [searchQuery, viewMode]);
@@ -198,14 +221,14 @@ export default function RecentView({ onOpenComic }) {
     const observer = new IntersectionObserver(
       (entries) => {
         if (entries[0] && entries[0].isIntersecting) {
-          setVisibleCount((c) => Math.min(c + 24, filteredRecents.length));
+          setVisibleCount((c) => Math.min(c + 24, filteredRecentsLengthRef.current));
         }
       },
       { root: scrollContainerRef.current, rootMargin: '600px 0px', threshold: 0 }
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [filteredRecents.length, viewMode, visibleCount]);
+  }, [filteredRecents.length, viewMode]);
 
   const handleScroll = useCallback(() => {
     setIsScrolling(true);
@@ -242,15 +265,6 @@ export default function RecentView({ onOpenComic }) {
   }, [showToast]);
 
 
-  const filteredRecents = useMemo(() => {
-    const q = (searchQuery || '').trim().toLowerCase();
-    if (!q) return recentItems || [];
-    return (recentItems || []).filter((item) => {
-      const name = (item.name || item.fileName || '').toLowerCase();
-      const path = (item.path || item.filePath || '').toLowerCase();
-      return name.includes(q) || path.includes(q);
-    });
-  }, [recentItems, searchQuery]);
 
   // مرحله ۹: دسته‌بندیِ زمانی — در خودِ فایل، هیچ گروه‌بندی‌ای
   // وجود نداشت؛ گروه‌ها (امروز / دیروز / هفتهٔ گذشته /
@@ -298,25 +312,25 @@ export default function RecentView({ onOpenComic }) {
 
 
   const handleClearAll = () => {
-    clearRecents();
+    if (typeof clearRecents === 'function') clearRecents();
     setConfirmClear(false);
-    showToast('تاریخچه مطالعه به طور کامل پاک شد', { type: 'info' });
+    if (typeof showToast === 'function') showToast('تاریخچه مطالعه به طور کامل پاک شد', { type: 'info' });
   };
 
   // مرحله ۹: کال‌بک‌هایِ پایدار — اگر این هندلرها در هر رندر،
   // تابعِ تازه بسازند، React.memoِ ردیف‌ها بی‌اثر می‌شود.
   const handleRemoveItem = useCallback(
     (e, filePath, title) => {
-      e.stopPropagation();
-      removeFromRecent(filePath);
-      showToast(`«${title}» از تاریخچه حذف شد`, { type: 'info' });
+      if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (typeof removeFromRecent === 'function' && filePath) removeFromRecent(filePath);
+      if (typeof showToast === 'function') showToast(`«${title}» از تاریخچه حذف شد`, { type: 'info' });
     },
     [removeFromRecent, showToast]
   );
 
   const handleShowInFolder = useCallback((e, filePath) => {
-    e.stopPropagation();
-    if (filePath) coreApi.showItemInFolder(filePath);
+    if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+    if (filePath && coreApi && typeof coreApi.showItemInFolder === 'function') coreApi.showItemInFolder(filePath);
   }, []);
 
   return (

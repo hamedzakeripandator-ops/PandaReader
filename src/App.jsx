@@ -52,38 +52,87 @@ const ProfileView = lazy(() => import('./views/profile/ProfileView'));
 // نشان داده می‌شود. کلاس است، چون مرزِ خطا فقط با کامپوننتِ کلاسی
 // ممکن است. styles در زمانِ رندر خوانده می‌شود، پس تعریفِ دیرترِ آن
 // در انتهای فایل مشکلی ندارد.
+// مرحله ۱۱: مرزِ خطا، دو نوع خطا را از هم جدا می‌کند. پیش‌تر،
+// هر خطایِ زمانِ اجرایِ کد (مثلاً TDZ در RecentView) هم با پیامِ
+// «بارگذاریِ بخشی از برنامه ناموفق بود» و دکمهٔ reloadِ کورکورانه
+// نشان داده می‌شد و پس از reload هم، همان خطا دوباره رخ می‌داد.
+// حالا: شکستِ واقعیِ دانلودِ چانک → reload؛ خطایِ زمانِ اجرا →
+// ثبتِ دقیقِ خطا، بازنشانیِ استیتِ مرز و بازگشت به نمایِ امن
+// (بدونِ reload)، با نمایشِ پیامِ خطا برای تشخیص.
+function isChunkLoadError(error) {
+  const text = String((error && (error.message || error.name)) || error || '');
+  return /ChunkLoadError|Loading chunk|Failed to fetch dynamically imported module|Importing a module script failed|Failed to load module script/i.test(text);
+}
+
 class ChunkErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, error: null, isChunkError: false };
   }
 
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error, isChunkError: isChunkLoadError(error) };
   }
 
-  componentDidCatch(error) {
+  componentDidCatch(error, info) {
     try {
-      console.error('Chunk load failed:', error);
+      const label = isChunkLoadError(error) ? 'Chunk load failed' : 'Render error caught by boundary';
+      console.error(label + ':', error, info && info.componentStack ? info.componentStack : '');
     } catch (_) {}
   }
 
+  handleReset = () => {
+    const { isChunkError } = this.state;
+    if (isChunkError) {
+      window.location.reload();
+      return;
+    }
+    this.setState({ hasError: false, error: null, isChunkError: false });
+    try {
+      if (typeof this.props.onReset === 'function') this.props.onReset();
+    } catch (_) {}
+  };
+
+  handleRetrySection = () => {
+    this.setState({ hasError: false, error: null, isChunkError: false });
+  };
+
   render() {
     if (this.state.hasError) {
+      const { isChunkError, error } = this.state;
+      const detail = error && error.message ? String(error.message).slice(0, 300) : '';
       return (
         <div style={styles.chunkErrorOverlay}>
           <div style={styles.chunkErrorCard}>
-            <div style={styles.chunkErrorTitle}>بارگذاریِ بخشی از برنامه ناموفق بود</div>
-            <div style={styles.chunkErrorText}>
-              به نظر می‌رسد فایلِ موردنیاز یافت نشد یا قدیمی است. با تلاشِ مجدد، برنامه دوباره بارگذاری می‌شود.
+            <div style={styles.chunkErrorTitle}>
+              {isChunkError ? 'بارگذاریِ بخشی از برنامه ناموفق بود' : 'خطایی در نمایشِ این بخش رخ داد'}
             </div>
+            <div style={styles.chunkErrorText}>
+              {isChunkError
+                ? 'به نظر می‌رسد فایلِ موردنیاز یافت نشد یا قدیمی است. با تلاشِ مجدد، برنامه دوباره بارگذاری می‌شود.'
+                : 'این خطا از خرابیِ دانلودِ فایل نیست و جزئیاتِ آن برای بررسی ثبت شد. با بازگشت به صفحهٔ خانه، بخشِ سالمِ برنامه دوباره نمایش داده می‌شود.'}
+            </div>
+            {detail ? (
+              <div style={{ ...styles.chunkErrorText, direction: 'ltr', textAlign: 'left', fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all' }}>
+                {detail}
+              </div>
+            ) : null}
             <button
               type="button"
               style={styles.chunkErrorButton}
-              onClick={() => window.location.reload()}
+              onClick={this.handleReset}
             >
-              تلاش مجدد
+              {isChunkError ? 'تلاش مجدد' : 'بازگشت به صفحهٔ خانه'}
             </button>
+            {!isChunkError && (
+              <button
+                type="button"
+                style={{ ...styles.chunkErrorButton, marginTop: 8, background: 'transparent', color: 'var(--text)' }}
+                onClick={this.handleRetrySection}
+              >
+                تلاشِ دوبارهٔ همین بخش
+              </button>
+            )}
           </div>
         </div>
       );
@@ -785,7 +834,7 @@ export default function App() {
             </button>
           )}
 
-          <ChunkErrorBoundary>
+          <ChunkErrorBoundary onReset={() => setCurrentView('home')}>
             <Suspense fallback={<div style={styles.centerLoadingFallback}>در حال بارگذاری…</div>}>
               {renderCenterContent()}
             </Suspense>

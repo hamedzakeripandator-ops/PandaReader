@@ -502,6 +502,49 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
   const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
 
+  // مرحله ۱۱ — تعویضِ بدونِ چشمکِ زوم (Zero-Flash Zoom Swap):
+  // <img>، همیشه displayedSrc را نشان می‌دهد؛ وقتی activeSrc
+  // عوض می‌شود (زوم یا پاسِ HiDPI)، تصویرِ قبلی تا لحظه‌ای که
+  // Blobِ جدید کامل دیکد شود، روی صفحه می‌ماند و سپس، یک‌جا
+  // جابه‌جا می‌شود. پس صفحه، هرگز چشمکِ سفید نمی‌زند. اولین
+  // نمایش و خالی شدنِ منبع (تخلیهٔ کش)، بی‌درنگ انجام می‌شود.
+  const [displayedSrc, setDisplayedSrc] = useState(null);
+  const swapGenerationRef = useRef(0);
+  useEffect(() => {
+    const next = activeSrc || null;
+    if (!next) {
+      swapGenerationRef.current += 1;
+      if (displayedSrc !== null) setDisplayedSrc(null);
+      return;
+    }
+    if (next === displayedSrc) return;
+    if (!displayedSrc) {
+      setDisplayedSrc(next);
+      return;
+    }
+    const generation = (swapGenerationRef.current += 1);
+    let settled = false;
+    const finish = () => {
+      if (settled || swapGenerationRef.current !== generation) return;
+      settled = true;
+      setDisplayedSrc(next);
+    };
+    const timerId = setTimeout(finish, 400);
+    const probe = new Image();
+    probe.onload = () => { clearTimeout(timerId); finish(); };
+    probe.onerror = () => { clearTimeout(timerId); finish(); };
+    probe.src = next;
+    if (typeof probe.decode === 'function') {
+      try {
+        probe.decode().then(() => { clearTimeout(timerId); finish(); }).catch(() => { clearTimeout(timerId); finish(); });
+      } catch (_) {}
+    }
+    return () => {
+      settled = true;
+      clearTimeout(timerId);
+    };
+  }, [activeSrc, displayedSrc]);
+
   // Stage 8 Part B (CRITICAL TDZ FIX): Part A declared handleImgError
   // ABOVE this const, so its useCallback dependency array evaluated
   // `activeSrc` before initialization and threw a ReferenceError on
@@ -596,10 +639,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
             : (rotation ? `rotate(${rotation}deg)` : 'none'),
         }}
       >
-        {activeSrc ? (
+        {displayedSrc ? (
           <img
             ref={imgRef}
-            src={activeSrc}
+            src={displayedSrc}
             onError={handleImgError}
             onLoad={() => {
               imgErrorCountRef.current = 0;
@@ -766,6 +809,9 @@ export default function PdfViewer({ filePath }) {
   const [errorMsg, setErrorMsg] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
+  // مرحله ۱۱: جهتِ اسکرولِ فعلی ('down' | 'up') — فقط هنگامِ
+  // عوض شدنِ جهت، setState می‌شود تا رندرِ اضافی نسازد.
+  const [scrollDirection, setScrollDirection] = useState('down');
   const [defaultRatio, setDefaultRatio] = useState(1.4142);
   const [containerWidth, setContainerWidth] = useState(900);
   const [ratioTick, setRatioTick] = useState(0);
@@ -807,6 +853,13 @@ export default function PdfViewer({ filePath }) {
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
   activePageRef.current = activePage;
+  // مرحله ۱۱: جهتِ آخرین اسکرول (برای پیش‌رندرِ جهت‌دار) و
+  // آخرین scrollTop (با ناحیهٔ مردهٔ ۲ پیکسل).
+  const scrollDirectionRef = useRef('down');
+  const lastScrollTopRef = useRef(0);
+  // مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایلِ بازسازی‌شده (در صورتِ
+  // وجود)، برای جستجو روی صفحه‌هایِ رستریِ بدونِ لایهٔ متن.
+  const searchIndexRef = useRef(null);
 
   // مرحله ۴ — جستجوی درون‌متنی PDF (غیرمسدودکننده):
   // pdfDocRef آینهٔ همان سندِ state است (سندِ دومی باز نمی‌شود)؛
@@ -1102,6 +1155,9 @@ export default function PdfViewer({ filePath }) {
         base64,
         mode: saveMode,
         expectedPageCount: rebuilt.pageCount,
+        // مرحله ۱۱: ایندکسِ جستجویِ کناری، کنارِ فایلِ خروجی
+        // ذخیره می‌شود تا Ctrl+F روی فایلِ رستری هم کار کند.
+        searchIndex: rebuilt.searchIndex || undefined,
       });
       if (result && result.canceled) {
         showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
@@ -1167,6 +1223,10 @@ export default function PdfViewer({ filePath }) {
           base64,
           mode: 'copy',
           expectedPageCount: rebuilt.pageCount,
+          // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر از مودالِ محافظت.
+          desiredName: detail.desiredName || undefined,
+          desiredPath: detail.desiredPath || undefined,
+          searchIndex: rebuilt.searchIndex || undefined,
         });
         if (result && result.success) {
           showSaveStatus('saved-as', 'نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', 4500);
@@ -1306,6 +1366,17 @@ export default function PdfViewer({ filePath }) {
         // بازسازی و با همان mode ذخیره می‌شود.
         await handleRebuildSave(saveMode, pages);
         return;
+      } else if (result && (result.errorCode === 'PDF_COPY_PASSWORD_REQUIRED' || result.errorCode === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+        // مرحله ۱۱: فایل، همین حالا در pdf.js باز است ولی ذخیرهٔ
+        // معمولی، رمز می‌خواهد یا رمزگذاری‌اش پشتیبانی نمی‌شود.
+        // به‌جای بنرِ قرمزِ بن‌بستِ «بدونِ رمزِ عبور، قابلِ
+        // ذخیره‌سازی نیست»، مودالِ ساختِ نسخهٔ کپی در TopBar باز
+        // می‌شود تا کاربر، همان‌جا کپیِ قابل‌ویرایش (بی‌اتلافِ
+        // qpdf یا بازسازی) بسازد. حاشیه‌نویسی‌ها در دیتابیس
+        // می‌مانند و از دست نمی‌روند.
+        showSaveStatus('info', 'این فایل محافظت‌شده است؛ برای ذخیره، نسخهٔ کپیِ قابل‌ویرایش ساخته می‌شود…', 6000);
+        showToast('این فایل محافظت‌شده است؛ مودالِ ساختِ نسخهٔ کپی باز می‌شود.', { type: 'info' });
+        window.dispatchEvent(new CustomEvent('app:open-protection-modal', { detail: { filePath } }));
       } else {
         showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
         showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
@@ -1668,6 +1739,19 @@ export default function PdfViewer({ filePath }) {
         pendingResumePageRef.current = savedPage;
         setDefaultRatio(initialRatio);
         setPdfDoc(doc);
+        // مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایلِ بازسازی‌شده (در
+        // صورتِ وجود) به‌صورتِ غیرمسدودکننده خوانده می‌شود تا
+        // extractPageText روی صفحه‌هایِ رستری هم متن داشته باشد.
+        // نبودنِ ایندکس، خطا نیست و مسیرِ عادیِ جستجو را عوض
+        // نمی‌کند.
+        try {
+          coreApi.getSearchIndex(filePath).then((res) => {
+            if (!isMounted) return;
+            if (res && res.found && res.index && res.index.pages) {
+              searchIndexRef.current = res.index;
+            }
+          }).catch(() => {});
+        } catch (_) {}
         setNumPages(doc.numPages);
         setActivePage(savedPage);
         activePageRef.current = savedPage;
@@ -1857,13 +1941,29 @@ export default function PdfViewer({ filePath }) {
       strippedChars.push(ch);
       strippedToOriginal.push(i);
     }
-    const entry = {
+    let entry = {
       text,
       normalized,
       stripped: strippedChars.join(''),
       strippedToOriginal,
       items,
     };
+    // مرحله ۱۱: اگر خودِ PDF هیچ آیتمِ متنی نداشت (صفحهٔ رستریِ
+    // بازسازی‌شده) ولی ایندکسِ کناری برای این صفحه، متن و مختصات
+    // دارد، از ایندکس خوانده می‌شود تا Ctrl+F با هایلایتِ دقیق،
+    // روی فایلِ بازسازی‌شده هم کار کند. متنِ زندهٔ خودِ PDF،
+    // همیشه اولویت دارد.
+    const sidecarPages = searchIndexRef.current && searchIndexRef.current.pages;
+    const sidecarEntry = sidecarPages ? (sidecarPages[pageNum] || sidecarPages[String(pageNum)]) : null;
+    if ((!entry.items || entry.items.length === 0) && (!entry.stripped || entry.stripped.length === 0) && sidecarEntry && sidecarEntry.text) {
+      entry = {
+        text: sidecarEntry.text,
+        normalized: sidecarEntry.normalized || normalizeSearchText(sidecarEntry.text),
+        stripped: sidecarEntry.stripped || '',
+        strippedToOriginal: Array.isArray(sidecarEntry.strippedToOriginal) ? sidecarEntry.strippedToOriginal : [],
+        items: Array.isArray(sidecarEntry.items) ? sidecarEntry.items : [],
+      };
+    }
     pageTextCacheRef.current.set(pageNum, entry);
     pruneSearchTextCache(pageNum);
     // مرحله ۴ ـ بخش ب: صفحه‌های دور از شعاعِ رندر، پس از استخراجِ متن
@@ -2158,6 +2258,7 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     searchRunIdRef.current += 1;
     pageTextCacheRef.current.clear();
+    searchIndexRef.current = null;
     setSearchOpen(false);
     setSearchQuery('');
     setSearchResults([]);
@@ -2167,6 +2268,7 @@ export default function PdfViewer({ filePath }) {
     return () => {
       searchRunIdRef.current += 1;
       pageTextCacheRef.current.clear();
+      searchIndexRef.current = null;
     };
   }, [filePath]);
 
@@ -2277,8 +2379,14 @@ export default function PdfViewer({ filePath }) {
     }
 
     const centerIndex = Math.max(0, Math.min(numPages - 1, activePage - 1));
-    const startIdx = Math.max(0, centerIndex - DOM_OVERSCAN);
-    const endIdx = Math.min(numPages - 1, centerIndex + DOM_OVERSCAN);
+    // مرحله ۱۱: پنجرهٔ DOM، جهت‌دار است — در جهتِ حرکت، یک صفحه
+    // بیشتر از شعاعِ متقارنِ قبلی (DOM_OVERSCAN=۴) نگه داشته
+    // می‌شود تا صفحه‌هایِ پیشِ رو، پیش از رسیدنِ چشمِ کاربر در
+    // DOM باشند. خلافِ جهت، شعاعِ قبلی حفظ می‌شود.
+    const behindOverscan = scrollDirection === 'down' ? DOM_OVERSCAN - 1 : DOM_OVERSCAN + 1;
+    const aheadOverscan = scrollDirection === 'down' ? DOM_OVERSCAN + 1 : DOM_OVERSCAN - 1;
+    const startIdx = Math.max(0, centerIndex - behindOverscan);
+    const endIdx = Math.min(numPages - 1, centerIndex + aheadOverscan);
 
     const pages = [];
     for (let i = startIdx; i <= endIdx; i++) {
@@ -2297,7 +2405,7 @@ export default function PdfViewer({ filePath }) {
       paddingTop: pTop,
       paddingBottom: pBottom,
     };
-  }, [numPages, activePage, pageOffsets, pageHeights, totalHeight, safePageGap]);
+  }, [numPages, activePage, pageOffsets, pageHeights, totalHeight, safePageGap, scrollDirection]);
 
   // فاز ۳: صفحه‌های در دید را برای تخلیهٔ کش، در ref نگه دار.
   visiblePageNumbersRef.current = visiblePageNumbers;
@@ -2324,6 +2432,19 @@ export default function PdfViewer({ filePath }) {
     let rafId = null;
 
     const updateActivePageFromScroll = () => {
+      // مرحله ۱۱: جهتِ اسکرول، پیش از هر early return محاسبه
+      // می‌شود (با ناحیهٔ مردهٔ ۲ پیکسل) تا پنجرهٔ پیش‌رندر، حتی
+      // هنگامِ پرش هم در جهتِ حرکت گسترش یابد.
+      const currentTop = container.scrollTop || 0;
+      const deltaTop = currentTop - lastScrollTopRef.current;
+      if (deltaTop > 2 || deltaTop < -2) {
+        const nextDirection = deltaTop > 0 ? 'down' : 'up';
+        lastScrollTopRef.current = currentTop;
+        if (scrollDirectionRef.current !== nextDirection) {
+          scrollDirectionRef.current = nextDirection;
+          setScrollDirection(nextDirection);
+        }
+      }
       if (isJumpingRef.current || isResumingRef.current || !hasResumedRef.current) {
         return;
       }
@@ -2821,7 +2942,16 @@ export default function PdfViewer({ filePath }) {
             visiblePageNumbers.map((pageNum) => {
               const index = pageNum - 1;
               const distance = Math.abs(pageNum - activePage);
-              const shouldRender = distance <= RENDER_RADIUS;
+              // مرحله ۱۱: پیش‌رندرِ جهت‌دار — به‌جای شعاعِ متقارنِ
+              // ثابت (RENDER_RADIUS=۳)، در جهتِ حرکت ۵ صفحه و
+              // خلافِ جهت ۲ صفحه رندر می‌شوند؛ صفحه‌هایِ بعدی،
+              // همیشه پیش از رسیدنِ چشمِ کاربر آماده‌اند. فاصلهٔ
+              // مطلق، همچنان برای اولویتِ رندر (distanceFromActive)
+              // به PdfPageItem می‌رود.
+              const signedDistance = pageNum - activePage;
+              const shouldRender = scrollDirection === 'down'
+                ? (signedDistance >= -2 && signedDistance <= 5)
+                : (signedDistance >= -5 && signedDistance <= 2);
               const cachedUrl = pageBlobCacheRef.current.get(pageNum) || null;
               const pageAnnots = annotationsByPage[String(pageNum)] || [];
 

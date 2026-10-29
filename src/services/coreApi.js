@@ -265,16 +265,43 @@ export const coreApi = {
   // مرحله ۸ ـ بخش الف: ساختِ نسخهٔ کپیِ بدونِ قفل. عمداً بدونِ
   // withTimeout است (مثلِ exportAnnotatedPdf): رمزگشایی و اعتبارسنجیِ
   // فایلِ بزرگ، زمان‌بر است و نباید تایم‌اوتِ کاذب بسازد.
-  createUnlockedPdfCopy: async (filePath, password) => {
+  // مرحله ۱۱: options اختیاری — { desiredName, desiredPath }.
+  createUnlockedPdfCopy: async (filePath, password, options) => {
     const api = getApi();
     if (!api?.createUnlockedPdfCopy) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
     if (!filePath || typeof filePath !== 'string') {
       return { success: false, error: 'مسیر فایل مشخص نشده است.' };
     }
     try {
-      return await api.createUnlockedPdfCopy(filePath, typeof password === 'string' ? password : '');
+      return await api.createUnlockedPdfCopy(filePath, typeof password === 'string' ? password : '', options || undefined);
     } catch (err) {
       return { success: false, error: err?.message || 'خطا در ساختِ نسخهٔ کپی' };
+    }
+  },
+
+  // مرحله ۱۱: دیالوگِ انتخابِ نام/پوشهٔ نسخهٔ کپی. عمداً بدونِ
+  // تایم‌اوت (تعاملِ کاربر با دیالوگِ ویندوز).
+  chooseCopySavePath: async (filePath, defaultName) => {
+    const api = getApi();
+    if (!api?.chooseCopySavePath) return { canceled: true };
+    if (!filePath || typeof filePath !== 'string') return { canceled: true };
+    try {
+      return await api.chooseCopySavePath(filePath, defaultName);
+    } catch (err) {
+      return { canceled: true };
+    }
+  },
+
+  // مرحله ۱۱: ایندکسِ جستجویِ کناری. تایم‌اوتِ ۳۰ ثانیه‌ای؛ در
+  // خطا، «پیدا نشد» برمی‌گردد تا جستجو، مسیرِ عادی را برود.
+  getSearchIndex: async (filePath) => {
+    const api = getApi();
+    if (!api?.getSearchIndex) return { found: false };
+    if (!filePath || typeof filePath !== 'string') return { found: false };
+    try {
+      return await withTimeout(api.getSearchIndex(filePath), 30000, { found: false });
+    } catch (err) {
+      return { found: false };
     }
   },
 

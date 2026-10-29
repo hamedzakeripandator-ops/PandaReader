@@ -87,8 +87,13 @@ async function handleProbe(filePath) {
     } catch (_) { /* توصیف انجام نشد؛ پروبِ پایه، معتبر می‌ماند */ }
   }
   postProgress('probe-done', 1, 'بررسیِ محافظت انجام شد.');
+  let qpdfAvailable = false;
+  try {
+    if (saver.isQpdfAvailable) qpdfAvailable = Boolean(await saver.isQpdfAvailable());
+  } catch (_) { qpdfAvailable = false; }
   return {
     protected: Boolean(result && result.protected),
+    qpdfAvailable,
     readOnly: Boolean(result && result.readOnly),
     reason: (result && result.reason) || 'unknown',
     pageCount: (result && result.pageCount) || -1,
@@ -101,9 +106,12 @@ async function handleProbe(filePath) {
   };
 }
 
-// آستانهٔ پرامپت: فایل‌های بالای ۱۵ مگابایت، مسیرِ رمزگشایی را
-// نمی‌روند؛ مستقیم کپیِ باینری می‌شوند.
+// مرحله ۱۱: دو آستانهٔ جدا — مسیرِ سنگینِ pdf-lib فقط تا ۱۵
+// مگابایت (پرامپتِ مرحلهٔ ۸)؛ مسیرِ qpdf (چند ده میلی‌ثانیه،
+// حافظهٔ خطی) تا ۲۰۰ مگابایت. فایلِ بزرگ‌تر از ۲۰۰ مگابایت،
+// مستقیم کپیِ باینری می‌شود.
 const COPY_DECRYPT_MAX_BYTES = 15 * 1024 * 1024;
+const COPY_QPDF_MAX_BYTES = 200 * 1024 * 1024;
 
 async function handleCopy(filePath, tempPath, password) {
   // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: تصمیمِ مسیر، پیش از هر
@@ -126,13 +134,20 @@ async function handleCopy(filePath, tempPath, password) {
   if (!probe.protected && !probe.readOnly) {
     return { success: true, alreadyUnlocked: true, pageCount: probe.pageCount, textGate: 'not-needed' };
   }
-  if (probe.protected && size <= COPY_DECRYPT_MAX_BYTES) {
+  if (probe.protected && size <= COPY_QPDF_MAX_BYTES) {
     const bytes = await fs.promises.readFile(filePath);
     postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل…');
     const result = await saver.createUnlockedPdfCopy({
       bytes,
       logger: makeLogger(),
       password: typeof password === 'string' ? password : '',
+      // مرحله ۱۱: پروبِ سریع، صفحه‌شمار را می‌داند؛ از پارسِ کاملِ
+      // دوباره در createUnlockedPdfCopy جلوگیری می‌شود. مسیرِ
+      // سنگینِ pdf-lib فقط برای فایل‌های ≤۱۵ مگابایت مجاز است؛
+      // بزرگ‌ترها فقط با qpdf باز می‌شوند و در صورتِ شکست، کدِ
+      // خطا برمی‌گردد تا TopBar بازسازی را پیشنهاد دهد.
+      probeHint: { protected: true, pageCount: probe.pageCount, invalidObjects: [] },
+      allowHeavyFallback: size <= COPY_DECRYPT_MAX_BYTES,
       onProgress: (fraction, label) => { postProgress('copy', 0.08 + fraction * 0.85, label); },
     });
     if (result && result.success) {
@@ -142,12 +157,19 @@ async function handleCopy(filePath, tempPath, password) {
       return result;
     }
     if (result && (result.code === 'PDF_COPY_PASSWORD_REQUIRED' || result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
-      // رمزگشایی ذاتاً ممکن نیست → به کپیِ باینری بیفت (پرامپت،
-      // مسیرِ دوم)؛ خطای «نمی‌تواند کپی بسازد» دیگر صادر نمی‌شود.
-      postProgress('copy-fallback', 0.1, 'رمزگشایی ممکن نیست؛ کپیِ باینری ساخته می‌شود…');
-    } else {
-      return result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' };
+      // مرحله ۱۱: شکستِ رمزگشایی، دیگر به کپیِ باینریِ خاموش
+      // نمی‌افتد؛ کد برمی‌گردد تا TopBar، بازسازیِ از pdf.js یا
+      // درخواستِ رمز را به کاربر پیشنهاد دهد. کپیِ باینری فقط
+      // برای فایلِ فقط‌خواندنیِ بدونِ قفل یا فایلِ >۲۰۰ مگابایت
+      // است (مسیرِ پایینِ تابع).
+      return {
+        success: false,
+        code: result.code,
+        error: result.error || 'ساختِ نسخهٔ کپیِ قابل‌ویرایش انجام نشد.',
+        pageCount: probe.pageCount,
+      };
     }
+    return result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' };
   }
   // مسیرِ کپیِ باینری: ناهمگام، بدونِ پارس، بدونِ هنگ.
   postProgress('copy-binary', 0.1, 'در حالِ ساختِ کپیِ باینری…');
@@ -206,6 +228,7 @@ async function writeCopyTemp(result, tempPath) {
     binaryCopy: false,
     pageCount: result.pageCount,
     textGate: result.textGate,
+    unlockedBy: result.unlockedBy || undefined,
     healed: Boolean(result.healed),
     baselineInvalidObjects: result.baselineInvalidObjects || 0,
     outputInvalidObjects: result.outputInvalidObjects || 0,

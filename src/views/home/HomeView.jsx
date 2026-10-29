@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
+import useSettingsStore from '../../store/useSettingsStore';
+
+// مرحله ۱۱: عددهایِ پیش‌فرضِ «تعدادِ نمایشِ مواردِ اخیر» در
+// صفحهٔ خانه؛ عددهایِ سفارشیِ کاربر، از تنظیمات (db.json) به
+// همین فهرست اضافه می‌شوند.
+const DEFAULT_RECENT_LIMITS = [6, 12, 18, 24, 36, 50];
 import QuickActionCards from './QuickActionCards';
 import ComicCard from '../library/ComicCard';
 import StorageSection from '../../components/common/StorageSection';
@@ -15,7 +21,39 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
 
   const effectiveLibrary = library || libraryItems || [];
   const lastReadComic = recentItems?.[0] || null;
-  const recentPreview = (recentItems || []).slice(0, 5);
+  // مرحله ۱۱: حدِ نمایشِ مواردِ اخیر، از تنظیماتِ ماندگار
+  // (db.json) خوانده می‌شود؛ ۱ تا ۲۰۰ و پیش‌فرضِ ۱۲.
+  const homeRecentLimit = useSettingsStore((state) => state.preferences?.homeRecentLimit);
+  const homeRecentCustomPresets = useSettingsStore((state) => state.preferences?.homeRecentCustomPresets);
+  const updatePreferences = useSettingsStore((state) => state.updatePreferences);
+  const recentLimit = Math.max(1, Math.min(200, Number(homeRecentLimit) || 12));
+  const customPresets = Array.isArray(homeRecentCustomPresets)
+    ? homeRecentCustomPresets.map((n) => Number(n)).filter((n) => Number.isInteger(n) && n >= 1 && n <= 200)
+    : [];
+  const recentLimitOptions = Array.from(new Set([...DEFAULT_RECENT_LIMITS, ...customPresets])).sort((a, b) => a - b);
+  const recentPreview = (recentItems || []).filter(Boolean).slice(0, recentLimit);
+  const [limitMenuOpen, setLimitMenuOpen] = useState(false);
+  const [customLimitInput, setCustomLimitInput] = useState('');
+
+  const handleSelectRecentLimit = (n) => {
+    if (typeof updatePreferences === 'function') updatePreferences({ homeRecentLimit: n });
+    setLimitMenuOpen(false);
+  };
+  const handleAddCustomRecentLimit = () => {
+    const n = Number.parseInt(String(customLimitInput).trim(), 10);
+    if (!Number.isInteger(n) || n < 1 || n > 200) {
+      showToast('عددِ دلخواه باید بینِ ۱ تا ۲۰۰ باشد.', { type: 'warning' });
+      return;
+    }
+    if (typeof updatePreferences === 'function') {
+      updatePreferences({
+        homeRecentCustomPresets: Array.from(new Set([...customPresets, n])),
+        homeRecentLimit: n,
+      });
+    }
+    setCustomLimitInput('');
+    setLimitMenuOpen(false);
+  };
 
   const lastReadPath = lastReadComic?.path || lastReadComic?.filePath || '';
   const lastReadTitle = lastReadComic?.name || lastReadComic?.fileName || lastReadPath.split(/[\\/]/).pop() || '';
@@ -220,10 +258,6 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
         onSelectFile={onSelectFile}
         onSelectFolder={handleOpenFolderFallback}
       />
-      <div style={{ marginTop: '20px' }}>
-        <StorageSection compact />
-      </div>
-
       {/* ردیف «اخیراً مطالعه شده»: تیتر Estedad 800 19px + لینک فیروزه‌ای Estedad 600 12.5px */}
       {recentPreview.length > 0 && (
         <div style={styles.recentSection}>
@@ -235,14 +269,69 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
               <h3 style={styles.sectionTitle}>اخیراً مطالعه شده</h3>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setCurrentView('library')}
-              style={styles.seeAllBtn}
-            >
-              <span>مشاهده ویترین کتابخانه</span>
-              <Icons.ChevronLeft size={14} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', position: 'relative' }}>
+              <button
+                type="button"
+                onClick={() => setLimitMenuOpen((open) => !open)}
+                aria-haspopup="true"
+                aria-expanded={limitMenuOpen}
+                style={styles.limitBtn}
+              >
+                <span>تعدادِ نمایش: {recentLimit}</span>
+                <Icons.ChevronDown size={14} />
+              </button>
+              {limitMenuOpen && (
+                <>
+                  <div
+                    style={{ position: 'fixed', inset: 0, zIndex: 49, background: 'transparent' }}
+                    onMouseDown={() => setLimitMenuOpen(false)}
+                  />
+                  <div style={styles.limitMenu} role="menu">
+                    {recentLimitOptions.map((n) => (
+                      <button
+                        type="button"
+                        key={n}
+                        onClick={() => handleSelectRecentLimit(n)}
+                        style={{ ...styles.limitMenuItem, ...(n === recentLimit ? styles.limitMenuItemActive : {}) }}
+                      >
+                        <span>{n} مورد</span>
+                        {n === recentLimit ? <Icons.Check size={14} /> : null}
+                      </button>
+                    ))}
+                    <div style={styles.limitMenuDivider} />
+                    <div style={styles.limitMenuCustomRow}>
+                      <input
+                        type="number"
+                        min={1}
+                        max={200}
+                        value={customLimitInput}
+                        onChange={(e) => setCustomLimitInput(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleAddCustomRecentLimit(); }}
+                        dir="ltr"
+                        placeholder="عددِ دلخواه…"
+                        style={styles.limitMenuInput}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddCustomRecentLimit}
+                        style={styles.limitMenuAddBtn}
+                      >
+                        <Icons.Plus size={14} />
+                        <span>افزودن</span>
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setCurrentView('library')}
+                style={styles.seeAllBtn}
+              >
+                <span>مشاهده ویترین کتابخانه</span>
+                <Icons.ChevronLeft size={14} />
+              </button>
+            </div>
           </div>
 
           <div style={styles.recentGrid}>
@@ -257,6 +346,13 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
           </div>
         </div>
       )}
+
+      {/* مرحله ۱۱: کارتِ اطلاعاتِ دیتابیس/حافظه، پس از «مواردِ
+          اخیر» قرار گرفت تا ابتدا اقدام‌هایِ سریع و مواردِ اخیر
+          دیده شوند. */}
+      <div style={{ marginTop: '2px' }}>
+        <StorageSection compact />
+      </div>
     </div>
   );
 }
@@ -562,6 +658,94 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     gap: '4px',
+  },
+  limitBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '7px 12px',
+    borderRadius: '10px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  limitMenu: {
+    position: 'absolute',
+    top: 'calc(100% + 6px)',
+    left: 0,
+    zIndex: 50,
+    minWidth: '190px',
+    padding: '6px',
+    borderRadius: '12px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel)',
+    boxShadow: '0 16px 40px rgba(0, 0, 0, 0.4)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '2px',
+  },
+  limitMenuItem: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    padding: '8px 10px',
+    borderRadius: '8px',
+    border: 'none',
+    backgroundColor: 'transparent',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    textAlign: 'right',
+    width: '100%',
+  },
+  limitMenuItemActive: {
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--accent)',
+  },
+  limitMenuDivider: {
+    height: '1px',
+    backgroundColor: 'var(--border)',
+    margin: '6px 4px',
+  },
+  limitMenuCustomRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '2px 4px 4px',
+  },
+  limitMenuInput: {
+    flex: 1,
+    minWidth: 0,
+    padding: '7px 10px',
+    borderRadius: '8px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+    fontSize: '12.5px',
+    textAlign: 'left',
+    outline: 'none',
+  },
+  limitMenuAddBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+    padding: '7px 10px',
+    borderRadius: '8px',
+    border: '1px solid var(--accent)',
+    backgroundColor: 'var(--accent)',
+    color: '#fff',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   recentGrid: {
     display: 'grid',

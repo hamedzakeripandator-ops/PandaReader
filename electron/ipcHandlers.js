@@ -489,6 +489,83 @@ function createCoverFromBuffer(buffer, forcedMime = 'image/jpeg', targetWidth = 
   }
 }
 
+// مرحله ۱۱: نامِ دلخواهِ نسخهٔ کپی و ایندکسِ جستجویِ کناری.
+// sanitizeCopyFileName: فقط نامِ پایه را می‌پذیرد (بدونِ پوشه)،
+// کاراکترهایِ نامعتبرِ ویندوز و کنترلی را حذف می‌کند و پسوندِ
+// .pdf را تضمین می‌کند. نامِ خالی → نامِ پیش‌فرضِ خودکار.
+function sanitizeCopyFileName(name, fallbackBase) {
+  const fallback = String(fallbackBase || 'copy') + '-editable.pdf';
+  if (!name || typeof name !== 'string') return fallback;
+  let base = path.basename(name.trim());
+  base = base.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '').trim();
+  if (!base) return fallback;
+  if (path.extname(base).toLowerCase() !== '.pdf') base += '.pdf';
+  return base;
+}
+
+// resolveCopyOutputPath: مسیرِ نهاییِ کپی از سه منبع (به ترتیبِ
+// اولویت): مسیرِ انتخاب‌شده در showSaveDialog، نامِ تایپ‌شده در
+// مودال، نامِ خودکارِ <base>-editable.pdf. اگر مسیرِ نهایی از
+// قبل وجود داشته باشد، پسوندِ شماره‌دار (-2 … -100) می‌گیرد؛
+// اگر هیچ نامی آزاد نباشد، null برمی‌گردد.
+function resolveCopyOutputPath(pdfPath, desiredName, desiredPath) {
+  const dir = path.dirname(pdfPath);
+  const baseName = path.basename(pdfPath, path.extname(pdfPath));
+  let candidate = null;
+  if (desiredPath && typeof desiredPath === 'string') {
+    const p = desiredPath.trim();
+    if (path.isAbsolute(p)) {
+      let withExt = p;
+      if (path.extname(withExt).toLowerCase() !== '.pdf') withExt += '.pdf';
+      if (fs.existsSync(path.dirname(withExt))) candidate = withExt;
+    }
+  }
+  if (!candidate) {
+    candidate = path.join(dir, sanitizeCopyFileName(desiredName, baseName));
+  }
+  if (fs.existsSync(candidate)) {
+    const cDir = path.dirname(candidate);
+    const cBase = path.basename(candidate, '.pdf');
+    for (let i = 2; i <= 100; i++) {
+      const numbered = path.join(cDir, cBase + '-' + i + '.pdf');
+      if (!fs.existsSync(numbered)) return numbered;
+    }
+    return null;
+  }
+  return candidate;
+}
+
+// مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایل‌هایِ بازسازی‌شده.
+// کلید، هشِ مسیرِ مطلقِ خروجی است تا بازسازیِ دوباره، ایندکسِ
+// کهنه را بازنویسی کند؛ محتوا، مختصاتِ کلماتِ استخراج‌شده از
+// pdf.js در زمانِ پرینت است.
+function getSearchIndexDir() {
+  const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+  const dir = path.join(dataDir || path.join(require('os').homedir(), '.comic-reader'), 'search-index');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  return dir;
+}
+function searchIndexPathFor(outputPath) {
+  const key = path.resolve(String(outputPath)).toLowerCase();
+  const hash = require('crypto').createHash('sha256').update(key, 'utf8').digest('hex');
+  return path.join(getSearchIndexDir(), hash + '.json');
+}
+function writeSearchIndexFile(outputPath, searchIndex) {
+  try {
+    if (!searchIndex || typeof searchIndex !== 'object') return false;
+    if (!searchIndex.pages || typeof searchIndex.pages !== 'object') return false;
+    const doc = {
+      version: 1,
+      sourcePath: String(outputPath),
+      pageCount: Number(searchIndex.pageCount) || 0,
+      createdAt: Date.now(),
+      pages: searchIndex.pages,
+    };
+    fs.writeFileSync(searchIndexPathFor(outputPath), JSON.stringify(doc), 'utf8');
+    return true;
+  } catch (_) { return false; }
+}
+
 function getWindowFromEvent(event) {
   if (!event || !event.sender || event.sender.isDestroyed()) return null;
   try {
@@ -1346,6 +1423,8 @@ module.exports = function(app) {
           let saveLogger = null;
           try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
           const probed = await saver.probePdfProtectionForPath(filePath, saveLogger);
+          let qpdfAvailable = false;
+          try { if (saver.isQpdfAvailable) qpdfAvailable = Boolean(await saver.isQpdfAvailable()); } catch (_) {}
           result = {
             protected: Boolean(probed && probed.protected),
             readOnly: Boolean(probed && probed.readOnly),
@@ -1355,6 +1434,7 @@ module.exports = function(app) {
             fast: Boolean(probed && probed.fast),
             invalidObjects: Array.isArray(probed && probed.invalidObjects) ? probed.invalidObjects.length : 0,
             warningsCount: (probed && probed.warningsCount) || 0,
+            qpdfAvailable,
           };
         } else {
           try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection worker failed', err && err.message); } catch (_) {}
@@ -1384,6 +1464,7 @@ module.exports = function(app) {
         warningsCount: (result && result.warningsCount) || 0,
         encryption: (result && result.encryption) || undefined,
         rebuildRecommended: Boolean(result && result.rebuildRecommended),
+        qpdfAvailable: Boolean(result && result.qpdfAvailable),
       };
     } catch (err) {
       try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection failed', err && err.message); } catch (_) {}
@@ -1413,13 +1494,11 @@ module.exports = function(app) {
       if (path.extname(filePath).toLowerCase() !== '.pdf') {
         return { success: false, error: 'فقط فایل‌های PDF می‌توانند نسخهٔ کپیِ قابل‌ویرایش داشته باشند.' };
       }
-      const dir = path.dirname(filePath);
-      const baseName = path.basename(filePath, path.extname(filePath));
-      let copyPath = path.join(dir, baseName + '-editable.pdf');
-      for (let i = 2; i <= 100 && fs.existsSync(copyPath); i++) {
-        copyPath = path.join(dir, baseName + '-editable-' + i + '.pdf');
-      }
-      if (fs.existsSync(copyPath)) {
+      // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر (از مودال یا دیالوگِ
+      // ویندوز) با همان حلقهٔ شماره‌دارِ قبلی؛ در غیابِ آن‌ها،
+      // نامِ خودکارِ <base>-editable.pdf.
+      const copyPath = resolveCopyOutputPath(filePath, payload && payload.desiredName, payload && payload.desiredPath);
+      if (!copyPath) {
         return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
       }
       tempPath = copyPath + '.' + process.pid + '.' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8) + '.tmp';
@@ -1438,12 +1517,11 @@ module.exports = function(app) {
           const bytes = await fs.promises.readFile(filePath);
           const inMain = await saver.createUnlockedPdfCopy({ bytes, logger: saveLogger, password: copyPassword });
           if (!inMain || !inMain.success) {
-            // مرحله ۹: پشتیبانِ درونِ پروسه هم، مثلِ ورکر، برای ردِ
-            // رمزگشایی به کپیِ باینری می‌افتد (نه «نمی‌تواند کپی
-            // بسازد»)؛ باز شدنِ کپیِ باینری، با لایهٔ ۱ انجام می‌شود.
+            // مرحله ۱۱: ردِ رمزگشایی در پشتیبانِ درونِ پروسه هم،
+            // کد برمی‌گرداند تا TopBar بازسازی را پیشنهاد دهد؛
+            // کپیِ باینریِ خاموش، دیگر صادر نمی‌شود (همانندِ ورکر).
             if (inMain && (inMain.code === 'PDF_COPY_PASSWORD_REQUIRED' || inMain.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
-              await fs.promises.copyFile(filePath, copyPath);
-              return { success: true, copyPath, pageCount: -1, textGate: 'skipped-binary-copy', alreadyUnlocked: false, binaryCopy: true, stillEncrypted: true };
+              return { success: false, code: inMain.code, error: inMain.error || 'ساختِ نسخهٔ کپیِ قابل‌ویرایش انجام نشد.', pageCount: -1 };
             }
             return { success: false, error: (inMain && inMain.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
           }
@@ -1451,14 +1529,14 @@ module.exports = function(app) {
             return { success: true, copyPath: filePath, pageCount: inMain.pageCount, textGate: 'not-needed', alreadyUnlocked: true };
           }
           await atomicWriteBuffer(copyPath, Buffer.from(inMain.bytes));
-          return { success: true, copyPath, pageCount: inMain.pageCount, textGate: inMain.textGate, alreadyUnlocked: false };
+          return { success: true, copyPath, pageCount: inMain.pageCount, textGate: inMain.textGate, alreadyUnlocked: false, unlockedBy: inMain.unlockedBy || undefined };
         }
         throw err;
       }
       if (!copy || !copy.success) {
         cleanupPdfCopyTemp(tempPath);
         tempPath = null;
-        return { success: false, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
+        return { success: false, code: (copy && copy.code) || undefined, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.', pageCount: (copy && copy.pageCount) || -1 };
       }
       if (copy.alreadyUnlocked) {
         // فایل، قفلِ فعالی ندارد: هیچ‌چیز نوشته نشده است؛ مسیرِ
@@ -1478,6 +1556,7 @@ module.exports = function(app) {
         alreadyUnlocked: false,
         binaryCopy: Boolean(copy.binaryCopy),
         stillEncrypted: Boolean(copy.stillEncrypted),
+        unlockedBy: copy.unlockedBy || undefined,
         healed: Boolean(copy.healed),
         baselineInvalidObjects: copy.baselineInvalidObjects || 0,
         outputInvalidObjects: copy.outputInvalidObjects || 0,
@@ -1940,13 +2019,10 @@ module.exports = function(app) {
       if (normalizedMode === 'in-place') {
         outputPath = pdfPath;
       } else if (normalizedMode === 'copy') {
-        const dir = path.dirname(pdfPath);
-        const baseName = path.basename(pdfPath, path.extname(pdfPath));
-        outputPath = path.join(dir, baseName + '-editable.pdf');
-        for (let i = 2; i <= 100 && fs.existsSync(outputPath); i++) {
-          outputPath = path.join(dir, baseName + '-editable-' + i + '.pdf');
-        }
-        if (fs.existsSync(outputPath)) {
+        // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر (از مودالِ محافظت) با
+        // همان حلقهٔ شماره‌دار؛ در غیابِ آن، نامِ خودکار.
+        outputPath = resolveCopyOutputPath(pdfPath, payload && payload.desiredName, payload && payload.desiredPath);
+        if (!outputPath) {
           return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
         }
       } else {
@@ -1983,13 +2059,59 @@ module.exports = function(app) {
       if (normalizedMode === 'in-place') {
         invalidateComicRamCache(app, pdfPath);
       }
-      return { success: true, outputPath, mode: normalizedMode, pageCount: expected, backupCreated };
+      // مرحله ۱۱: ایندکسِ جستجویِ کناری، بهترین‌تلاش و هرگز
+      // مانعِ موفقیتِ ذخیره نمی‌شود.
+      const searchIndexSaved = writeSearchIndexFile(outputPath, payload && payload.searchIndex);
+      return { success: true, outputPath, mode: normalizedMode, pageCount: expected, backupCreated, searchIndexSaved };
     } catch (err) {
       if (err && err.code === 'FILE_LOCKED') {
         return { success: false, locked: true, error: err.message };
       }
       try { const lg = getIpcLogger(); if (lg) lg.error('save-rebuilt-pdf failed', err); } catch (_) {}
       return { success: false, error: 'ذخیرهٔ فایلِ بازسازی‌شده انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۱: دیالوگِ استانداردِ انتخابِ نام و پوشهٔ نسخهٔ کپی
+  // (از مودالِ فایلِ محافظت‌شده در TopBar).
+  ipcMain.handle('choose-copy-save-path', async (event, payload) => {
+    try {
+      const filePath = payload && payload.filePath;
+      const defaultName = payload && typeof payload.defaultName === 'string' && payload.defaultName
+        ? payload.defaultName
+        : 'copy-editable.pdf';
+      if (!filePath || typeof filePath !== 'string') return { canceled: true };
+      const win = getWindowFromEvent(event);
+      const dialogOptions = {
+        title: 'انتخابِ نام و محلِ ذخیرهٔ نسخهٔ کپی',
+        defaultPath: path.join(path.dirname(filePath), defaultName),
+        filters: [{ name: 'PDF (*.pdf)', extensions: ['pdf'] }],
+      };
+      const { canceled, filePath: chosenPath } = win
+        ? await dialog.showSaveDialog(win, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+      if (canceled || !chosenPath) return { canceled: true };
+      let out = chosenPath;
+      if (path.extname(out).toLowerCase() !== '.pdf') out += '.pdf';
+      return { canceled: false, filePath: out };
+    } catch (err) {
+      try { const lg = getIpcLogger(); if (lg) lg.error('choose-copy-save-path failed', err); } catch (_) {}
+      return { canceled: true };
+    }
+  });
+
+  // مرحله ۱۱: خواندنِ ایندکسِ جستجویِ کناریِ یک فایلِ بازسازی‌شده.
+  ipcMain.handle('get-search-index', async (event, payload) => {
+    try {
+      const filePath = payload && payload.filePath;
+      if (!filePath || typeof filePath !== 'string' || !fs.existsSync(filePath)) return { found: false };
+      const indexPath = searchIndexPathFor(filePath);
+      if (!fs.existsSync(indexPath)) return { found: false };
+      const parsed = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      if (!parsed || parsed.version !== 1 || !parsed.pages || typeof parsed.pages !== 'object') return { found: false };
+      return { found: true, index: parsed };
+    } catch (_) {
+      return { found: false };
     }
   });
 

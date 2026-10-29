@@ -108,11 +108,37 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('check-pdf-protection', { filePath: filePath.trim() });
   },
 
-  createUnlockedPdfCopy: (filePath, password) => {
+  // مرحله ۱۱: options اختیاری — { desiredName, desiredPath }:
+  // نام/مسیرِ دلخواهِ کاربر برای نسخهٔ کپی (از مودالِ محافظت).
+  createUnlockedPdfCopy: (filePath, password, options) => {
     if (!filePath || typeof filePath !== 'string') {
       return Promise.resolve({ success: false, error: 'مسیر فایل مشخص نشده است.' });
     }
-    return ipcRenderer.invoke('create-unlocked-pdf-copy', { filePath: filePath.trim(), password: typeof password === 'string' ? password : '' });
+    return ipcRenderer.invoke('create-unlocked-pdf-copy', {
+      filePath: filePath.trim(),
+      password: typeof password === 'string' ? password : '',
+      desiredName: options && typeof options.desiredName === 'string' ? options.desiredName : undefined,
+      desiredPath: options && typeof options.desiredPath === 'string' ? options.desiredPath : undefined,
+    });
+  },
+
+  // مرحله ۱۱: دیالوگِ استانداردِ انتخابِ نام و پوشهٔ نسخهٔ کپی.
+  chooseCopySavePath: (filePath, defaultName) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ canceled: true });
+    }
+    return ipcRenderer.invoke('choose-copy-save-path', {
+      filePath: filePath.trim(),
+      defaultName: typeof defaultName === 'string' ? defaultName : undefined,
+    });
+  },
+
+  // مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایلِ بازسازی‌شده.
+  getSearchIndex: (filePath) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ found: false });
+    }
+    return ipcRenderer.invoke('get-search-index', { filePath: filePath.trim() });
   },
 
   // مرحله ۹ — لایهٔ ۱: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده

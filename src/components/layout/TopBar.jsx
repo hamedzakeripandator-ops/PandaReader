@@ -6,6 +6,13 @@ import useLibraryStore from '../../store/useLibraryStore';
 import useReaderStore from '../../store/useReaderStore';
 import useSettingsStore from '../../store/useSettingsStore';
 import Icons from '../common/Icons';
+import { getPdfSessionPassword } from '../../services/pdfPasswordSession';
+
+// مرحله ۱۱: نامِ پیش‌فرضِ نسخهٔ کپی: <نامِ اصلی>-editable.pdf
+function defaultCopyName(filePath) {
+  const base = String(filePath || '').split(/[\\/]/).pop() || 'copy.pdf';
+  return base.replace(/\.pdf$/i, '') + '-editable.pdf';
+}
 
 function parsePageJumpQuery(rawQuery, totalPages) {
   if (!rawQuery || !totalPages || totalPages < 1) return null;
@@ -73,6 +80,11 @@ export default function TopBar({
   // که کلیکش ثبت شده) + پیشرفتِ زندهٔ ساختِ کپی در مودال.
   const [isCheckingProtection, setIsCheckingProtection] = useState(false);
   const [copyProgress, setCopyProgress] = useState(null);
+  // مرحله ۱۱: نامِ دلخواهِ نسخهٔ کپی (قابلِ ویرایش در مودال) و
+  // مسیرِ انتخاب‌شده در دیالوگِ ویندوز. هر بار که مودال باز
+  // می‌شود، در openProtectionModal مقدارِ پیش‌فرض می‌گیرند.
+  const [copyFileName, setCopyFileName] = useState('');
+  const [copyDesiredPath, setCopyDesiredPath] = useState(null);
   const [pendingCopySwitch, setPendingCopySwitch] = useState(null);
   const probeCacheRef = useRef(new Map());
   const probeInFlightRef = useRef(false);
@@ -382,6 +394,83 @@ export default function TopBar({
     showToast('استودیو ویرایش و کادربندی فعال شد', { type: 'success' });
   }, [toggleAnnotationMode, showToast]);
 
+  // مرحله ۱۱: باز کردنِ مودالِ محافظت با مقداردهیِ نامِ کپی.
+  const openProtectionModal = useCallback((info) => {
+    setCopyDesiredPath(null);
+    setCopyFileName(defaultCopyName(info.filePath));
+    setProtectedModal({
+      filePath: info.filePath,
+      pageCount: info.pageCount,
+      reason: info.reason,
+      rebuildRecommended: Boolean(info.rebuildRecommended),
+      qpdfAvailable: Boolean(info.qpdfAvailable),
+      encryptionLabel: (info.encryption && info.encryption.label) || '',
+      preservedPage: info.preservedPage || useReaderStore.getState().currentPage || 1,
+    });
+  }, []);
+
+  // مرحله ۱۱: جریانِ واحدِ بررسیِ محافظت — هم برای کلیکِ
+  // استودیو و هم برای رویدادِ app:open-protection-modal (از
+  // ذخیرهٔ فایلِ محافظت‌شده). هیچ مسیری، استودیو را بی‌چک باز
+  // نمی‌کند: نتیجهٔ «نامشخص» (تایم‌اوت/خطای پروب) هم مودال را
+  // نشان می‌دهد تا کاربر، خودش تصمیم بگیرد. پروبِ سریعِ دمِ
+  // فایل، چند میلی‌ثانیه است و اسپینرِ دکمه، تا پایانِ پروب
+  // می‌ماند؛ تایم‌اوتِ ۱۲۰۰ میلی‌ثانیه‌ایِ مرحلهٔ ۹ که مودال را
+  // در کلیکِ اول قورت می‌داد، حذف شد.
+  const ensureProtectionChecked = useCallback((filePath) => {
+    const cached = probeCacheRef.current.get(filePath);
+    if (cached && cached.protected === false && !cached.readOnly && cached.reason !== 'unknown') {
+      return 'clean';
+    }
+    if (cached && (cached.protected === true || cached.readOnly === true)) {
+      openProtectionModal({
+        filePath,
+        pageCount: cached.pageCount,
+        reason: cached.reason,
+        rebuildRecommended: cached.rebuildRecommended,
+        qpdfAvailable: cached.qpdfAvailable,
+        encryption: cached.encryption,
+      });
+      return 'modal';
+    }
+    if (probeInFlightRef.current) return 'pending';
+    probeInFlightRef.current = true;
+    setIsCheckingProtection(true);
+    coreApi
+      .checkPdfProtection(filePath)
+      .then((res) => {
+        const result = res || { protected: false, reason: 'unknown', pageCount: -1 };
+        probeCacheRef.current.set(filePath, result);
+        if (result.protected || result.readOnly || result.reason === 'unknown') {
+          openProtectionModal({
+            filePath,
+            pageCount: result.pageCount,
+            reason: result.reason,
+            rebuildRecommended: result.rebuildRecommended,
+            qpdfAvailable: result.qpdfAvailable,
+            encryption: result.encryption,
+          });
+        } else {
+          activateStudio();
+        }
+      })
+      .catch(() => {
+        openProtectionModal({
+          filePath,
+          pageCount: -1,
+          reason: 'unknown',
+          rebuildRecommended: false,
+          qpdfAvailable: false,
+          encryption: null,
+        });
+      })
+      .finally(() => {
+        probeInFlightRef.current = false;
+        setIsCheckingProtection(false);
+      });
+    return 'pending';
+  }, [activateStudio, openProtectionModal]);
+
   const handleToggleAnnotationStudio = useCallback(
     (e) => {
       e.stopPropagation();
@@ -399,68 +488,12 @@ export default function TopBar({
         activateStudio();
         return;
       }
-      const cached = probeCacheRef.current.get(filePath);
-      if (cached && cached.protected === false && !cached.readOnly) {
-        activateStudio();
-        return;
-      }
-      if (cached && (cached.protected === true || cached.readOnly === true)) {
-        setProtectedModal({
-          filePath,
-          pageCount: cached.pageCount,
-          reason: cached.reason,
-          rebuildRecommended: Boolean(cached.rebuildRecommended),
-          encryptionLabel: (cached.encryption && cached.encryption.label) || '',
-          preservedPage: useReaderStore.getState().currentPage || 1,
-        });
-        return;
-      }
-      if (probeInFlightRef.current) return;
-      probeInFlightRef.current = true;
-      setIsCheckingProtection(true);
-      // مرحله ۹: تایم‌اوتِ سختِ ۱۲۰۰ میلی‌ثانیه‌ای در سمتِ کلاینت.
-      // اگر پروب (ورکرِ ۶۰ ثانیه‌ای) بیش از ۱.۲ ثانیه طول کشید،
-      // استودیو مستقیم باز می‌شود و دکمه، هرگز قفل نمی‌ماند؛
-      // نتیجهٔ دیررسِ پروب، فقط کش را پر می‌کند و برای همین
-      // کلیک، مودال را باز نمی‌کند.
-      let probeTimedOut = false;
-      const probeTimeoutId = setTimeout(() => {
-        probeTimedOut = true;
-        probeInFlightRef.current = false;
-        setIsCheckingProtection(false);
-        activateStudio();
-      }, 1200);
-      coreApi
-        .checkPdfProtection(filePath)
-        .then((res) => {
-          const result = res || { protected: false, reason: 'unknown', pageCount: -1 };
-          probeCacheRef.current.set(filePath, result);
-          if (probeTimedOut) return;
-          if (result.protected || result.readOnly) {
-            setProtectedModal({
-              filePath,
-              pageCount: result.pageCount,
-              reason: result.reason,
-              rebuildRecommended: Boolean(result.rebuildRecommended),
-              encryptionLabel: (result.encryption && result.encryption.label) || '',
-              preservedPage: useReaderStore.getState().currentPage || 1,
-            });
-          } else {
-            // Unknown (timeout/error) lands here too: the studio opens
-            // as before and the user is not left waiting on the probe.
-            activateStudio();
-          }
-        })
-        .catch(() => {
-          if (!probeTimedOut) activateStudio();
-        })
-        .finally(() => {
-          clearTimeout(probeTimeoutId);
-          probeInFlightRef.current = false;
-          setIsCheckingProtection(false);
-        });
+      // مرحله ۱۱: جریانِ واحدِ بررسی (بالا). نتیجهٔ 'clean' یعنی
+      // کش، تمیزیِ فایل را قطعی می‌داند؛ بقیهٔ حالت‌ها، مودال یا
+      // فعال‌سازی را خودِ جریان انجام می‌دهد.
+      if (ensureProtectionChecked(filePath) === 'clean') activateStudio();
     },
-    [toggleAnnotationMode, showToast, activateStudio]
+    [toggleAnnotationMode, showToast, activateStudio, ensureProtectionChecked]
   );
 
   // Stage 8 Part A: once the active file becomes the copy path after
@@ -501,24 +534,67 @@ export default function TopBar({
     return () => window.removeEventListener('app:editable-copy-ready', onEditableCopyReady);
   }, [showToast, totalPages]);
 
+  // مرحله ۱۱: وقتی PdfViewer هنگامِ ذخیره می‌فهمد فایل،
+  // محافظت‌شده است و بدونِ کپی نمی‌توان ذخیره کرد، به‌جای بنرِ
+  // قرمز، همین مودالِ محافظت را باز می‌کند (بدونِ تغییرِ وضعیتِ
+  // استودیو).
+  useEffect(() => {
+    const onOpenProtectionModal = (e) => {
+      const detail = (e && e.detail) || {};
+      const fp = detail.filePath || useReaderStore.getState().comicData?.filePath || '';
+      if (!fp || !/\.pdf$/i.test(fp)) return;
+      if (memoryOnlyRef.current.has(fp)) return;
+      ensureProtectionChecked(fp);
+    };
+    window.addEventListener('app:open-protection-modal', onOpenProtectionModal);
+    return () => window.removeEventListener('app:open-protection-modal', onOpenProtectionModal);
+  }, [ensureProtectionChecked]);
+
+
+  // مرحله ۱۱: انتخابِ مسیر و نامِ کپی با دیالوگِ استانداردِ
+  // ویندوز. نامِ انتخاب‌شده در فیلدِ ورودی هم نوشته می‌شود؛ اگر
+  // کاربر بعداً نامِ فیلد را عوض کند، نامِ فیلد (در پوشهٔ اصلی)
+  // بر مسیرِ انتخاب‌شده اولویت دارد.
+  const handleChooseCopyPath = useCallback(async () => {
+    if (!protectedModal || isCreatingCopy) return;
+    try {
+      const res = await coreApi.chooseCopySavePath(
+        protectedModal.filePath,
+        copyFileName || defaultCopyName(protectedModal.filePath)
+      );
+      if (res && !res.canceled && res.filePath) {
+        setCopyDesiredPath(res.filePath);
+        setCopyFileName(res.filePath.split(/[\\/]/).pop() || copyFileName);
+      }
+    } catch (_) {}
+  }, [protectedModal, isCreatingCopy, copyFileName]);
 
   // Stage 8 Part A: build the unlocked copy and switch to it.
   const handleProtectedCopyConfirm = useCallback(async () => {
     if (!protectedModal || isCreatingCopy) return;
     const { filePath, preservedPage } = protectedModal;
-    if (protectedModal.rebuildRecommended) {
-      // مرحله ۱۰: pdf-lib نمی‌تواند این فایل را رمزگشایی کند؛ کپی،
-      // با «بازسازی از سندِ بازشده در pdf.js» ساخته می‌شود. خودِ
-      // بازسازی در PdfViewer انجام می‌شود (سند، آن‌جاست) و نتیجه،
-      // با رویدادِ app:editable-copy-ready برمی‌گردد تا همین
-      // جابه‌جاییِ مرحلهٔ ۸ انجام شود.
+    // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر برای کپی.
+    const desiredPathForCopy = copyDesiredPath && copyDesiredPath.split(/[\\/]/).pop() === copyFileName
+      ? copyDesiredPath
+      : undefined;
+    const copyNaming = { desiredName: copyFileName || undefined, desiredPath: desiredPathForCopy };
+    if (protectedModal.rebuildRecommended && !protectedModal.qpdfAvailable) {
+      // مرحله ۱۰/۱۱: qpdf در دسترس نیست و pdf-lib هم نمی‌تواند
+      // این فایل را رمزگشایی کند؛ کپی، با «بازسازی از سندِ
+      // بازشده در pdf.js» ساخته می‌شود. خودِ بازسازی در PdfViewer
+      // انجام می‌شود (سند، آن‌جاست) و نتیجه، با رویدادِ
+      // app:editable-copy-ready برمی‌گردد تا همین جابه‌جاییِ
+      // مرحلهٔ ۸ انجام شود.
       const rebuildFilePath = protectedModal.filePath;
       const rebuildPage = protectedModal.preservedPage || 1;
       setProtectedModal(null);
-      window.dispatchEvent(new CustomEvent('app:rebuild-editable-copy', { detail: { filePath: rebuildFilePath, preservedPage: rebuildPage } }));
+      window.dispatchEvent(new CustomEvent('app:rebuild-editable-copy', { detail: { filePath: rebuildFilePath, preservedPage: rebuildPage, desiredName: copyNaming.desiredName, desiredPath: copyNaming.desiredPath } }));
       showToast('در حالِ ساختِ نسخهٔ قابل‌ویرایش با بازسازیِ صفحات…', { type: 'info' });
       return;
     }
+    // rebuildRecommended ولی qpdf در دسترس است: مسیرِ کپیِ
+    // بی‌اتلافِ qpdf در saver، اول امتحان می‌شود؛ اگر آن هم
+    // شکست خورد، پایین‌تر به بازسازی می‌افتیم.
     setIsCreatingCopy(true);
     setCopyProgress({ fraction: 0, label: 'در حالِ شروع…' });
     let unsubscribeProgress = null;
@@ -530,13 +606,28 @@ export default function TopBar({
           }
         });
       }
-      const result = await coreApi.createUnlockedPdfCopy(filePath);
+      // مرحله ۱۱: رمزِ نشست (اگر کاربر در مودالِ رمز وارد کرده
+      // باشد) به کپی هم می‌رسد؛ پیش‌تر، کپی همیشه بدونِ رمز بود.
+      const sessionPassword = getPdfSessionPassword(filePath) || '';
+      const result = await coreApi.createUnlockedPdfCopy(filePath, sessionPassword, copyNaming);
       if (result && result.cancelled) {
         // لغوِ کاربر: مودال باز می‌ماند تا دوباره تصمیم بگیرد.
         showToast('ساختِ نسخهٔ کپی لغو شد.', { type: 'info' });
         return;
       }
       if (!result || !result.success) {
+        // مرحله ۱۱: اگر qpdf هم نتوانست باز کند (رمزِ واقعی یا
+        // رمزگذاریِ پشتیبانی‌نشده)، به‌جای پیامِ خطا، بازسازی از
+        // pdf.js پیشنهاد می‌شود — همان مسیری که کپیِ بی‌اتلاف،
+        // جایگزینِ آن بود.
+        if (result && (result.code === 'PDF_COPY_PASSWORD_REQUIRED' || result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+          const rebuildFilePath = protectedModal.filePath;
+          const rebuildPage = protectedModal.preservedPage || 1;
+          setProtectedModal(null);
+          window.dispatchEvent(new CustomEvent('app:rebuild-editable-copy', { detail: { filePath: rebuildFilePath, preservedPage: rebuildPage, desiredName: copyNaming.desiredName, desiredPath: copyNaming.desiredPath } }));
+          showToast('باز کردنِ بی‌اتلاف ممکن نشد؛ نسخهٔ کپی با بازسازیِ صفحات ساخته می‌شود…', { type: 'info' });
+          return;
+        }
         showToast(result?.error || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
         return;
       }
@@ -587,7 +678,7 @@ export default function TopBar({
       setCopyProgress(null);
       setIsCreatingCopy(false);
     }
-  }, [protectedModal, isCreatingCopy, showToast, totalPages, activateStudio]);
+  }, [protectedModal, isCreatingCopy, showToast, totalPages, activateStudio, copyFileName, copyDesiredPath]);
 
   // Stage 8 Part A: memory-only — the studio opens, but a direct save
   // is later refused loudly by the saver guard.
@@ -596,7 +687,7 @@ export default function TopBar({
     memoryOnlyRef.current.add(protectedModal.filePath);
     setProtectedModal(null);
     activateStudio();
-    showToast('حاشیه‌نویسی فقط در حافظهٔ برنامه انجام می‌شود؛ ذخیرهٔ مستقیم روی این فایلِ محافظت‌شده ممکن نیست.', { type: 'info' });
+    showToast('حاشیه‌نویسی فقط در حافظهٔ برنامه انجام می‌شود؛ برای ذخیره، از همین مودال نسخهٔ کپی بسازید.', { type: 'info' });
   }, [protectedModal, activateStudio, showToast]);
 
   const handleProtectedCancel = useCallback(() => {
@@ -1216,10 +1307,62 @@ export default function TopBar({
             >
             {protectedModal.rebuildRecommended && (
               <div style={{ fontSize: '12px', lineHeight: 1.8, color: '#f59e0b', marginBottom: '16px' }}>
-                {`این فایل با روشی قفل شده است (${protectedModal.encryptionLabel || 'AES-256'}) که ابزارِ معمولی نمی‌تواند آن را باز کند؛ نسخهٔ کپی از صفحاتِ بازشده بازسازی می‌شود و لایهٔ متنِ آن حفظ نمی‌شود.`}
+                {protectedModal.qpdfAvailable
+                  ? `این فایل با روشی قفل شده است (${protectedModal.encryptionLabel || 'AES-256'}) که ابزارِ معمولی نمی‌تواند آن را باز کند؛ نسخهٔ کپی با موتورِ بی‌اتلاف ساخته می‌شود و متن، فونت‌ها و جستجو کامل حفظ می‌شوند.`
+                  : `این فایل با روشی قفل شده است (${protectedModal.encryptionLabel || 'AES-256'}) که ابزارِ معمولی نمی‌تواند آن را باز کند؛ نسخهٔ کپی از صفحاتِ بازشده بازسازی می‌شود و لایهٔ متنِ آن در خودِ فایل حفظ نمی‌شود (جستجو در همین برنامه، از ایندکسِ کناری انجام می‌شود).`}
               </div>
             )}
               {(protectedModal.filePath.split(/[\\/]/).pop() || '').replace(/\.pdf$/i, '') + '-editable.pdf'}
+            </div>
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: 'var(--text)', marginBottom: '6px' }}>
+                نامِ فایلِ کپی
+              </label>
+              <input
+                type="text"
+                value={copyFileName}
+                onChange={(e) => { setCopyFileName(e.target.value); }}
+                disabled={isCreatingCopy}
+                dir="ltr"
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  padding: '9px 12px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: 'var(--panel2)',
+                  color: 'var(--text)',
+                  fontSize: '13px',
+                  textAlign: 'left',
+                  outline: 'none',
+                }}
+                placeholder="نامِ فایلِ کپی…"
+              />
+              <button
+                type="button"
+                onClick={handleChooseCopyPath}
+                disabled={isCreatingCopy}
+                style={{
+                  marginTop: '8px',
+                  width: '100%',
+                  padding: '8px 12px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: 'var(--panel2)',
+                  color: 'var(--text)',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: isCreatingCopy ? 'wait' : 'pointer',
+                }}
+              >
+                انتخابِ مسیر و نام با پنجرهٔ ویندوز…
+              </button>
+              {copyDesiredPath ? (
+                <div style={{ fontSize: '11px', lineHeight: 1.8, color: 'var(--muted)', marginTop: '6px', direction: 'ltr', textAlign: 'left', wordBreak: 'break-all' }}>
+                  {copyDesiredPath}
+                </div>
+              ) : null}
             </div>
             {isCreatingCopy && copyProgress && (
               <div style={{ marginBottom: '18px' }} aria-live="polite">
