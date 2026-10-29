@@ -196,6 +196,85 @@ function origBackupPathFor(pdfPath) {
   return String(pdfPath) + '.orig.bak';
 }
 
+// مرحله ۱۰: پشتیبانِ پایهٔ خام، دیگر کنارِ فایلِ کاربر ساخته
+// نمی‌شود؛ در پوشهٔ دادهٔ برنامه (<dataDir>/orig-backups/) با
+// نامِ هش‌شده نگه داشته می‌شود تا پوشهٔ شخصیِ کاربر تمیز بماند.
+// سازگاریِ عقب‌رو: `.orig.bak`های قدیمیِ کنارِ فایل، همچنان
+// خوانده می‌شوند (و در اولین ذخیرهٔ موفق، به محلِ جدید مهاجرت
+// می‌کنند)؛ هرگز حذف یا بازنویسی نمی‌شوند.
+function resolveOrigBackupsDir(dataDir) {
+  if (typeof dataDir === 'string' && dataDir.length > 0 && path.isAbsolute(dataDir)) {
+    return path.join(dataDir, 'orig-backups');
+  }
+  const envDir = process.env.COMIC_READER_DATA_DIR;
+  if (typeof envDir === 'string' && envDir.length > 0 && path.isAbsolute(envDir)) {
+    return path.join(envDir, 'orig-backups');
+  }
+  try {
+    const osMod = require('os');
+    return path.join(osMod.homedir(), '.comic-reader', 'orig-backups');
+  } catch (_) {
+    return path.join('.comic-reader', 'orig-backups');
+  }
+}
+
+// کلیدِ هش، دقیقاً همان نرمال‌سازیِ main.js است
+// (path.normalize + lowercase) تا main.js و saver، یک نامِ
+// فایلِ پشتیبان را حساب کنند.
+function normalizeOrigBackupKey(pdfPath) {
+  try {
+    return path.normalize(String(pdfPath)).toLowerCase();
+  } catch (_) {
+    return String(pdfPath).toLowerCase();
+  }
+}
+
+function relocatedOrigBackupPathFor(pdfPath, dataDir) {
+  const key = normalizeOrigBackupKey(pdfPath);
+  const hash = nodeCrypto
+    ? nodeCrypto.createHash('sha256').update(key).digest('hex')
+    : Buffer.from(key).toString('hex');
+  return path.join(resolveOrigBackupsDir(dataDir), hash + '.pdf');
+}
+
+function relocatedOrigBackupSidecarPathFor(backupPath) {
+  return String(backupPath) + '.json';
+}
+
+function writeOrigBackupSidecar(backupPath, pdfPath, bytes) {
+  try {
+    const sidecar = {
+      version: 1,
+      sourcePath: String(pdfPath),
+      sha256: nodeCrypto ? nodeCrypto.createHash('sha256').update(bytes).digest('hex') : '',
+      size: bytes ? bytes.length : 0,
+      createdAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(relocatedOrigBackupSidecarPathFor(backupPath), JSON.stringify(sidecar, null, 2), 'utf8');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// راستی‌آزماییِ پشتیبانِ جابه‌جاشده با فایلِ کناری (sidecar):
+// اندازه + هشِ SHA-256 باید با رکوردِ زمانِ ساخت بخوانند؛ وگرنه
+// پشتیبان، قابلِ اعتماد نیست و مثلِ نبودنش رفتار می‌شود.
+function verifyRelocatedOrigBackup(backupPath, bytes) {
+  try {
+    if (!nodeCrypto || !bytes) return false;
+    const raw = fs.readFileSync(relocatedOrigBackupSidecarPathFor(backupPath), 'utf8');
+    const sidecar = JSON.parse(raw);
+    if (!sidecar || sidecar.version !== 1) return false;
+    if (Number(sidecar.size) !== bytes.length) return false;
+    if (!sidecar.sha256) return false;
+    const actual = nodeCrypto.createHash('sha256').update(bytes).digest('hex');
+    return actual === sidecar.sha256;
+  } catch (_) {
+    return false;
+  }
+}
+
 function isPdfMagic(buffer) {
   return Buffer.isBuffer(buffer) && buffer.length > 5 && buffer.slice(0, 5).toString('ascii') === '%PDF-';
 }
@@ -1421,8 +1500,9 @@ async function validateIncrementalBytesImpl(outBytes, expectedPageCount, baselin
  *   نرود). نتیجه، probeِ بارگذاریِ بایت‌های پایه را هم دارد تا مسیرِ
  *   ذخیره، فایل را دوبار پارس نکند.
  */
-async function resolveBasePdfBytes(pdfPath, mode, logger) {
-  const origPath = origBackupPathFor(pdfPath);
+async function resolveBasePdfBytes(pdfPath, mode, logger, dataDir) {
+  const legacyOrigPath = origBackupPathFor(pdfPath);
+  const relocatedOrigPath = relocatedOrigBackupPathFor(pdfPath, dataDir);
   // مرحله ۷ ـ نهاییِ دوم: «سالم بودنِ» پایه، فقط جادوی %PDF- نیست؛
   // بایت‌ها باید واقعاً با pdf-lib بارگذاری شوند و صفحه بدهند.
   // این کاوش، همان بارگذاریِ اولِ مسیرِ ذخیره است و نتیجه‌اش
@@ -1434,7 +1514,7 @@ async function resolveBasePdfBytes(pdfPath, mode, logger) {
   // نبودِ loadError است، نه صفر بودنِ هشدارها.
   const isHealthyProbe = (probe) => Boolean(probe && probe.pdfDoc && !probe.loadError);
   // هات‌فیکسِ مرحله ۶: خواندنِ کاملِ فایلِ اصلی فقط وقتی لازم است
-  // که `.orig.bak`ای نیست (یا خراب است و Save As به فایلِ فعلی
+  // که پشتیبانی نیست (یا خراب است و Save As به فایلِ فعلی
   // برمی‌گردد)؛ وقتی پایهٔ خام هست، خواندنِ دوبارهٔ فایلِ چندصد
   // مگابایتی، هم کند است و هم پنجرهٔ مسابقه با استریم‌های خواندنِ
   // پروتکل را بی‌دلیل باز می‌کند. pdf-lib هرگز خودِ فایل را باز
@@ -1445,33 +1525,65 @@ async function resolveBasePdfBytes(pdfPath, mode, logger) {
     if (!currentBytes) currentBytes = fs.readFileSync(pdfPath);
     return currentBytes;
   };
+  const fileExists = (p) => {
+    try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch (_) { return false; }
+  };
+  // مرحله ۱۰: اول، پشتیبانِ جابه‌جاشده (پوشهٔ دادهٔ برنامه).
+  // فقط وقتی قابلِ اعتماد است که sidecar با بایت‌ها بخواند و
+  // بارگذاریِ کاوشی هم سالم باشد؛ در غیرِ این صورت، مثلِ نبودنش
+  // رفتار می‌شود و سراغِ `.orig.bak`ی قدیمی می‌رویم.
+  if (fileExists(relocatedOrigPath)) {
+    const relocatedBytes = fs.readFileSync(relocatedOrigPath);
+    if (isPdfMagic(relocatedBytes) && verifyRelocatedOrigBackup(relocatedOrigPath, relocatedBytes)) {
+      const probe = await loadPdfDocumentWithWarnings(relocatedBytes);
+      if (isHealthyProbe(probe)) {
+        return { baseBytes: relocatedBytes, origBackupPath: relocatedOrigPath, backupLocation: 'relocated', usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, probe };
+      }
+      logSaveDiag(logger, 'warn', 'pdf-save: relocated orig backup failed probe load; trying legacy .orig.bak', 'origBackup=' + relocatedOrigPath);
+    } else {
+      logSaveDiag(logger, 'warn', 'pdf-save: relocated orig backup failed sidecar verification; trying legacy .orig.bak', 'origBackup=' + relocatedOrigPath);
+    }
+  }
   let origExists = false;
   try {
-    origExists = fs.existsSync(origPath) && fs.statSync(origPath).isFile();
+    origExists = fs.existsSync(legacyOrigPath) && fs.statSync(legacyOrigPath).isFile();
   } catch (_) {
     origExists = false;
   }
   if (origExists) {
-    const origBytes = fs.readFileSync(origPath);
+    const origBytes = fs.readFileSync(legacyOrigPath);
     if (isPdfMagic(origBytes)) {
       const probe = await loadPdfDocumentWithWarnings(origBytes);
       if (isHealthyProbe(probe)) {
-        return { baseBytes: origBytes, origBackupPath: origPath, usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, probe };
+        // مرحله ۱۰: مهاجرتِ بهترین‌تلاشِ `.orig.bak`ی قدیمی به
+        // محلِ جدید. اگر مهاجرت شکست خورد، همان مسیرِ قدیمی
+        // استفاده می‌شود؛ هیچ‌چیز، به‌خاطرِ مهاجرت خراب نمی‌شود.
+        if (!fileExists(relocatedOrigPath)) {
+          try {
+            fs.mkdirSync(path.dirname(relocatedOrigPath), { recursive: true });
+            fs.copyFileSync(legacyOrigPath, relocatedOrigPath, fs.constants.COPYFILE_EXCL);
+            writeOrigBackupSidecar(relocatedOrigPath, pdfPath, origBytes);
+            return { baseBytes: origBytes, origBackupPath: relocatedOrigPath, backupLocation: 'relocated', usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, migratedFromLegacy: true, probe };
+          } catch (_) {
+            // مهاجرت انجام نشد؛ پایهٔ قدیمی، معتبر است و استفاده می‌شود.
+          }
+        }
+        return { baseBytes: origBytes, origBackupPath: legacyOrigPath, backupLocation: 'legacy', usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, probe };
       }
       // پایهٔ خام، بارگذاری نمی‌شود ولی فایلِ فعلی شاید سالم باشد
       // (مثلاً خروجیِ خرابِ قبلی، روی `.orig.bak` ننشسته است).
       // در این حالت، از بایت‌های فعلی استفاده می‌شود و `.orig.bak`ی
       // خراب، هرگز بازنویسی نمی‌شود؛ پرچمِ origBackupCorrupt،
       // موضوع را در نتیجهٔ ذخیره آشکار می‌کند.
-      logSaveDiag(logger, 'warn', 'pdf-save: .orig.bak failed probe load; falling back to current file bytes', 'origBackup=' + origPath);
+      logSaveDiag(logger, 'warn', 'pdf-save: .orig.bak failed probe load; falling back to current file bytes', 'origBackup=' + legacyOrigPath);
     } else {
-      logSaveDiag(logger, 'warn', 'pdf-save: .orig.bak is not a PDF; falling back to current file bytes', 'origBackup=' + origPath);
+      logSaveDiag(logger, 'warn', 'pdf-save: .orig.bak is not a PDF; falling back to current file bytes', 'origBackup=' + legacyOrigPath);
     }
     const cur = readCurrentBytes();
     if (isPdfMagic(cur)) {
       const curProbe = await loadPdfDocumentWithWarnings(cur);
       if (isHealthyProbe(curProbe)) {
-        return { baseBytes: cur, origBackupPath: origPath, usedOrigBackup: false, origCreated: false, origBackupCorrupt: true, probe: curProbe };
+        return { baseBytes: cur, origBackupPath: legacyOrigPath, backupLocation: 'legacy', usedOrigBackup: false, origCreated: false, origBackupCorrupt: true, probe: curProbe };
       }
     }
     if (mode === 'in-place') {
@@ -1479,37 +1591,42 @@ async function resolveBasePdfBytes(pdfPath, mode, logger) {
     }
     // Save As: پایهٔ خراب را نادیده بگیر و از فایلِ فعلی استفاده کن
     // (اگر آن هم بارگذاری نشود، مسیرِ ذخیره با خطای بارگذاری رد می‌شود).
-    return { baseBytes: cur, origBackupPath: origPath, usedOrigBackup: false, origCreated: false, origBackupCorrupt: true, probe: await loadPdfDocumentWithWarnings(cur) };
+    return { baseBytes: cur, origBackupPath: legacyOrigPath, backupLocation: 'legacy', usedOrigBackup: false, origCreated: false, origBackupCorrupt: true, probe: await loadPdfDocumentWithWarnings(cur) };
   }
   if (mode === 'in-place') {
-    // پیش از ساختنِ `.orig.bak`، بایت‌های فعلی کاوش می‌شوند تا
+    // پیش از ساختنِ پشتیبان، بایت‌های فعلی کاوش می‌شوند تا
     // بایت‌های بارگذاری‌نشدنی، «پایهٔ تمیز» نشوند.
     const cur = readCurrentBytes();
     const curProbe = await loadPdfDocumentWithWarnings(cur);
     if (!isHealthyProbe(curProbe)) {
       throw new Error('فایلِ PDFِ فعلی بارگذاری نمی‌شود؛ ذخیرهٔ درجا انجام نشد و نسخهٔ خام هم ساخته نشد تا بایت‌های خراب، پایهٔ تمیز نشوند.');
     }
-    // فقط اگر وجود ندارد بساز؛ COPYFILE_EXCL جلوی بازنویسیِ مسابقه‌ای
+    // مرحله ۱۰: پشتیبانِ تازه، فقط در محلِ جدید (پوشهٔ دادهٔ
+    // برنامه) ساخته می‌شود، با sidecarِ انگشت‌نگار؛ کنارِ فایلِ
+    // کاربر، دیگر `.orig.bak`ی ساخته نمی‌شود. فقط اگر وجود
+    // ندارد بساز؛ COPYFILE_EXCL جلوی بازنویسیِ مسابقه‌ای
     // (دو ذخیرهٔ هم‌زمان) را می‌گیرد.
     try {
-      fs.copyFileSync(pdfPath, origPath, fs.constants.COPYFILE_EXCL);
+      fs.mkdirSync(path.dirname(relocatedOrigPath), { recursive: true });
+      fs.copyFileSync(pdfPath, relocatedOrigPath, fs.constants.COPYFILE_EXCL);
+      writeOrigBackupSidecar(relocatedOrigPath, pdfPath, cur);
     } catch (err) {
       if (err && err.code === 'EEXIST') {
-        const racedBytes = fs.readFileSync(origPath);
-        if (isPdfMagic(racedBytes)) {
+        const racedBytes = fs.readFileSync(relocatedOrigPath);
+        if (isPdfMagic(racedBytes) && verifyRelocatedOrigBackup(relocatedOrigPath, racedBytes)) {
           const racedProbe = await loadPdfDocumentWithWarnings(racedBytes);
           if (isHealthyProbe(racedProbe)) {
-            return { baseBytes: racedBytes, origBackupPath: origPath, usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, probe: racedProbe };
+            return { baseBytes: racedBytes, origBackupPath: relocatedOrigPath, backupLocation: 'relocated', usedOrigBackup: true, origCreated: false, origBackupCorrupt: false, probe: racedProbe };
           }
         }
-        throw new Error('فایلِ پشتیبانِ پایهٔ خام (.orig.bak) خراب است؛ ذخیرهٔ درجا انجام نشد.');
+        throw new Error('فایلِ پشتیبانِ پایهٔ خام خراب است؛ ذخیرهٔ درجا انجام نشد.');
       }
-      throw new Error('نگه‌داشتنِ نسخهٔ خامِ اولیهٔ فایل (.orig.bak) انجام نشد؛ ذخیرهٔ درجا لغو شد تا پایهٔ تمیز از دست نرود.');
+      throw new Error('نگه‌داشتنِ نسخهٔ خامِ اولیهٔ فایل انجام نشد؛ ذخیرهٔ درجا لغو شد تا پایهٔ تمیز از دست نرود.');
     }
-    return { baseBytes: cur, origBackupPath: origPath, usedOrigBackup: false, origCreated: true, origBackupCorrupt: false, probe: curProbe };
+    return { baseBytes: cur, origBackupPath: relocatedOrigPath, backupLocation: 'relocated', usedOrigBackup: false, origCreated: true, origBackupCorrupt: false, probe: curProbe };
   }
   const cur = readCurrentBytes();
-  return { baseBytes: cur, origBackupPath: origPath, usedOrigBackup: false, origCreated: false, origBackupCorrupt: false, probe: await loadPdfDocumentWithWarnings(cur) };
+  return { baseBytes: cur, origBackupPath: relocatedOrigPath, backupLocation: 'relocated', usedOrigBackup: false, origCreated: false, origBackupCorrupt: false, probe: await loadPdfDocumentWithWarnings(cur) };
 }
 
 // برای خوانایی، ساختِ PDFName/PDFNumber در یک جا متمرکز شده است.
@@ -2378,7 +2495,7 @@ async function buildOutputBytes(pdfDoc, pages, options = {}) {
  *   می‌شود. پیش‌فرض: 'save-as' (سازگاری با فراخوانِ بخش الف).
  * @returns {Promise<{success: boolean, outputPath?: string, pagesAnnotated?: number, annotationsPlaced?: number, backupPath?: string|null, origBackupPath?: string, usedOrigBackup?: boolean, origCreated?: boolean, restoredClean?: boolean, mode?: string, error?: string, canceled?: boolean}>}
  */
-async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, password }) {
+async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, password, dataDir }) {
   try {
     if (!pdfPath || !fs.existsSync(pdfPath)) {
       return { success: false, error: 'فایل PDF پیدا نشد.' };
@@ -2401,7 +2518,7 @@ async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, 
     const saveLoggerEarly = (logger && typeof logger === 'object') ? logger : null;
     let base;
     try {
-      base = await resolveBasePdfBytes(pdfPath, effectiveMode, saveLoggerEarly);
+      base = await resolveBasePdfBytes(pdfPath, effectiveMode, saveLoggerEarly, dataDir);
     } catch (err) {
       return { success: false, error: String((err && err.message) || err) };
     }
@@ -2526,9 +2643,12 @@ async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, 
             isEncryptedForGuard = false;
             logSaveDiag(saveLogger, 'info', 'pdf-save: ghost /Encrypt neutralized for this save (streams were never encrypted)', 'pages=' + buildDoc.getPageCount());
           } else {
-            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (' + String(err.message) + '). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.' };
+            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (' + String(err.message) + '). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: err.code, rebuildNeeded: err.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION' };
           }
         } else {
+          if (isEncryptedForGuard && hasObjStmInBytes(buildBytes)) {
+            return { success: false, error: 'این فایل PDF با روشی محافظت شده است که بدونِ رمزِ عبور، قابلِ ذخیره‌سازی نیست (استریمِ آبجکتِ فشرده با رمز ترکیب شده است). حاشیه‌نویسی‌ها در حافظهٔ برنامه و در پایگاهِ دادهٔ محلی می‌مانند؛ برای ذخیره روی فایل، آن را با رمزِ عبور در یک PDFخوان باز و بدونِ رمز ذخیره کنید.', errorCode: 'PDF_COPY_UNSUPPORTED_ENCRYPTION', rebuildNeeded: true };
+          }
           return { success: false, error: 'رمزگشاییِ فایل برای ذخیره انجام نشد: ' + String((err && err.message) || err) };
         }
       }
@@ -3243,6 +3363,102 @@ function safeProbePageCount(pdfDoc) {
   }
 }
 
+// مرحله ۱۰: توصیفِ ساختارِ رمزگذاری از روی دیکشنریِ /Encryptِ
+// بارگذاری‌شده (بدونِ رمزگشایی). decryptSupported یعنی مسیرِ
+// بی‌اتلافِ pdf-lib (Standard، V=1/2/4، R=2/3/4، CFMهای
+// V2/AESV2/None، بدونِ ObjStm) می‌تواند فایل را باز کند؛ در
+// غیرِ این صورت، rebuildRecommended یعنی تنها مسیرِ درون‌برنامه‌ای،
+// «بازسازی از سندِ بازشده در pdf.js» است (اگر pdf.js آن را باز کند).
+// مرحله ۱۰: pdf-lib، استریم‌های آبجکت (ObjStm) را هنگامِ پارس، باز
+// می‌کند و خودِ استریمِ ObjStm در context باقی نمی‌ماند؛ پس اسکنِ
+// context (در encryptionInfoFromDoc و در پیش‌اسکنِ رمزگشایی) هرگز
+// ObjStm نمی‌بیند — با آزمایش روی فایلِ useObjectStreams ثابت شد.
+// تشخیصِ درست، از بایت‌های خام است: نامِ /ObjStm در بایت‌های خام
+// (استریم‌های محتوا معمولاً فشرده‌اند) تقریباً همیشه یعنی استریمِ
+// آبجکتِ واقعی. مثبتِ کاذب، فقط به «بازسازی» می‌انجامد که امن است.
+function hasObjStmInBytes(bytes) {
+  try {
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+    if (buf.length === 0) return false;
+    const CHUNK = 1048576;
+    const OVERLAP = 32;
+    const needle = '/ObjStm';
+    let prevTail = '';
+    for (let off = 0; off < buf.length; off += CHUNK) {
+      const piece = prevTail + buf.slice(off, Math.min(buf.length, off + CHUNK)).toString('latin1');
+      if (piece.includes(needle)) return true;
+      prevTail = piece.slice(-OVERLAP);
+    }
+    return false;
+  } catch (_) { return false; }
+}
+
+function encryptionInfoFromDoc(pdfDoc, rawBytes) {
+  try {
+    const info = parsePdfEncryptionInfo(pdfDoc);
+    if (!info) {
+      return { present: false, decryptSupported: true, rebuildRecommended: false, unknown: false };
+    }
+    let hasObjStm = false;
+    try {
+      const context = pdfDoc.context;
+      const allEntries = context.enumerateIndirectObjects();
+      for (const [, obj] of allEntries) {
+        if (!obj || !obj.dict || typeof obj.getContents !== 'function') continue;
+        let typeName = '';
+        try {
+          const tRaw = obj.dict.get(getPdfLib().PDFName.of('Type'));
+          const tResolved = tRaw && tRaw.constructor && tRaw.constructor.name === 'PDFRef' ? context.lookup(tRaw) : tRaw;
+          typeName = tResolved ? pdfNameText(tResolved) : '';
+        } catch (_) {}
+        if (typeName === 'ObjStm') { hasObjStm = true; break; }
+      }
+    } catch (_) {}
+    if (rawBytes && hasObjStmInBytes(rawBytes)) hasObjStm = true;
+    const cfmOk = ['V2', 'AESV2', 'None'].includes(info.stmCfm) && ['V2', 'AESV2', 'None'].includes(info.strCfm);
+    const decryptSupported = info.filter === 'Standard'
+      && [1, 2, 4].includes(info.V)
+      && [2, 3, 4].includes(info.R)
+      && cfmOk
+      && Boolean(info.O) && Boolean(info.U)
+      && !hasObjStm;
+    return {
+      present: true,
+      filter: info.filter,
+      V: info.V,
+      R: info.R,
+      lengthBits: info.lengthBits,
+      stmCfm: info.stmCfm,
+      strCfm: info.strCfm,
+      hasObjStm,
+      decryptSupported,
+      rebuildRecommended: !decryptSupported,
+      unknown: false,
+      label: (info.V === 5 || info.R >= 5) ? 'AES-256' : (hasObjStm ? 'ObjStm' : 'Standard'),
+    };
+  } catch (_) {
+    return { present: true, decryptSupported: false, rebuildRecommended: false, unknown: true };
+  }
+}
+
+async function describePdfEncryptionImpl(bytes, logger) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+  const loaded = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
+  if (loaded && loaded.pdfDoc) {
+    return encryptionInfoFromDoc(loaded.pdfDoc, buf);
+  }
+  return { present: false, decryptSupported: false, rebuildRecommended: false, unknown: true };
+}
+
+async function describePdfEncryption(bytes, logger) {
+  return withSilencedPdfLibWarnings(() => describePdfEncryptionImpl(bytes, logger));
+}
+
+async function describePdfEncryptionForPath(filePath, logger) {
+  const bytes = await fs.promises.readFile(filePath);
+  return describePdfEncryption(bytes, logger);
+}
+
 function trailerEncryptPresent(pdfDoc) {
   try {
     const ctx = pdfDoc && pdfDoc.context;
@@ -3429,6 +3645,7 @@ async function probePdfProtectionImpl(bytes, logger, onProgress) {
         logSaveDiag(logger, 'info', 'pdf-probe: clean load, invalid objects summarized',
           'invalidObjects=' + firstInvalid.length + ' refs=' + firstInvalid.map((o) => o.num + ' ' + o.gen + ' R').join(', '));
       }
+      const encryption = encryptionInfoFromDoc(first.pdfDoc, buf);
       return {
         protected: present,
         reason: present ? 'encrypt-dict' : 'clean',
@@ -3437,6 +3654,8 @@ async function probePdfProtectionImpl(bytes, logger, onProgress) {
         loadError: null,
         invalidObjects: firstInvalid,
         warningsCount: firstWarnings.length,
+        encryption,
+        rebuildRecommended: Boolean(encryption && encryption.rebuildRecommended),
       };
     }
     var firstLoadError = first.loadError;
@@ -3460,7 +3679,13 @@ async function probePdfProtectionImpl(bytes, logger, onProgress) {
         const countedLoad = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
         counted = countedLoad.pageCount;
       } catch (_) {}
-      return { protected: true, reason: 'encrypted-error', pageCount: counted, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length };
+      let encryption = null;
+      try {
+        const countedLoad = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
+        if (countedLoad && countedLoad.pdfDoc) encryption = encryptionInfoFromDoc(countedLoad.pdfDoc, buf);
+      } catch (_) {}
+      if (!encryption) encryption = { present: true, decryptSupported: false, rebuildRecommended: false, unknown: true };
+      return { protected: true, reason: 'encrypted-error', pageCount: counted, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length, encryption, rebuildRecommended: Boolean(encryption.rebuildRecommended) };
     }
     // بارگذاری به دلیلِ دیگری شکست خورد (مثلاً آبجکتِ خراب)؛ با
     // ignoreEncryption دوباره امتحان کن تا ‎/Encrypt از خرابیِ
@@ -3469,6 +3694,7 @@ async function probePdfProtectionImpl(bytes, logger, onProgress) {
       const doc2Load = await loadPdfDocumentWithWarnings(buf, { ignoreEncryption: true });
       if (doc2Load.pdfDoc) {
         const present = trailerEncryptPresent(doc2Load.pdfDoc);
+        const encryption = encryptionInfoFromDoc(doc2Load.pdfDoc, buf);
         return {
           protected: present,
           reason: present ? 'encrypt-dict' : 'load-failed-other',
@@ -3477,10 +3703,12 @@ async function probePdfProtectionImpl(bytes, logger, onProgress) {
           loadError: errText,
           invalidObjects: doc2Load.invalidObjects || firstInvalid,
           warningsCount: (doc2Load.warnings || []).length,
+          encryption,
+          rebuildRecommended: Boolean(encryption && encryption.rebuildRecommended),
         };
       }
       logSaveDiag(logger, 'warn', 'pdf-probe: load failed even with ignoreEncryption', String((doc2Load.loadError && doc2Load.loadError.message) || doc2Load.loadError));
-      return { protected: hasEncryptToken, reason: 'unparseable', pageCount: -1, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length };
+      return { protected: hasEncryptToken, reason: 'unparseable', pageCount: -1, hasEncryptToken, loadError: errText, invalidObjects: firstInvalid, warningsCount: firstWarnings.length, encryption: { present: hasEncryptToken, decryptSupported: false, rebuildRecommended: false, unknown: true }, rebuildRecommended: false };
     }
   }
 }
@@ -3975,4 +4203,4 @@ async function prepareProtectedPdfForReading(args) {
   return withSilencedPdfLibWarnings(() => prepareProtectedPdfForReadingImpl(args));
 }
 
-module.exports = { saveAnnotatedPdf, origBackupPathFor, healUnparseableIndirectObjectsInBuffer, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes };
+module.exports = { saveAnnotatedPdf, origBackupPathFor, relocatedOrigBackupPathFor, resolveOrigBackupsDir, describePdfEncryption, describePdfEncryptionForPath, encryptionInfoFromDoc, writeOrigBackupSidecar, verifyRelocatedOrigBackup, healUnparseableIndirectObjectsInBuffer, hasObjStmInBytes, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes };

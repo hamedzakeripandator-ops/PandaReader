@@ -5,6 +5,7 @@ const { app, BrowserWindow, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const nodeCrypto = require('crypto');
 const { Readable } = require('stream');
 const { createLogger, resolveComicDataDir } = require('./logger');
 
@@ -171,6 +172,7 @@ app.closeComicReadStreams = (rawPath) => {
   clearPdfServePathCache();
   closeComicReadStreamsForKey(app.normalizeComicCacheKey(rawPath));
   closeComicReadStreamsForKey(app.normalizeComicCacheKey(String(rawPath) + '.orig.bak'));
+  try { const relocatedKey = relocatedOrigBackupPathForServe(rawPath); if (relocatedKey) closeComicReadStreamsForKey(app.normalizeComicCacheKey(relocatedKey)); } catch (_) {}
 };
 
 // مرحله ۶ ـ بخش ب: انتخابِ مسیرِ واقعیِ سروِ PDF. اگر پایهٔ خامِ
@@ -182,6 +184,77 @@ app.closeComicReadStreams = (rawPath) => {
 // اگر پایهٔ خام نیست یا معتبر نیست، همان فایلِ اصلی سرو می‌شود.
 // فقط stat + خواندنِ ۵ بایتِ اول است تا در هر درخواستِ Range،
 // سربارِ ناچیزی داشته باشد.
+// مرحله ۱۰: مسیرِ پشتیبانِ جابه‌جاشدهٔ پایهٔ خام — همان هشِ
+// saver (کلیدِ نرمال‌شدهٔ مسیر + SHA-256) در پوشهٔ دادهٔ برنامه.
+function relocatedOrigBackupPathForServe(normalizedPath) {
+  try {
+    const key = app.normalizeComicCacheKey(normalizedPath);
+    const hash = nodeCrypto.createHash('sha256').update(key).digest('hex');
+    return path.join(COMIC_DATA_DIR, 'orig-backups', hash + '.pdf');
+  } catch (_) {
+    return '';
+  }
+}
+
+// مرحله ۱۰: «قابلِ قبول بودنِ ظاهری» یک فایلِ پشتیبان برای سرو:
+// جادوی %PDF- در سر + %%EOF در ۱ کیلوبایتِ پایانی. این، پارسِ
+// کامل نیست (در مسیرِ داغِ Range، گران است)؛ راستی‌آزماییِ کاملِ
+// پشتیبان (probe-load) در saver، پیش از هر ذخیره انجام می‌شود.
+// فقط جلوی سایه‌انداختنِ یک `.orig.bak`ی بریده‌شده/خراب روی
+// فایلِ سالمِ اصلی را می‌گیرد — همان حالتی که در گذشته،
+function isStructurallyPlausiblePdf(servePath) {
+  let fd = -1;
+  try {
+    const stat = fs.statSync(servePath);
+    if (!stat.isFile() || stat.size <= 5) return false;
+    fd = fs.openSync(servePath, 'r');
+    const head = Buffer.alloc(5);
+    if (fs.readSync(fd, head, 0, 5, 0) !== 5) return false;
+    if (head.toString('ascii') !== '%PDF-') return false;
+    const tailLen = Math.min(1024, stat.size);
+    const tail = Buffer.alloc(tailLen);
+    if (fs.readSync(fd, tail, 0, tailLen, stat.size - tailLen) !== tailLen) return false;
+    return tail.indexOf('%%EOF') !== -1;
+  } catch (_) {
+    return false;
+  } finally {
+    if (fd >= 0) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+  }
+}
+
+// مرحله ۱۰: پشتیبانِ جابه‌جاشده، فقط وقتی سرو می‌شود که فایلِ
+// کناریِ (sidecar) آن با مسیر و اندازهٔ فایل بخواند. هشِ کاملِ
+// محتوا، عمداً این‌جا حساب نمی‌شود (در مسیرِ داغِ Range، خواندنِ
+// کلِ فایلِ ۶۸ مگابایتی گران است)؛ saver، پیش از هر ذخیره،
+function isRelocatedBackupPlausible(backupPath, normalizedPath) {
+  try {
+    const stat = fs.statSync(backupPath);
+    if (!stat.isFile() || stat.size <= 5) return false;
+    const raw = fs.readFileSync(backupPath + '.json', 'utf8');
+    const sidecar = JSON.parse(raw);
+    if (!sidecar || sidecar.version !== 1) return false;
+    if (Number(sidecar.size) !== stat.size) return false;
+    if (typeof sidecar.sourcePath !== 'string') return false;
+    const sidecarKey = app.normalizeComicCacheKey(sidecar.sourcePath);
+    return sidecarKey === app.normalizeComicCacheKey(normalizedPath);
+  } catch (_) {
+    return false;
+  }
+}
+
+// مرحله ۶ ـ بخش ب: انتخابِ مسیرِ واقعیِ سروِ PDF. ترتیبِ
+// مرحلهٔ ۱۰:
+//   ۱) پشتیبانِ جابه‌جاشدهٔ معتبر در پوشهٔ دادهٔ برنامه
+//      (sidecar + سر/دمِ سالم)؛
+//   ۲) `.orig.bak`ی قدیمیِ کنارِ فایل (با همان بررسیِ سر/دمِ
+//      تقویت‌شده — فقط جادوی %PDF- کافی نیست)؛
+//   ۳) خودِ فایلِ اصلی.
+// اگر پایهٔ خام نیست یا معتبر نیست، همان فایلِ اصلی سرو می‌شود،
+// تا فایلِ سالمِ اصلی، هرگز زیرِ سایهٔ پشتیبانِ خراب نرود.
+// فقط stat + خواندنِ سر/دم است تا در هر درخواستِ Range،
+// سربارِ ناچیزی داشته باشد؛ نتیجه، ۱۰ ثانیه در کش می‌ماند.
 function resolvePdfServePath(normalizedPath) {
   if (!normalizedPath || typeof normalizedPath !== 'string') return normalizedPath;
   if (path.extname(normalizedPath).toLowerCase() !== '.pdf') return normalizedPath;
@@ -190,23 +263,13 @@ function resolvePdfServePath(normalizedPath) {
   if (cached && (Date.now() - cached.at) < PDF_SERVE_PATH_CACHE_TTL_MS) {
     return cached.servePath;
   }
-  const origPath = normalizedPath + '.orig.bak';
   let servePath = normalizedPath;
-  let fd = -1;
-  try {
-    const stat = fs.statSync(origPath);
-    if (stat.isFile() && stat.size > 5) {
-      fd = fs.openSync(origPath, 'r');
-      const head = Buffer.alloc(5);
-      const read = fs.readSync(fd, head, 0, 5, 0);
-      if (read === 5 && head.toString('ascii') === '%PDF-') servePath = origPath;
-    }
-  } catch (_) {
-    // هر خطا (نیست، دایرکتوری، غیرقابلِ خواندن) = سرو از فایلِ اصلی.
-  } finally {
-    if (fd >= 0) {
-      try { fs.closeSync(fd); } catch (_) {}
-    }
+  const relocatedPath = relocatedOrigBackupPathForServe(normalizedPath);
+  if (relocatedPath && isRelocatedBackupPlausible(relocatedPath, normalizedPath) && isStructurallyPlausiblePdf(relocatedPath)) {
+    servePath = relocatedPath;
+  } else {
+    const origPath = normalizedPath + '.orig.bak';
+    if (isStructurallyPlausiblePdf(origPath)) servePath = origPath;
   }
   pdfServePathCache.set(normalizedPath, { servePath, at: Date.now() });
   // سقفِ ساده: اگر بیش از ۵۱۲ ورودی شد، قدیمی‌ترین ورودی دور
@@ -279,6 +342,7 @@ app.invalidateComicRamCache = (rawPath) => {
   // است با کلیدِ پایهٔ خام (.orig.bak) هم باشند؛ آن‌ها هم باطل
   // می‌شوند تا خواندنِ بعدی، بایتِ تازه را بگیرد.
   const bakKey = app.normalizeComicCacheKey(String(rawPath) + '.orig.bak');
+  const relocatedBakKey = (() => { try { const rp = relocatedOrigBackupPathForServe(rawPath); return rp ? app.normalizeComicCacheKey(rp) : ''; } catch (_) { return ''; } })();
   if (bakKey && bakKey !== key) {
     const bakEntry = app.activeComicRamCache.get(bakKey);
     if (bakEntry && app.activeComicRamCache.delete(bakKey)) {
@@ -286,6 +350,14 @@ app.invalidateComicRamCache = (rawPath) => {
       if (currentRamCacheBytes < 0) currentRamCacheBytes = 0;
     }
     if (app.inFlightDiskReads) app.inFlightDiskReads.delete(bakKey);
+  }
+  if (relocatedBakKey && relocatedBakKey !== key && relocatedBakKey !== bakKey) {
+    const relEntry = app.activeComicRamCache.get(relocatedBakKey);
+    if (relEntry && app.activeComicRamCache.delete(relocatedBakKey)) {
+      currentRamCacheBytes -= relEntry.buffer ? relEntry.buffer.length : 0;
+      if (currentRamCacheBytes < 0) currentRamCacheBytes = 0;
+    }
+    if (app.inFlightDiskReads) app.inFlightDiskReads.delete(relocatedBakKey);
   }
   // مرحله ۶ ـ بخش ب: بستنِ استریم‌های خواندنِ فعال روی هر دو مسیر،
   // تا در ذخیرهٔ بعدی هیچ هندلِ بازی از سمتِ comic:// نماند.

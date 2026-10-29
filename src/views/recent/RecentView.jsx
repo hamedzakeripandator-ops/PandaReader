@@ -22,7 +22,7 @@ function formatRelativeTime(dateString) {
 }
 
 // ردیف اختصاصی نمایش فهرستی مجهز به خودترمیمی کاور و حذف تداخل استایل React
-const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
+const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, coverLoadEnabled = true }) {
   const filePath = item?.path || item?.filePath || '';
   const title = item?.name || item?.fileName || filePath.split(/[\\/]/).pop() || 'Untitled';
 
@@ -41,6 +41,8 @@ const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onS
       return;
     }
 
+    if (!coverLoadEnabled) return;
+
     thumbnailService.getThumbnail(filePath).then((res) => {
       if (isMounted && res) {
         setCoverUrl(res);
@@ -53,11 +55,12 @@ const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onS
       // لغو کن تا صفِ کاورها با کارت‌هایِ خارج از دید، پر نشود.
       if (!existing) thumbnailService.cancelThumbnailRequest(filePath);
     };
-  }, [filePath, item?.cover]);
+  }, [filePath, item?.cover, coverLoadEnabled]);
 
   // بازیابی خودکار در صورت لود ناموفق تصویر (مثلاً فایل‌های پاک‌شده پوشه موقت)
   const handleImageError = useCallback(() => {
     setCoverUrl(null);
+    if (!coverLoadEnabled) return;
     if (filePath) {
       thumbnailService.getThumbnail(filePath).then((freshCover) => {
         if (freshCover) {
@@ -65,7 +68,7 @@ const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onS
         }
       });
     }
-  }, [filePath]);
+  }, [filePath, coverLoadEnabled]);
 
   // مرحله ۹: برچسبِ زمان، فقط وقتی مهرِ زمانی عوض شود محاسبه می‌شود.
   const timeLabel = useMemo(
@@ -161,70 +164,13 @@ const RecentListRow = React.memo(function RecentListRow({ item, onOpenComic, onS
   );
 });
 
-// مرحله ۹: اسلاتِ تنبل — دقیقاً الگویِ LazyLibraryCardِ مرحلهٔ ۴
-// (IntersectionObserver با rootMargin 400px + قفلِ ارتفاعِ
-// اندازه‌گیری‌شده) تا در تاریخچه‌هایِ شلوغ، فقط آیتم‌هایِ داخلِ
-// دید مانت شوند و درخواستِ کاور بدهند؛ وقتی آیتمی از دید خارج
-// شد، آنمانت می‌شود و پاک‌سازیِ ردیف، درخواستِ کاورِ در صف را
-// لغو می‌کند.
-function LazyRecentSlot({ children, skeletonStyle }) {
-  const slotRef = useRef(null);
-  const measuredHeightRef = useRef(0);
-  const [isVisible, setIsVisible] = useState(false);
-
-  useEffect(() => {
-    const el = slotRef.current;
-    if (!el || typeof IntersectionObserver === 'undefined') {
-      setIsVisible(true);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (entry) setIsVisible(entry.isIntersecting);
-      },
-      { root: null, rootMargin: '400px 0px', threshold: 0 }
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (!isVisible) return;
-    const el = slotRef.current;
-    if (!el) return;
-    const measure = () => {
-      const h = el.offsetHeight || 0;
-      if (h > 0) measuredHeightRef.current = h;
-    };
-    measure();
-    if (typeof ResizeObserver !== 'undefined') {
-      const ro = new ResizeObserver(measure);
-      ro.observe(el);
-      return () => ro.disconnect();
-    }
-    window.addEventListener('resize', measure);
-    return () => window.removeEventListener('resize', measure);
-  }, [isVisible]);
-
-  const lockedHeight = measuredHeightRef.current;
-
-  return (
-    <div ref={slotRef}>
-      {isVisible ? (
-        children
-      ) : (
-        <div
-          style={
-            lockedHeight > 0
-              ? { ...skeletonStyle, height: lockedHeight, boxSizing: 'border-box', overflow: 'hidden' }
-              : skeletonStyle
-          }
-        />
-      )}
-    </div>
-  );
-}
+// مرحله ۱۰: LazyRecentSlotِ مرحلهٔ ۹ حذف شد — به ازایِ هر آیتم،
+// یک IntersectionObserver + یک ResizeObserver می‌ساخت (۲۰۰ آیتم =
+// ۴۰۰ ناظر) و آیتم‌هایِ خارج از دید را آنمانت می‌کرد. جایِ آن،
+// «پنجره‌بندیِ پیش‌رونده» است: فقط ۲۴ آیتمِ اول رندر می‌شود و یک
+// IntersectionObserverِ واحد روی نگهبانِ انتهایِ فهرست، با اسکرول،
+// ۲۴ آیتمِ بعدی را اضافه می‌کند. هیچ آیتمی آنمانت نمی‌شود، پس
+// درخواستِ کاور هم تکرار نمی‌شود.
 
 export default function RecentView({ onOpenComic }) {
   const { recentItems, removeFromRecent, clearRecents } = useLibraryStore();
@@ -232,6 +178,69 @@ export default function RecentView({ onOpenComic }) {
 
   const [viewMode, setViewMode] = useState('list'); // 'list' | 'grid'
   const [confirmClear, setConfirmClear] = useState(false);
+  // مرحله ۱۰: پنجره‌بندیِ پیش‌رونده — فقط ۲۴ آیتمِ اول در DOM است؛
+  // نگهبانِ انتهایِ فهرست با یک IntersectionObserverِ واحد، دسته‌هایِ
+  // بعدی را اضافه می‌کند. درخواستِ کاور فقط وقتی آزاد است که اسکرول،
+  // ۱۶۰ میلی‌ثانیه بی‌حرکت مانده باشد.
+  const [visibleCount, setVisibleCount] = useState(24);
+  const [isScrolling, setIsScrolling] = useState(false);
+  const scrollContainerRef = useRef(null);
+  const sentinelRef = useRef(null);
+  const scrollIdleTimerRef = useRef(null);
+
+  useEffect(() => {
+    setVisibleCount(24);
+  }, [searchQuery, viewMode]);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0] && entries[0].isIntersecting) {
+          setVisibleCount((c) => Math.min(c + 24, filteredRecents.length));
+        }
+      },
+      { root: scrollContainerRef.current, rootMargin: '600px 0px', threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [filteredRecents.length, viewMode, visibleCount]);
+
+  const handleScroll = useCallback(() => {
+    setIsScrolling(true);
+    if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+    scrollIdleTimerRef.current = setTimeout(() => setIsScrolling(false), 160);
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+  }, []);
+
+  // مرحله ۱۰: پاک‌سازیِ خودکارِ فایل‌هایِ حذف‌شده از سیستم — یک بار
+  // در هر جلسه (sessionStorage)، بی‌صدا مگر اینکه موردی پاک شود.
+  useEffect(() => {
+    let cancelled = false;
+    try {
+      if (sessionStorage.getItem('comicReader.autoPruneDone.v1')) return;
+      sessionStorage.setItem('comicReader.autoPruneDone.v1', '1');
+    } catch (_) {
+      return;
+    }
+    (async () => {
+      try {
+        const res = await coreApi.pruneMissingFiles();
+        if (cancelled || !res || !res.success) return;
+        const removed = Array.isArray(res.removed) ? res.removed : [];
+        if (removed.length > 0) {
+          await useLibraryStore.getState().applyPruneResult(removed.map((r) => r.path).filter(Boolean));
+          showToast(`${removed.length} فایلِ حذف‌شده از سیستم، از برنامه هم پاک شد.`, { type: 'info' });
+        }
+      } catch (_) {}
+    })();
+    return () => { cancelled = true; };
+  }, [showToast]);
+
 
   const filteredRecents = useMemo(() => {
     const q = (searchQuery || '').trim().toLowerCase();
@@ -273,6 +282,21 @@ export default function RecentView({ onOpenComic }) {
     return groups.filter((group) => group.items.length > 0);
   }, [filteredRecents]);
 
+  // مرحله ۱۰: برشِ پنجره از رویِ گروه‌هایِ زمانی — سربرگِ هر گروه،
+  // فقط وقتی رندر می‌شود که دستِ‌کم یک آیتمِ آن در پنجره باشد.
+  const windowedGroups = useMemo(() => {
+    let remaining = visibleCount;
+    const out = [];
+    for (const group of groupedRecents) {
+      if (remaining <= 0) break;
+      const shown = group.items.slice(0, remaining);
+      remaining -= shown.length;
+      out.push({ ...group, items: shown });
+    }
+    return out;
+  }, [groupedRecents, visibleCount]);
+
+
   const handleClearAll = () => {
     clearRecents();
     setConfirmClear(false);
@@ -296,7 +320,7 @@ export default function RecentView({ onOpenComic }) {
   }, []);
 
   return (
-    <div style={styles.container}>
+    <div ref={scrollContainerRef} onScroll={handleScroll} style={styles.container}>
       {/* هدر بالای تاریخچه */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -384,44 +408,40 @@ export default function RecentView({ onOpenComic }) {
           </span>
         </div>
       ) : (
-        groupedRecents.map((group) => (
+        windowedGroups.map((group) => (
           <div key={group.id}>
             <div style={styles.sectionHeader}>{group.title}</div>
             {viewMode === 'grid' ? (
               <div style={styles.grid}>
                 {group.items.map((item, idx) => (
-                  <LazyRecentSlot
+                  <ComicCard
                     key={item.path || item.filePath || `recent-grid-${idx}`}
-                    skeletonStyle={styles.cardSkeleton}
-                  >
-                    <ComicCard
-                      item={item}
-                      onOpenComic={onOpenComic}
-                      onRemove={(path) => removeFromRecent(path)}
-                      showRemoveBtn={true}
-                    />
-                  </LazyRecentSlot>
+                    item={item}
+                    onOpenComic={onOpenComic}
+                    onRemove={(path) => removeFromRecent(path)}
+                    showRemoveBtn={true}
+                  />
                 ))}
               </div>
             ) : (
               <div style={styles.list}>
                 {group.items.map((item, index) => (
-                  <LazyRecentSlot
+                  <RecentListRow
                     key={item.path || item.filePath || `recent-list-${index}`}
-                    skeletonStyle={styles.rowSkeleton}
-                  >
-                    <RecentListRow
-                      item={item}
-                      onOpenComic={onOpenComic}
-                      onShowInFolder={handleShowInFolder}
-                      onRemoveItem={handleRemoveItem}
-                    />
-                  </LazyRecentSlot>
+                    item={item}
+                    onOpenComic={onOpenComic}
+                    onShowInFolder={handleShowInFolder}
+                    onRemoveItem={handleRemoveItem}
+                    coverLoadEnabled={!isScrolling}
+                  />
                 ))}
               </div>
             )}
           </div>
         ))
+      )}
+      {visibleCount < filteredRecents.length && (
+        <div ref={sentinelRef} style={{ height: '1px' }} aria-hidden="true" />
       )}
     </div>
   );
@@ -570,31 +590,15 @@ const styles = {
     flexDirection: 'column',
     gap: '10px',
   },
-  // مرحله ۹: سربرگِ بخشِ زمانی + اسکلت‌هایِ اسلاتِ تنبل. هیچ
-  // backdrop-filterای در این فایل نیست و هیچ‌کدام هم اضافه
-  // نشده است؛ پس‌زمینه‌ها همان پنلِ نیمه‌شفافِ سبکِ قبلی‌اند.
+  // مرحله ۱۰: اسکلت‌هایِ اسلاتِ تنبلِ مرحلهٔ ۹ با حذفِ
+  // LazyRecentSlot حذف شدند. هیچ backdrop-filterای در این
+  // فایل نیست و هیچ‌کدام هم اضافه نشده است.
   sectionHeader: {
     fontFamily: 'var(--font-fa)',
     fontSize: '13px',
     fontWeight: 800,
     color: 'var(--muted)',
     margin: '6px 2px 10px',
-  },
-  rowSkeleton: {
-    backgroundColor: 'var(--panel)',
-    borderRadius: '14px',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'var(--border)',
-    minHeight: '84px',
-  },
-  cardSkeleton: {
-    backgroundColor: 'var(--panel)',
-    borderRadius: '14px',
-    borderWidth: '1px',
-    borderStyle: 'solid',
-    borderColor: 'var(--border)',
-    minHeight: '230px',
   },
   listItem: {
     display: 'flex',

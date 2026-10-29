@@ -3,6 +3,7 @@ import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import QuickActionCards from './QuickActionCards';
 import ComicCard from '../library/ComicCard';
+import StorageSection from '../../components/common/StorageSection';
 import { coreApi } from '../../services/coreApi';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../../components/common/Icons';
@@ -10,6 +11,7 @@ import Icons from '../../components/common/Icons';
 export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) {
   const { recentItems, library, libraryItems, favorites } = useLibraryStore();
   const setCurrentView = useAppStore((state) => state.setCurrentView);
+  const showToast = useAppStore((state) => state.showToast);
 
   const effectiveLibrary = library || libraryItems || [];
   const lastReadComic = recentItems?.[0] || null;
@@ -46,6 +48,30 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
       isMounted = false;
     };
   }, [lastReadPath, lastReadComic?.cover]);
+  // مرحله ۱۰: پاک‌سازیِ خودکارِ فایل‌هایِ حذف‌شده از سیستم — یک بار
+  // در هر جلسه (sessionStorage)، بی‌صدا مگر اینکه موردی پاک شود.
+  useEffect(() => {
+    let cancelled = false;
+    try {
+      if (sessionStorage.getItem('comicReader.autoPruneDone.v1')) return;
+      sessionStorage.setItem('comicReader.autoPruneDone.v1', '1');
+    } catch (_) {
+      return;
+    }
+    (async () => {
+      try {
+        const res = await coreApi.pruneMissingFiles();
+        if (cancelled || !res || !res.success) return;
+        const removed = Array.isArray(res.removed) ? res.removed : [];
+        if (removed.length > 0) {
+          await useLibraryStore.getState().applyPruneResult(removed.map((r) => r.path).filter(Boolean));
+          showToast(`${removed.length} فایلِ حذف‌شده از سیستم، از برنامه هم پاک شد.`, { type: 'info' });
+        }
+      } catch (_) {}
+    })();
+    return () => { cancelled = true; };
+  }, [showToast]);
+
 
   const lastReadPercent = lastReadComic
     ? typeof lastReadComic.percentage === 'number'
@@ -76,6 +102,7 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
 
   return (
     <div style={styles.container}>
+
       {/* بنر هیرو (Landing Hero) طبق جدول استاندارد تایپوگرافی */}
       <div style={styles.heroBanner}>
         <div style={styles.heroTextSide}>
@@ -193,6 +220,9 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
         onSelectFile={onSelectFile}
         onSelectFolder={handleOpenFolderFallback}
       />
+      <div style={{ marginTop: '20px' }}>
+        <StorageSection compact />
+      </div>
 
       {/* ردیف «اخیراً مطالعه شده»: تیتر Estedad 800 19px + لینک فیروزه‌ای Estedad 600 12.5px */}
       {recentPreview.length > 0 && (

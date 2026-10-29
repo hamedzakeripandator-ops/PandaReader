@@ -7,6 +7,7 @@ import useLibraryStore from '../../store/useLibraryStore';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
+import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 import thumbnailService from '../../services/thumbnailService';
 import hiDpiRenderService from '../../services/hiDpiRenderService';
@@ -814,6 +815,7 @@ export default function PdfViewer({ filePath }) {
   const pdfDocRef = useRef(null);
   const outlineRunRef = useRef(0);
   pdfDocRef.current = pdfDoc;
+  const rebuildCopyInFlightRef = useRef(false);
   // مرحله ۵ ـ بخش الف: آینهٔ annotationsByPage برای هندلرِ خروجیِ PDF تا
   // تازه‌ترین کامیت‌ها (نه closureی قدیمی) خوانده شوند.
   const annotationsByPageRef = useRef({});
@@ -1044,6 +1046,150 @@ export default function PdfViewer({ filePath }) {
     showToast(`یادداشت‌های صفحه ${pageNum} پاک شد`, { type: 'info' });
   }, [handleCommitPageAnnotations, showToast]);
 
+  // مرحله ۱۰: ذخیرهٔ «بازسازی‌شده» — مسیرِ آخر برای فایل‌هایی که
+  // pdf-lib نمی‌تواند رمزگشایی کند (AES-256/ObjStm) ولی pdf.js
+  // آن‌ها را باز کرده است. overlayها با قابِ طبیعی (cssRotation: 0)
+  // ساخته می‌شوند تا با viewportِ طبیعیِ بازسازی هم‌تراز شوند؛
+  // مسیرِ معمولیِ ذخیره، دست نمی‌خورد.
+  const handleRebuildSave = useCallback(async (saveMode, pagesMap) => {
+    const doc = pdfDocRef.current;
+    if (!doc) {
+      showSaveStatus('error', 'سندِ PDF هنوز کامل بارگذاری نشده است.', 6000);
+      showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+      return;
+    }
+    const itemsMap = pagesMap || {};
+    const annotatedCount = Object.values(itemsMap).reduce(
+      (n, items) => n + (Array.isArray(items) ? items.length : 0),
+      0
+    );
+    setIsExportingPdf(true);
+    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', 'در حالِ بازسازیِ صفحاتِ بدونِ قفل…', 0);
+    showToast('ذخیرهٔ معمولی ممکن نیست؛ نسخهٔ تمیزِ بدونِ قفل بازسازی می‌شود…', { type: 'info' });
+    try {
+      const prepared = annotatedCount > 0
+        ? await prepareAnnotatedPdfExport({
+            annotationsByPage: itemsMap,
+            getPageViewport: async (pageNum) => {
+              const pg = await doc.getPage(pageNum);
+              const vp = pg.getViewport({ scale: 1 });
+              return {
+                width: vp.width,
+                height: vp.height,
+                transform: vp.transform,
+                rotate: pg.rotate,
+                view: pg.view,
+              };
+            },
+            cssRotation: 0,
+          })
+        : { pages: {}, totalItems: 0, annotatedPages: 0 };
+      if (annotatedCount > 0 && prepared.annotatedPages === 0) {
+        showSaveStatus('info', 'آیتمِ قابلِ خروجی پیدا نشد.', 4500);
+        showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        return;
+      }
+      const rebuilt = await rebuildEditablePdfFromPdfJs({
+        pdfDoc: doc,
+        preparedPages: prepared.pages,
+        onProgress: (pageNum, totalPages) => {
+          showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
+        },
+      });
+      const base64 = rebuildPdfBytesToBase64(rebuilt.bytes);
+      const result = await coreApi.saveRebuiltPdf({
+        pdfPath: filePath,
+        base64,
+        mode: saveMode,
+        expectedPageCount: rebuilt.pageCount,
+      });
+      if (result && result.canceled) {
+        showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
+        return;
+      }
+      if (result && result.success) {
+        const savedName = String((result && result.outputPath) || filePath || '').split(/[\\/]/).pop() || '';
+        const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + ')' : '';
+        if (saveMode === 'in-place') {
+          showSaveStatus('saved-inplace', '✓ فایلِ بازسازی‌شدهٔ بدونِ قفل روی همین فایل ذخیره شد!' + savedSuffix, 4500);
+          showToast(`نسخهٔ تمیزِ بدونِ قفل روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`, { type: 'success' });
+        } else {
+          showSaveStatus('saved-as', '✓ فایلِ PDFِ بازسازی‌شدهٔ بدونِ قفل ذخیره شد!' + savedSuffix, 4500);
+          showToast(`فایلِ PDFِ بازسازی‌شده با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`, { type: 'success' });
+        }
+      } else if (result && result.locked) {
+        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
+      } else {
+        showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
+        showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
+      showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+    } finally {
+      setIsExportingPdf(false);
+    }
+  }, [filePath, showToast, showSaveStatus]);
+
+  // مرحله ۱۰: شنوندهٔ «ساختِ نسخهٔ کپیِ قابل‌ویرایش با بازسازی» که
+  // TopBar، وقتی پروب گفت pdf-lib نمی‌تواند فایل را رمزگشایی کند،
+  // می‌فرستد. کپی، پایهٔ تمیز است و حاشیه‌نویسی‌ای رویش پخته
+  // نمی‌شود (آیتم‌ها در دیتابیس، زیرِ مسیرِ اصلی می‌مانند — همان
+  // قراردادِ کپیِ مرحلهٔ ۸). پس از ساخت، رویدادِ
+  // app:editable-copy-ready به TopBar می‌گوید تا جابه‌جایی و فعال‌سازیِ
+  // استودیو را انجام دهد.
+  useEffect(() => {
+    const onRebuildCopy = async (e) => {
+      const detail = e && e.detail ? e.detail : {};
+      if (!detail.filePath || detail.filePath !== filePath) return;
+      if (rebuildCopyInFlightRef.current) return;
+      const doc = pdfDocRef.current;
+      if (!doc) {
+        showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+        return;
+      }
+      rebuildCopyInFlightRef.current = true;
+      showSaveStatus('saving-as', 'در حالِ ساختِ نسخهٔ قابل‌ویرایشِ بدونِ قفل…', 0);
+      try {
+        const rebuilt = await rebuildEditablePdfFromPdfJs({
+          pdfDoc: doc,
+          preparedPages: {},
+          onProgress: (pageNum, totalPages) => {
+            showSaveStatus('saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
+          },
+        });
+        const base64 = rebuildPdfBytesToBase64(rebuilt.bytes);
+        const result = await coreApi.saveRebuiltPdf({
+          pdfPath: filePath,
+          base64,
+          mode: 'copy',
+          expectedPageCount: rebuilt.pageCount,
+        });
+        if (result && result.success) {
+          showSaveStatus('saved-as', 'نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', 4500);
+          window.dispatchEvent(new CustomEvent('app:editable-copy-ready', {
+            detail: { copyPath: result.outputPath, preservedPage: detail.preservedPage || 1, pageCount: rebuilt.pageCount },
+          }));
+        } else if (result && result.canceled) {
+          showSaveStatus('info', 'ساختِ نسخهٔ کپی لغو شد.', 4500);
+        } else {
+          showSaveStatus('error', (result && result.error) || 'ساختِ نسخهٔ کپی انجام نشد.', 6000);
+          showToast((result && result.error) || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
+        }
+      } catch (err) {
+        showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
+        showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+      } finally {
+        rebuildCopyInFlightRef.current = false;
+      }
+    };
+    window.addEventListener('app:rebuild-editable-copy', onRebuildCopy);
+    return () => window.removeEventListener('app:rebuild-editable-copy', onRebuildCopy);
+  }, [filePath, showToast, showSaveStatus]);
+
   // مرحله ۵ ـ بخش الف: خروجیِ PDFِ حاشیه‌نویسی‌شده.
   //  • فقط حاشیه‌نویسی‌های «ثبت‌شده» (کامیت‌شده) صادر می‌شوند؛ طرحِ
   //    نیمه‌کارهٔ در حالِ ترسیم، هنوز در دیتابیس/استیت نیست.
@@ -1153,6 +1299,13 @@ export default function PdfViewer({ filePath }) {
         // هات‌فیکسِ مرحله ۶: پیامِ دقیقِ قفل، به‌جای خطای عمومی.
         showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
         showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
+      } else if (result && result.rebuildNeeded) {
+        // مرحله ۱۰: ذخیرهٔ معمولی رد شد چون pdf-lib نمی‌تواند فایل
+        // را رمزگشایی کند (AES-256/ObjStm) — ولی سند همین حالا در
+        // pdf.js باز است؛ از صفحاتِ بازشده، نسخهٔ تمیزِ بدونِ قفل
+        // بازسازی و با همان mode ذخیره می‌شود.
+        await handleRebuildSave(saveMode, pages);
+        return;
       } else {
         showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
         showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
@@ -1163,7 +1316,7 @@ export default function PdfViewer({ filePath }) {
     } finally {
       setIsExportingPdf(false);
     }
-  }, [filePath, rotation, showToast, isExportingPdf, showSaveStatus]);
+  }, [filePath, rotation, showToast, isExportingPdf, showSaveStatus, handleRebuildSave]);
 
   // Refinement Final: مالکیتِ Ctrl+Z/Y وارونه شد تا Undoی مضاعف
   // رفع شود. قبلاً این شنونده فقط وقتی استودیو روشن بود ثبت می‌شد

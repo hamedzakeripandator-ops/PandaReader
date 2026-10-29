@@ -74,6 +74,18 @@ async function handleProbe(filePath) {
   const result = await saver.probePdfProtectionForPath(filePath, makeLogger(), (fraction, label) => {
     postProgress('probe', fraction, label);
   });
+  // مرحله ۱۰: پروبِ سریعِ نتیجه‌بخش، جزئیاتِ رمزگذاری را ندارد؛
+  // برای فایلِ قفل‌دار، توصیفِ رمزگذاری هم ضمیمه می‌شود تا TopBar
+  // بداند کپیِ بی‌اتلاف ممکن است یا باید «بازسازی از pdf.js»
+  // پیشنهاد شود. این، فقط روی کلیکِ استودیو اجرا می‌شود.
+  let encryption = result && result.encryption ? result.encryption : null;
+  let rebuildRecommended = Boolean(result && result.rebuildRecommended);
+  if (result && result.protected && !encryption && saver.describePdfEncryptionForPath) {
+    try {
+      encryption = await saver.describePdfEncryptionForPath(filePath, makeLogger());
+      rebuildRecommended = Boolean(encryption && encryption.rebuildRecommended);
+    } catch (_) { /* توصیف انجام نشد؛ پروبِ پایه، معتبر می‌ماند */ }
+  }
   postProgress('probe-done', 1, 'بررسیِ محافظت انجام شد.');
   return {
     protected: Boolean(result && result.protected),
@@ -84,6 +96,8 @@ async function handleProbe(filePath) {
     fast: Boolean(result && result.fast),
     invalidObjects: Array.isArray(result && result.invalidObjects) ? result.invalidObjects.length : 0,
     warningsCount: (result && result.warningsCount) || 0,
+    encryption: encryption || undefined,
+    rebuildRecommended,
   };
 }
 

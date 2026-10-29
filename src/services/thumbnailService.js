@@ -555,6 +555,12 @@ export const thumbnailService = {
   // پاک‌سازیِ ComicCard هنگامِ آنمانتِ کارتِ خارج از دید). اگر استخراج
   // در حالِ اجراست یا اصلاً در صف نیست، false برمی‌گردد و هیچ‌کاری
   // نمی‌شود؛ لغو، وعدهٔ در انتظار را با null حل می‌کند.
+  // مرحله ۱۰: خالی کردنِ کشِ رمِ کاورها پس از پاک‌سازیِ کاورها.
+  // درخواست‌هایِ در حالِ پرواز، وعده‌هایِ حل‌شده‌اند و دست نمی‌خورند.
+  clearMemoryCache: () => {
+    memoryCoverCache.clear();
+  },
+
   cancelThumbnailRequest: (filePath) => {
     const norm = normalizeCoverKey(filePath);
     if (!norm) return false;

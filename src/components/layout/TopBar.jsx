@@ -409,6 +409,8 @@ export default function TopBar({
           filePath,
           pageCount: cached.pageCount,
           reason: cached.reason,
+          rebuildRecommended: Boolean(cached.rebuildRecommended),
+          encryptionLabel: (cached.encryption && cached.encryption.label) || '',
           preservedPage: useReaderStore.getState().currentPage || 1,
         });
         return;
@@ -439,6 +441,8 @@ export default function TopBar({
               filePath,
               pageCount: result.pageCount,
               reason: result.reason,
+              rebuildRecommended: Boolean(result.rebuildRecommended),
+              encryptionLabel: (result.encryption && result.encryption.label) || '',
               preservedPage: useReaderStore.getState().currentPage || 1,
             });
           } else {
@@ -468,11 +472,53 @@ export default function TopBar({
       activateStudio();
     }
   }, [pendingCopySwitch, currentFilePath, activateStudio]);
+  // مرحله ۱۰: وقتی PdfViewer، کپیِ بازسازی‌شده را ساخت، همان
+  // جابه‌جاییِ مرحلهٔ ۸ انجام می‌شود: seedِ تاریخچه + جابه‌جایی +
+  // فعال‌سازیِ استودیو پس از باز شدنِ کپی.
+  useEffect(() => {
+    const onEditableCopyReady = (e) => {
+      const detail = e && e.detail ? e.detail : {};
+      if (!detail.copyPath) return;
+      (async () => {
+        try {
+          const fileName = detail.copyPath.split(/[\\/]/).pop() || 'copy.pdf';
+          await useLibraryStore.getState().addToRecent({
+            path: detail.copyPath,
+            name: fileName,
+            type: 'pdf',
+            fileSize: '',
+            cover: null,
+            totalPages: Number(detail.pageCount) > 0 ? Number(detail.pageCount) : totalPages,
+            lastPage: detail.preservedPage || 1,
+          });
+        } catch (_) {}
+        setPendingCopySwitch({ copyPath: detail.copyPath, page: detail.preservedPage || 1 });
+        showToast('نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', { type: 'success' });
+        window.dispatchEvent(new CustomEvent('app:navigate-comic', { detail: detail.copyPath }));
+      })();
+    };
+    window.addEventListener('app:editable-copy-ready', onEditableCopyReady);
+    return () => window.removeEventListener('app:editable-copy-ready', onEditableCopyReady);
+  }, [showToast, totalPages]);
+
 
   // Stage 8 Part A: build the unlocked copy and switch to it.
   const handleProtectedCopyConfirm = useCallback(async () => {
     if (!protectedModal || isCreatingCopy) return;
     const { filePath, preservedPage } = protectedModal;
+    if (protectedModal.rebuildRecommended) {
+      // مرحله ۱۰: pdf-lib نمی‌تواند این فایل را رمزگشایی کند؛ کپی،
+      // با «بازسازی از سندِ بازشده در pdf.js» ساخته می‌شود. خودِ
+      // بازسازی در PdfViewer انجام می‌شود (سند، آن‌جاست) و نتیجه،
+      // با رویدادِ app:editable-copy-ready برمی‌گردد تا همین
+      // جابه‌جاییِ مرحلهٔ ۸ انجام شود.
+      const rebuildFilePath = protectedModal.filePath;
+      const rebuildPage = protectedModal.preservedPage || 1;
+      setProtectedModal(null);
+      window.dispatchEvent(new CustomEvent('app:rebuild-editable-copy', { detail: { filePath: rebuildFilePath, preservedPage: rebuildPage } }));
+      showToast('در حالِ ساختِ نسخهٔ قابل‌ویرایش با بازسازیِ صفحات…', { type: 'info' });
+      return;
+    }
     setIsCreatingCopy(true);
     setCopyProgress({ fraction: 0, label: 'در حالِ شروع…' });
     let unsubscribeProgress = null;
@@ -1168,6 +1214,11 @@ export default function TopBar({
                 whiteSpace: 'nowrap',
               }}
             >
+            {protectedModal.rebuildRecommended && (
+              <div style={{ fontSize: '12px', lineHeight: 1.8, color: '#f59e0b', marginBottom: '16px' }}>
+                {`این فایل با روشی قفل شده است (${protectedModal.encryptionLabel || 'AES-256'}) که ابزارِ معمولی نمی‌تواند آن را باز کند؛ نسخهٔ کپی از صفحاتِ بازشده بازسازی می‌شود و لایهٔ متنِ آن حفظ نمی‌شود.`}
+              </div>
+            )}
               {(protectedModal.filePath.split(/[\\/]/).pop() || '').replace(/\.pdf$/i, '') + '-editable.pdf'}
             </div>
             {isCreatingCopy && copyProgress && (
@@ -1222,7 +1273,7 @@ export default function TopBar({
                 }}
               >
                 {isCreatingCopy ? <Icons.Loader size={16} /> : <Icons.Copy size={16} />}
-                <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : 'ساخت نسخهٔ کپی و شروع ویرایش'}</span>
+                <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : (protectedModal.rebuildRecommended ? 'ساخت نسخهٔ کپی با بازسازی و شروع ویرایش' : 'ساخت نسخهٔ کپی و شروع ویرایش')}</span>
               </button>
               {isCreatingCopy && (
                 <button

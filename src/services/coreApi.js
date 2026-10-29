@@ -322,6 +322,73 @@ export const coreApi = {
     }
   },
 
+  // مرحله ۱۰: مدیریتِ حافظه و محلِ داده. آمار/هرس/پاک‌سازی،
+  // تایم‌اوتِ ۹۰ ثانیه‌ای دارند (ورکرِ دیتابیس، ۶۰ ثانیه + حاشیه)؛
+  // ذخیرهٔ بازسازی‌شده و تغییرِ محلِ داده، دیالوگ‌دارند و عمداً
+  // بدونِ تایم‌اوت‌اند (همان استدلالِ exportAnnotatedPdf).
+  getStorageStats: async () => {
+    const api = getApi();
+    if (!api?.getStorageStats) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.getStorageStats(), 30000, { success: false, error: 'مهلت زمانی دریافتِ آمارِ حافظه به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در دریافتِ آمارِ حافظه' };
+    }
+  },
+
+  clearAllCovers: async () => {
+    const api = getApi();
+    if (!api?.clearAllCovers) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.clearAllCovers(), 90000, { success: false, error: 'مهلت زمانی پاک‌سازیِ کاورها به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در پاک‌سازیِ کاورها' };
+    }
+  },
+
+  pruneMissingFiles: async () => {
+    const api = getApi();
+    if (!api?.pruneMissingFiles) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.pruneMissingFiles(), 90000, { success: false, error: 'مهلت زمانی هرسِ فایل‌ها به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در هرسِ فایل‌های حذف‌شده' };
+    }
+  },
+
+  saveRebuiltPdf: async (payload) => {
+    const api = getApi();
+    if (!api?.saveRebuiltPdf) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!payload?.pdfPath || typeof payload?.base64 !== 'string') {
+      return { success: false, error: 'دادهٔ فایلِ بازسازی‌شده کامل نیست.' };
+    }
+    try {
+      return await api.saveRebuiltPdf(payload);
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ذخیرهٔ فایلِ بازسازی‌شده' };
+    }
+  },
+
+  changeDataDirectory: async (mode) => {
+    const api = getApi();
+    if (!api?.changeDataDirectory) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.changeDataDirectory({ mode: mode === 'reset' ? 'reset' : 'choose' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در تغییرِ محلِ ذخیرهٔ اطلاعات' };
+    }
+  },
+
+  resetDataDirectory: async () => {
+    const api = getApi();
+    if (!api?.changeDataDirectory) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.changeDataDirectory({ mode: 'reset' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در بازگشت به مسیرِ پیش‌فرض' };
+    }
+  },
+
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی (دیالوگ‌دار،
   // بدونِ تایم‌اوتِ رندرر — همان استدلالِ exportAnnotatedPdf).
   exportBackup: async () => {

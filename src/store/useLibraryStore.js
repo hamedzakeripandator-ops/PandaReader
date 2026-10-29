@@ -229,6 +229,33 @@ const useLibraryStore = create((set, get) => ({
   },
 
   // ۲. کش کردن کاور با محافظت از کاورهای سفارشی انتخاب‌شده توسط کاربر
+  // مرحله ۱۰: حذفِ آینه‌هایِ لوکال‌استوریج برای مسیرهایِ داده‌شده —
+  // بدونِ این، initLibrary آیتم‌هایِ حذف‌شده از دیتابیس را از آینهٔ
+  // محلی بازمی‌گرداند (ادغامِ DB-first + local).
+  removeLocalEntries: (filePaths) => {
+    const paths = Array.isArray(filePaths) ? filePaths : [];
+    if (paths.length === 0) return;
+    const norms = new Set(paths.map((x) => normalizePath(x)).filter(Boolean));
+    if (norms.size === 0) return;
+    const drop = (list) => (Array.isArray(list) ? list.filter((item) => !norms.has(normalizePath(item.path || item.filePath))) : list);
+    const library = drop(get().library);
+    const libraryItems = drop(get().libraryItems);
+    const favorites = drop(get().favorites);
+    const recentItems = drop(get().recentItems);
+    set({ library, libraryItems, favorites, recentItems });
+    writeLocal(STORAGE_KEYS.LIBRARY, library);
+    writeLocal(STORAGE_KEYS.FAVORITES, favorites);
+    writeLocal(STORAGE_KEYS.RECENTS, recentItems);
+  },
+
+  // مرحله ۱۰: اعمالِ نتیجهٔ پاک‌سازیِ بک‌اند — ابتدا آینه‌هایِ محلی
+  // را پاک می‌کند، بعد initLibrary را صدا می‌زند تا وضعیتِ تازهٔ
+  // دیتابیس (بدونِ آیتم‌هایِ حذف‌شده) در استور بنشیند.
+  applyPruneResult: async (removedPaths) => {
+    get().removeLocalEntries(removedPaths);
+    try { await get().initLibrary(); } catch (_) {}
+  },
+
   cacheCover: (filePath, dataUrl, isCustom = false) => {
     if (!filePath || !isPermanentCover(dataUrl)) return;
     const norm = normalizePath(filePath);

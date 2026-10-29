@@ -131,6 +131,29 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('cancel-pdf-copy');
   },
 
+  // مرحله ۱۰: مدیریتِ حافظه (آمار، پاک‌سازیِ کاورها، هرسِ
+  // فایل‌های حذف‌شده) + ذخیرهٔ فایلِ بازسازی‌شده + تغییرِ محلِ
+  // داده. رمزِ عبوری در هیچ‌یک از این کانال‌ها رد نمی‌شود.
+  getStorageStats: () => {
+    return ipcRenderer.invoke('get-storage-stats');
+  },
+
+  clearAllCovers: () => {
+    return ipcRenderer.invoke('clear-all-covers');
+  },
+
+  pruneMissingFiles: () => {
+    return ipcRenderer.invoke('prune-missing-files');
+  },
+
+  saveRebuiltPdf: (payload) => {
+    return ipcRenderer.invoke('save-rebuilt-pdf', sanitizePayload(payload));
+  },
+
+  changeDataDirectory: (payload) => {
+    return ipcRenderer.invoke('change-data-directory', sanitizePayload(payload || {}));
+  },
+
   exportBackup: () => {
     return ipcRenderer.invoke('export-backup');
   },

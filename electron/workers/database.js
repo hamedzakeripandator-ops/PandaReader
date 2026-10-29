@@ -1198,6 +1198,203 @@ async function applyRestoreFromZip(zipBuffer) {
 initDB();
 readDB();
 
+// مرحله ۱۰: ابزارهای هرس و پاک‌سازیِ کاور.
+// پیشوندِ نامِ فایلِ کاور از هشِ مسیرِ نرمال‌شده (همان قراردادِ
+// coverFileNameFor): برای یک کتاب همیشه یکسان است و پسوند، ممکن
+// است بینِ نسخه‌ها عوض شده باشد؛ پس حذف، بر اساسِ پیشوند انجام
+// می‌شود، نه نامِ کامل.
+function coverHashPrefixFor(normPath) {
+  try {
+    return crypto.createHash('sha256').update(normPath).digest('hex').slice(0, 32);
+  } catch (_) {
+    return '';
+  }
+}
+
+// حذفِ همهٔ فایل‌های کاورِ یک کتاب (بر اساسِ پیشوندِ هش + ورودیِ
+// کش) و برگرداندنِ شمار و حجمِ آزادشده. نامِ فایل‌های کاور،
+// ذاتاً به مسیرِ نرمال‌شده گره خورده‌اند؛ پس فایلی که پیشوندِ
+// هشِ کتابی دیگر را داشته باشد، هرگز لمس نمی‌شود.
+function deleteCoverFilesForNorm(db, normPath) {
+  let deleted = 0;
+  let freedBytes = 0;
+  try {
+    const prefix = coverHashPrefixFor(normPath);
+    const entryFile = db.coverCache && db.coverCache[normPath] ? coverFileFromUrl(coverEntryToUrl(db.coverCache[normPath])) : null;
+    if (!fs.existsSync(COVERS_DIR)) return { deleted: 0, freedBytes: 0 };
+    const names = fs.readdirSync(COVERS_DIR);
+    for (const name of names) {
+      const isPrefixed = prefix && name.startsWith(prefix);
+      const isEntryFile = entryFile && name === entryFile;
+      if (!isPrefixed && !isEntryFile) continue;
+      const full = path.join(COVERS_DIR, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) {
+          fs.unlinkSync(full);
+          deleted += 1;
+          freedBytes += st.size;
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return { deleted, freedBytes };
+}
+
+// آیا ریشهٔ درایوِ مسیر (مثلاً D:\ یا \\server\share\) هنوز
+// در سیستم هست؟ اگر درایو وصل نباشد، «نبودنِ فایل» به‌معنای
+// «حذف‌شدن» نیست و کتاب باید بماند. نبودِ ریشه، یعنی درایو
+// قطع است، نه فایلِ پاک‌شده.
+function driveRootExists(filePath) {
+  try {
+    const root = path.parse(filePath).root;
+    if (!root) return false;
+    const st = fs.statSync(root);
+    return st.isDirectory();
+  } catch (_) {
+    return false;
+  }
+}
+
+// مرحله ۱۰: هرسِ کتاب‌هایی که فایلِ اصلی‌شان از دیسک رفته است.
+// برای هر مسیرِ یکتا در history/library/favorites/annotations:
+// اگر فایل هست → می‌ماند؛ اگر مسیر، مطلق نیست → دست نمی‌خورد؛
+// اگر ریشهٔ درایو نیست → «ردشده» (درایوِ قطع‌شده) و می‌ماند؛
+// در غیرِ این صورت، از هر سه جدول + annotations + coverCache +
+// فایل‌های کاور حذف می‌شود. فقط یک بار writeDB انجام می‌شود.
+function pruneMissingFiles(db) {
+  const candidates = new Map();
+  const consider = (rawPath, fallbackNorm) => {
+    const norm = normalizePath(rawPath) || fallbackNorm;
+    if (!norm || candidates.has(norm)) return;
+    candidates.set(norm, rawPath || fallbackNorm || '');
+  };
+  Object.entries(db.history || {}).forEach(([normKey, h]) => {
+    consider(h && (h.filePath || h.path), normKey);
+  });
+  (db.library || []).forEach((item) => consider(item && (item.path || item.filePath), ''));
+  (db.favorites || []).forEach((item) => consider(item && (item.path || item.filePath), ''));
+
+  const removed = [];
+  const skipped = [];
+  let coverFilesDeleted = 0;
+  let coverBytesFreed = 0;
+
+  for (const [norm, rawPath] of candidates.entries()) {
+    const probePath = rawPath || norm;
+    if (!probePath || !path.isAbsolute(probePath)) {
+      skipped.push({ path: probePath, reason: 'non-absolute' });
+      continue;
+    }
+    let exists = false;
+    try { exists = fs.existsSync(probePath); } catch (_) { exists = false; }
+    if (exists) continue;
+    if (!driveRootExists(probePath)) {
+      skipped.push({ path: probePath, reason: 'drive-offline' });
+      continue;
+    }
+    // فایل، واقعاً رفته است: از همهٔ جدول‌ها حذف شود.
+    if (db.history && db.history[norm]) delete db.history[norm];
+    db.library = (db.library || []).filter((item) => normalizePath(item.path || item.filePath) !== norm);
+    db.favorites = (db.favorites || []).filter((item) => normalizePath(item.path || item.filePath) !== norm);
+    if (db.annotations && db.annotations[norm]) delete db.annotations[norm];
+    const coverRes = deleteCoverFilesForNorm(db, norm);
+    coverFilesDeleted += coverRes.deleted;
+    coverBytesFreed += coverRes.freedBytes;
+    if (db.coverCache) delete db.coverCache[norm];
+    removed.push({ path: probePath, name: path.basename(probePath) });
+  }
+
+  // annotationsای که در هیچ جدولی نیستند ولی کلیدشان هم در
+  // candidates نبود (مثلاً فقط حاشیه‌نویسی دارد): اگر فایلشان
+  // روی دیسکِ در دسترس نیست، آن‌ها هم هرس می‌شوند.
+  Object.keys(db.annotations || {}).forEach((norm) => {
+    if (candidates.has(norm)) return;
+    const probePath = norm;
+    if (!path.isAbsolute(probePath) || !driveRootExists(probePath)) return;
+    let exists = false;
+    try { exists = fs.existsSync(probePath); } catch (_) { exists = false; }
+    if (!exists) {
+      delete db.annotations[norm];
+      const coverRes = deleteCoverFilesForNorm(db, norm);
+      coverFilesDeleted += coverRes.deleted;
+      coverBytesFreed += coverRes.freedBytes;
+      if (db.coverCache) delete db.coverCache[norm];
+      removed.push({ path: probePath, name: path.basename(probePath) });
+    }
+  });
+
+  if (removed.length > 0) {
+    try { sweepOrphanCoverFiles(db); } catch (_) {}
+    writeDB(db);
+  }
+  return {
+    removed,
+    skipped,
+    removedCount: removed.length,
+    skippedCount: skipped.length,
+    coverFilesDeleted,
+    coverBytesFreed,
+  };
+}
+
+// مرحله ۱۰: پاک‌سازیِ کاملِ کشِ کاورها.
+// کاورهای سفارشیِ کاربر (isCustom)، دادهٔ کاربرند، نه کش؛ نگه
+// داشته می‌شوند و در keptCustom گزارش می‌شوند. بقیهٔ ورودی‌های
+// کش حذف، فیلدِ cover در هر سه جدول (به‌جز کتاب‌های سفارشی)
+// null، و همهٔ فایل‌های کاورِ غیرِسفارشی از پوشهٔ covers پاک
+// می‌شوند.
+function clearAllCovers(db) {
+  let clearedFiles = 0;
+  let freedBytes = 0;
+  let keptCustom = 0;
+  const keptFiles = new Set();
+  const customNorms = new Set();
+  const preservedCache = {};
+  Object.entries(db.coverCache || {}).forEach(([normKey, entry]) => {
+    if (entry && entry.isCustom) {
+      keptCustom += 1;
+      customNorms.add(normKey);
+      preservedCache[normKey] = entry;
+      const f = coverFileFromUrl(coverEntryToUrl(entry));
+      if (f) keptFiles.add(f);
+      if (entry && typeof entry.file === 'string' && entry.file) keptFiles.add(entry.file);
+    }
+  });
+  const nullCoverUnlessCustom = (entry, rawPath) => {
+    if (!entry) return;
+    const norm = normalizePath(rawPath);
+    if (norm && customNorms.has(norm)) {
+      const f = coverFileFromUrl(entry.cover);
+      if (f) keptFiles.add(f);
+      return;
+    }
+    entry.cover = null;
+  };
+  Object.values(db.history || {}).forEach((h) => nullCoverUnlessCustom(h, h && (h.filePath || h.path)));
+  (db.library || []).forEach((item) => nullCoverUnlessCustom(item, item && (item.path || item.filePath)));
+  (db.favorites || []).forEach((item) => nullCoverUnlessCustom(item, item && (item.path || item.filePath)));
+  db.coverCache = preservedCache;
+  try {
+    if (fs.existsSync(COVERS_DIR)) {
+      fs.readdirSync(COVERS_DIR).forEach((name) => {
+        if (keptFiles.has(name)) return;
+        const full = path.join(COVERS_DIR, name);
+        try {
+          const st = fs.statSync(full);
+          if (st.isFile()) {
+            fs.unlinkSync(full);
+            clearedFiles += 1;
+            freedBytes += st.size;
+          }
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  writeDB(db);
+  return { clearedFiles, freedBytes, keptCustom, coverCacheCleared: true };
+}
+
 parentPort.on('message', (request) => {
   const { reqId, action, payload = {} } = request || {};
   let db = readDB();
@@ -1948,6 +2145,18 @@ parentPort.on('message', (request) => {
           .catch((err) => {
             sendReply({ type: 'error', action, message: err && err.message ? err.message : 'خطا در بازیابیِ فایل پشتیبان.' });
           });
+        break;
+      }
+
+      case 'PRUNE_MISSING_FILES': {
+        const stats = pruneMissingFiles(db);
+        sendReply({ type: 'done', action, success: true, ...stats });
+        break;
+      }
+
+      case 'CLEAR_ALL_COVERS': {
+        const stats = clearAllCovers(db);
+        sendReply({ type: 'done', action, success: true, ...stats });
         break;
       }
 

@@ -4,6 +4,7 @@ import useReaderStore from '../../store/useReaderStore';
 import useAppStore from '../../store/useAppStore';
 import KeybindRecorder from './KeybindRecorder';
 import Icons from '../../components/common/Icons';
+import StorageSection from '../../components/common/StorageSection';
 import { coreApi } from '../../services/coreApi';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 
@@ -25,7 +26,7 @@ export default function SettingsView() {
   const { setZoomLevel } = useReaderStore();
   const showToast = useAppStore((state) => state.showToast);
 
-  const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader'
+  const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader' | 'storage'
 
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی.
   const [backupBusy, setBackupBusy] = useState(null); // null | 'export' | 'import'
@@ -176,6 +177,18 @@ export default function SettingsView() {
             <Icons.BookOpen size={15} />
             <span>تنظیمات ریدر و ظاهر</span>
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('storage')}
+            style={{
+              ...styles.tabBtn,
+              ...(activeTab === 'storage' ? styles.tabBtnActive : {}),
+            }}
+          >
+            <Icons.FolderOpen size={15} />
+            <span>مدیریت حافظه و پاک‌سازی</span>
+          </button>
+
         </div>
       </div>
 
@@ -301,6 +314,11 @@ export default function SettingsView() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* مرحله ۱۰: تبِ «حافظه» — آمارِ دقیقِ حجم، پاک‌سازیِ کشِ کاورها و فایل‌هایِ حذف‌شده و انتخابِ درایوِ محلِ ذخیره. */}
+      {activeTab === 'storage' && (
+        <StorageSection />
       )}
 
       {/* مرحله ۵ ـ بخش الف: کارتِ پشتیبان‌گیری و بازیابی — همیشه زیرِ

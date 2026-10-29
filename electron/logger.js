@@ -72,7 +72,58 @@ function resolveComicDataDir(app) {
   } catch (_) {
     // هر خطایی در تشخیص، به حالتِ عادی برمی‌گردد؛ هرگز کرش نمی‌کند.
   }
+  // مرحله ۱۰: مسیرِ سفارشیِ انتخاب‌شده توسطِ کاربر (درایو/پوشهٔ
+  // دلخواه) — فقط وقتی هیچ‌یک از قانون‌های Portable اعمال نشده‌اند.
+  // اگر فایلِ پیکربندی خراب باشد، readCustomDataDir همان null را
+  // برمی‌گرداند و مسیرِ پیش‌فرضِ همیشگی به کار می‌رود.
+  const customDir = readCustomDataDir();
+  if (customDir) return customDir;
   return homeDir;
+}
+
+// مرحله ۱۰: فایلِ پیکربندیِ بوت‌استرپِ محلِ داده.
+// مسیرِ انتخابیِ کاربر (درایو/پوشهٔ دلخواه) در فایلی ثابت در خانهٔ
+// کاربر نگه داشته می‌شود تا resolveComicDataDir در بوتِ بعدی، همان
+// مسیر را برگرداند. این فایل، هرگز داخلِ خودِ پوشهٔ داده نیست تا
+// جابه‌جاییِ پوشهٔ داده، آن را با خود نبرد. در حالتِ Portable،
+// پیکربندی نادیده گرفته می‌شود (محلِ داده، کنارِ فایلِ اجرایی است).
+function customDataDirConfigPath() {
+  return path.join(os.homedir(), '.comic-reader-location.json');
+}
+
+function readCustomDataDir() {
+  try {
+    const raw = fs.readFileSync(customDataDirConfigPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    const dir = parsed && typeof parsed.customDataDir === 'string' ? parsed.customDataDir.trim() : '';
+    if (dir && path.isAbsolute(dir)) return path.normalize(dir);
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCustomDataDirConfig(dirOrNull) {
+  const configPath = customDataDirConfigPath();
+  try {
+    if (!dirOrNull) {
+      try { fs.unlinkSync(configPath); } catch (_) { /* نبودنِ فایل، خطا نیست */ }
+      return { success: true, customDataDir: null };
+    }
+    const dir = String(dirOrNull);
+    if (!path.isAbsolute(dir)) return { success: false, error: 'مسیرِ انتخاب‌شده، مطلق نیست.' };
+    const payload = JSON.stringify({ customDataDir: path.normalize(dir), updatedAt: new Date().toISOString() }, null, 2);
+    const tmpPath = configPath + '.tmp';
+    fs.writeFileSync(tmpPath, payload, 'utf8');
+    fs.renameSync(tmpPath, configPath);
+    return { success: true, customDataDir: path.normalize(dir) };
+  } catch (err) {
+    return { success: false, error: String((err && err.message) || err) };
+  }
+}
+
+function isCustomDataDirActive() {
+  return readCustomDataDir() !== null;
 }
 
 function createLogger(dataDir) {
@@ -155,4 +206,8 @@ module.exports = {
   resolveComicDataDir,
   getLogFileInfo,
   defaultDataDir,
+  customDataDirConfigPath,
+  readCustomDataDir,
+  writeCustomDataDirConfig,
+  isCustomDataDirActive,
 };

@@ -1295,7 +1295,7 @@ module.exports = function(app) {
       // اطراف) در logs/app.log ثبت شود.
       let saveLogger = null;
       try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger, password: typeof password === 'string' ? password : '' });
+      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger, password: typeof password === 'string' ? password : '', dataDir: (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '' });
       if (result && result.success && (result.mode === 'in-place' || path.resolve(finalPath) === path.resolve(pdfPath))) {
         invalidateComicRamCache(app, pdfPath);
       }
@@ -1361,6 +1361,18 @@ module.exports = function(app) {
           return unknown;
         }
       }
+      // مرحله ۱۰: اگر پروبِ سریع، جزئیاتِ رمزگذاری را نداشت و
+      // فایل قفل‌دار است، توصیفِ رمزگذاری ضمیمه می‌شود (بهترین‌تلاش)
+      // تا رندرر بداند کپیِ بی‌اتلاف ممکن است یا بازسازی لازم است.
+      if (result && result.protected && !result.encryption) {
+        try {
+          const saverForDescribe = require('./services/pdfAnnotationSaver');
+          if (saverForDescribe && saverForDescribe.describePdfEncryptionForPath) {
+            const enc = await saverForDescribe.describePdfEncryptionForPath(filePath, getIpcLogger());
+            if (enc) { result.encryption = enc; result.rebuildRecommended = Boolean(enc.rebuildRecommended); }
+          }
+        } catch (_) { /* توصیف انجام نشد؛ پروبِ پایه، معتبر می‌ماند */ }
+      }
       return {
         protected: Boolean(result && result.protected),
         readOnly: Boolean(result && result.readOnly),
@@ -1370,6 +1382,8 @@ module.exports = function(app) {
         fast: Boolean(result && result.fast),
         invalidObjects: (result && result.invalidObjects) || 0,
         warningsCount: (result && result.warningsCount) || 0,
+        encryption: (result && result.encryption) || undefined,
+        rebuildRecommended: Boolean(result && result.rebuildRecommended),
       };
     } catch (err) {
       try { const lg = getIpcLogger(); if (lg) lg.warn('check-pdf-protection failed', err && err.message); } catch (_) {}
@@ -1675,6 +1689,383 @@ module.exports = function(app) {
       };
     } catch (err) {
       return { success: false, error: String((err && err.message) || err) };
+    }
+  });
+
+
+  // ==========================================================================
+  // مرحله ۱۰: مدیریتِ حافظه، پاک‌سازی و تغییرِ محلِ ذخیرهٔ داده.
+  // ==========================================================================
+
+  // اندازهٔ بازگشتیِ یک پوشه (فایل‌ها + بایت‌ها)؛ هر خطا در یک
+  // ورودی، همان ورودی را رد می‌کند، نه کلِ محاسبه را. پیوندهای
+  // نمادین دنبال نمی‌شوند تا حلقهٔ بی‌نهایت ساخته نشود.
+  function dirSizeRecursive(dirPath) {
+    let bytes = 0;
+    let files = 0;
+    try {
+      if (!dirPath || !fs.existsSync(dirPath)) return { bytes: 0, files: 0 };
+      const stack = [dirPath];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        let entries;
+        try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch (_) { continue; }
+        for (const entry of entries) {
+          const full = path.join(current, entry.name);
+          try {
+            if (entry.isSymbolicLink()) continue;
+            if (entry.isDirectory()) { stack.push(full); continue; }
+            if (entry.isFile()) {
+              const st = fs.statSync(full);
+              bytes += st.size;
+              files += 1;
+            }
+          } catch (_) { /* یک ورودیِ خراب، محاسبه را متوقف نمی‌کند */ }
+        }
+      }
+    } catch (_) {}
+    return { bytes, files };
+  }
+
+  // مرحله ۱۰: فلاشِ دیتابیس + توقفِ تمیزِ ورکر، برای جابه‌جاییِ
+  // محلِ داده. همان handshakeِ خروجِ مرحلهٔ ۱ است، ولی بدونِ
+  // app.quit: پس از ACK (یا حداکثر ۲۵۰۰ میلی‌ثانیه)، ورکر خاتمه
+  // می‌یابد و persistentDbWorker خالی می‌شود تا هیچ نوشتنِ
+  // معلقی، روی پوشهٔ قدیمی نماند.
+  function flushAndTerminateDbWorker() {
+    return new Promise((resolve) => {
+      const worker = persistentDbWorker;
+      if (!worker) { resolve(true); return; }
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        try { worker.removeListener('message', onAck); } catch (_) {}
+        try { worker.terminate(); } catch (_) {}
+        persistentDbWorker = null;
+        resolve(true);
+      };
+      const onAck = (msg) => {
+        if (msg && msg.type === 'FLUSH_SYNC_ACK') finish();
+      };
+      try { worker.on('message', onAck); } catch (_) { finish(); return; }
+      try { worker.postMessage({ action: 'FLUSH_SYNC' }); } catch (_) { finish(); return; }
+      setTimeout(finish, 2500);
+    });
+  }
+
+  function isPathInsidePath(child, parent) {
+    try {
+      const rel = path.relative(parent, child);
+      return rel === '' || (rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+    } catch (_) { return false; }
+  }
+
+  // مرحله ۱۰: جابه‌جاییِ کلِ پوشهٔ داده (db.json، covers، logs،
+  // کش‌ها، پشتیبان‌ها) به مقصدِ تازه. اول rename (همان درایو)؛
+  // اگر rename ممکن نبود (درایوِ دیگر)، کپیِ بازگشتی + راستی‌آزماییِ
+  // شمارِ فایل‌ها و حجم‌ها + حذفِ مبدأ. مقصد باید خالی یا ناموجود
+  // باشد؛ هرگز روی دادهٔ موجود نوشته نمی‌شود.
+  function moveDataDirectory(sourceDir, targetDir) {
+    const source = path.normalize(sourceDir);
+    const target = path.normalize(targetDir);
+    if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) {
+      throw new Error('پوشهٔ فعلیِ داده پیدا نشد.');
+    }
+    if (fs.existsSync(target)) {
+      if (!fs.statSync(target).isDirectory()) throw new Error('مسیرِ انتخاب‌شده، پوشه نیست.');
+      if (fs.readdirSync(target).length > 0) throw new Error('پوشهٔ انتخاب‌شده خالی نیست؛ پوشه‌ای خالی (یا تازه) انتخاب کنید.');
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+    const before = dirSizeRecursive(source);
+    let movedByRename = false;
+    try {
+      fs.renameSync(source, target);
+      movedByRename = true;
+    } catch (_) {
+      movedByRename = false;
+    }
+    if (!movedByRename) {
+      fs.mkdirSync(target, { recursive: true });
+      fs.cpSync(source, target, { recursive: true });
+      const after = dirSizeRecursive(target);
+      if (after.files !== before.files || after.bytes !== before.bytes) {
+        try { fs.rmSync(target, { recursive: true, force: true }); } catch (_) {}
+        throw new Error('کپیِ اطلاعات به مقصدِ جدید کامل انجام نشد؛ هیچ‌چیز جابه‌جا نشد و مسیرِ قبلی دست نخورده باقی ماند.');
+      }
+      fs.rmSync(source, { recursive: true, force: true });
+    }
+    return { moved: true, method: movedByRename ? 'rename' : 'copy', files: before.files, bytes: before.bytes };
+  }
+
+  // مرحله ۱۰: راه‌اندازیِ دوبارهٔ برنامه پس از تغییرِ محلِ داده،
+  // با تأخیرِ کوتاه تا پاسخِ IPC به رندرر برسد و Toast دیده شود.
+  function scheduleDataDirRelaunch() {
+    setTimeout(() => {
+      try { quitAfterFlush = true; } catch (_) {}
+      try { app.relaunch(); } catch (_) {}
+      try { app.quit(); } catch (_) {}
+    }, 900);
+  }
+
+  // مرحله ۱۰: اگر پشتیبانِ جابه‌جاشده‌ای برای فایل نیست، از
+  // بایت‌های فعلیِ فایل (همان‌طور که هستند، حتی رمزدار) یک نسخهٔ
+  // خامِ دست‌نخورده در پوشهٔ داده بساز + sidecar. پشتیبانِ موجود،
+  // هرگز بازنویسی نمی‌شود. معیارِ سلامت، فقط جادوی %PDF- است:
+  // بایت‌های اصلی باید بایت‌به‌بایت حفظ شوند، حتی اگر pdf-lib
+  // نتواند آن‌ها را پارس کند (فایلِ رمزدار).
+  function ensureRelocatedOrigBackup(pdfPath, dataDir) {
+    try {
+      const saver = require('./services/pdfAnnotationSaver');
+      if (!saver || !saver.relocatedOrigBackupPathFor) return { created: false };
+      const backupPath = saver.relocatedOrigBackupPathFor(pdfPath, dataDir);
+      if (fs.existsSync(backupPath)) return { created: false, backupPath };
+      const current = fs.readFileSync(pdfPath);
+      if (!current || current.length <= 5 || current.slice(0, 5).toString('ascii') !== '%PDF-') {
+        return { created: false, reason: 'not-pdf' };
+      }
+      fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+      fs.copyFileSync(pdfPath, backupPath, fs.constants.COPYFILE_EXCL);
+      if (saver.writeOrigBackupSidecar) saver.writeOrigBackupSidecar(backupPath, pdfPath, current);
+      return { created: true, backupPath };
+    } catch (err) {
+      if (err && err.code === 'EEXIST') return { created: false };
+      return { created: false, reason: String((err && err.message) || err) };
+    }
+  }
+
+  ipcMain.handle('get-storage-stats', async () => {
+    try {
+      const { readCustomDataDir } = require('./logger');
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+      const dbFiles = ['db.json', 'db.json.bak', 'db.json.pre-restore.bak'];
+      let dbSizeBytes = 0;
+      for (const name of dbFiles) {
+        try { dbSizeBytes += fs.statSync(path.join(dataDir, name)).size; } catch (_) {}
+      }
+      const covers = dirSizeRecursive(dataDir ? path.join(dataDir, 'covers') : '');
+      const protectedCache = dirSizeRecursive(getProtectedCacheDir());
+      const origBackups = dirSizeRecursive(dataDir ? path.join(dataDir, 'orig-backups') : '');
+      const extractedTemp = dirSizeRecursive(typeof tempDir === 'string' ? tempDir : '');
+      const logs = dirSizeRecursive(dataDir ? path.join(dataDir, 'logs') : '');
+      const tempCacheSizeBytes = protectedCache.bytes + origBackups.bytes + extractedTemp.bytes;
+      const totalSizeBytes = dbSizeBytes + covers.bytes + tempCacheSizeBytes + logs.bytes;
+      return {
+        success: true,
+        stats: {
+          currentDataDir: dataDir,
+          drive: dataDir ? path.parse(dataDir).root : '',
+          isPortableMode: Boolean(app && app.isPortableMode),
+          isCustomDir: Boolean(readCustomDataDir && readCustomDataDir()),
+          dbSizeBytes,
+          coversSizeBytes: covers.bytes,
+          coversCount: covers.files,
+          tempCacheSizeBytes,
+          protectedCacheSizeBytes: protectedCache.bytes,
+          origBackupsSizeBytes: origBackups.bytes,
+          extractedTempSizeBytes: extractedTemp.bytes,
+          logsSizeBytes: logs.bytes,
+          totalSizeBytes,
+        },
+      };
+    } catch (err) {
+      return { success: false, error: 'دریافتِ آمارِ حافظه انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  ipcMain.handle('clear-all-covers', async () => {
+    try {
+      const result = await executeDbRequest('CLEAR_ALL_COVERS', {}, 60000);
+      if (result && result.type === 'done') {
+        return { success: true, clearedFiles: result.clearedFiles || 0, freedBytes: result.freedBytes || 0, keptCustom: result.keptCustom || 0 };
+      }
+      return { success: false, error: (result && result.message) || 'پاک‌سازیِ کاورها انجام نشد.' };
+    } catch (err) {
+      return { success: false, error: 'پاک‌سازیِ کاورها انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  ipcMain.handle('prune-missing-files', async () => {
+    try {
+      const result = await executeDbRequest('PRUNE_MISSING_FILES', {}, 60000);
+      if (result && result.type === 'done') {
+        return {
+          success: true,
+          removed: Array.isArray(result.removed) ? result.removed : [],
+          skipped: Array.isArray(result.skipped) ? result.skipped : [],
+          removedCount: result.removedCount || 0,
+          skippedCount: result.skippedCount || 0,
+          coverFilesDeleted: result.coverFilesDeleted || 0,
+          coverBytesFreed: result.coverBytesFreed || 0,
+        };
+      }
+      return { success: false, error: (result && result.message) || 'هرسِ فایل‌های حذف‌شده انجام نشد.' };
+    } catch (err) {
+      return { success: false, error: 'هرسِ فایل‌های حذف‌شده انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  ipcMain.handle('save-rebuilt-pdf', async (event, payload) => {
+    try {
+      const { pdfPath, base64, mode, expectedPageCount } = payload || {};
+      const normalizedMode = mode === 'in-place' ? 'in-place' : (mode === 'copy' ? 'copy' : 'save-as');
+      if (!pdfPath || typeof pdfPath !== 'string' || !fs.existsSync(pdfPath)) {
+        return { success: false, error: 'فایل PDF پیدا نشد.' };
+      }
+      if (path.extname(pdfPath).toLowerCase() !== '.pdf') {
+        return { success: false, error: 'فقط فایل‌های PDF قابلِ بازسازی‌اند.' };
+      }
+      if (!base64 || typeof base64 !== 'string' || base64.length === 0 || base64.length > 500000000) {
+        return { success: false, error: 'دادهٔ PDFِ بازسازی‌شده معتبر نیست.' };
+      }
+      const expected = Number(expectedPageCount);
+      if (!Number.isFinite(expected) || expected < 1 || expected > 100000) {
+        return { success: false, error: 'شمارِ صفحه‌های موردِ انتظار معتبر نیست.' };
+      }
+      const bytes = Buffer.from(base64, 'base64');
+      if (bytes.length <= 5 || bytes.slice(0, 5).toString('ascii') !== '%PDF-') {
+        return { success: false, error: 'خروجیِ بازسازی‌شده، یک فایلِ PDF معتبر نیست.' };
+      }
+      let saver;
+      try { saver = require('./services/pdfAnnotationSaver'); } catch (_) {
+        return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد.' };
+      }
+      let saveLogger = null;
+      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+      const validation = await saver.validateSavedPdfBytes(bytes, expected, saveLogger, 0);
+      if (!validation || !validation.ok) {
+        return { success: false, error: (validation && validation.reason) || 'راستی‌آزماییِ فایلِ بازسازی‌شده انجام نشد.' };
+      }
+      let outputPath = null;
+      if (normalizedMode === 'in-place') {
+        outputPath = pdfPath;
+      } else if (normalizedMode === 'copy') {
+        const dir = path.dirname(pdfPath);
+        const baseName = path.basename(pdfPath, path.extname(pdfPath));
+        outputPath = path.join(dir, baseName + '-editable.pdf');
+        for (let i = 2; i <= 100 && fs.existsSync(outputPath); i++) {
+          outputPath = path.join(dir, baseName + '-editable-' + i + '.pdf');
+        }
+        if (fs.existsSync(outputPath)) {
+          return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
+        }
+      } else {
+        const baseName = path.basename(pdfPath, path.extname(pdfPath));
+        const defaultName = baseName + '-annotated.pdf';
+        const win = getWindowFromEvent(event);
+        const dialogOptions = {
+          title: 'ذخیره PDF بازسازی‌شده با حاشیه‌نویسی‌ها',
+          defaultPath: path.join(path.dirname(pdfPath), defaultName),
+          filters: [{ name: 'PDF (*.pdf)', extensions: ['pdf'] }],
+        };
+        const { canceled, filePath: chosenPath } = win
+          ? await dialog.showSaveDialog(win, dialogOptions)
+          : await dialog.showSaveDialog(dialogOptions);
+        if (canceled || !chosenPath) return { success: false, canceled: true };
+        outputPath = chosenPath;
+        if (path.extname(outputPath).toLowerCase() !== '.pdf') outputPath += '.pdf';
+      }
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+      let backupCreated = false;
+      if (normalizedMode === 'in-place') {
+        closeComicReadStreams(app, pdfPath);
+        const ensured = ensureRelocatedOrigBackup(pdfPath, dataDir);
+        backupCreated = Boolean(ensured && ensured.created);
+      }
+      try {
+        await atomicWriteBuffer(outputPath, bytes);
+      } catch (err) {
+        if (err && err.code === 'FILE_LOCKED') {
+          return { success: false, locked: true, error: err.message };
+        }
+        throw err;
+      }
+      if (normalizedMode === 'in-place') {
+        invalidateComicRamCache(app, pdfPath);
+      }
+      return { success: true, outputPath, mode: normalizedMode, pageCount: expected, backupCreated };
+    } catch (err) {
+      if (err && err.code === 'FILE_LOCKED') {
+        return { success: false, locked: true, error: err.message };
+      }
+      try { const lg = getIpcLogger(); if (lg) lg.error('save-rebuilt-pdf failed', err); } catch (_) {}
+      return { success: false, error: 'ذخیرهٔ فایلِ بازسازی‌شده انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  ipcMain.handle('change-data-directory', async (event, payload) => {
+    try {
+      const { writeCustomDataDirConfig } = require('./logger');
+      if (app && app.isPortableMode) {
+        return { success: false, error: 'در حالتِ Portable، محلِ ذخیرهٔ اطلاعات ثابت است و قابلِ تغییر نیست.' };
+      }
+      const currentDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+      if (!currentDir) return { success: false, error: 'مسیرِ فعلیِ داده مشخص نیست.' };
+      const mode = payload && payload.mode === 'reset' ? 'reset' : 'choose';
+      if (mode === 'reset') {
+        const res = writeCustomDataDirConfig(null);
+        if (!res || !res.success) return { success: false, error: (res && res.error) || 'بازگشت به مسیرِ پیش‌فرض انجام نشد.' };
+        scheduleDataDirRelaunch();
+        return { success: true, restarting: true, customDataDir: null };
+      }
+      const win = getWindowFromEvent(event);
+      const dialogOptions = {
+        title: 'انتخابِ محلِ ذخیرهٔ اطلاعاتِ برنامه',
+        properties: ['openDirectory', 'createDirectory'],
+      };
+      const dlg = win
+        ? await dialog.showOpenDialog(win, dialogOptions)
+        : await dialog.showOpenDialog(dialogOptions);
+      if (dlg.canceled || !dlg.filePaths || !dlg.filePaths[0]) return { success: false, canceled: true };
+      const target = path.normalize(String(dlg.filePaths[0]));
+      const normCurrent = path.normalize(currentDir);
+      const samePath = (a, b) => a.toLowerCase() === b.toLowerCase();
+      if (samePath(target, normCurrent)) {
+        return { success: false, error: 'همین مسیر، الان محلِ ذخیرهٔ اطلاعات است.' };
+      }
+      if (path.parse(target).root === target) {
+        return { success: false, error: 'ریشهٔ درایو را نمی‌توان محلِ ذخیرهٔ اطلاعات کرد؛ یک پوشه انتخاب کنید.' };
+      }
+      try {
+        const osMod = require('os');
+        if (samePath(target, path.normalize(osMod.homedir()))) {
+          return { success: false, error: 'پوشهٔ خانهٔ کاربر را نمی‌توان محلِ ذخیرهٔ اطلاعات کرد؛ یک پوشهٔ دیگر انتخاب کنید.' };
+        }
+      } catch (_) {}
+      if (isPathInsidePath(target, normCurrent) || isPathInsidePath(normCurrent, target)) {
+        return { success: false, error: 'مسیرِ جدید نباید داخلِ مسیرِ فعلی (یا برعکس) باشد.' };
+      }
+      // ساختِ پوشه + آزمونِ نوشتن، پیش از هر جابه‌جایی.
+      try {
+        fs.mkdirSync(target, { recursive: true });
+        const probeFile = path.join(target, '.comic-reader-write-test');
+        fs.writeFileSync(probeFile, 'ok', 'utf8');
+        fs.unlinkSync(probeFile);
+      } catch (err) {
+        return { success: false, error: 'پوشهٔ انتخاب‌شده قابلِ نوشتن نیست: ' + String((err && err.message) || err) };
+      }
+      if (fs.existsSync(target) && fs.readdirSync(target).length > 0) {
+        return { success: false, error: 'پوشهٔ انتخاب‌شده خالی نیست؛ پوشه‌ای خالی (یا تازه) انتخاب کنید.' };
+      }
+      await flushAndTerminateDbWorker();
+      let moved;
+      try {
+        moved = moveDataDirectory(normCurrent, target);
+      } catch (err) {
+        return { success: false, error: String((err && err.message) || err) };
+      }
+      const written = writeCustomDataDirConfig(target);
+      if (!written || !written.success) {
+        // پیکربندی نوشته نشد: جابه‌جایی را برگردان تا برنامه با
+        // مسیرِ قدیمی بالا بیاید و داده، گم نشود.
+        try { moveDataDirectory(target, normCurrent); } catch (_) {}
+        return { success: false, error: (written && written.error) || 'ذخیرهٔ مسیرِ جدید انجام نشد؛ جابه‌جایی برگردانده شد.' };
+      }
+      scheduleDataDirRelaunch();
+      return { success: true, restarting: true, customDataDir: target, movedFiles: moved.files, movedBytes: moved.bytes };
+    } catch (err) {
+      try { const lg = getIpcLogger(); if (lg) lg.error('change-data-directory failed', err); } catch (_) {}
+      return { success: false, error: 'تغییرِ محلِ ذخیرهٔ اطلاعات انجام نشد: ' + String((err && err.message) || err) };
     }
   });
 
