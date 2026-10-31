@@ -30,6 +30,39 @@ function resolveStudioToolId(settingsState, e) {
   return null;
 }
 
+// مرحله ۲۲ — تشخیصِ دقیقِ ورودیِ متنی (مرجعِ واحد برایِ همهٔ
+// شنونده‌هایِ صفحه‌کلید): فقط TEXTAREA و SELECT و contentEditable
+// و INPUTهایی با typeهایِ متنی، «ورودیِ متنی» حساب می‌شوند.
+// اسلایدرِ range، دکمه، چک‌باکس و بقیهٔ کنترل‌ها، ورودیِ متنی
+// نیستند و هرگز نباید شورت‌کاتِ کاربر را ببلعند. (دلیلِ باگِ
+// ArrowRight: گیتِ قبلی، هر INPUTای — از جمله range — را ورودی
+// حساب می‌کرد و useKeyboard، پیش از رسیدن به شاخهٔ شورت‌کات،
+// خارج می‌شد؛ بعد، رفتارِ پیش‌فرضِ مرورگر رویِ range، زوم را
+// زیاد می‌کرد.)
+const TEXT_INPUT_TYPES = new Set(['text', 'search', 'number', 'password', 'email', 'url', 'tel']);
+
+export function isTextInputElement(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'INPUT') return TEXT_INPUT_TYPES.has((el.type || 'text').toLowerCase());
+  const closest = el.closest?.('input, textarea, select, [contenteditable="true"]');
+  if (!closest) return false;
+  return isTextInputElement(closest);
+}
+
+// کنترلِ غیرمتنیِ فوکوس‌شده (دکمه، range، چک‌باکس و...) که
+// کلیدهایِ ناوبری، نباید مقدارش را عوض کنند.
+function isNonTextControl(el) {
+  if (!el) return false;
+  if (el.tagName === 'BUTTON') return true;
+  if (el.tagName === 'INPUT') return !TEXT_INPUT_TYPES.has((el.type || 'text').toLowerCase());
+  return false;
+}
+
+const NAVIGATION_KEYS = ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'];
+
 // مرحله ۱۲: صفحه‌هایِ شروعِ فصل‌هایِ کمیک — دقیقاً همان قاعده‌ای
 // که RightPanel برای منویِ «فصل‌ها» استفاده می‌کند: مرزِ فصل،
 // جایی است که `item.chapter` (یا بخشِ اولِ `item.name` پیش از
@@ -118,24 +151,29 @@ export default function useKeyboard(callbacks = {}) {
       const { comicData, currentPage } = readerState;
       const target = e.target;
 
-      // تشخیص فوکوس در کادرهای متنی، سرچ‌بار و ادیتور یادداشت‌های صفحه
-      const isInputFocused = Boolean(
-        target &&
-          (target.tagName === 'INPUT' ||
-            target.tagName === 'TEXTAREA' ||
-            target.tagName === 'SELECT' ||
-            target.isContentEditable ||
-            target.closest?.('input, textarea, select, [contenteditable="true"]'))
-      );
+      // مرحله ۲۲ — تشخیصِ دقیقِ ورودیِ متنی (نه هر INPUTای):
+      // سرچ‌بار و ادیتورِ یادداشت‌ها، شورت‌کات را می‌بلعند؛
+      // اسلایدرِ range و دکمه، هرگز.
+      const isTextInputFocused = isTextInputElement(target);
 
-      // ۱. رفتار کلید Escape هنگام حضور در اینپوت
-      if (isInputFocused) {
+      // ۱. رفتار کلید Escape هنگام حضور در اینپوتِ متنی
+      if (isTextInputFocused) {
         if (e.key === 'Escape' || e.code === 'Escape') {
           e.preventDefault();
           target.blur?.();
           appState.setIsSearchFocused(false);
         }
         return;
+      }
+
+      // مرحله ۲۲ — خلعِ سلاحِ کنترلِ غیرمتنیِ فوکوس‌شده: اگر
+      // فوکوس رویِ range یا دکمه است و کلید، ناوبری است، رفتارِ
+      // پیش‌فرضِ مرورگر (مثلِ زوم با ArrowRight رویِ range) خلع
+      // و فوکوس برداشته می‌شود؛ اجرا، در شاخه‌هایِ پایین انجام
+      // می‌شود و این‌جا، هرگز return نمی‌شود.
+      if (isNonTextControl(target) && NAVIGATION_KEYS.includes(e.key)) {
+        e.preventDefault();
+        target.blur?.();
       }
 
       // ۲. سلسله‌مراتب اولویت‌بندی شده کلید Escape
@@ -585,12 +623,13 @@ export default function useKeyboard(callbacks = {}) {
         return;
       }
 
-      // ۱۶. فصلِ بعدیِ داخلِ کتاب؛ وگرنه فایلِ بعدیِ پوشه — فقط با
-      // Ctrl نگه‌داشته‌شده (Ctrl + PageDown). مرحله ۱۲: کلیدهایِ
-      // سادهٔ D و PageDownِ بدونِ Ctrl دیگر فایل را عوض نمی‌کنند.
-      // گیتِ قدیمیِ KeyA هم حذف شد، چون A دیگر به این اکشن بسته
-      // نیست (A، ابزارِ فلشِ استودیو است و شاخهٔ ابزار، بالاتر آن
-      // را می‌گیرد).
+      // ۱۶. مرحلهٔ ۲۲ — اولویتِ صریح با فایلِ بعدیِ پوشه است،
+      // بعد پرشِ فصلِ داخلِ کتاب (برعکسِ مرحلهٔ ۱۲). دلیل: وقتی
+      // کاربر ArrowRight را برایِ «فایلِ بعدی» چیده است، وجودِ
+      // Outline در PDF نباید او را داخلِ همان فایل نگه دارد. اگر
+      // فایلِ بعدی نبود، پرشِ فصل انجام می‌شود؛ اگر هیچ‌کدام
+      // نبود، پیامِ راهنما می‌آید. (برایِ برگرداندنِ اولویتِ فصل،
+      // جایِ دو بلوکِ پایین را عوض کنید.)
       if (
         comicData &&
         appState.currentView === 'reader' &&
@@ -599,7 +638,6 @@ export default function useKeyboard(callbacks = {}) {
         if (e.repeat) return;
         e.preventDefault();
         e.stopPropagation();
-        if (jumpToChapterInBook(readerState, +1)) return;
         const nextComic = comicData.nextComic;
         if (nextComic?.path) {
           if (callbacksRef.current?.onOpenComic) {
@@ -609,15 +647,15 @@ export default function useKeyboard(callbacks = {}) {
               new CustomEvent('app:navigate-comic', { detail: nextComic.path })
             );
           }
-        } else {
-          appState.showToast('فصل بعدی در این پوشه یافت نشد', { type: 'info' });
+          return;
         }
+        if (jumpToChapterInBook(readerState, +1)) return;
+        appState.showToast('فصل بعدی در این پوشه یافت نشد', { type: 'info' });
         return;
       }
 
-      // ۱۷. فصلِ قبلیِ داخلِ کتاب؛ وگرنه فایلِ قبلیِ پوشه — فقط با
-      // Ctrl نگه‌داشته‌شده (Ctrl + PageUp). مرحله ۱۲: مانندِ
-      // nextChapter.
+      // ۱۷. مرحلهٔ ۲۲ — اولویتِ صریح با فایلِ قبلیِ پوشه است،
+      // بعد پرشِ فصلِ داخلِ کتاب (مانندِ nextChapter).
       if (
         comicData &&
         appState.currentView === 'reader' &&
@@ -626,7 +664,6 @@ export default function useKeyboard(callbacks = {}) {
         if (e.repeat) return;
         e.preventDefault();
         e.stopPropagation();
-        if (jumpToChapterInBook(readerState, -1)) return;
         const prevComic = comicData.prevComic;
         if (prevComic?.path) {
           if (callbacksRef.current?.onOpenComic) {
@@ -636,9 +673,10 @@ export default function useKeyboard(callbacks = {}) {
               new CustomEvent('app:navigate-comic', { detail: prevComic.path })
             );
           }
-        } else {
-          appState.showToast('این اولین فایل در پوشه جاری است', { type: 'info' });
+          return;
         }
+        if (jumpToChapterInBook(readerState, -1)) return;
+        appState.showToast('این اولین فایل در پوشه جاری است', { type: 'info' });
         return;
       }
 

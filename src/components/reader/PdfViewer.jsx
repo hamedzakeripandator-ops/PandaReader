@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import useReaderStore from '../../store/useReaderStore';
@@ -6,6 +6,7 @@ import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useContextMenu from '../../hooks/useContextMenu';
 import useDragPan from '../../hooks/useDragPan';
+import { isTextInputElement } from '../../hooks/useKeyboard';
 import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
 import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
@@ -385,14 +386,13 @@ const PdfPageItem = React.memo(function PdfPageItem({
   onDeleteBookmark,
   searchHighlights,
   pageFilter,
-  clipRect,
-  deepSuspended,
 }) {
   const [blobUrl, setBlobUrl] = useState(cachedBlobUrl || null);
-  // مرحله ۲۰ — لایهٔ دیپ، drawable است (ImageBitmap یا بومِ جایگزین)،
-  // نه URL؛ پس دیگر نه toBlobای هست، نه دیکدِ <img>ای برایِ آن.
-  const [hiDpiDrawable, setHiDpiDrawable] = useState(() =>
-    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel, null)
+  // مرحله ۲۲ — لایهٔ دیپ، دوباره یک نشانیِ blob: از جنسِ PNGِ
+  // سوپرسمپل‌شده است (ساختهٔ WebWorker) که مستقیم در <img>
+  // می‌نشیند؛ مثلِ مرحلهٔ ۱۹، ولی بدونِ قفلِ تردِ اصلی.
+  const [hiDpiUrl, setHiDpiUrl] = useState(() =>
+    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel)
   );
   const [renderFailed, setRenderFailed] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
@@ -469,16 +469,17 @@ const PdfPageItem = React.memo(function PdfPageItem({
           onPageRatioMeasured(pageNumber - 1, baseViewport.height / baseViewport.width);
         }
 
-        // مرحله ۲۰ — لایهٔ پایهٔ فوق‌سبک: مقیاس، dpr با کفِ ۱٫۵ و
-        // سقفِ ۱٫۸۵ است و ضلعِ بوم از ۲۲۰۰ پیکسل نمی‌گذرد تا اسکرول
-        // سبک بماند؛ تیزیِ نهایی با لایهٔ دیپ (بومِ مستقیم) می‌آید،
-        // نه با سنگین‌کردنِ پایه. (مرحلهٔ ۱۹ پایه را PNG و مقیاسِ
-        // max(dpr, 2.0) کرده بود که همان کندیِ گزارش‌شده را ساخت.)
-        let optimalScale = Math.min(Math.max(window.devicePixelRatio || 1, 1.5), 1.85);
+        // مرحله ۲۲ — لایهٔ پایهٔ سریع برایِ اسکرولِ بدونِ لگ:
+        // مقیاس، max(dpr, 2.0) با سقفِ ضلعِ ۲۸۰۰ پیکسل و فرمتِ
+        // WebP با کیفیتِ ۰٫۹۴ است. این لایه، دیگر PNG نیست (دلیلِ
+        // کندیِ مرحلهٔ ۱۹) و آن‌قدر واضح است که تا نشستنِ دیپ،
+        // صفحه تار دیده نشود. نسبتِ واقعیِ صفحه هم همین‌جا ثبت
+        // می‌شود تا کادر، دقیقاً هم‌اندازهٔ تصویر باشد.
+        let optimalScale = Math.max(window.devicePixelRatio || 1, 2.0);
         let viewport = page.getViewport({ scale: optimalScale });
         const maxBaseSide = Math.max(viewport.width, viewport.height);
-        if (maxBaseSide > 2200) {
-          optimalScale = Number((optimalScale * (2200 / maxBaseSide)).toFixed(3));
+        if (maxBaseSide > 2800) {
+          optimalScale = Number((optimalScale * (2800 / maxBaseSide)).toFixed(3));
           viewport = page.getViewport({ scale: optimalScale });
         }
 
@@ -530,7 +531,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             setBlobUrl(nextUrl);
           },
           'image/webp',
-          0.90
+          0.94
         );
       } catch (err) {
         if (tempCanvas) {
@@ -598,36 +599,25 @@ const PdfPageItem = React.memo(function PdfPageItem({
     // دوباره، از کشِ سرویس (اگر مانده) بی‌درنگ، وگرنه با رندرِ
     // تازه، برمی‌گردد.
     if (!pdfDoc || !isNearViewport) {
-      if (hiDpiDrawable) setHiDpiDrawable(null);
+      if (hiDpiUrl) setHiDpiUrl(null);
       return;
     }
 
-    const clipKey = clipRect
-      ? `${Math.round(clipRect.x || 0)},${Math.round(clipRect.y || 0)},${Math.round(clipRect.width)},${Math.round(clipRect.height)}`
-      : '';
-    // مرحله ۲۰ — تغییرِ برش، drawableیِ کهنه را فوراً خالی می‌کند تا
-    // تایلِ قدیمی، لحظه‌ای در باکسِ برشِ تازه دیده نشود؛ تا رسیدنِ
-    // تایلِ تازه، لایهٔ پایه دیده می‌شود.
-    const clipChanged = clipKey !== lastClipKeyRef.current;
-    if (clipChanged && hiDpiDrawable) setHiDpiDrawable(null);
-
-    const cachedDrawable = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel, clipRect);
-    if (cachedDrawable) {
-      if (cachedDrawable !== hiDpiDrawable) setHiDpiDrawable(cachedDrawable);
-      lastClipKeyRef.current = clipKey;
+    const cachedUrl = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel);
+    if (cachedUrl) {
+      if (cachedUrl !== hiDpiUrl) setHiDpiUrl(cachedUrl);
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return;
     }
 
     let isCancelled = false;
-    // مرحله ۲۰ — تغییرِ برش (پس از توقفِ اسکرول در زومِ بالا) بدونِ
-    // دیبانس رندر می‌شود، چون توقفِ ۱۲۰ میلی‌ثانیه‌ایِ والد از قبل،
-    // ازدحام را مهار کرده است؛ بقیهٔ حالت‌ها همان ۱۷۰/۳۲۰ قبلی‌اند.
-    const debounceMs = clipChanged ? 0 : (isActivePage ? 170 : 320);
+    // مرحله ۲۲ — دیبانس، همان ۱۷۰/۳۲۰ قبلی است؛ خروجی، نشانیِ
+    // blob:یِ PNGِ سوپرسمپل‌شده از WebWorker است.
+    const debounceMs = isActivePage ? 170 : 320;
 
     const timer = setTimeout(async () => {
       if (isCancelled) return;
-      const drawable = await hiDpiRenderService.renderPdfPageHiDpi({
+      const url = await hiDpiRenderService.renderPdfPageHiDpi({
         pdfDoc,
         filePath,
         pageNumber,
@@ -636,12 +626,15 @@ const PdfPageItem = React.memo(function PdfPageItem({
         // کانتینر × زوم) تا سرویس، مقیاس را از رویِ پیکسلِ واقعیِ
         // نمایش حساب کند، نه فقط ضریبِ زوم.
         displayWidthPx: pageWidth,
-        clipRect: clipRect || null,
+        rotation,
+        // مرحله ۲۲ — ثبتِ فوریِ نسبتِ واقعیِ صفحه از مسیرِ HiDPI
+        // هم (علاوه بر لایهٔ پایه) تا کادر، دقیقاً هم‌اندازهٔ
+        // تصویرِ واقعی‌اش باشد.
+        onPageRatio: (ratio) => onPageRatioMeasured?.(pageNumber - 1, ratio),
       });
       if (isCancelled) return;
-      if (drawable) {
-        setHiDpiDrawable(drawable);
-        lastClipKeyRef.current = clipKey;
+      if (url) {
+        setHiDpiUrl(url);
       }
       // نشستِ وعده، چه موفق چه ناموفق: صفحه دیگر هدفِ معلق نیست.
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
@@ -651,38 +644,8 @@ const PdfPageItem = React.memo(function PdfPageItem({
       isCancelled = true;
       clearTimeout(timer);
     };
-  }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage, onHiDpiSettled, pageWidth, clipRect, hiDpiDrawable]);
+  }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage, onHiDpiSettled, pageWidth, hiDpiUrl, rotation, onPageRatioMeasured]);
 
-  // مرحله ۲۰ — بومِ دیپ رندر و نشاندنِ drawable رویِ آن: بوم، دقیقاً
-  // به اندازهٔ drawable (پیکسلِ دستگاه) ساخته می‌شود و CSS آن را به
-  // اندازهٔ باکسِ خودش (برش یا کلِ صفحه) می‌رساند؛ پس تراکم،
-  // یک‌به‌یک حفظ می‌شود. هنگامِ تعلیقِ اسکرول یا نبودِ drawable،
-  // بوم پاک می‌شود تا لایهٔ پایه دیده شود. توجه: drawable متعلق به
-  // کشِ سرویس است و این‌جا هرگز close نمی‌شود؛ بستن، فقط هنگامِ
-  // تخلیه از کش انجام می‌شود.
-  const deepCanvasRef = useRef(null);
-  const lastClipKeyRef = useRef('');
-  useEffect(() => {
-    const c = deepCanvasRef.current;
-    if (!c) return;
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    if (!hiDpiDrawable || deepSuspended) {
-      if (c.width > 0 && c.height > 0) ctx.clearRect(0, 0, c.width, c.height);
-      return;
-    }
-    const dw = hiDpiDrawable.width || 0;
-    const dh = hiDpiDrawable.height || 0;
-    if (!dw || !dh) return;
-    if (c.width !== dw || c.height !== dh) {
-      c.width = dw;
-      c.height = dh;
-    }
-    ctx.clearRect(0, 0, c.width, c.height);
-    try {
-      ctx.drawImage(hiDpiDrawable, 0, 0);
-    } catch (_) {}
-  }, [hiDpiDrawable, deepSuspended]);
 
   const handleFrameContextMenu = useCallback(
     (e) => {
@@ -704,9 +667,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
   );
 
   // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
-  // مرحله ۲۰ — activeSrc فقط لایهٔ پایه است؛ لایهٔ دیپ، دیگر از راهِ
-  // <img> نمی‌گذرد و رویِ بومِ خودش می‌نشیند.
-  const activeSrc = effectiveCachedBlobUrl || effectiveBlobUrl;
+  // مرحله ۲۲ — بازگشت به <img>: نشانیِ HiDPI (PNGِ سوپرسمپل‌شدهٔ
+  // Worker) در اولویت است و لایهٔ پایه، پشتیبانِ آن است. تعویضِ
+  // بدونِ چشمک (decode-gated) در ادامه، مثلِ قبل کار می‌کند.
+  const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
 
   // مرحله ۱۱ — تعویضِ بدونِ چشمکِ زوم (Zero-Flash Zoom Swap):
   // <img>، همیشه displayedSrc را نشان می‌دهد؛ وقتی activeSrc
@@ -770,6 +734,16 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const handleImgError = useCallback((e) => {
     const badSrc = (e && e.currentTarget && e.currentTarget.src) || activeSrc;
     if (!badSrc) return;
+    // مرحله ۲۲ — خطا رویِ نشانیِ HiDPI: ورودیِ کش، باطل و حذف
+    // می‌شود تا رندرِ تازه جایِ آن را بگیرد و صفحه، بی‌درنگ به
+    // لایهٔ پایه برمی‌گردد (بدونِ شمارشِ ضربهٔ خطا و بدونِ
+    // صفحهٔ خطا؛ خرابیِ HiDPI، هرگز صفحه را خالی نمی‌کند).
+    if (badSrc === hiDpiUrl) {
+      hiDpiRenderService.invalidateHiDpiPage?.(filePath, pageNumber, renderZoomLevel);
+      setHiDpiUrl(null);
+      setRenderFailed(false);
+      return;
+    }
     imgErrorCountRef.current += 1;
     if (imgErrorCountRef.current >= 3) {
       setRenderFailed(true);
@@ -778,15 +752,15 @@ const PdfPageItem = React.memo(function PdfPageItem({
     if (!erroredUrlsRef.current.has(badSrc)) {
       erroredUrlsRef.current.add(badSrc);
       if (erroredUrlsRef.current.size > 50) erroredUrlsRef.current.clear();
-      // مرحله ۲۰ — خطایِ <img> فقط به لایهٔ پایه مربوط می‌شود؛ لایهٔ
-      // دیپ، URL ندارد که باطل شود.
+      // مرحله ۲۲ — این‌جا فقط خطایِ لایهٔ پایه می‌رسد (خطایِ
+      // HiDPI بالاتر برگشت خورد)؛ مسیرِ قبلی، بدونِ تغییر.
       if (onDropPageBlob) onDropPageBlob(pageNumber, badSrc);
       setBlobUrl(null);
     } else {
       setBlobUrl(null);
     }
     setRenderFailed(false);
-  }, [activeSrc, onDropPageBlob, pageNumber]);
+  }, [activeSrc, onDropPageBlob, pageNumber, hiDpiUrl, filePath, renderZoomLevel]);
 
   // کالبدشکافیِ ناحیه‌های مردهٔ جزئی: برای چرخشِ ۹۰/۲۷۰، کادرِ
   // چیدمانِ wrapper باید ابعادِ جابه‌جا شده (ارتفاعِ کارت × عرضِ
@@ -866,13 +840,15 @@ const PdfPageItem = React.memo(function PdfPageItem({
               // عنصر است و فیلتر روی آن اثر نمی‌گذارد (نه رنگِ
               // ابزارها عوض می‌شود، نه مختصاتِ بوم).
               filter: pageFilter || 'none',
-              // کالبدشکافی: ارتفاعِ ۱۰۰٪ِ wrapper (نه ارتفاعِ کارت) —
-              // در حالتِ عادی، wrapper دقیقاً به ارتفاعِ کارت است و
-              // نتیجه یکسان است؛ در حالتِ چرخیدهٔ ۹۰/۲۷۰، wrapper به
-              // عرضِ کارت است و همین، تصویر را دقیقاً هم‌اندازهٔ لایه
-              // می‌کند (قبلاً ارتفاعِ کارت، تصویرِ چرخیده را بدقواره
-              // و بریده می‌کرد).
-              height: '100%',
+              // مرحله ۲۲ — نسبتِ ابعادِ ذاتی: در حالتِ عادی،
+              // height: auto یعنی تصویر، هرگز کشیده نمی‌شود (قبلاً
+              // ۱۰۰٪ بود و تصویر به ارتفاعِ کارت کشیده می‌شد).
+              // در حالتِ چرخیدهٔ ۹۰/۲۷۰، wrapper جابه‌جا شده است و
+              // تصویر باید دقیقاً همان باکس را پر کند، پس همان
+              // ۱۰۰٪ِ قبلی می‌ماند (انحرافِ مستند در گزارش: با
+              // auto، تصویرِ چرخیده از باکس بیرون می‌زد و بریده
+              // می‌شد).
+              height: isSwappedRotation ? '100%' : 'auto',
             }}
           />
         ) : (
@@ -902,23 +878,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
           </div>
         )}
 
-        {/* مرحله ۲۰ — بومِ دیپ رندر: بالایِ تصویرِ پایه، زیرِ هایلایت
-            و لایهٔ حاشیه‌نویسی؛ pointerEvents none تا هیچ تعاملی را
-            نگیرد. وقتی clipRect هست، بوم دقیقاً همان مستطیلِ
-            قابل‌مشاهده است، وگرنه کلِ صفحه. */}
-        <canvas
-          ref={deepCanvasRef}
-          className="deep-render-canvas"
-          style={{
-            position: 'absolute',
-            left: clipRect ? `${clipRect.x}px` : '0px',
-            top: clipRect ? `${clipRect.y}px` : '0px',
-            width: clipRect ? `${clipRect.width}px` : '100%',
-            height: clipRect ? `${clipRect.height}px` : '100%',
-            pointerEvents: 'none',
-            display: !deepSuspended && hiDpiDrawable ? 'block' : 'none',
-          }}
-        />
 
         {/* هایلایتِ نتایجِ جستجوی درون‌متنی (مرحله ۴): داخلِ همان wrapperِ
             چرخان قرار می‌گیرد تا چرخش را به‌ارث ببرد؛ مختصات‌ها درصدی‌اند،
@@ -1023,8 +982,6 @@ export default function PdfViewer({ filePath }) {
   const triggerHiDpiRender = useReaderStore((state) => state.triggerHiDpiRender);
   const pdfPageGap = useReaderStore((state) => state.pdfPageGap ?? 12);
   const rotation = useReaderStore((state) => state.rotation);
-  const rotationRef = useRef(rotation);
-  rotationRef.current = rotation;
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
   const targetPage = useReaderStore((state) => state.targetPage);
   const clearTargetPage = useReaderStore((state) => state.clearTargetPage);
@@ -1131,8 +1088,6 @@ export default function PdfViewer({ filePath }) {
   const { handleContextMenu } = useContextMenu();
 
   const [numPages, setNumPages] = useState(0);
-  const numPagesRef = useRef(numPages);
-  numPagesRef.current = numPages;
   const [pdfDoc, setPdfDoc] = useState(null);
   // مرحله ۵ ـ بخش الف: وضعیتِ «در حالِ ساختِ خروجیِ PDF» برای غیرفعال
   // کردنِ دکمهٔ خروجیِ تولبار در طولِ پردازش.
@@ -1231,6 +1186,13 @@ export default function PdfViewer({ filePath }) {
   // خودش، با جهشِ درجا، هیچ propای را عوض نمی‌کند).
   const [revokedTick, setRevokedTick] = useState(0);
   const prevZoomRef = useRef(zoomLevel);
+  // مرحله ۲۲ — نقطهٔ کانونیِ زوم: صفحهٔ فعال + نسبتِ درونِ صفحهٔ
+  // مرکزِ دیدِ فعلی. در handleScroll (همگام) به‌روز می‌شود و اثرِ
+  // قفلِ زوم، پیش از نقاشیِ فریم، scrollTop را رویِ همان نقطه
+  // قفل می‌کند. prevAnchorZoomRef، جلویِ اجرایِ دوبارهٔ قفل را
+  // وقتی زومِ ناحیه‌ای، هدفش را پاک می‌کند، می‌گیرد.
+  const zoomAnchorRef = useRef({ page: 1, ratioInPage: 0 });
+  const prevAnchorZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
   activePageRef.current = activePage;
@@ -1280,8 +1242,6 @@ export default function PdfViewer({ filePath }) {
   const [searchScannedCount, setSearchScannedCount] = useState(0);
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
-  const safeZoomRef = useRef(safeZoom);
-  safeZoomRef.current = safeZoom;
   const safePageGap = Math.max(0, Math.min(48, Math.round(Number(pdfPageGap) ?? 12)));
 
   // مرحله ۱۲: زومِ «تثبیت‌شده» برای رسترایزِ سنگین — در حینِ
@@ -1295,12 +1255,6 @@ export default function PdfViewer({ filePath }) {
   const [rasterZoomLevel, setRasterZoomLevel] = useState(safeZoom);
   const rasterZoomRef = useRef(safeZoom);
 
-  // مرحله ۲۰ — برش‌هایِ دیپ رندر و تعلیقِ هنگامِ حرکت.
-  const [deepClipRects, setDeepClipRects] = useState({});
-  const deepClipRectsRef = useRef({});
-  const [deepSuspended, setDeepSuspended] = useState(false);
-  const deepSuspendedRef = useRef(false);
-  const deepStopTimerRef = useRef(null);
   useEffect(() => {
     if (rasterZoomRef.current === safeZoom) return;
     const timer = setTimeout(() => {
@@ -1895,13 +1849,10 @@ export default function PdfViewer({ filePath }) {
       // کاربر، بی‌صدا حاشیه‌نویسی را برمی‌گرداند. (شنوندهٔ تولبار و
       // useKeyboard، از پیش همین گیت را داشتند؛ این شنونده نداشت.)
       const t = e.target;
-      if (
-        t &&
-        (t.tagName === 'INPUT' ||
-          t.tagName === 'TEXTAREA' ||
-          t.tagName === 'SELECT' ||
-          t.isContentEditable)
-      )
+      // مرحله ۲۲ — گیتِ دقیقِ ورودیِ متنی (مشترک با useKeyboard):
+      // فقط TEXTAREA و SELECT و contentEditable و INPUTهایِ متنی،
+      // شورت‌کات را می‌بلعند؛ اسلایدرِ range و دکمه، هرگز.
+      if (isTextInputElement(t))
         return;
       // مرحله ۷ ـ بخش الف: مالکیتِ این شنونده (فقط وقتی استودیو
       // خاموش است) دقیقاً مثلِ قبل می‌ماند؛ فقط گزاره، از
@@ -1949,13 +1900,10 @@ export default function PdfViewer({ filePath }) {
       } catch (_) { /* ignore */ }
       if (!settingsState?.matchesShortcut?.('findInPdf', e)) return;
       const t = e.target;
-      if (
-        t &&
-        (t.tagName === 'INPUT' ||
-          t.tagName === 'TEXTAREA' ||
-          t.tagName === 'SELECT' ||
-          t.isContentEditable)
-      )
+      // مرحله ۲۲ — گیتِ دقیقِ ورودیِ متنی (مشترک با useKeyboard):
+      // فقط TEXTAREA و SELECT و contentEditable و INPUTهایِ متنی،
+      // شورت‌کات را می‌بلعند؛ اسلایدرِ range و دکمه، هرگز.
+      if (isTextInputElement(t))
         return;
       e.preventDefault();
       setSearchOpen(true);
@@ -2947,23 +2895,46 @@ export default function PdfViewer({ filePath }) {
     });
   }, [areaZoomTarget, zoomLevel, numPages, pageOffsets.length, clearAreaZoomTarget, setCurrentPage]);
 
-  // ۶. حفظ کانون دید هنگام تغییر زوم عادی
-  useEffect(() => {
-    if (areaZoomTarget) return;
-    const container = containerRef.current;
-    const prev = prevZoomRef.current;
-
-    if (!container || prev === zoomLevel || prev <= 0) {
-      prevZoomRef.current = zoomLevel;
+  // ۶. قفلِ همگامِ نقطهٔ کانونیِ زوم (مرحلهٔ ۲۲) — جایگزینِ اثرِ
+  // قبلیِ «ضربِ کلِ scrollTop در ضریبِ زوم» که دو عیب داشت:
+  // ۱) useEffect بود، یعنی پس از نقاشی اجرا می‌شد و کاربر، یک
+  // فریمِ پریده می‌دید؛ ۲) فرض می‌کرد فاصله‌هایِ ثابتِ بینِ
+  // صفحه‌ها (safePageGap) هم با زوم مقیاس می‌شوند، ولی آن‌ها
+  // ثابت‌اند؛ پس مرکز، بیش از حد جابه‌جا می‌شد.
+  // این اثر، useLayoutEffect است (پیش از نقاشیِ فریم) و نقطهٔ
+  // کانونیِ ذخیره‌شده را با آفست‌ها و ارتفاع‌هایِ تازه می‌خواند
+  // (pageOffsetsRef، همان‌جا در رندر به‌روز می‌شود) و scrollTop
+  // را همان‌جا قفل می‌کند. زومِ ناحیه‌ای (areaZoomTarget)،
+  // اسکرولِ مقصدِ خودش را دارد (اثرِ شمارهٔ ۵) و از این اثر
+  // مستثناست؛ prevAnchorZoomRef هم جلویِ قفلِ دوباره را وقتی
+  // هدفِ ناحیه‌ای پاک می‌شود، می‌گیرد.
+  useLayoutEffect(() => {
+    if (areaZoomTarget) {
+      prevAnchorZoomRef.current = safeZoom;
       return;
     }
-
-    const factor = zoomLevel / prev;
+    if (prevAnchorZoomRef.current === safeZoom) return;
+    prevAnchorZoomRef.current = safeZoom;
+    const container = containerRef.current;
+    if (!container) return;
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    const tops = pageOffsetsRef.current || [];
+    const heights = pageHeightsRef.current || [];
+    const idx = (anchor.page || 1) - 1;
+    if (idx < 0 || idx >= tops.length) return;
+    const newTop = tops[idx] || 0;
+    const newHeight = heights[idx] || 0;
+    if (!newHeight) return;
     const ch = container.clientHeight || 800;
-    const center = container.scrollTop + ch / 2;
-    container.scrollTop = Math.max(0, center * factor - ch / 2);
-    prevZoomRef.current = zoomLevel;
-  }, [zoomLevel, areaZoomTarget]);
+    const target = newTop + anchor.ratioInPage * newHeight - ch * 0.5;
+    // فقط وقتی اختلاف، معنادار است (بیش از ۱ پیکسل) تا از لرزشِ
+    // ناشی از گرد کردن، جلوگیری شود.
+    if (Math.abs(container.scrollTop - target) > 1) {
+      markProgrammaticScroll();
+      container.scrollTop = Math.max(0, target);
+    }
+  }, [safeZoom, areaZoomTarget]);
 
   // ۷. محاسبه پنجره مجازی DOM
   const { visiblePageNumbers, paddingTop, paddingBottom } = useMemo(() => {
@@ -3015,82 +2986,6 @@ export default function PdfViewer({ filePath }) {
     [defaultRatio]
   );
 
-  // مرحله ۲۰ — محاسبهٔ برشِ قابل‌مشاهدهٔ هر صفحهٔ در DOM.
-  // مختصات، پیکسلِ CSS نسبت به گوشهٔ بالایِ چپِ خودِ صفحه‌اند و
-  // با فرمولِ خودِ ویوور هم‌ترازند: چون spacerیِ paddingTop + چیدمانِ
-  // جریانیِ صفحه‌ها، آفستِ مطلقِ pageOffsets را بازسازی می‌کند،
-  // بالایِ صفحه در مختصاتِ اسکرول، همان pageOffsets[i] است.
-  // فقط وقتی زوم بالایِ ۱٫۶ و چرخش صفر است، برش ساخته می‌شود؛ در
-  // غیرِ این صورت null یعنی «صفحهٔ کامل». برش، ۳۰٪ حاشیهٔ امن در
-  // هر چهار طرف دارد و به مرزهایِ صفحه کلمپ می‌شود. صفحه‌ای که
-  // اصلاً دیده نمی‌شود هم null می‌گیرد (صفحهٔ کامل) تا بومِ خالی
-  // ساخته نشود. فقط وقتی مقادیر واقعاً عوض شده باشند، state
-  // به‌روز می‌شود و هویتِ آبجکتِ clipRect برایِ ممو پایدار می‌ماند
-  // (برایِ صفحه‌هایِ بی‌تغییر، همان آبجکتِ قبلی بازمی‌گردد).
-  const computeDeepClips = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const pages = visiblePageNumbersRef.current || [];
-    if (pages.length === 0) return;
-    const scrollTop = container.scrollTop || 0;
-    const scrollLeft = container.scrollLeft || 0;
-    const clientW = container.clientWidth || 0;
-    const clientH = container.clientHeight || 0;
-    if (!clientW || !clientH) return;
-    const zoom = safeZoomRef.current || 1;
-    const rot = rotationRef.current || 0;
-    const offs = pageOffsetsRef.current || [];
-    const hts = pageHeightsRef.current || [];
-    const next = {};
-    let changed = false;
-    const prev = deepClipRectsRef.current || {};
-    for (const pageNum of pages) {
-      const idx = pageNum - 1;
-      const pageTop = offs[idx] || 0;
-      const pageH = hts[idx] || 0;
-      // عرضِ صفحه در نمایش: همان فرمولِ پراپِ pageWidth، ولی با
-      // clientWidthِ زندهٔ DOM (دقیق‌تر از state که با آستانهٔ
-      // ۲ پیکسل به‌روز می‌شود؛ اختلافِ حداکثر ۲ پیکسل، زیرِ حاشیهٔ
-      // ۳۰٪ گم می‌شود).
-      const pageW = Math.max(1, Math.round(clientW * (Math.round(zoom * 100) / 100)));
-      let rect = null;
-      if (zoom > 1.6 && rot === 0 && pageH > 0) {
-        const pageLeft = pageW <= clientW ? (clientW - pageW) / 2 : 0;
-        const visX0 = Math.max(0, scrollLeft - pageLeft);
-        const visX1 = Math.min(pageW, scrollLeft + clientW - pageLeft);
-        const visY0 = Math.max(0, scrollTop - pageTop);
-        const visY1 = Math.min(pageH, scrollTop + clientH - pageTop);
-        if (visX1 > visX0 && visY1 > visY0) {
-          const visW = visX1 - visX0;
-          const visH = visY1 - visY0;
-          const mx = visW * 0.3;
-          const my = visH * 0.3;
-          const x0 = Math.max(0, Math.round(visX0 - mx));
-          const y0 = Math.max(0, Math.round(visY0 - my));
-          const x1 = Math.min(pageW, Math.round(visX1 + mx));
-          const y1 = Math.min(pageH, Math.round(visY1 + my));
-          if (x1 > x0 && y1 > y0) {
-            rect = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
-          }
-        }
-      }
-      const p = prev[pageNum];
-      const same = (!p && !rect) || (p && rect && p.x === rect.x && p.y === rect.y && p.width === rect.width && p.height === rect.height);
-      next[pageNum] = same ? (p || null) : rect;
-      if (!same) changed = true;
-    }
-    if (changed) {
-      deepClipRectsRef.current = next;
-      setDeepClipRects(next);
-    }
-  }, []);
-
-  // مرحله ۲۰ — بازمحاسبهٔ برش‌ها پس از تغییرِ زوم، اندازه، چرخش،
-  // فایل یا آفست‌ها (با کمی تأخیر تا آفست‌هایِ تازه در ref بنشینند).
-  useEffect(() => {
-    const timerId = setTimeout(() => { computeDeepClips(); }, 60);
-    return () => clearTimeout(timerId);
-  }, [rasterZoomLevel, containerWidth, rotation, numPages, pageOffsets, filePath, computeDeepClips]);
 
   // ۸. رصد اسکرول Passive + فراخوانی ری‌رندر HiDPI پس از توقف اسکرول
   useEffect(() => {
@@ -3165,19 +3060,21 @@ export default function PdfViewer({ filePath }) {
         triggerHiDpiRender?.();
       }, 220);
 
-      // مرحله ۲۰ — هنگامِ حرکت، بومِ دیپ پنهان می‌شود تا فقط لایهٔ
-      // پایهٔ سبک دیده شود؛ ۱۲۰ میلی‌ثانیه پس از توقف، برشِ تازه
-      // حساب و بومِ دیپ دوباره نشان داده می‌شود.
-      if (!deepSuspendedRef.current) {
-        deepSuspendedRef.current = true;
-        setDeepSuspended(true);
+      // مرحله ۲۲ — به‌روزرسانیِ نقطهٔ کانونیِ زوم در هر رویدادِ
+      // اسکرول (همگام، نه با rAF) تا اثرِ قفل، همیشه تازه‌ترین
+      // مرکزِ دید را داشته باشد.
+      const anchorPage = activePageRef.current || 1;
+      const anchorTops = pageOffsetsRef.current || [];
+      const anchorHeights = pageHeightsRef.current || [];
+      const anchorTop = anchorTops[anchorPage - 1] || 0;
+      const anchorHeight = anchorHeights[anchorPage - 1] || 0;
+      if (anchorHeight > 0) {
+        zoomAnchorRef.current = {
+          page: anchorPage,
+          ratioInPage: Math.min(1, Math.max(0, (container.scrollTop + container.clientHeight * 0.5 - anchorTop) / anchorHeight)),
+        };
       }
-      if (deepStopTimerRef.current) clearTimeout(deepStopTimerRef.current);
-      deepStopTimerRef.current = setTimeout(() => {
-        deepSuspendedRef.current = false;
-        setDeepSuspended(false);
-        computeDeepClips();
-      }, 120);
+
     };
 
     let resizeObserver = null;
@@ -3195,7 +3092,6 @@ export default function PdfViewer({ filePath }) {
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
-      if (deepStopTimerRef.current) clearTimeout(deepStopTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       container.removeEventListener('scroll', handleScroll);
     };
@@ -3677,8 +3573,6 @@ export default function PdfViewer({ filePath }) {
                   onDeleteBookmark={handleDeleteBookmark}
                   onRenameBookmark={handleRenameBookmark}
                   onHiDpiSettled={handleHiDpiSettled}
-                  clipRect={deepClipRects[pageNum] || null}
-                  deepSuspended={deepSuspended}
                 />
               );
             })}

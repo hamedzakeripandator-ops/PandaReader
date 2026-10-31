@@ -257,6 +257,8 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
         <button
           type="button"
           onClick={() => handleStepZoom(-zoomStep)}
+          onMouseUp={(e) => { e.currentTarget.blur(); }}
+          onPointerUp={(e) => { e.currentTarget.blur(); }}
           style={styles.stepBtn}
           title={`کوچک‌نمایی (-${Math.round(zoomStep * 100)}%)`}
         >
@@ -271,8 +273,19 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
             step="0.05"
             value={zoomLevel}
             onPointerDown={() => setIsDraggingSlider(true)}
-            onPointerUp={() => setIsDraggingSlider(false)}
-            onChange={handleZoomChange}
+            onPointerUp={(e) => { setIsDraggingSlider(false); e.currentTarget.blur(); }}
+            onMouseUp={(e) => { e.currentTarget.blur(); }}
+            onKeyDown={(e) => {
+              // مرحله ۲۲ — اسلایدرِ زوم، هرگز با کلیدهایِ جهت‌نما
+              // زوم نمی‌کند: رفتارِ پیش‌فرضِ مرورگر خلع و فوکوس
+              // برداشته می‌شود تا شورت‌کاتِ کاربر (مثلِ ArrowRight
+              // برایِ فایلِ بعدی) اجرا شود.
+              if (['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) {
+                e.preventDefault();
+                e.currentTarget.blur();
+              }
+            }}
+            onChange={(e) => { handleZoomChange(e); e.currentTarget.blur(); }}
             style={{
               ...styles.zoomSlider,
               background: `linear-gradient(to right, var(--accent) 0%, var(--accent) ${fillPercentage}%, rgba(255, 255, 255, 0.14) ${fillPercentage}%, rgba(255, 255, 255, 0.14) 100%)`,
@@ -284,6 +297,8 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
         <button
           type="button"
           onClick={() => handleStepZoom(zoomStep)}
+          onMouseUp={(e) => { e.currentTarget.blur(); }}
+          onPointerUp={(e) => { e.currentTarget.blur(); }}
           style={styles.stepBtn}
           title={`بزرگ‌نمایی (+${Math.round(zoomStep * 100)}%)`}
         >
