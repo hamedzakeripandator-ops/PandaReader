@@ -7,6 +7,10 @@ import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailServi
 import Icons from '../common/Icons';
 import MarqueeText from '../common/MarqueeText';
 import { flattenOutline, findActiveOutlineEntry, firstJumpablePage } from '../../utils/pdfOutline';
+import useBookmarkStore, { resolveActiveBookKey, normalizeBookKey } from '../../store/useBookmarkStore';
+import { BOOKMARK_TEMPLATE_MAP, computeViewportCenterYRatio, resolveBookmarkImage } from '../reader/bookmarkTemplates';
+
+const EMPTY_BOOKMARKS = Object.freeze([]);
 
 const PageListRow = React.memo(function PageListRow({
   pageNum,
@@ -18,6 +22,7 @@ const PageListRow = React.memo(function PageListRow({
   isActive,
   activePageRef,
   onJumpToPage,
+  hasBookmark,
 }) {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -79,6 +84,12 @@ const PageListRow = React.memo(function PageListRow({
           {cleanFileName}
         </span>
 
+        {hasBookmark ? (
+          <span
+            title="این صفحه بوک‌مارک دارد"
+            style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#c9a227', flexShrink: 0 }}
+          />
+        ) : null}
         {isActive && <div style={styles.activeIndicator} />}
       </div>
     </>
@@ -103,7 +114,66 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const setComicPageGap = useReaderStore((state) => state.setComicPageGap);
   const setPdfPageGap = useReaderStore((state) => state.setPdfPageGap);
 
-  const filePath = comicData?.filePath || comicData?.path || '';
+  const filePath = resolveActiveBookKey(comicData, null);
+
+  // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
+  const bookmarkList = useBookmarkStore((state) => state.bookmarksByFile?.[normalizeBookKey(filePath)] || EMPTY_BOOKMARKS);
+  const bookmarkPreferences = useBookmarkStore((state) => state.preferences || {});
+  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || []);
+  const addBookmark = useBookmarkStore((state) => state.addBookmark);
+  const setCurrentView = useAppStore((state) => state.setCurrentView);
+  const loadBookmarksForFile = useBookmarkStore((state) => state.loadBookmarksForFile);
+  const deleteBookmark = useBookmarkStore((state) => state.deleteBookmark);
+  const updateBookmark = useBookmarkStore((state) => state.updateBookmark);
+
+  // مرحله ۱۶، بخش ب: ویرایشِ درجایِ نام از پنلِ راست (مدادِ کنارِ هر
+  // بوک‌مارک) — همان الگویِ مارکر: Enter/blur ثبت می‌کند، Escape
+  // لغو می‌کند و پرچمِ skip از ثبتِ دوبارهٔ blur پس از Escape جلوگیری
+  // می‌کند؛ نامِ خالی به '' می‌رسد تا نمایش به برچسبِ تمپلیت برگردد.
+  const panelSkipBlurRef = useRef(false);
+  const [editingBookmarkId, setEditingBookmarkId] = useState(null);
+  const [editingBookmarkName, setEditingBookmarkName] = useState('');
+  const commitPanelRename = useCallback(async (fp, id) => {
+    if (editingBookmarkId !== id) return;
+    const finalName = (editingBookmarkName || '').trim().slice(0, 30);
+    setEditingBookmarkId(null);
+    await updateBookmark(fp, id, { name: finalName });
+  }, [editingBookmarkId, editingBookmarkName, updateBookmark]);
+  const openBookmarkStudio = useBookmarkStore((state) => state.openStudio);
+  const requestBookmarkJump = useBookmarkStore((state) => state.requestJump);
+
+  const sortedBookmarks = useMemo(() => {
+    return [...(bookmarkList || [])].sort((a, b) => (a.page - b.page) || (a.yRatio - b.yRatio));
+  }, [bookmarkList]);
+
+  const bookmarkedPages = useMemo(() => {
+    const set = new Set();
+    (bookmarkList || []).forEach((bm) => set.add(bm.page));
+    return set;
+  }, [bookmarkList]);
+
+  useEffect(() => {
+    if (filePath) loadBookmarksForFile(filePath);
+  }, [filePath, loadBookmarksForFile]);
+
+  // مرحله ۱۵ — جریانِ سایدبار-اول در پنلِ راست: کلیک رویِ کارتِ
+  // پریست، همان بوک‌مارک را در صفحهٔ جاری و نقطهٔ مرکزِ دید، رویِ
+  // حاشیهٔ ۱۳ پیکسلیِ کاغذ می‌نشاند.
+  const handleAddPresetBookmark = async (preset) => {
+    if (!preset || !filePath) return;
+    const created = await addBookmark({
+      filePath,
+      page: currentPage,
+      yRatio: computeViewportCenterYRatio(currentPage),
+      template: preset.template,
+      image: preset.image || null,
+      focalPoint: preset.focalPoint || 'center',
+      side: preset.side || bookmarkPreferences.defaultSide || 'right',
+      name: preset.name || '',
+    });
+    if (created) showToast('بوک‌مارک ساخته شد.', { type: 'success' });
+  };
+  const goToBookmarkBuilder = () => setCurrentView('bookmarks');
   const isPdfMode = comicData?.type === 'pdf';
   const activeGapValue = isPdfMode ? pdfPageGap : comicPageGap;
 
@@ -590,6 +660,172 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
           </div>
         </div>
 
+        {/* مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ کتابِ جاری — کلیک رویِ هر
+            بوک‌مارک، به همان صفحه و همان مختصاتِ عمودی می‌پرد. */}
+        {filePath ? (
+          <div style={styles.bookmarkPanel}>
+            <div style={styles.panelTitleRow}>
+              <div style={styles.titleWithIcon}>
+                <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                  <Icons.Bookmark size={15} />
+                </span>
+                <span style={styles.panelHeaderTitle}>بوک‌مارک‌ها ({sortedBookmarks.length.toLocaleString('fa-IR')})</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => openBookmarkStudio({ filePath, page: currentPage, yRatio: computeViewportCenterYRatio(currentPage) })}
+                style={styles.bookmarkAddBtn}
+                title="افزودن بوک‌مارک در صفحهٔ جاری"
+              >
+                <Icons.Plus size={14} />
+                <span>افزودن</span>
+              </button>
+            </div>
+            {sortedBookmarks.length === 0 ? (
+              <div style={styles.emptyNotice}>هنوز بوک‌مارکی برای این کتاب نساخته‌اید.</div>
+            ) : (
+              <div style={styles.bookmarkList}>
+                {sortedBookmarks.map((bm) => {
+                  const imageUrl = resolveBookmarkImage(bm, bookmarkPreferences);
+                  const label = bm.name || BOOKMARK_TEMPLATE_MAP[bm.template]?.faLabel || bm.template;
+                  return (
+                    <div
+                      key={bm.id}
+                      onClick={() => requestBookmarkJump(filePath, bm.page, bm.yRatio)}
+                      style={styles.bookmarkRow}
+                      title={`پرش به صفحه ${bm.page} • ${Math.round(bm.yRatio * 100)}٪`}
+                    >
+                      {imageUrl ? (
+                        <img src={imageUrl} alt="" draggable={false} style={styles.bookmarkThumb} />
+                      ) : (
+                        <div style={{ ...styles.bookmarkThumb, background: 'repeating-linear-gradient(45deg,#e5e7eb 0 6px,#f3f4f6 6px 12px)' }} />
+                      )}
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        {editingBookmarkId === bm.id ? (
+                          <input
+                            type="text"
+                            value={editingBookmarkName}
+                            maxLength={30}
+                            dir="auto"
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onChange={(e) => setEditingBookmarkName(e.target.value)}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              if (e.key === 'Enter') commitPanelRename(filePath, bm.id);
+                              else if (e.key === 'Escape') { panelSkipBlurRef.current = true; setEditingBookmarkId(null); }
+                            }}
+                            onKeyUp={(e) => e.stopPropagation()}
+                            onBlur={() => {
+                              if (panelSkipBlurRef.current) { panelSkipBlurRef.current = false; return; }
+                              commitPanelRename(filePath, bm.id);
+                            }}
+                            style={styles.bookmarkNameInput}
+                          />
+                        ) : (
+                          <div style={styles.bookmarkName}>{label}</div>
+                        )}
+                        <div style={styles.bookmarkMeta}>صفحه {bm.page.toLocaleString('fa-IR')} • {Math.round(bm.yRatio * 100).toLocaleString('fa-IR')}٪ • {bm.side === 'left' ? 'حاشیهٔ چپ' : 'حاشیهٔ راست'}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setEditingBookmarkId(bm.id); setEditingBookmarkName(bm.name || ''); }}
+                        style={styles.bookmarkEditBtn}
+                        title="ویرایش نام بوک‌مارک"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); deleteBookmark(filePath, bm.id); }}
+                        style={styles.bookmarkDelBtn}
+                        title="حذف بوک‌مارک"
+                      >
+                        <Icons.X size={13} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {/* مرحله ۱۵ — تمپلیت‌هایِ من (ساخته‌شده در صفحهٔ
+                بوک‌مارک‌هایِ سایدبار): خالی = کارتِ هدایتگر،
+                غیرخالی = لیستِ کارتی + دکمهٔ ساختِ تازه. */}
+            <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
+              <div style={{ ...styles.panelTitleRow, marginBottom: '8px' }}>
+                <div style={styles.titleWithIcon}>
+                  <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                    <Icons.Bookmark size={14} />
+                  </span>
+                  <span style={styles.panelHeaderTitle}>تمپلیت‌هایِ من</span>
+                </div>
+              </div>
+              {savedPresets.length === 0 ? (
+                <button
+                  type="button"
+                  onClick={goToBookmarkBuilder}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    padding: '10px 12px',
+                    borderRadius: '10px',
+                    border: '1px dashed var(--border)',
+                    backgroundColor: 'var(--panel2)',
+                    color: 'var(--text)',
+                    fontFamily: 'var(--font-fa)',
+                    fontSize: '12.5px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    textAlign: 'right',
+                    lineHeight: 1.8,
+                  }}
+                >
+                  <Icons.Bookmark size={15} />
+                  <span>هنوز تمپلیت بوک‌مارکی نساخته‌اید — رفتن به بخش ساخت بوک‌مارک</span>
+                </button>
+              ) : (
+                <>
+                  <div style={styles.bookmarkList}>
+                    {savedPresets.map((preset) => {
+                      const imageUrl = resolveBookmarkImage(preset, bookmarkPreferences);
+                      const animationLabel = BOOKMARK_TEMPLATE_MAP[preset.template]?.faLabel || preset.template;
+                      return (
+                        <div
+                          key={preset.id}
+                          onClick={() => handleAddPresetBookmark(preset)}
+                          style={styles.bookmarkRow}
+                          title="نشاندنِ این بوک‌مارک در صفحهٔ جاری"
+                        >
+                          {imageUrl ? (
+                            <img src={imageUrl} alt="" draggable={false} style={styles.bookmarkThumb} />
+                          ) : (
+                            <div style={{ ...styles.bookmarkThumb, background: 'repeating-linear-gradient(45deg,#e5e7eb 0 6px,#f3f4f6 6px 12px)' }} />
+                          )}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={styles.bookmarkName}>{preset.name || `ساختِ ${animationLabel}`}</div>
+                            <div style={styles.bookmarkMeta}>انیمیشنِ {animationLabel} • {preset.side === 'left' ? 'حاشیهٔ چپ' : 'حاشیهٔ راست'}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={goToBookmarkBuilder}
+                    style={{ ...styles.bookmarkAddBtn, marginTop: '10px', width: '100%', justifyContent: 'center' }}
+                  >
+                    <Icons.Plus size={14} />
+                    <span>+ ساخت تمپلیت جدید در بخش بوک‌مارک‌ها</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        ) : null}
+
         {/* ===================================================================
             مرحله ۶ ـ بخش الف: فهرستِ کتاب (PDF Outline) — فقط برای PDFها
             و فقط وقتی سند، فهرستِ داخلی دارد. استخراج، غیرمسدودکننده
@@ -653,6 +889,12 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                     >
                       {entry.title}
                     </span>
+                    {jumpPage && bookmarkedPages.has(jumpPage) ? (
+                      <span
+                        title="این صفحه بوک‌مارک دارد"
+                        style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#c9a227', flexShrink: 0 }}
+                      />
+                    ) : null}
                     {jumpPage ? (
                       <span style={styles.outlineRowPage}>ص. {jumpPage}</span>
                     ) : null}
@@ -745,6 +987,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   isActive={p.pageNum === currentPage}
                   activePageRef={activePageRef}
                   onJumpToPage={jumpToPage}
+                  hasBookmark={bookmarkedPages.has(p.pageNum)}
                 />
               ))
             ) : (
@@ -1588,5 +1831,103 @@ const styles = {
     transition: 'all 0.15s ease',
     outline: 'none',
     textAlign: 'center',
+  },
+  // مرحله ۱۳: کارتِ بوک‌مارک‌ها
+  bookmarkPanel: {
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    backgroundColor: 'var(--panel)',
+    padding: '12px',
+    marginBottom: '12px',
+  },
+  bookmarkAddBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    padding: '5px 10px',
+    borderRadius: '8px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  bookmarkList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    marginTop: '10px',
+  },
+  bookmarkRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '8px',
+    borderRadius: '10px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    cursor: 'pointer',
+  },
+  bookmarkThumb: {
+    width: '40px',
+    height: '56px',
+    objectFit: 'cover',
+    borderRadius: '6px',
+    flexShrink: 0,
+    display: 'block',
+  },
+  bookmarkName: {
+    fontSize: '13px',
+    fontWeight: 700,
+    color: 'var(--text)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  bookmarkMeta: {
+    fontSize: '11.5px',
+    color: 'var(--muted)',
+    marginTop: '2px',
+  },
+  bookmarkEditBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '26px',
+    height: '26px',
+    borderRadius: '50%',
+    border: '1px solid var(--border)',
+    backgroundColor: 'transparent',
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    flexShrink: 0,
+  },
+  bookmarkNameInput: {
+    flex: 1,
+    minWidth: 0,
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    fontWeight: 600,
+    color: 'var(--text)',
+    backgroundColor: '#fffbe6',
+    border: '1px solid #d4af37',
+    borderRadius: '6px',
+    padding: '2px 6px',
+    outline: 'none',
+  },
+  bookmarkDelBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '26px',
+    height: '26px',
+    borderRadius: '50%',
+    border: '1px solid var(--border)',
+    backgroundColor: 'transparent',
+    color: 'var(--muted)',
+    cursor: 'pointer',
+    flexShrink: 0,
   },
 };

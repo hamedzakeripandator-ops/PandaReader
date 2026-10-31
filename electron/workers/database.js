@@ -53,7 +53,15 @@ const defaultDB = {
   libraryFolders: [],
   favorites: [],
   annotations: {},
-  readingStats: { days: {} },
+  bookmarks: {},
+  bookmarkPreferences: {
+    defaultTemplate: 'MARGIN',
+    globalImage: null,
+    templateImages: {},
+    defaultSide: 'right',
+    savedPresets: []
+  },
+  readingStats: { days: {}, totalAppSeconds: 0 },
   profile: {
     username: 'Haamed',
     subtitle: 'توسعه‌دهنده و کمیک‌خوان حرفه‌ای',
@@ -125,6 +133,10 @@ function sortLibraryItems(list) {
   });
 }
 
+// مرحله ۱۳: فهرستِ ۱۵ تمپلیت — باید پیش از migrateSchema باشد، چون
+// migrateSchema در readDB صدا زده می‌شود و readDB در ارزیابیِ ماژول
+// (initDB()/readDB() در پایینِ فایل) اجرا می‌شود.
+const BOOKMARK_TEMPLATE_IDS = ['MARGIN', 'SLANT', 'ARROW', 'MIRROR', 'FLIP', 'ZOOM', 'SWAY', 'GLOW', 'FLOAT', 'SLIDE', 'SPLIT', 'TILT', 'WAVE', 'DIAGONAL', 'OFFSET'];
 function migrateSchema(parsed) {
   if (!parsed || typeof parsed !== 'object') {
     return JSON.parse(JSON.stringify(defaultDB));
@@ -215,10 +227,48 @@ function migrateSchema(parsed) {
       readingStatsDays[key] = {
         pages: Math.max(0, Math.min(100000, Math.floor(Number(entry.pages) || 0))),
         seconds: Math.max(0, Math.min(86400, Math.floor(Number(entry.seconds) || 0))),
+        appSeconds: Math.max(0, Math.min(86400, Math.floor(Number(entry.appSeconds) || 0))),
       };
     }
   }
-  const readingStats = { days: readingStatsDays };
+  const readingStats = {
+    days: readingStatsDays,
+    totalAppSeconds: Math.max(0, Math.floor(Number((parsed.readingStats && parsed.readingStats.totalAppSeconds) || 0))),
+  };
+
+  // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتال — فقط رکوردهایِ معتبر نگه
+  // داشته می‌شوند؛ ورودیِ خراب، به‌جایِ شکستنِ رندر، حذف می‌شود.
+  const rawBookmarks = parsed.bookmarks && typeof parsed.bookmarks === 'object' ? parsed.bookmarks : {};
+  const bookmarks = {};
+  Object.entries(rawBookmarks).forEach(([normKey, list]) => {
+    if (!Array.isArray(list)) return;
+    const norm = normalizePath(normKey) || normKey;
+    const clean = [];
+    list.forEach((item) => {
+      const b = sanitizeBookmarkRecord(item);
+      if (b) clean.push(b);
+    });
+    if (clean.length > 0) bookmarks[norm] = clean;
+  });
+  const rawPrefs = parsed.bookmarkPreferences && typeof parsed.bookmarkPreferences === 'object' ? parsed.bookmarkPreferences : {};
+  const bookmarkPreferences = {
+    defaultTemplate: BOOKMARK_TEMPLATE_IDS.includes(rawPrefs.defaultTemplate) ? rawPrefs.defaultTemplate : 'MARGIN',
+    globalImage: typeof rawPrefs.globalImage === 'string' ? rawPrefs.globalImage : null,
+    templateImages: {},
+    defaultSide: rawPrefs.defaultSide === 'left' ? 'left' : 'right',
+    savedPresets: [],
+  };
+  if (Array.isArray(rawPrefs.savedPresets)) {
+    rawPrefs.savedPresets.forEach((p) => {
+      const clean = sanitizeBookmarkPreset(p);
+      if (clean && bookmarkPreferences.savedPresets.length < 100) bookmarkPreferences.savedPresets.push(clean);
+    });
+  }
+  if (rawPrefs.templateImages && typeof rawPrefs.templateImages === 'object') {
+    Object.entries(rawPrefs.templateImages).forEach(([id, url]) => {
+      if (BOOKMARK_TEMPLATE_IDS.includes(id) && typeof url === 'string' && url) bookmarkPreferences.templateImages[id] = url;
+    });
+  }
 
   return {
     history,
@@ -226,6 +276,8 @@ function migrateSchema(parsed) {
     libraryFolders,
     favorites,
     annotations,
+    bookmarks,
+    bookmarkPreferences,
     readingStats,
     profile: {
       ...defaultDB.profile,
@@ -1262,7 +1314,7 @@ function driveRootExists(filePath) {
 // اگر ریشهٔ درایو نیست → «ردشده» (درایوِ قطع‌شده) و می‌ماند؛
 // در غیرِ این صورت، از هر سه جدول + annotations + coverCache +
 // فایل‌های کاور حذف می‌شود. فقط یک بار writeDB انجام می‌شود.
-function pruneMissingFiles(db) {
+function pruneMissingFiles(db, dryRun = false) {
   const candidates = new Map();
   const consider = (rawPath, fallbackNorm) => {
     const norm = normalizePath(rawPath) || fallbackNorm;
@@ -1293,6 +1345,13 @@ function pruneMissingFiles(db) {
       skipped.push({ path: probePath, reason: 'drive-offline' });
       continue;
     }
+    if (dryRun) {
+      const coverRes = statCoverFilesForNorm(db, norm);
+      coverFilesDeleted += coverRes.deleted;
+      coverBytesFreed += coverRes.freedBytes;
+      removed.push({ path: probePath, name: path.basename(probePath) });
+      continue;
+    }
     // فایل، واقعاً رفته است: از همهٔ جدول‌ها حذف شود.
     if (db.history && db.history[norm]) delete db.history[norm];
     db.library = (db.library || []).filter((item) => normalizePath(item.path || item.filePath) !== norm);
@@ -1315,6 +1374,13 @@ function pruneMissingFiles(db) {
     let exists = false;
     try { exists = fs.existsSync(probePath); } catch (_) { exists = false; }
     if (!exists) {
+      if (dryRun) {
+        const coverRes = statCoverFilesForNorm(db, norm);
+        coverFilesDeleted += coverRes.deleted;
+        coverBytesFreed += coverRes.freedBytes;
+        removed.push({ path: probePath, name: path.basename(probePath) });
+        return;
+      }
       delete db.annotations[norm];
       const coverRes = deleteCoverFilesForNorm(db, norm);
       coverFilesDeleted += coverRes.deleted;
@@ -1324,7 +1390,7 @@ function pruneMissingFiles(db) {
     }
   });
 
-  if (removed.length > 0) {
+  if (!dryRun && removed.length > 0) {
     try { sweepOrphanCoverFiles(db); } catch (_) {}
     writeDB(db);
   }
@@ -1338,22 +1404,57 @@ function pruneMissingFiles(db) {
   };
 }
 
-// مرحله ۱۰: پاک‌سازیِ کاملِ کشِ کاورها.
-// کاورهای سفارشیِ کاربر (isCustom)، دادهٔ کاربرند، نه کش؛ نگه
-// داشته می‌شوند و در keptCustom گزارش می‌شوند. بقیهٔ ورودی‌های
-// کش حذف، فیلدِ cover در هر سه جدول (به‌جز کتاب‌های سفارشی)
-// null، و همهٔ فایل‌های کاورِ غیرِسفارشی از پوشهٔ covers پاک
-// می‌شوند.
-function clearAllCovers(db) {
-  let clearedFiles = 0;
-  let freedBytes = 0;
-  let keptCustom = 0;
+// مرحله ۱۳: بوک‌مارک‌هایِ دیجیتال و تفکیکِ پاک‌سازیِ کاورها.
+// توجه: BOOKMARK_TEMPLATE_IDS بالاتر، پیش از migrateSchema تعریف شده
+// است؛ چون initDB()/readDB() در انتهایِ ماژول، پیش از رسیدن به این
+// نقطه اجرا می‌شوند و ارجاعِ زودهنگام به const، خطایِ TDZ می‌داد.
+
+function sanitizeBookmarkRecord(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const page = Number(raw.page);
+  if (!Number.isFinite(page) || page < 1) return null;
+  const yRaw = Number(raw.yRatio);
+  const yRatio = Number.isFinite(yRaw) ? Math.max(0, Math.min(0.92, yRaw)) : 0;
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : ('bm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)),
+    page: Math.floor(page),
+    yRatio,
+    side: raw.side === 'left' ? 'left' : 'right',
+    template: BOOKMARK_TEMPLATE_IDS.includes(raw.template) ? raw.template : 'MARGIN',
+    image: typeof raw.image === 'string' ? raw.image : null,
+    focalPoint: raw.focalPoint === 'top' || raw.focalPoint === 'bottom' ? raw.focalPoint : 'center',
+    name: typeof raw.name === 'string' ? raw.name.slice(0, 60) : '',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+  };
+}
+
+// مرحله ۱۴: «ساختِ کاربر» (پریستِ سفارشی) — ترکیبِ تمپلیت +
+// تصویر + نام که در همهٔ کتاب‌ها در دسترس است. اعتبارسنجی،
+// همان قوانینِ بوک‌مارک را دارد؛ تمپلیتِ ناشناخته به MARGIN
+// برمی‌گردد و سقفِ ۱۰۰ پریست، جلوی رشدِ بی‌نهایت را می‌گیرد.
+function sanitizeBookmarkPreset(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : ('preset_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)),
+    name: typeof raw.name === 'string' ? raw.name.slice(0, 60) : '',
+    template: BOOKMARK_TEMPLATE_IDS.includes(raw.template) ? raw.template : 'MARGIN',
+    image: typeof raw.image === 'string' ? raw.image : null,
+    focalPoint: raw.focalPoint === 'top' || raw.focalPoint === 'bottom' ? raw.focalPoint : 'center',
+    side: raw.side === 'left' ? 'left' : 'right',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
+  };
+}
+
+// فایل‌هایِ کاوری که باید بمانند (فقط کاورهایِ سفارشیِ کاربر):
+// ورودی‌هایِ coverCache با isCustom + کاورِ همان کتاب‌ها در
+// سه جدول. همین مجموعه، هم در پاک‌سازی و هم در آمارِ پیش‌نمایش
+// استفاده می‌شود تا عددِ «حذف می‌شود» با عملِ واقعی یکی باشد.
+function collectKeptCoverFiles(db) {
   const keptFiles = new Set();
   const customNorms = new Set();
   const preservedCache = {};
   Object.entries(db.coverCache || {}).forEach(([normKey, entry]) => {
     if (entry && entry.isCustom) {
-      keptCustom += 1;
       customNorms.add(normKey);
       preservedCache[normKey] = entry;
       const f = coverFileFromUrl(coverEntryToUrl(entry));
@@ -1361,13 +1462,42 @@ function clearAllCovers(db) {
       if (entry && typeof entry.file === 'string' && entry.file) keptFiles.add(entry.file);
     }
   });
-  const nullCoverUnlessCustom = (entry, rawPath) => {
+  const addTableCover = (entry, rawPath) => {
     if (!entry) return;
     const norm = normalizePath(rawPath);
     if (norm && customNorms.has(norm)) {
       const f = coverFileFromUrl(entry.cover);
       if (f) keptFiles.add(f);
-      return;
+    }
+  };
+  Object.values(db.history || {}).forEach((h) => addTableCover(h, h && (h.filePath || h.path)));
+  (db.library || []).forEach((item) => addTableCover(item, item && (item.path || item.filePath)));
+  (db.favorites || []).forEach((item) => addTableCover(item, item && (item.path || item.filePath)));
+  return { keptFiles, customNorms, preservedCache };
+}
+
+// مرحله ۱۳: پاک‌سازیِ فقط کاورها (بدونِ دست‌زدن به هیچ کشِ
+// دیگری). preserveCustom=true همان رفتارِ قدیمیِ CLEAR_ALL_COVERS
+// است؛ false یعنی کاورهایِ سفارشی هم پاک می‌شوند.
+function clearOnlyCovers(db, preserveCustom = true) {
+  let clearedFiles = 0;
+  let freedBytes = 0;
+  let keptCustom = 0;
+  let keptFiles = new Set();
+  let preservedCache = {};
+  let customNorms = new Set();
+  if (preserveCustom) {
+    const kept = collectKeptCoverFiles(db);
+    keptFiles = kept.keptFiles;
+    preservedCache = kept.preservedCache;
+    customNorms = kept.customNorms;
+    keptCustom = customNorms.size;
+  }
+  const nullCoverUnlessCustom = (entry, rawPath) => {
+    if (!entry) return;
+    if (preserveCustom) {
+      const norm = normalizePath(rawPath);
+      if (norm && customNorms.has(norm)) return;
     }
     entry.cover = null;
   };
@@ -1394,6 +1524,57 @@ function clearAllCovers(db) {
   writeDB(db);
   return { clearedFiles, freedBytes, keptCustom, coverCacheCleared: true };
 }
+
+// نسخهٔ فقط-خواندنیِ deleteCoverFilesForNorm برایِ پیش‌نمایشِ
+// هرس: همان فایل‌ها شمرده می‌شوند، ولی هیچ فایلی پاک نمی‌شود.
+function statCoverFilesForNorm(db, normPath) {
+  let deleted = 0;
+  let freedBytes = 0;
+  try {
+    const prefix = coverHashPrefixFor(normPath);
+    const entryFile = db.coverCache && db.coverCache[normPath] ? coverFileFromUrl(coverEntryToUrl(db.coverCache[normPath])) : null;
+    if (!fs.existsSync(COVERS_DIR)) return { deleted: 0, freedBytes: 0 };
+    const names = fs.readdirSync(COVERS_DIR);
+    for (const name of names) {
+      const isPrefixed = prefix && name.startsWith(prefix);
+      const isEntryFile = entryFile && name === entryFile;
+      if (!isPrefixed && !isEntryFile) continue;
+      const full = path.join(COVERS_DIR, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) { deleted += 1; freedBytes += st.size; }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return { deleted, freedBytes };
+}
+
+// آمارِ دقیقِ کاورها برایِ مودالِ تأیید: مجموع و سهمِ سفارشی.
+function getCoverStats(db) {
+  const { keptFiles } = collectKeptCoverFiles(db);
+  let totalFiles = 0;
+  let totalBytes = 0;
+  let customFiles = 0;
+  let customBytes = 0;
+  try {
+    if (fs.existsSync(COVERS_DIR)) {
+      fs.readdirSync(COVERS_DIR).forEach((name) => {
+        const full = path.join(COVERS_DIR, name);
+        try {
+          const st = fs.statSync(full);
+          if (!st.isFile()) return;
+          totalFiles += 1;
+          totalBytes += st.size;
+          if (keptFiles.has(name)) { customFiles += 1; customBytes += st.size; }
+        } catch (_) {}
+      });
+    }
+  } catch (_) {}
+  return { totalFiles, totalBytes, customFiles, customBytes, coverCacheEntries: Object.keys(db.coverCache || {}).length };
+}
+
+// مرحله ۱۳: clearAllCovers با clearOnlyCovers(db, true) جایگزین شد (رفتارِ یکسان).
+
 
 parentPort.on('message', (request) => {
   const { reqId, action, payload = {} } = request || {};
@@ -1529,6 +1710,9 @@ parentPort.on('message', (request) => {
         db.readingStats.days[date] = {
           pages: Math.min(100000, (Number(prev.pages) || 0) + addPages),
           seconds: Math.min(86400, (Number(prev.seconds) || 0) + addSeconds),
+          // مرحله ۱۴: ثانیه‌هایِ حضورِ برنامه، با فلاشِ مطالعه پاک
+          // نمی‌شوند؛ همان روز، هر دو شمارنده را نگه می‌دارد.
+          appSeconds: Math.min(86400, Number(prev.appSeconds) || 0),
         };
         // هرسِ روزهای خیلی قدیمی (بیش از ۱۰۹۵ روز) در همان نوشتن.
         const dayKeys = Object.keys(db.readingStats.days).sort();
@@ -1542,12 +1726,45 @@ parentPort.on('message', (request) => {
         break;
       }
 
+      case 'RECORD_APP_ACTIVITY': {
+        // مرحله ۱۴: ثبتِ زمانِ حضورِ سراسریِ برنامه. مجموعِ کل
+        // در totalAppSeconds و تفکیکِ روزانه در days[date].appSeconds
+        // می‌نشیند؛ صفحات و ثانیه‌هایِ مطالعهٔ همان روز، دست
+        // نمی‌خورند.
+        const { date, seconds = 0 } = payload || {};
+        if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          sendReply({ type: 'error', action, message: 'تاریخِ فعالیت معتبر نیست.' });
+          return;
+        }
+        const addSeconds = Math.max(0, Math.min(86400, Math.floor(Number(seconds) || 0)));
+        if (addSeconds === 0) {
+          sendReply({ type: 'done', action, success: true, totalAppSeconds: db.readingStats?.totalAppSeconds || 0 });
+          return;
+        }
+        if (!db.readingStats || typeof db.readingStats !== 'object' || Array.isArray(db.readingStats)) {
+          db.readingStats = { days: {}, totalAppSeconds: 0 };
+        }
+        if (!db.readingStats.days || typeof db.readingStats.days !== 'object') {
+          db.readingStats.days = {};
+        }
+        const prev = db.readingStats.days[date] || { pages: 0, seconds: 0, appSeconds: 0 };
+        db.readingStats.days[date] = {
+          pages: Number(prev.pages) || 0,
+          seconds: Number(prev.seconds) || 0,
+          appSeconds: Math.min(86400, (Number(prev.appSeconds) || 0) + addSeconds),
+        };
+        db.readingStats.totalAppSeconds = Math.min(315360000, (Number(db.readingStats.totalAppSeconds) || 0) + addSeconds);
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true, totalAppSeconds: db.readingStats.totalAppSeconds });
+        break;
+      }
+
       case 'GET_READING_STATS': {
         const days =
           db.readingStats && typeof db.readingStats === 'object' && db.readingStats.days && typeof db.readingStats.days === 'object'
             ? db.readingStats.days
             : {};
-        sendReply({ type: 'done', action, days });
+        sendReply({ type: 'done', action, days, totalAppSeconds: Number(db.readingStats?.totalAppSeconds) || 0 });
         break;
       }
 
@@ -2155,7 +2372,119 @@ parentPort.on('message', (request) => {
       }
 
       case 'CLEAR_ALL_COVERS': {
-        const stats = clearAllCovers(db);
+        const stats = clearOnlyCovers(db, true);
+        sendReply({ type: 'done', action, success: true, ...stats });
+        break;
+      }
+
+      case 'GET_ALL_BOOKMARKS': {
+        // مرحله ۱۴: همهٔ بوک‌مارک‌هایِ همهٔ کتاب‌ها، برای نمایِ
+        // سراسریِ سایدبار و بجِ شمارنده. مسیرِ قابلِ باز شدن، از
+        // تاریخچه/کتابخانه/علاقه‌مندی‌ها برداشته می‌شود تا حروفِ
+        // بزرگ‌وکوچکِ اصلیِ مسیر حفظ شود (کلیدِ نرمال‌شده، کوچک
+        // شده است؛ در ویندوز فرقی نمی‌کند، ولی اصل، دقیق‌تر است).
+        db.bookmarks = db.bookmarks || {};
+        const files = [];
+        let total = 0;
+        Object.entries(db.bookmarks).forEach(([norm, list]) => {
+          const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmarkRecord).filter(Boolean);
+          if (clean.length === 0) return;
+          const hist = db.history && db.history[norm];
+          const libItem = (db.library || []).find((it) => normalizePath(it.path || it.filePath) === norm);
+          const favItem = (db.favorites || []).find((it) => normalizePath(it.path || it.filePath) === norm);
+          const filePath = (hist && (hist.filePath || hist.path))
+            || (libItem && (libItem.path || libItem.filePath))
+            || (favItem && (favItem.path || favItem.filePath))
+            || norm;
+          const fileName = String(filePath).split(/[\\/]/).pop() || norm;
+          files.push({ filePath, fileName, bookmarks: clean });
+          total += clean.length;
+        });
+        files.sort((a, b) => String(a.fileName).localeCompare(String(b.fileName)));
+        sendReply({ type: 'done', action, files, total });
+        break;
+      }
+
+      case 'GET_BOOKMARKS': {
+        const { filePath } = payload;
+        const norm = normalizePath(filePath);
+        db.bookmarks = db.bookmarks || {};
+        const list = (db.bookmarks[norm] || []).map(sanitizeBookmarkRecord).filter(Boolean);
+        sendReply({ type: 'done', action, bookmarks: list });
+        break;
+      }
+
+      case 'SAVE_BOOKMARKS': {
+        const { filePath, bookmarks = [] } = payload;
+        const norm = normalizePath(filePath);
+        if (!norm) { sendReply({ type: 'error', action, message: 'مسیرِ فایل نامعتبر است.' }); break; }
+        db.bookmarks = db.bookmarks || {};
+        const clean = (Array.isArray(bookmarks) ? bookmarks : []).map(sanitizeBookmarkRecord).filter(Boolean);
+        if (clean.length === 0) delete db.bookmarks[norm];
+        else db.bookmarks[norm] = clean;
+        // مرحله ۱۹ — فلشِ همگام و فوری روی دیسک (مانندِ
+        // SAVE_BOOKMARK_PREFERENCES در مرحلهٔ ۱۶ب): گذاشتن، تغییرِ
+        // نام، جابه‌جایی یا حذفِ بوک‌مارک، در همان میلی‌ثانیه رویِ
+        // db.json می‌نشیند و به تایمرِ ۹۰۰ میلی‌ثانیه‌ای وابسته نیست.
+        writeDB(db, true);
+        sendReply({ type: 'done', action, success: true, bookmarks: clean });
+        break;
+      }
+
+      case 'GET_BOOKMARK_PREFERENCES': {
+        db.bookmarkPreferences = db.bookmarkPreferences || { ...defaultDB.bookmarkPreferences };
+        sendReply({ type: 'done', action, preferences: db.bookmarkPreferences });
+        break;
+      }
+
+      case 'SAVE_BOOKMARK_PREFERENCES': {
+        const { preferences = {} } = payload;
+        const next = { ...defaultDB.bookmarkPreferences, templateImages: {} };
+        if (BOOKMARK_TEMPLATE_IDS.includes(preferences.defaultTemplate)) next.defaultTemplate = preferences.defaultTemplate;
+        if (typeof preferences.globalImage === 'string') next.globalImage = preferences.globalImage;
+        else if (preferences.globalImage === null) next.globalImage = null;
+        if (preferences.templateImages && typeof preferences.templateImages === 'object') {
+          Object.entries(preferences.templateImages).forEach(([id, url]) => {
+            if (BOOKMARK_TEMPLATE_IDS.includes(id) && typeof url === 'string' && url) next.templateImages[id] = url;
+          });
+        }
+        if (preferences.defaultSide === 'left' || preferences.defaultSide === 'right') next.defaultSide = preferences.defaultSide;
+        // مرحله ۱۴: پریست‌ها — اگر فیلد نفرستاده شد، مقدارِ قبلی
+        // حفظ می‌شود تا ذخیرهٔ جزئیِ تنظیمات، ساخته‌هایِ کاربر را
+        // پاک نکند؛ اگر فرستاده شد، پاک‌سازی و سقفِ ۱۰۰ اعمال می‌شود.
+        if (Array.isArray(preferences.savedPresets)) {
+          next.savedPresets = [];
+          preferences.savedPresets.forEach((p) => {
+            const clean = sanitizeBookmarkPreset(p);
+            if (clean && next.savedPresets.length < 100) next.savedPresets.push(clean);
+          });
+        } else if (db.bookmarkPreferences && Array.isArray(db.bookmarkPreferences.savedPresets)) {
+          next.savedPresets = db.bookmarkPreferences.savedPresets;
+        }
+        db.bookmarkPreferences = next;
+        // مرحله ۱۶، بخش ب: فلشِ فوری و همگام به دیسک — پریست باید
+        // حتی اگر کاربر ۱ ثانیه بعد برنامه را بست، سرِ جایش باشد؛
+        // نوشتنِ debounceدارِ ۹۰۰ میلی‌ثانیه‌ای برایِ این مسیر کافی نیست.
+        writeDB(db, true);
+        sendReply({ type: 'done', action, success: true, preferences: next });
+        break;
+      }
+
+      case 'GET_COVER_STATS': {
+        const stats = getCoverStats(db);
+        sendReply({ type: 'done', action, success: true, ...stats });
+        break;
+      }
+
+      case 'PREVIEW_PRUNE_MISSING_FILES': {
+        const stats = pruneMissingFiles(db, true);
+        sendReply({ type: 'done', action, success: true, ...stats });
+        break;
+      }
+
+      case 'CLEAR_ONLY_COVERS': {
+        const preserveCustom = payload.preserveCustom !== false;
+        const stats = clearOnlyCovers(db, preserveCustom);
         sendReply({ type: 'done', action, success: true, ...stats });
         break;
       }

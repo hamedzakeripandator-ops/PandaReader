@@ -229,11 +229,139 @@ export function endReadingSession() {
   flushNow();
 }
 
+// ============================================================================
+// مرحله ۱۴: موتورِ زمان‌سنجِ سراسریِ کلِ برنامه (App Session &
+// Total Time Engine) — جدا از نشستِ مطالعهٔ یک کتاب. از لحظهٔ
+// باز شدنِ برنامه (App.jsx) شروع می‌شود و مادامی که پنجره
+// قابل‌مشاهده است، هر ۱ ثانیه زمانِ حضور را می‌شمارد؛ دسته‌ای
+// (حداکثر هر ۴۵ ثانیه، یا هنگامِ مخفی‌شدن/بسته‌شدن) با
+// RECORD_APP_ACTIVITY در readingStats.totalAppSeconds و تفکیکِ
+// روزانه (days[date].appSeconds) ذخیره می‌شود.
+// ============================================================================
+
+const APP_FLUSH_INTERVAL_MS = 45000;
+let appSessionStarted = false;
+let appSessionTotalSeconds = 0;
+let appPendingSeconds = 0;
+let appLastVisibleAt = null;
+let appHeartbeatTimer = null;
+let appFlushTimer = null;
+let appFlushPromise = null;
+let appFlushQueued = false;
+
+function accumulateAppElapsed() {
+  if (appLastVisibleAt === null) return;
+  const elapsed = Math.floor((Date.now() - appLastVisibleAt) / 1000);
+  if (elapsed > 0) {
+    appPendingSeconds += elapsed;
+    appSessionTotalSeconds += elapsed;
+  }
+  appLastVisibleAt = Date.now();
+}
+
+function flushAppNow() {
+  if (appFlushPromise) {
+    appFlushQueued = true;
+    return appFlushPromise;
+  }
+  if (appPendingSeconds <= 0) return Promise.resolve();
+  const payload = { date: localDateKey(), seconds: Math.min(86400, appPendingSeconds) };
+  appPendingSeconds = 0;
+  if (!payload.date) return Promise.resolve();
+  appFlushPromise = (async () => {
+    try {
+      if (coreApi && typeof coreApi.recordAppActivity === 'function') {
+        await coreApi.recordAppActivity(payload);
+      }
+    } catch (_) {
+      // آمارِ حضور، هرگز برنامه را خراب نمی‌کند.
+    }
+    appFlushPromise = null;
+    if (appFlushQueued) {
+      appFlushQueued = false;
+      if (appPendingSeconds > 0) return flushAppNow();
+    }
+  })();
+  return appFlushPromise;
+}
+
+function scheduleAppFlush() {
+  if (appFlushTimer) return;
+  appFlushTimer = setTimeout(() => {
+    appFlushTimer = null;
+    flushAppNow();
+  }, APP_FLUSH_INTERVAL_MS);
+  if (typeof appFlushTimer.unref === 'function') {
+    try { appFlushTimer.unref(); } catch (_) {}
+  }
+}
+
+function onAppVisibilityChange() {
+  if (typeof document === 'undefined') return;
+  if (document.hidden) {
+    accumulateAppElapsed();
+    appLastVisibleAt = null;
+    flushAppNow();
+  } else if (appSessionStarted) {
+    appLastVisibleAt = Date.now();
+  }
+}
+
+function onAppBeforeUnload() {
+  // بهترین تلاش برای ثبتِ ثانیه‌های پایانی؛ مثلِ نشستِ مطالعه،
+  // فلاشِ ناهمگام ممکن است در همهٔ محیط‌ها کامل نشود، ولی
+  // فلاشِ دوره‌ایِ ۴۵ ثانیه‌ای، خطا را به همان سقف محدود می‌کند.
+  accumulateAppElapsed();
+  flushAppNow();
+}
+
+/** شروعِ نشستِ سراسریِ برنامه؛ فقط یک بار اثر دارد. */
+export function beginAppSession() {
+  if (appSessionStarted) return;
+  appSessionStarted = true;
+  appLastVisibleAt = isDocumentHidden() ? null : Date.now();
+  appHeartbeatTimer = setInterval(() => {
+    if (isDocumentHidden()) return;
+    accumulateAppElapsed();
+    scheduleAppFlush();
+  }, 1000);
+  if (typeof appHeartbeatTimer.unref === 'function') {
+    try { appHeartbeatTimer.unref(); } catch (_) {}
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onAppVisibilityChange);
+  }
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('beforeunload', onAppBeforeUnload);
+  }
+}
+
+/** ثانیه‌هایِ نشستِ فعلیِ برنامه (شاملِ بازهٔ در جریانِ دیده‌شده). */
+export function getAppSessionSeconds() {
+  let current = 0;
+  if (appLastVisibleAt !== null) {
+    current = Math.floor((Date.now() - appLastVisibleAt) / 1000);
+  }
+  return appSessionTotalSeconds + Math.max(0, current);
+}
+
+/** انتظار برای اتمامِ فلاشِ حضورِ در حالِ انجام. */
+export async function waitForAppFlush() {
+  accumulateAppElapsed();
+  if (appPendingSeconds > 0) await flushAppNow();
+  if (appFlushPromise) await appFlushPromise;
+  if (appPendingSeconds > 0) await flushAppNow();
+  if (appFlushPromise) await appFlushPromise;
+}
+
 export const readingActivity = {
   begin: beginReadingSession,
   visitPage: notePageVisit,
   end: endReadingSession,
   waitForPendingFlush,
+  beginAppSession,
+  getAppSessionSeconds,
+  waitForAppFlush,
 };
 
 export default readingActivity;

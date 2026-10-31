@@ -172,6 +172,48 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('prune-missing-files');
   },
 
+  // مرحله ۱۳: پاک‌سازیِ جداگانهٔ کاورها و کش‌ها + پیش‌نمایشِ
+  // هرس + گالریِ تصاویرِ بوک‌مارک. هیچ‌کدام، فایلِ کاربر را
+  // (کتاب، حاشیه‌نویسی، دیتابیس) لمس نمی‌کنند.
+  clearOnlyCovers: (payload) => {
+    return ipcRenderer.invoke('clear-only-covers', sanitizePayload(payload || {}));
+  },
+
+  clearOnlyCaches: (payload) => {
+    return ipcRenderer.invoke('clear-only-caches', sanitizePayload(payload || {}));
+  },
+
+  previewPruneMissingFiles: () => {
+    return ipcRenderer.invoke('preview-prune-missing-files');
+  },
+
+  listBookmarkBackgrounds: () => {
+    return ipcRenderer.invoke('list-bookmark-backgrounds');
+  },
+
+  openBookmarkBackgroundsFolder: () => {
+    return ipcRenderer.invoke('open-bookmark-backgrounds-folder');
+  },
+
+  // مرحله ۱۴: وارد کردنِ مستقیمِ عکس‌ها به پوشهٔ بوک‌مارک
+  // (مسیرها از درگ‌واندراپ می‌آیند؛ هیچ دیالوگی باز نمی‌شود).
+  importBookmarkBackgroundFiles: (paths) => {
+    const clean = Array.isArray(paths)
+      ? paths.map((p) => (typeof p === 'string' ? p : p?.path || '')).filter(Boolean)
+      : [];
+    return ipcRenderer.invoke('import-bookmark-background-files', { paths: clean });
+  },
+
+  // مرحله ۱۵: حذفِ عکس از پوشهٔ بوک‌مارک + خواندنِ تمپلیت‌هایِ
+  // همراهِ نرم‌افزار.
+  deleteBookmarkBackground: (name) => {
+    return ipcRenderer.invoke('delete-bookmark-background', { name });
+  },
+
+  getAppBookmarkPresets: () => {
+    return ipcRenderer.invoke('get-app-bookmark-presets');
+  },
+
   saveRebuiltPdf: (payload) => {
     return ipcRenderer.invoke('save-rebuilt-pdf', sanitizePayload(payload));
   },

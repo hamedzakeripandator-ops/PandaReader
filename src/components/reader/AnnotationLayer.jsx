@@ -60,6 +60,10 @@ import {
   getUnionBounds,
   moveAnnotationByDelta,
 } from '../../utils/annotationEngine';
+import {
+  detectCaretLineDirection,
+  normalizeMixedBidiText,
+} from '../../utils/bidiTextEngine';
 
 // ============================================================================
 // بخش ۱: ریاضیات
@@ -793,7 +797,10 @@ const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit,
       <Text
         x={Number.isFinite(x) ? x : 0}
         y={Number.isFinite(y) ? y : 0}
-        text={item.text || ''}
+        // مرحله ۱۴: نمایشِ نرمال‌شدهٔ BiDi — Konva جهتِ بوم را
+        // تنظیم نمی‌کند، پس خطِ فارسیِ ترکیبی، بدونِ این
+        // نرمال‌سازی، کلماتِ انگلیسی و نقطه‌اش جابه‌جا می‌شد.
+        text={normalizeMixedBidiText(item.text || '')}
         fontSize={fontSize}
         fontFamily={fontFamily}
         fill={item.color || '#22d3ee'}
@@ -1022,7 +1029,8 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
         height={Math.max(20, h - headerH - 20)}
         ellipsis={true}
         align={textDir === 'rtl' ? 'right' : 'left'}
-        text={item.text || 'برای نوشتن یادداشت دوبار کلیک کنید...'}
+        // مرحله ۱۴: مثلِ متن — نمایشِ نرمال‌شدهٔ BiDi.
+        text={normalizeMixedBidiText(item.text || 'برای نوشتن یادداشت دوبار کلیک کنید...')}
         fontSize={Number(item.fontSize) || 13}
         fontFamily={item.fontFamily || "'Estedad', sans-serif"}
         fill={theme.text}
@@ -1115,7 +1123,12 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
     return () => clearTimeout(timer);
   }, [editor, editorKey]);
   if (!editor) return null;
-  const textareaDir = detectTextDirection(editor.value);
+  // مرحله ۱۴: جهتِ زندهٔ ویرایشگر از رویِ خطی که مکان‌نما در
+  // آن است (نه کلِ متن)، تا با تایپ، جهتِ همان خط عوض شود.
+  const textareaCaret = textareaRef.current ? textareaRef.current.selectionStart : null;
+  const textareaDir = textareaCaret === null
+    ? detectTextDirection(editor.value)
+    : detectCaretLineDirection(editor.value, textareaCaret);
   // Forensic Step 4 — Smart Viewport Clamping (برگشتِ آگاهانه از
   // تصمیمِ «بدونِ clamp»ی گامِ قبل، طبقِ TASKِ جدید): نقطهٔ کلیک
   // همچنان دقیق ذخیره می‌شود، ولی «نمایشِ» کارت، داخلِ صفحه نگه
@@ -1259,6 +1272,12 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
           lineHeight: 1.3,
           color: editor.color,
           direction: textareaDir,
+          // مرحله ۱۴: unicodeBidi: 'plaintext' یعنی جهتِ هر
+          // پاراگراف، از اولین کاراکترِ قویِ خودش می‌آید؛ پس
+          // خطِ فارسی و خطِ انگلیسی، هر کدام جهتِ خودشان را
+          // دارند و با هم قاطی نمی‌شوند.
+          unicodeBidi: 'plaintext',
+          textAlign: textareaDir === 'rtl' ? 'right' : 'left',
         }}
       />
       <div
@@ -1266,9 +1285,12 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
           fontSize: 11,
           color: 'rgba(255,255,255,0.55)',
           lineHeight: 1.4,
+          direction: 'rtl',
         }}
       >
-        Enter: ثبت | Shift+Enter: سطر جدید | Esc: انصراف
+        {/* مرحله ۱۴: کلیدهایِ لاتین، داخلِ <bdi> ایزوله‌اند تا
+            ترتیبِ «کلید: عمل» در بسترِ راست‌به‌چپ به هم نریزد. */}
+        <span dir="rtl"><bdi>Enter</bdi>: ثبت | <bdi>Shift+Enter</bdi>: سطر جدید | <bdi>Esc</bdi>: انصراف</span>
       </div>
     </div>
   );
@@ -1380,7 +1402,8 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
         autoFocus
         defaultValue={item.text || ''}
         onChange={(e) => {
-          setTextDir(detectTextDirection(e.target.value));
+          // مرحله ۱۴: جهتِ زنده از رویِ خطِ مکان‌نما.
+          setTextDir(detectCaretLineDirection(e.target.value, e.target.selectionStart));
         }}
         onKeyDown={(e) => {
           // همان مسدودسازیِ کاملِ TextEditorOverlay — stopPropagation +
@@ -1414,6 +1437,8 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
           color: theme.text,
           direction: textDir,
           textAlign: textDir === 'rtl' ? 'right' : 'left',
+          // مرحله ۱۴: جهتِ هر پاراگراف از خودش می‌آید.
+          unicodeBidi: 'plaintext',
         }}
       />
     </div>

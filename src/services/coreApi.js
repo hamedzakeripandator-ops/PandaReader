@@ -383,6 +383,91 @@ export const coreApi = {
     }
   },
 
+  // مرحله ۱۳: پاک‌سازیِ جداگانهٔ کاورها و کش‌ها + پیش‌نمایشِ
+  // هرس + گالریِ تصاویرِ بوک‌مارک.
+  clearOnlyCovers: async (payload = {}) => {
+    const api = getApi();
+    if (!api?.clearOnlyCovers) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.clearOnlyCovers(payload), 90000, { success: false, error: 'مهلت زمانی پاک‌سازیِ کاورها به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در پاک‌سازیِ کاورها' };
+    }
+  },
+
+  clearOnlyCaches: async (payload = {}) => {
+    const api = getApi();
+    if (!api?.clearOnlyCaches) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.clearOnlyCaches(payload), 90000, { success: false, error: 'مهلت زمانی پاک‌سازیِ کش‌ها به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در پاک‌سازیِ کش‌ها' };
+    }
+  },
+
+  previewPruneMissingFiles: async () => {
+    const api = getApi();
+    if (!api?.previewPruneMissingFiles) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.previewPruneMissingFiles(), 60000, { success: false, error: 'مهلت زمانی پیش‌نمایشِ هرس به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در پیش‌نمایشِ هرس' };
+    }
+  },
+
+  listBookmarkBackgrounds: async () => {
+    const api = getApi();
+    if (!api?.listBookmarkBackgrounds) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.listBookmarkBackgrounds(), 30000, { success: false, error: 'مهلت زمانی خواندنِ پوشهٔ تصاویر به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در خواندنِ پوشهٔ تصاویر' };
+    }
+  },
+
+  openBookmarkBackgroundsFolder: async () => {
+    const api = getApi();
+    if (!api?.openBookmarkBackgroundsFolder) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.openBookmarkBackgroundsFolder(), 30000, { success: false, error: 'مهلت زمانی باز کردنِ پوشه به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در باز کردنِ پوشه' };
+    }
+  },
+
+  // مرحله ۱۴: وارد کردنِ مستقیمِ عکس‌ها به پوشهٔ بوک‌مارک.
+  importBookmarkBackgroundFiles: async (paths) => {
+    const api = getApi();
+    if (!api?.importBookmarkBackgroundFiles) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.importBookmarkBackgroundFiles(paths), 60000, { success: false, error: 'مهلت زمانی وارد کردنِ عکس‌ها به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در وارد کردنِ عکس‌ها' };
+    }
+  },
+
+  // مرحله ۱۵: حذفِ عکس از پوشهٔ بوک‌مارک.
+  deleteBookmarkBackground: async (name) => {
+    const api = getApi();
+    if (!api?.deleteBookmarkBackground) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.deleteBookmarkBackground(name), 30000, { success: false, error: 'مهلت زمانی حذفِ عکس به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در حذفِ عکس' };
+    }
+  },
+
+  // مرحله ۱۵: خواندنِ تمپلیت‌هایِ همراهِ نرم‌افزار.
+  getAppBookmarkPresets: async () => {
+    const api = getApi();
+    if (!api?.getAppBookmarkPresets) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.getAppBookmarkPresets(), 30000, { success: false, error: 'مهلت زمانی خواندنِ تمپلیت‌هایِ همراه به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در خواندنِ تمپلیت‌هایِ همراه' };
+    }
+  },
+
   saveRebuiltPdf: async (payload) => {
     const api = getApi();
     if (!api?.saveRebuiltPdf) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
@@ -451,6 +536,14 @@ export const coreApi = {
 
   getReadingStats: async () => {
     return await coreApi.dbAction({ action: 'GET_READING_STATS', payload: {} });
+  },
+
+  // مرحله ۱۴: ثبتِ زمانِ حضورِ سراسریِ برنامه.
+  recordAppActivity: async ({ date, seconds = 0 } = {}) => {
+    return await coreApi.dbAction({
+      action: 'RECORD_APP_ACTIVITY',
+      payload: { date, seconds },
+    });
   },
 
   toggleFullscreen: async () => {

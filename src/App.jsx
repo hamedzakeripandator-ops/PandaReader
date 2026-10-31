@@ -12,7 +12,9 @@ import useReaderStore from './store/useReaderStore';
 import useLibraryStore from './store/useLibraryStore';
 import useAppStore from './store/useAppStore';
 import useSettingsStore from './store/useSettingsStore';
+import useBookmarkStore, { resolveActiveBookKey } from './store/useBookmarkStore';
 import { coreApi } from './services/coreApi';
+import { beginAppSession } from './services/readingActivity';
 import Icons from './components/common/Icons';
 
 // ۳. کامپوننت‌های رندر کمیک و PDF
@@ -32,6 +34,10 @@ const ScreenshotWidget = lazy(() => import('./components/modals/ScreenshotWidget
 const SnippingOverlay = lazy(() => import('./components/modals/SnippingOverlay'));
 const AreaZoomOverlay = lazy(() => import('./components/modals/AreaZoomOverlay'));
 const QuickSettingsModal = lazy(() => import('./components/modals/QuickSettingsModal'));
+// مرحله ۱۳: استودیوی بوک‌مارک — فقط با باز شدنِ مودال بارگذاری می‌شود.
+const BookmarkStudioModal = lazy(() => import('./components/modals/BookmarkStudioModal'));
+// مرحله ۱۴: نمایِ سراسریِ بوک‌مارک‌ها (زیرِ مواردِ اخیر در سایدبار).
+const BookmarksView = lazy(() => import('./views/bookmarks/BookmarksView'));
 import ToastHUD from './components/common/ToastHUD';
 
 // ۵. صفحات ماژولار برنامه
@@ -211,6 +217,12 @@ export default function App() {
       }, autoZenDelay);
     }
   }, [cancelAutoZen, setIsRightSidebarOpen]);
+
+  // مرحله ۱۴: موتورِ زمان‌سنجِ سراسریِ برنامه، از لحظهٔ باز
+  // شدنِ برنامه شروع می‌شود و تا بسته شدن، ادامه دارد.
+  useEffect(() => {
+    beginAppSession();
+  }, []);
 
   // ۱. شنونده زنده پیشرفت استخراج فایل
   useEffect(() => {
@@ -498,6 +510,10 @@ export default function App() {
     useReaderStore.getState().initZoomSettings?.();
     useLibraryStore.getState().initLibrary?.();
     useSettingsStore.getState().initSettings?.();
+    // مرحله ۱۶: هیدراتِ بوک‌مارک در بوت، تا سایدبار و منو از همان
+    // اول پریست‌ها را داشته باشند و هیچ ذخیره‌ای پیش از بارگذاری
+    // رخ ندهد.
+    useBookmarkStore.getState().loadPreferences?.();
 
     const handleBeforeUnload = () => {
       try {
@@ -723,7 +739,7 @@ export default function App() {
       return (
         <div style={styles.readerInnerBox}>
           {comicData.type === 'pdf' ? (
-            <PdfViewer filePath={comicData.filePath} />
+            <PdfViewer filePath={resolveActiveBookKey(comicData, null)} />
           ) : (
             <VerticalViewer />
           )}
@@ -736,6 +752,8 @@ export default function App() {
         return <LibraryView onOpenComic={processFiles} />;
       case 'recent':
         return <RecentView onOpenComic={processFiles} />;
+      case 'bookmarks':
+        return <BookmarksView onOpenComic={processFiles} />;
       case 'favorites':
         return <FavoritesView onOpenComic={processFiles} />;
       case 'downloads':
@@ -891,6 +909,7 @@ export default function App() {
           <SnippingOverlay />
           <AreaZoomOverlay />
           <QuickSettingsModal />
+          <BookmarkStudioModal />
         </Suspense>
       </ChunkErrorBoundary>
       <ToastHUD />

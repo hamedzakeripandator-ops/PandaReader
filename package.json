@@ -10,6 +10,9 @@
     "directories": {
       "output": "dist-electron"
     },
+    "extraResources": [
+      "bookmark-backgrounds"
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -32,6 +35,7 @@
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.4.299",
     "perfect-freehand": "^1.2.3",
+    "pica": "^10.0.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-konva": "^19.3.2",

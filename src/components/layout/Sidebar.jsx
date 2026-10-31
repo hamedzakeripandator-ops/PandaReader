@@ -1,9 +1,59 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useReaderStore from '../../store/useReaderStore';
 import useSettingsStore from '../../store/useSettingsStore';
+import useBookmarkStore from '../../store/useBookmarkStore';
+import { coreApi } from '../../services/coreApi';
+import { getAppSessionSeconds } from '../../services/readingActivity';
+import { formatReadingHours } from '../../utils/readingStats';
 import Icons from '../common/Icons';
+
+// مرحله ۱۴: ویجتِ زندهٔ «زمانِ حضور در برنامه» — بالایِ کارتِ
+// پروفایل. تیکِ ۱ ثانیه‌ای، فقط همین کامپوننت را بازرندر
+// می‌کند، نه کلِ سایدبار؛ مجموعِ کل، هر ۶۰ ثانیه از دیتابیس
+// تازه می‌شود و نشستِ فعلی، از موتورِ readingActivity می‌آید.
+function AppTimeWidget() {
+  const [total, setTotal] = useState(0);
+  const [session, setSession] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadTotal = async () => {
+      try {
+        if (coreApi.isAvailable()) {
+          const res = await coreApi.getReadingStats();
+          if (mounted && res) setTotal(Number(res.totalAppSeconds) || 0);
+        }
+      } catch (_) {}
+    };
+    loadTotal();
+    const refreshTimer = setInterval(loadTotal, 60000);
+    const tickTimer = setInterval(() => {
+      try {
+        setSession(getAppSessionSeconds());
+      } catch (_) {}
+    }, 1000);
+    return () => {
+      mounted = false;
+      clearInterval(refreshTimer);
+      clearInterval(tickTimer);
+    };
+  }, []);
+
+  return (
+    <div style={styles.appTimeWidget} title="زمانِ حضور در برنامه">
+      <span style={styles.appTimeIcon}>
+        <Icons.Clock size={15} />
+      </span>
+      <div style={styles.appTimeTexts}>
+        <span style={styles.appTimeTitle}>زمانِ حضور در برنامه</span>
+        <span style={styles.appTimeLine}>مجموعِ حضور در اپ: {formatReadingHours(total)}</span>
+        <span style={styles.appTimeLine}>نشستِ فعلی: {formatReadingHours(session)}</span>
+      </div>
+    </div>
+  );
+}
 
 export default function Sidebar({ onMouseEnter, onMouseLeave }) {
   // سلکتورهای اتمی برای جلوگیری از بازرندر ناخواسته
@@ -16,6 +66,12 @@ export default function Sidebar({ onMouseEnter, onMouseLeave }) {
   // اشتراک فقط به طول آرایه‌ها جهت صفر کردن بازرندر در حین اسکرول
   const libraryCount = useLibraryStore((state) => state.library?.length || 0);
   const recentCount = useLibraryStore((state) => state.recentItems?.length || 0);
+  // مرحله ۱۴: بجِ شمارندهٔ کلِ بوک‌مارک‌ها (همهٔ کتاب‌ها).
+  const totalBookmarkCount = useBookmarkStore((state) => state.totalBookmarkCount);
+  const loadAllBookmarks = useBookmarkStore((state) => state.loadAllBookmarks);
+  useEffect(() => {
+    loadAllBookmarks();
+  }, [loadAllBookmarks]);
   const favCount = useLibraryStore((state) => state.favorites?.length || 0);
   const downloadsCount = useLibraryStore((state) => state.downloads?.length || 0);
 
@@ -46,6 +102,13 @@ export default function Sidebar({ onMouseEnter, onMouseLeave }) {
       label: 'Recent',
       persianHint: 'اخیراً خوانده‌شده',
       count: recentCount,
+    },
+    {
+      id: 'bookmarks',
+      Icon: Icons.Bookmark,
+      label: 'Bookmarks',
+      persianHint: 'بوک‌مارک‌ها',
+      count: totalBookmarkCount,
     },
     {
       id: 'favorites',
@@ -164,6 +227,8 @@ export default function Sidebar({ onMouseEnter, onMouseLeave }) {
           })}
         </nav>
       </div>
+
+      <AppTimeWidget />
 
       <div
         onClick={() => handleSelectNav('profile')}
@@ -347,6 +412,46 @@ const styles = {
     borderRadius: '10px',
     fontVariantNumeric: 'tabular-nums',
     direction: 'ltr',
+  },
+  appTimeWidget: {
+    direction: 'rtl',
+    backgroundColor: 'var(--panel2)',
+    borderRadius: '16px',
+    padding: '10px 14px',
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '12px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  appTimeIcon: {
+    color: '#f59e0b',
+    display: 'flex',
+    paddingTop: '2px',
+    flexShrink: 0,
+  },
+  appTimeTexts: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3px',
+    minWidth: 0,
+  },
+  appTimeTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 800,
+    color: 'var(--text)',
+  },
+  appTimeLine: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11px',
+    color: 'var(--muted)',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
   profileCard: {
     // مرحله ۴ — جهتِ صریحِ ردیف: آواتار چپ‌ترین، بعد اسم، بعد فلش.

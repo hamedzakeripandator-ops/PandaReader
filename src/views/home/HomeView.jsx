@@ -11,11 +11,24 @@ import QuickActionCards from './QuickActionCards';
 import ComicCard from '../library/ComicCard';
 import StorageSection from '../../components/common/StorageSection';
 import { coreApi } from '../../services/coreApi';
+import { formatReadingHours } from '../../utils/readingStats';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../../components/common/Icons';
 
 export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) {
   const { recentItems, library, libraryItems, favorites } = useLibraryStore();
+  // مرحله ۱۴: مجموعِ زمانِ حضور در برنامه (از دیتابیس).
+  const [appTotalSeconds, setAppTotalSeconds] = useState(0);
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await coreApi.getReadingStats();
+        if (mounted && res) setAppTotalSeconds(Number(res.totalAppSeconds) || 0);
+      } catch (_) {}
+    })();
+    return () => { mounted = false; };
+  }, []);
   const setCurrentView = useAppStore((state) => state.setCurrentView);
   const showToast = useAppStore((state) => state.showToast);
 
@@ -189,6 +202,14 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
               </span>
               <span>مطالعه اخیر:</span>
               <strong style={styles.statNumber}>{recentItems?.length || 0}</strong>
+            </div>
+
+            <div style={styles.statChip} onClick={() => setCurrentView('profile')} title="مجموعِ زمانِ حضور در برنامه">
+              <span style={{ color: '#f59e0b', display: 'flex' }}>
+                <Icons.Clock size={15} />
+              </span>
+              <span>حضور در اپ:</span>
+              <strong style={styles.statNumber}>{formatReadingHours(appTotalSeconds)}</strong>
             </div>
           </div>
         </div>

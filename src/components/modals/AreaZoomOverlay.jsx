@@ -21,22 +21,46 @@ export default function AreaZoomOverlay() {
   const startPosRef = useRef(null);
   const isDrawingRef = useRef(false);
 
-  // مرحله ۱۲: جمع‌شدنِ خودکارِ بنرِ راهنما پس از ۱۰ ثانیه به
-  // دایرهٔ کوچکِ نیمه‌شفافِ اطلاعات. تایمر، از لحظهٔ فعال شدنِ
-  // زومِ ناحیه‌ای شروع می‌شود و با غیرفعال شدنش، وضعیت به حالتِ
-  // اول برمی‌گردد تا فعال‌سازیِ بعدی، دوباره ۱۰ ثانیهٔ کامل،
-  // کپسولِ راهنما را نشان بدهد.
+  // مرحله ۱۴: جمع‌شدنِ خودکارِ بنرِ راهنما پس از ۵ ثانیه به
+  // دایرهٔ کوچکِ نیمه‌شفافِ اطلاعات. تایمر، فقط به فعال‌بودنِ
+  // زومِ ناحیه‌ای و «نسلِ باز شدن» وابسته است — نه به زوم،
+  // صفحه یا هیچ استیتِ در حالِ تغییری — پس تغییرِ پراپ‌ها،
+  // تایمر را ریست نمی‌کند. باز شدنِ دوباره با کلیک رویِ
+  // دایره، نسل را یکی جلو می‌برد و تایمرِ ۵ ثانیه‌ایِ تازه
+  // می‌سازد. هاور، عمداً هیچ کاری نمی‌کند: فقط کلیک، باز و
+  // بسته می‌کند (هاورِ ناخواسته، جلوی جمع شدن را نمی‌گیرد).
   const [bannerCollapsed, setBannerCollapsed] = useState(false);
-  const [bannerHovered, setBannerHovered] = useState(false);
+  const [collapseNonce, setCollapseNonce] = useState(0);
   useEffect(() => {
     if (!isAreaZoomActive) {
       setBannerCollapsed(false);
-      setBannerHovered(false);
       return;
     }
-    const timer = setTimeout(() => setBannerCollapsed(true), 10000);
+    if (bannerCollapsed) return;
+    const timer = setTimeout(() => setBannerCollapsed(true), 5000);
     return () => clearTimeout(timer);
-  }, [isAreaZoomActive]);
+  }, [isAreaZoomActive, bannerCollapsed, collapseNonce]);
+
+  // مرحله ۱۵: کپسولِ «زوم ناحیه‌ای: XX% | بازگشت به YY%» دقیقاً
+  // ۴ ثانیه پس از نمایش، به یک دایرهٔ کوچکِ نیمه‌شفاف جمع می‌شود
+  // تا مزاحمِ مطالعه نباشد؛ کلیک رویِ دایره، کپسول را دوباره باز
+  // می‌کند و ۴ ثانیه بعد، دوباره جمع می‌شود. پیامِ دیگرِ زومِ
+  // ناحیه‌ای (بنرِ راهنمایِ ۵ ثانیه‌ایِ بالا) دست نخورده مانده و
+  // توستِ «قفل شد» هم خودِ ToastHUD آن را محو می‌کند.
+  const [pillCollapsed, setPillCollapsed] = useState(false);
+  const [pillNonce, setPillNonce] = useState(0);
+  useEffect(() => {
+    setPillCollapsed(false);
+  }, [preAreaZoomLevel]);
+  useEffect(() => {
+    if (preAreaZoomLevel === null) {
+      setPillCollapsed(false);
+      return undefined;
+    }
+    if (pillCollapsed) return undefined;
+    const timer = setTimeout(() => setPillCollapsed(true), 4000);
+    return () => clearTimeout(timer);
+  }, [preAreaZoomLevel, pillCollapsed, pillNonce]);
 
   // مرحله ۱۲: پاک‌سازیِ کمربند و شانه‌بند — اگر به هر راهی
   // (مثلاً شورت‌کاتِ Alt+Z روی نمایِ دیگر، که در مرحله ۱۲ در
@@ -226,6 +250,21 @@ export default function AreaZoomOverlay() {
     <>
       {/* ۱. کپسول شناور بازگشت سریع به زوم قبلی (زمانی که زوم باکسی اعمال شده باشد) */}
       {!isAreaZoomActive && preAreaZoomLevel !== null && (
+        pillCollapsed ? (
+          <div style={styles.restorePillWrap}>
+            <button
+              type="button"
+              title="باز کردنِ کپسولِ بازگشت به زومِ قبلی"
+              onClick={() => {
+                setPillCollapsed(false);
+                setPillNonce((n) => n + 1);
+              }}
+              style={styles.restorePillCollapsed}
+            >
+              <Icons.ScanSearch size={15} />
+            </button>
+          </div>
+        ) : (
         <div style={styles.restorePillWrap}>
           <div style={styles.restorePill}>
             <span style={styles.restoreIcon}>
@@ -246,6 +285,7 @@ export default function AreaZoomOverlay() {
             </button>
           </div>
         </div>
+        )
       )}
 
       {/* ۲. لایه تمام‌صفحه کشیدن باکس زوم */}
@@ -260,26 +300,43 @@ export default function AreaZoomOverlay() {
           }}
           style={styles.overlayBackdrop}
         >
-          {/* بنر راهنمای بالای صفحه — مرحله ۱۲: پس از ۱۰ ثانیه،
-              به دایرهٔ کوچکِ نیمه‌شفافِ اطلاعات جمع می‌شود؛
-              هاور یا کلیک، کپسولِ راهنما (همراه با دکمهٔ خروج)
-              را دوباره باز می‌کند و با کنار رفتنِ ماوس، دوباره
-              به دایره برمی‌گردد. pointerDown روی بنر، جلوی شروعِ
+          {/* بنر راهنمای بالای صفحه — مرحله ۱۴: پس از ۵ ثانیه،
+              با انیمیشنِ ۳۵۰ میلی‌ثانیه‌ای به دایرهٔ ۴۰×۴۰
+              جمع می‌شود؛ کلیک رویِ دایره، بنر را دوباره باز
+              می‌کند (و ۵ ثانیه بعد، دوباره جمع می‌شود) و دکمهٔ
+              کوچک‌سازیِ کنارِ بنر، بی‌درنگ جمعش می‌کند. هاور،
+              هیچ اثری ندارد. pointerDown روی بنر، جلوی شروعِ
               کشیدنِ باکس را می‌گیرد. */}
           <div
-            style={bannerCollapsed && !bannerHovered ? styles.topInstructionCollapsed : styles.topInstructionBanner}
-            onMouseEnter={() => setBannerHovered(true)}
-            onMouseLeave={() => setBannerHovered(false)}
-            onClick={() => setBannerHovered(true)}
+            style={bannerCollapsed ? styles.topInstructionCollapsed : styles.topInstructionBanner}
+            onClick={() => {
+              if (bannerCollapsed) {
+                setBannerCollapsed(false);
+                setCollapseNonce((n) => n + 1);
+              }
+            }}
             onPointerDown={(e) => e.stopPropagation()}
           >
-            {bannerCollapsed && !bannerHovered ? (
-              <Icons.Info size={17} />
+            {bannerCollapsed ? (
+              <span style={styles.collapsedGlow}>
+                <Icons.Info size={17} />
+              </span>
             ) : (
               <>
                 <Icons.ScanSearch size={16} />
                 <span>کادر مورد نظر برای بزرگ‌نمایی را با ماوس بکشید</span>
                 <span style={styles.escBadge}>Esc = لغو</span>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setBannerCollapsed(true);
+                  }}
+                  style={styles.bannerMinBtn}
+                  title="جمع شدن به دایرهٔ کوچک"
+                >
+                  <Icons.Minimize size={13} />
+                </button>
                 <button
                   type="button"
                   onClick={(e) => {
@@ -342,16 +399,20 @@ const styles = {
     transform: 'translateX(-50%)',
     display: 'flex',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: '10px',
+    width: 'min(560px, calc(100vw - 32px))',
+    boxSizing: 'border-box',
     padding: '8px 18px',
     borderRadius: '24px',
-    // مرحله ۱۲: نیمه‌شفاف‌تر (۰٫۵۸) تا محتوای کتاب در پشتِ بنر
-    // کاملاً خوانا بماند؛ transition، جمع‌شدنِ نرم به دایره را
-    // می‌سازد؛ pointerEvents فعال است تا هاور/کلیکِ دایره کار کند.
+    // مرحله ۱۴: نیمه‌شفاف‌تر (۰٫۵۸) تا محتوای کتاب در پشتِ بنر
+    // کاملاً خوانا بماند؛ عرضِ صریح، انیمیشنِ width به دایره را
+    // ممکن می‌کند (عرضِ auto انیمیت نمی‌شود)؛ easing و زمان،
+    // دقیقاً همان چیزی است که TASK خواسته است.
     background: 'rgba(15, 23, 42, 0.58)',
     backdropFilter: 'blur(8px)',
     WebkitBackdropFilter: 'blur(8px)',
-    transition: 'all 300ms cubic-bezier(0.16, 1, 0.3, 1)',
+    transition: 'width 350ms cubic-bezier(0.16, 1, 0.3, 1), padding 350ms cubic-bezier(0.16, 1, 0.3, 1), border-radius 350ms cubic-bezier(0.16, 1, 0.3, 1), transform 350ms cubic-bezier(0.16, 1, 0.3, 1), height 350ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease',
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: 'rgba(167, 139, 250, 0.45)',
@@ -363,8 +424,9 @@ const styles = {
     pointerEvents: 'auto',
     direction: 'rtl',
   },
-  // مرحله ۱۲: حالتِ جمع‌شدهٔ بنر — دایرهٔ ۳۸ پیکسلیِ نیمه‌شفاف
-  // با آیکونِ اطلاعات (i) که جلوی دیدِ صفحه را نمی‌گیرد.
+  // مرحله ۱۴: حالتِ جمع‌شدهٔ بنر — دایرهٔ ۴۰×۴۰ پیکسلیِ
+  // نیمه‌شفاف با آیکونِ درخشانِ اطلاعات (i) که جلوی دیدِ صفحه
+  // را نمی‌گیرد؛ فقط با کلیک باز می‌شود، نه با هاور.
   topInstructionCollapsed: {
     position: 'fixed',
     top: '66px',
@@ -373,14 +435,15 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    width: '38px',
-    height: '38px',
+    width: '40px',
+    height: '40px',
+    boxSizing: 'border-box',
     padding: 0,
     borderRadius: '50%',
     background: 'rgba(15, 23, 42, 0.58)',
     backdropFilter: 'blur(8px)',
     WebkitBackdropFilter: 'blur(8px)',
-    transition: 'all 300ms cubic-bezier(0.16, 1, 0.3, 1)',
+    transition: 'width 350ms cubic-bezier(0.16, 1, 0.3, 1), padding 350ms cubic-bezier(0.16, 1, 0.3, 1), border-radius 350ms cubic-bezier(0.16, 1, 0.3, 1), transform 350ms cubic-bezier(0.16, 1, 0.3, 1), height 350ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease',
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: 'rgba(167, 139, 250, 0.45)',
@@ -388,6 +451,24 @@ const styles = {
     boxShadow: '0 12px 32px rgba(0, 0, 0, 0.7)',
     pointerEvents: 'auto',
     cursor: 'pointer',
+  },
+  collapsedGlow: {
+    display: 'flex',
+    filter: 'drop-shadow(0 0 6px rgba(167, 139, 250, 0.9))',
+    color: '#c4b5fd',
+  },
+  bannerMinBtn: {
+    backgroundColor: 'transparent',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(167, 139, 250, 0.45)',
+    color: '#c4b5fd',
+    borderRadius: '10px',
+    padding: '4px 7px',
+    cursor: 'pointer',
+    outline: 'none',
+    display: 'flex',
+    alignItems: 'center',
   },
   bannerExitBtn: {
     backgroundColor: 'rgba(167, 139, 250, 0.2)',
@@ -505,6 +586,24 @@ const styles = {
     borderColor: 'rgba(167, 139, 250, 0.4)',
     boxShadow: '0 10px 28px rgba(0, 0, 0, 0.65)',
     direction: 'rtl',
+  },
+  restorePillCollapsed: {
+    width: '36px',
+    height: '36px',
+    borderRadius: '50%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(13, 18, 24, 0.55)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(167, 139, 250, 0.35)',
+    color: '#a78bfa',
+    opacity: 0.5,
+    cursor: 'pointer',
+    outline: 'none',
+    padding: 0,
+    transition: 'opacity 300ms ease, transform 300ms ease',
   },
   restoreIcon: {
     color: '#a78bfa',

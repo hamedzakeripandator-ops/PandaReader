@@ -6,6 +6,8 @@ import useSettingsStore from '../../store/useSettingsStore';
 import { coreApi } from '../../services/coreApi';
 import thumbnailService from '../../services/thumbnailService';
 import Icons from './Icons';
+import useBookmarkStore, { resolveActiveBookKey } from '../../store/useBookmarkStore';
+import { BOOKMARK_TEMPLATE_MAP, computeViewportCenterYRatio, resolveBookmarkImage } from '../reader/bookmarkTemplates';
 
 export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const isContextMenuOpen = useAppStore((state) => state.isContextMenuOpen);
@@ -28,6 +30,10 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const assignToFolder = useLibraryStore((state) => state.assignToFolder);
 
   const shortcuts = useSettingsStore((state) => state.shortcuts);
+  const currentView = useAppStore((state) => state.currentView);
+  const bookmarkPreferences = useBookmarkStore((state) => state.preferences || {});
+  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || []);
+  const addBookmark = useBookmarkStore((state) => state.addBookmark);
 
   const [highlightStyle, setHighlightStyle] = useState({
     top: 0,
@@ -47,7 +53,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const menuSearchInputRef = useRef(null);
 
   // استیت بخش‌های بازشونده (Collapsible Accordions) برای جلوگیری از شلوغی منو
-  const [expandedSection, setExpandedSection] = useState(null); // 'library' | 'view' | null
+  const [expandedSection, setExpandedSection] = useState(null); // 'library' | 'view' | 'bookmark' | null
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [menuDimensions, setMenuDimensions] = useState({ width: 256, height: 340 });
 
@@ -57,7 +63,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
 
   const targetComicObj = contextMenuData?.comic || comicData;
   const hasComic = Boolean(targetComicObj);
-  const filePath = targetComicObj?.filePath || targetComicObj?.path || '';
+  const filePath = resolveActiveBookKey(contextMenuData?.comic, comicData);
 
   const normPath = useMemo(() => {
     return filePath ? filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase() : '';
@@ -297,6 +303,36 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     }
   };
 
+  // مرحله ۱۳: هدفِ بوک‌مارکِ نقطهٔ کلیک‌راست. اگر yRatio از ویوور
+  // نیامده باشد (مثلاً منویِ کانتینر)، نقطهٔ مرکزِ دیدِ صفحهٔ فعال
+  // مبناست.
+  const bookmarkPage = Math.max(1, (Number(contextMenuData?.pageIndex) || 0) + 1);
+  const bookmarkYRatio =
+    typeof contextMenuData?.yRatio === 'number'
+      ? contextMenuData.yRatio
+      : computeViewportCenterYRatio(bookmarkPage);
+  const isReaderMenu = currentView === 'reader';
+
+  // مرحله ۱۴: افزودنِ بوک‌مارک با یک ساختِ سفارشیِ کاربر
+  // (تمپلیت + عکس + نقطهٔ تمرکز + سمتِ همان پریست).
+  const handleAddPresetBookmark = useCallback(async (preset) => {
+    if (!preset || !filePath) return;
+    const created = await addBookmark({
+      filePath,
+      page: bookmarkPage,
+      yRatio: bookmarkYRatio,
+      template: preset.template,
+      image: preset.image || null,
+      focalPoint: preset.focalPoint || 'center',
+      side: preset.side || bookmarkPreferences.defaultSide || 'right',
+      name: preset.name || '',
+    });
+    if (created) {
+      showToast('بوک‌مارک ساخته شد.', { type: 'success' });
+      closeContextMenu();
+    }
+  }, [filePath, bookmarkPage, bookmarkYRatio, bookmarkPreferences, addBookmark, showToast, closeContextMenu]);
+
   // لیست اکشن‌های منو با ساختار بازشونده (Accordion) و خلوت
   const actions = useMemo(() => {
     const list = [
@@ -511,6 +547,70 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         }
       );
 
+    // مرحله ۱۳: بخشِ بوک‌مارکِ دیجیتال — فقط وقتی در محیطِ مطالعه
+    // هستیم و کتابی باز است.
+    if (hasComic && isReaderMenu) {
+      list.push({
+        id: 'acc_bookmark',
+        type: 'accordion',
+        label: 'بوک‌مارکِ دیجیتال',
+        isOpen: expandedSection === 'bookmark',
+        icon: <Icons.Bookmark size={15} />,
+        onClick: () => toggleSection('bookmark'),
+      });
+
+      // مرحله ۱۵ — جریانِ سایدبار-اول: منو، فقط مصرف‌کنندهٔ
+      // تمپلیت‌هایِ ساخته‌شده در صفحهٔ بوک‌مارک‌هاست (ساختِ تمپلیتِ
+      // خام و استودیویِ نقطه‌ای، از منو حذف شدند). اگر هنوز تمپلیتی
+      // ساخته نشده، به‌جایِ لیستِ خام، یک کارتِ هدایتگر نشان داده
+      // می‌شود؛ وگرنه همان تمپلیت‌ها به‌صورتِ کارتی (تصویرِ کوچک +
+      // نام + نوعِ انیمیشن) + دکمهٔ ساختِ تازه در پایینِ لیست.
+      // کلیک رویِ هر کارت، همان بوک‌مارک را در همین صفحه و همین
+      // مختصاتِ عمودی، رویِ حاشیهٔ ۱۳ پیکسلیِ کاغذ می‌نشاند.
+      const goToBookmarkBuilder = () => {
+        setCurrentView('bookmarks');
+        closeContextMenu();
+      };
+      if (savedPresets.length === 0) {
+        list.push({
+          id: 'bm-go-to-builder',
+          isSubItem: true,
+          section: 'bookmark',
+          label: (<span style={{ whiteSpace: 'normal', lineHeight: 1.7 }}>هنوز تمپلیت بوک‌مارکی نساخته‌اید — رفتن به بخش ساخت بوک‌مارک</span>),
+          icon: <Icons.Bookmark size={14} />,
+          onClick: goToBookmarkBuilder,
+        });
+      } else {
+        list.push(
+          ...savedPresets.map((preset) => {
+            const presetImage = resolveBookmarkImage(
+              { image: preset.image || null, template: preset.template },
+              bookmarkPreferences
+            );
+            const animationLabel = BOOKMARK_TEMPLATE_MAP[preset.template]?.faLabel || preset.template;
+            return {
+              id: `bm-preset-${preset.id}`,
+              isSubItem: true,
+              section: 'bookmark',
+              label: `${preset.name || `ساختِ ${animationLabel}`} — انیمیشنِ ${animationLabel}`,
+              icon: presetImage
+                ? <img src={presetImage} alt="" draggable={false} style={{ width: '18px', height: '26px', objectFit: 'cover', borderRadius: '3px', display: 'block' }} />
+                : <Icons.Bookmark size={14} />,
+              onClick: () => handleAddPresetBookmark(preset),
+            };
+          }),
+          {
+            id: 'bm-new-preset',
+            isSubItem: true,
+            section: 'bookmark',
+            label: '+ ساخت تمپلیت جدید در بخش بوک‌مارک‌ها',
+            icon: <Icons.Plus size={14} />,
+            onClick: goToBookmarkBuilder,
+          }
+        );
+      }
+    }
+
     list.push(
       { type: 'separator' },
       {
@@ -552,6 +652,10 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     resetZoom,
     setCurrentView,
     showToast,
+    isReaderMenu,
+    savedPresets,
+    handleAddPresetBookmark,
+    closeContextMenu,
   ]);
 
   // Stage 8 Part B: one menu row. Extracted verbatim from the old
@@ -847,7 +951,13 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                 }
                 return <React.Fragment key={action.id}>{renderMenuItem(action)}</React.Fragment>;
               }
-              const sectionId = seg.header.id === 'acc_library' ? 'library' : 'view';
+              // مرحله ۱۴ — رفعِ علتِ «در کلیک‌راست هیچی نیست»:
+              // نسخهٔ قبلی، هر هدرِ غیرِ library را 'view' می‌دانست،
+              // پس آکاردئونِ بوک‌مارک هرگز باز نمی‌شد (isOpen آن
+              // با 'bookmark' سنجیده می‌شد ولی رندر با 'view') و
+              // آیتم‌هایِ بوک‌مارک، فقط با باز شدنِ بخشِ view، زیرِ
+              // هدرِ اشتباه دیده می‌شدند.
+              const sectionId = seg.header.id === 'acc_library' ? 'library' : seg.header.id === 'acc_bookmark' ? 'bookmark' : 'view';
               const isOpen = expandedSection === sectionId;
               return (
                 <React.Fragment key={seg.header.id}>

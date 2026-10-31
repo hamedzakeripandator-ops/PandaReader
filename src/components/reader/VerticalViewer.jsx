@@ -10,6 +10,9 @@ import Icons from '../common/Icons';
 import AnnotationLayer from './AnnotationLayer';
 import AnnotationToolbar from './AnnotationToolbar';
 import useSettingsStore from '../../store/useSettingsStore';
+import useBookmarkStore, { resolveActiveBookKey, normalizeBookKey } from '../../store/useBookmarkStore';
+import BookmarkMarker from './BookmarkMarker';
+import { clampYRatio, resolveBookmarkImage } from './bookmarkTemplates';
 import readingActivity from '../../services/readingActivity';
 import { getReadingThemeFilter } from '../../utils/readingTheme';
 
@@ -34,6 +37,68 @@ function buildComicImageUrl(filePath) {
 // React.memo را برای ComicPageFrame و لایهٔ Konvaی درونِ آن،
 // شکست می‌داد. این آرایه، فریز شده و در همهٔ صفحه‌ها مشترک است.
 const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
+import useDragPan from '../../hooks/useDragPan';
+
+const EMPTY_PAGE_BOOKMARKS = Object.freeze([]);
+
+// مرحله ۱۵: کپسولِ شناورِ درصدِ پیشرفتِ ری‌رندر — غیرمزاحم
+// (pointerEvents: none) در گوشهٔ پایین-چپِ ویوور. در ۱۰۰٪، یک
+// ثانیه سبزِ زمردی نشان می‌دهد و بعد محو می‌شود.
+function RenderProgressHud({ total, done, isDone, visible }) {
+  if (!visible || total <= 0) return null;
+  const percent = Math.min(100, Math.round((done / total) * 100));
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: '16px',
+        bottom: '16px',
+        zIndex: 60,
+        pointerEvents: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        padding: '8px 14px',
+        borderRadius: '20px',
+        backgroundColor: isDone ? 'rgba(6, 78, 59, 0.92)' : 'rgba(13, 18, 24, 0.92)',
+        border: isDone ? '1px solid rgba(52, 211, 153, 0.5)' : '1px solid var(--border)',
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+        fontFamily: 'var(--font-fa)',
+        fontSize: '12px',
+        color: isDone ? '#a7f3d0' : 'var(--text)',
+        direction: 'rtl',
+      }}
+    >
+      <span>
+        {isDone
+          ? `\u2713 بازسازی کیفیت کامل شد (${percent.toLocaleString('fa-IR')}٪)`
+          : `در حال بازسازی کیفیت صفحات... ${percent.toLocaleString('fa-IR')}٪`}
+      </span>
+      <span
+        style={{
+          width: '90px',
+          height: '4px',
+          borderRadius: '2px',
+          backgroundColor: 'rgba(255, 255, 255, 0.15)',
+          overflow: 'hidden',
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            display: 'block',
+            height: '100%',
+            width: `${percent}%`,
+            backgroundColor: isDone ? '#34d399' : '#22d3ee',
+            transition: 'width 200ms ease',
+          }}
+        />
+      </span>
+    </div>
+  );
+}
+
+
 
 const ComicPageFrame = React.memo(function ComicPageFrame({
   item,
@@ -49,6 +114,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   pageAnnotations,
   onCommitPageAnnotations,
   onImageLoad,
+  onFrameRendered,
   onContextMenu,
   pageFilter,
 }) {
@@ -70,8 +136,11 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
       }, 250 * (retryCount + 1));
     } else {
       setHasError(true);
+      // تلاشِ نهایی هم تمام شد؛ برای HUD، این صفحه «تمام‌شده»
+      // حساب می‌شود تا درصد، هیچ‌وقت گیر نکند.
+      if (typeof onFrameRendered === 'function') onFrameRendered(index);
     }
-  }, [retryCount]);
+  }, [retryCount, index, onFrameRendered]);
 
   const handleLoad = useCallback(
     (e) => {
@@ -80,8 +149,9 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
       if (nw > 0 && nh > 0) {
         onImageLoad(index, nw, nh);
       }
+      if (typeof onFrameRendered === 'function') onFrameRendered(index);
     },
-    [index, onImageLoad]
+    [index, onImageLoad, onFrameRendered]
   );
 
   const normalizedRotation = ((Number(rotation) || 0) % 360 + 360) % 360;
@@ -104,7 +174,17 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
         contain: isSeamlessMode ? 'layout style' : 'layout paint',
         overflow: isSeamlessMode ? 'visible' : 'hidden',
       }}
-      onContextMenu={(e) => onContextMenu(e, index, rawPath)}
+      onContextMenu={(e) => {
+        // مرحله ۱۳: مختصاتِ عمودیِ کلیک نسبت به بالایِ همین صفحه.
+        let yRatio = 0;
+        try {
+          const rect = e.currentTarget ? e.currentTarget.getBoundingClientRect() : null;
+          if (rect && rect.height > 0) {
+            yRatio = clampYRatio((e.clientY - rect.top) / rect.height);
+          }
+        } catch (_) {}
+        onContextMenu(e, index, rawPath, yRatio);
+      }}
     >
       {/* مانتِ دائمیِ لایهٔ حاشیه‌نویسی (یکسان‌سازی با PdfViewer، فاز ۱):
           قبلاً AnnotationLayer فقط وقتی imgSrc آماده و بدونِ خطا بود
@@ -233,7 +313,46 @@ export default function VerticalViewer() {
   const [redoStack, setRedoStack] = useState([]);
   const [isScrollIdle, setIsScrollIdle] = useState(true);
 
+  // مرحله ۱۵ — پیشرفتِ ری‌رندر: مجموعهٔ فریم‌هایِ بارگذاری‌شدهٔ
+  // کتابِ جاری (در ref تا بازرندرِ اضافه نسازد) + شمارندهٔ پنجرهٔ
+  // دیدنیِ جاری. HUD، فقط وقتی نشان داده می‌شود که رندر، بیش از
+  // ۳۰۰ میلی‌ثانیه طول بکشد تا اسکرول‌هایِ سریع، چشمک نزنند؛
+  // حالتِ «کامل شد» هم فقط وقتی نشان داده می‌شود که HUD، قبلاً
+  // در همین نشستِ رندر دیده شده باشد.
+  // مرحله ۱۶ — HUDِ ری‌رندر، فقط هنگامِ تغییرِ زوم (نه اسکرول و
+  // نه باز شدنِ کتاب). در این ویوور، زوم فقط عرضِ CSS است و
+  // تصویرها دوباره بارگذاری نمی‌شوند؛ پس تایمرِ محافظِ ۱۲۰۰
+  // میلی‌ثانیه، تکمیل‌کنندهٔ اصلی است و onFrameRendered فقط
+  // بارگذاری‌هایِ واقعی (تغییرِ منبع یا خطایِ نهایی) را جلو می‌اندازد.
+  const visibleIndicesRef = useRef([]);
+  const zoomHudSessionRef = useRef(null);
+  const zoomHudSafetyRef = useRef(null);
+  const zoomHudGreenRef = useRef(null);
+  const prevZoomRef = useRef(null);
+  const [zoomHud, setZoomHud] = useState({ visible: false, done: 0, total: 0, isDone: false });
+
+  const completeZoomHud = useCallback(() => {
+    const session = zoomHudSessionRef.current;
+    if (!session) return;
+    if (zoomHudSafetyRef.current) { clearTimeout(zoomHudSafetyRef.current); zoomHudSafetyRef.current = null; }
+    setZoomHud((prev) => ({ ...prev, visible: true, done: prev.total, isDone: true }));
+    if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+    zoomHudGreenRef.current = setTimeout(() => {
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+    }, 800);
+  }, []);
+
   const containerRef = useRef(null);
+
+  // مرحله ۱۵ — درگِ چهارجهته با ماوس (دکمهٔ چپ در مطالعهٔ عادی،
+  // دکمهٔ وسط در هر حالتی؛ جزئیاتِ کامل در useDragPan). این فراخوان،
+  // عمداً پس از اعلانِ containerRef است تا TDZ نگیرد.
+  const { handlePanMouseDown, isPanning } = useDragPan({
+    containerRef,
+    isAnnotationActive,
+    isAreaZoomActive,
+  });
   const [containerWidth, setContainerWidth] = useState(0);
 
   // یکسان‌سازی با PdfViewer: عرضِ کانتینر باید با تغییرِ اندازهٔ
@@ -258,7 +377,55 @@ export default function VerticalViewer() {
 
   const items = comicData?.items || [];
   const itemsCount = items.length;
-  const currentFilePath = comicData?.filePath;
+  const currentFilePath = resolveActiveBookKey(comicData, null);
+
+  // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
+  const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(currentFilePath)] || EMPTY_PAGE_BOOKMARKS);
+  const bookmarkPreferences = useBookmarkStore((state) => state.preferences);
+  const loadBookmarksForFile = useBookmarkStore((state) => state.loadBookmarksForFile);
+  const loadBookmarkPreferences = useBookmarkStore((state) => state.loadPreferences);
+  const deleteBookmark = useBookmarkStore((state) => state.deleteBookmark);
+  const updateBookmark = useBookmarkStore((state) => state.updateBookmark);
+  const openBookmarkStudio = useBookmarkStore((state) => state.openStudio);
+  const bookmarkJumpTarget = useBookmarkStore((state) => state.jumpTarget);
+  const clearBookmarkJumpTarget = useBookmarkStore((state) => state.clearJumpTarget);
+
+  useEffect(() => {
+    if (!currentFilePath) return;
+    loadBookmarksForFile(currentFilePath);
+    loadBookmarkPreferences();
+  }, [currentFilePath, loadBookmarksForFile, loadBookmarkPreferences]);
+
+  const pageBookmarkMap = useMemo(() => {
+    const map = {};
+    (pageBookmarkList || []).forEach((bm) => {
+      if (!map[bm.page]) map[bm.page] = [];
+      map[bm.page].push(bm);
+    });
+    return map;
+  }, [pageBookmarkList]);
+
+  const handleOpenBookmark = useCallback((bm) => {
+    if (!bm) return;
+    openBookmarkStudio({ filePath: currentFilePath, page: bm.page, yRatio: bm.yRatio, bookmarkId: bm.id });
+  }, [openBookmarkStudio, currentFilePath]);
+
+  const handleDeleteBookmark = useCallback((bm) => {
+    if (!bm) return;
+    deleteBookmark(currentFilePath, bm.id);
+  }, [deleteBookmark, currentFilePath]);
+
+  const handleRenameBookmark = useCallback((bm, newName) => {
+    if (!bm) return;
+    updateBookmark(currentFilePath, bm.id, { name: newName });
+  }, [updateBookmark, currentFilePath]);
+
+  // مرحله ۱۸ — ثبتِ مکانِ تازهٔ بوک‌مارک پس از پایانِ درگ (فقط یک
+  // ذخیره در pointerup؛ در حینِ حرکت، هیچ IPCای صدا زده نمی‌شود).
+  const handleMoveBookmark = useCallback((bm, patch) => {
+    if (!bm || !patch) return;
+    updateBookmark(currentFilePath, bm.id, patch);
+  }, [updateBookmark, currentFilePath]);
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
   // عرضِ واقعیِ هر کادر = عرضِ کانتینر × ضریبِ زوم (همان درصدی که
@@ -290,6 +457,52 @@ export default function VerticalViewer() {
     pageGap: safePageGap,
     filePath: currentFilePath,
   });
+  visibleIndicesRef.current = visibleIndices;
+
+  useEffect(() => {
+    if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+    if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+    zoomHudSessionRef.current = null;
+    prevZoomRef.current = null;
+    setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+  }, [currentFilePath]);
+
+
+
+  const handleFrameRendered = useCallback((index) => {
+    const session = zoomHudSessionRef.current;
+    if (!session || typeof index !== 'number') return;
+    if (!session.targets.has(index)) return;
+    session.done.add(index);
+    setZoomHud((prev) => ({ ...prev, done: session.done.size }));
+    if (session.done.size >= session.targets.size) completeZoomHud();
+  }, [completeZoomHud]);
+
+  useEffect(() => {
+    if (!currentFilePath) return undefined;
+    const prev = prevZoomRef.current;
+    if (prev && prev.file === currentFilePath && prev.zoom === safeZoom) return undefined;
+    const changedFile = !prev || prev.file !== currentFilePath;
+    prevZoomRef.current = { file: currentFilePath, zoom: safeZoom };
+    if (changedFile) {
+      if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+      if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+      return undefined;
+    }
+    const targets = new Set(visibleIndicesRef.current || []);
+    if (targets.size === 0) return undefined;
+    if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+    if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+    zoomHudSessionRef.current = { targets, done: new Set() };
+    setZoomHud({ visible: true, done: 0, total: targets.size, isDone: false });
+    zoomHudSafetyRef.current = setTimeout(() => { completeZoomHud(); }, 1200);
+    return () => {
+      if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+    };
+  }, [safeZoom, currentFilePath, completeZoomHud]);
+
 
   // ۱. تشخیص توقف اسکرول برای فعال‌سازی پاس دوم وضوح تصویر (Dual-Pass Crispness)
   useEffect(() => {
@@ -780,6 +993,36 @@ export default function VerticalViewer() {
     }
   }, [targetPage, itemsCount, clearTargetPage, scrollToIndex]);
 
+  // مرحله ۱۳: پرشِ نقطه‌ای به بوک‌مارک — اول scrollToIndex تا صفحه
+  // در پنجرهٔ مجازی بیاید، بعد اسکرولِ دقیقِ DOM به همان نقطه.
+  // کانتینر، padding ندارد، پس فرمول، همان pageOffsetTop +
+  // pageHeight*yRatio است (با مختصاتِ واقعیِ DOM).
+  useEffect(() => {
+    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== currentFilePath) return;
+    const page = bookmarkJumpTarget.page;
+    if (page < 1 || page > itemsCount) { clearBookmarkJumpTarget(); return; }
+    scrollToIndex(page - 1, 'auto');
+    setCurrentPage(page);
+    const yRatio = bookmarkJumpTarget.yRatio;
+    const doPreciseScroll = () => {
+      const container = containerRef.current;
+      const el = document.getElementById(`comic-page-${page}`);
+      if (!container || !el) return false;
+      const cRect = container.getBoundingClientRect();
+      const eRect = el.getBoundingClientRect();
+      container.scrollTo({
+        top: container.scrollTop + (eRect.top - cRect.top) + eRect.height * yRatio,
+        behavior: 'auto',
+      });
+      return true;
+    };
+    clearBookmarkJumpTarget();
+    const t1 = setTimeout(() => {
+      if (!doPreciseScroll()) setTimeout(doPreciseScroll, 600);
+    }, 250);
+    return () => clearTimeout(t1);
+  }, [bookmarkJumpTarget, currentFilePath, itemsCount, scrollToIndex, setCurrentPage, clearBookmarkJumpTarget]);
+
   // ۷. همگام‌سازی شماره صفحه بدون سابسکرایب رندرر به currentPage
   useEffect(() => {
     if (isJumping.current || isResumingRef.current || !hasResumedRef.current) return;
@@ -809,10 +1052,11 @@ export default function VerticalViewer() {
   ]);
 
   const handleFrameContextMenu = useCallback(
-    (e, index, path) => {
+    (e, index, path, yRatio) => {
       handleContextMenu(e, {
         pageIndex: index,
         imagePath: path,
+        yRatio: typeof yRatio === 'number' ? yRatio : undefined,
         comic: comicData,
       });
     },
@@ -835,7 +1079,7 @@ export default function VerticalViewer() {
             <feConvolveMatrix
               order="3"
               preserveAlpha="true"
-              kernelMatrix="0 -0.18 0 -0.18 1.72 -0.18 0 -0.18 0"
+              kernelMatrix="0 -0.10 0 -0.10 1.40 -0.10 0 -0.10 0"
             />
           </filter>
         </defs>
@@ -858,13 +1102,16 @@ export default function VerticalViewer() {
         style={{
           ...styles.scrollContainer,
           pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
+          cursor: isPanning ? 'grabbing' : undefined,
+          userSelect: isPanning ? 'none' : undefined,
         }}
+        onMouseDown={handlePanMouseDown}
         onContextMenu={(e) => {
           if (!e.target.closest('.comic-page-item')) {
             const safeIndex = Math.max(0, Math.min(activePageIndex, itemsCount - 1));
             handleContextMenu(e, {
               pageIndex: safeIndex,
-              imagePath: comicData.items[safeIndex]?.path,
+              imagePath: items[safeIndex]?.path,
               comic: comicData,
             });
           }
@@ -872,6 +1119,7 @@ export default function VerticalViewer() {
       >
         <div
           style={{
+            position: 'relative',
             width: `${Math.round(safeZoom * 100)}%`,
             margin: '0 auto',
             display: 'flex',
@@ -883,23 +1131,31 @@ export default function VerticalViewer() {
           <div style={{ height: `${paddingTop}px`, width: '100%', flexShrink: 0 }} />
 
           {visibleIndices.map((index) => {
-            const item = comicData.items[index];
+            // مرحله ۱۵ — رفعِ کرشِ «reading '10'»: به‌جایِ خواندنِ
+            // مستقیمِ comicData.items (که هنگامِ تعویضِ کتاب، لحظه‌ای
+            // undefined است)، همان آرایهٔ امن‌شدهٔ items خوانده می‌شود
+            // که visibleIndices هم از رویِ آن ساخته شده است.
+            const item = items[index];
             if (!item) return null;
             const pageNum = index + 1;
             const pageAnnots = annotationsByPage[String(pageNum)] || EMPTY_PAGE_ANNOTATIONS;
             const isNearCenter = Math.abs(index - activePageIndex) <= 1;
+            const frameBookmarks = pageBookmarkMap[pageNum] || EMPTY_PAGE_BOOKMARKS;
 
             return (
-              <ComicPageFrame
+              <div
                 key={
                   item.path
                     ? `frame-${index}-${item.path}`
                     : `frame-${index}-${hiDpiRenderTick}`
                 }
+                style={{ position: 'relative', overflow: 'visible', width: '100%' }}
+              >
+              <ComicPageFrame
                 item={item}
                 index={index}
                 isLastItem={index === itemsCount - 1}
-                knownHeight={heights ? heights[index] : null}
+                knownHeight={(heights || [])[index] ?? null}
                 frameWidth={frameWidth}
                 pageGap={safePageGap}
                 rotation={rotation}
@@ -910,8 +1166,31 @@ export default function VerticalViewer() {
                 onCommitPageAnnotations={handleCommitPageAnnotations}
                 pageFilter={pageFilter}
                 onImageLoad={recordImageDimensions}
+                onFrameRendered={handleFrameRendered}
                 onContextMenu={handleFrameContextMenu}
               />
+              {frameBookmarks.map((bm) => (
+                <div
+                  key={bm.id}
+                  style={{
+                    position: 'absolute',
+                    top: bm.yRatio <= 0 ? '0px' : `calc(${bm.yRatio * 100}% - 12px)`,
+                    left: bm.side === 'left' ? undefined : 'calc(100% + 10px)',
+                    right: bm.side === 'left' ? 'calc(100% + 10px)' : undefined,
+                    zIndex: 50,
+                  }}
+                >
+                  <BookmarkMarker
+                    bookmark={bm}
+                    imageUrl={resolveBookmarkImage(bm, bookmarkPreferences)}
+                    onOpen={handleOpenBookmark}
+                    onDelete={handleDeleteBookmark}
+                    onRename={handleRenameBookmark}
+                    onMove={handleMoveBookmark}
+                  />
+                </div>
+              ))}
+              </div>
             );
           })}
 
@@ -920,6 +1199,12 @@ export default function VerticalViewer() {
           />
         </div>
       </div>
+      <RenderProgressHud
+        total={zoomHud.total}
+        done={zoomHud.done}
+        isDone={zoomHud.isDone}
+        visible={zoomHud.visible}
+      />
     </div>
   );
 }
@@ -936,7 +1221,8 @@ const styles = {
     height: '100%',
     overflowY: 'auto',
     overflowX: 'auto',
-    padding: '0',
+    // مرحله ۱۶: پدینگِ افقیِ ۸۰ = جایِ مارکرِ ۶۸ + ۱۲ فاصله.
+    padding: '0 80px',
     position: 'relative',
     userSelect: 'none',
     direction: 'ltr',

@@ -5,6 +5,7 @@ import useReaderStore from '../../store/useReaderStore';
 import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useContextMenu from '../../hooks/useContextMenu';
+import useDragPan from '../../hooks/useDragPan';
 import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
 import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
@@ -15,6 +16,9 @@ import Icons from '../common/Icons';
 import { normalizeSearchText } from '../../utils/persianSearch';
 import { prepareAnnotatedPdfExport } from '../../utils/annotationPdfExport';
 import useSettingsStore from '../../store/useSettingsStore';
+import useBookmarkStore, { normalizeBookKey } from '../../store/useBookmarkStore';
+import BookmarkMarker from './BookmarkMarker';
+import { clampYRatio, resolveBookmarkImage } from './bookmarkTemplates';
 import readingActivity from '../../services/readingActivity';
 import { extractPdfOutline } from '../../utils/pdfOutline';
 import { getReadingThemeFilter } from '../../utils/readingTheme';
@@ -210,14 +214,14 @@ export function ensurePdfJsEnvironmentReady() {
 
 ensurePdfJsEnvironmentReady();
 
-const DOM_OVERSCAN = 4;
-const RENDER_RADIUS = 3;
-const MAX_CACHED_BLOBS = 18;
+const DOM_OVERSCAN = 5;
+const RENDER_RADIUS = 4;
+const MAX_CACHED_BLOBS = 30;
 
-// مرحله ۴ ـ بخش ب: سقفِ کشِ متنِ جستجو + شعاعِ cleanup. شعاعِ ۵، یک
-// صفحه حاشیه فراتر از پنجرهٔ رندر (DOM_OVERSCAN=۴) نگه می‌دارد.
+// مرحله ۴ ـ بخش ب: سقفِ کشِ متنِ جستجو + شعاعِ cleanup. شعاعِ ۶، یک
+// صفحه حاشیه فراتر از پنجرهٔ رندر (DOM_OVERSCAN=۵) نگه می‌دارد.
 const MAX_SEARCH_TEXT_CACHE_PAGES = 500;
-const SEARCH_CLEANUP_RADIUS = 5;
+const SEARCH_CLEANUP_RADIUS = 6;
 
 // مرحله ۴ ـ بخش ب: جهتِ آیتمِ متنیِ pdf.js. در pdf.js، برای یک آیتمِ
 // خالصِ فارسی/عبری، رشتهٔ item.str به ترتیبِ منطقی برمی‌گردد و
@@ -267,6 +271,7 @@ function extractDataUrlFromImgElement(imgEl) {
  // برای PdfPageItem و لایهٔ Konvaی درونِ آن، در هر رندرِ والد،
 // شکست می‌داد. این آرایه، فریز شده و در همهٔ صفحه‌ها مشترک است.
 const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
+const EMPTY_PAGE_BOOKMARKS = Object.freeze([]);
 
 // مرحله ۱۲: مقایسه‌گرِ دقیقِ PdfPageItem — تنها تفاوتش با
 // مقایسهٔ پیش‌فرض، نادیده گرفتنِ `distanceFromActive` است: این
@@ -277,6 +282,64 @@ const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
 // می‌شوند. بقیهٔ پراپ‌ها، دقیقاً با `===` مقایسه می‌شوند (از
 // جمله `zoomLevel` و `expectedHeight` که در زوم، واقعاً عوض
 // می‌شوند و چیدمان، به‌روزرسانی‌شان را لازم دارد).
+
+// مرحله ۱۵: کپسولِ شناورِ درصدِ پیشرفتِ ری‌رندر — غیرمزاحم
+// (pointerEvents: none) در گوشهٔ پایین-چپِ ویوور. در ۱۰۰٪، یک
+// ثانیه سبزِ زمردی نشان می‌دهد و بعد محو می‌شود.
+function RenderProgressHud({ total, done, isDone, visible }) {
+  if (!visible || total <= 0) return null;
+  const percent = Math.min(100, Math.round((done / total) * 100));
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        left: '16px',
+        bottom: '16px',
+        zIndex: 60,
+        pointerEvents: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        padding: '8px 14px',
+        borderRadius: '20px',
+        backgroundColor: isDone ? 'rgba(6, 78, 59, 0.92)' : 'rgba(13, 18, 24, 0.92)',
+        border: isDone ? '1px solid rgba(52, 211, 153, 0.5)' : '1px solid var(--border)',
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+        fontFamily: 'var(--font-fa)',
+        fontSize: '12px',
+        color: isDone ? '#a7f3d0' : 'var(--text)',
+        direction: 'rtl',
+      }}
+    >
+      <span>
+        {isDone
+          ? `\u2713 بازسازی کیفیت کامل شد (${percent.toLocaleString('fa-IR')}٪)`
+          : `در حال بازسازی کیفیت صفحات... ${percent.toLocaleString('fa-IR')}٪`}
+      </span>
+      <span
+        style={{
+          width: '90px',
+          height: '4px',
+          borderRadius: '2px',
+          backgroundColor: 'rgba(255, 255, 255, 0.15)',
+          overflow: 'hidden',
+          flexShrink: 0,
+        }}
+      >
+        <span
+          style={{
+            display: 'block',
+            height: '100%',
+            width: `${percent}%`,
+            backgroundColor: isDone ? '#34d399' : '#22d3ee',
+            transition: 'width 200ms ease',
+          }}
+        />
+      </span>
+    </div>
+  );
+}
+
 function arePdfPagePropsEqual(prev, next) {
   const { distanceFromActive: _prevDistance, ...prevRest } = prev;
   const { distanceFromActive: _nextDistance, ...nextRest } = next;
@@ -305,6 +368,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   cachedBlobUrl,
   onStorePageBlob,
   revokedBlobUrls,
+  revokedTick,
   onDropPageBlob,
   expectedHeight,
   rotation,
@@ -313,20 +377,34 @@ const PdfPageItem = React.memo(function PdfPageItem({
   onCommitPageAnnotations,
   onPageRatioMeasured,
   onContextMenu,
+  onHiDpiSettled,
+  onRenameBookmark,
+  onMoveBookmark,
+  pageBookmarks,
+  onOpenBookmark,
+  onDeleteBookmark,
   searchHighlights,
   pageFilter,
+  clipRect,
+  deepSuspended,
 }) {
   const [blobUrl, setBlobUrl] = useState(cachedBlobUrl || null);
-  const [hiDpiUrl, setHiDpiUrl] = useState(() =>
-    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel)
+  // مرحله ۲۰ — لایهٔ دیپ، drawable است (ImageBitmap یا بومِ جایگزین)،
+  // نه URL؛ پس دیگر نه toBlobای هست، نه دیکدِ <img>ای برایِ آن.
+  const [hiDpiDrawable, setHiDpiDrawable] = useState(() =>
+    hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel, null)
   );
   const [renderFailed, setRenderFailed] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
+
 
   const imgRef = useRef(null);
   const renderTaskRef = useRef(null);
   const erroredUrlsRef = useRef(new Set());
   const imgErrorCountRef = useRef(0);
+  // مرحله ۱۳: تنظیماتِ بوک‌مارک (اشتراکِ داخلی؛ تغییرش نادر است و
+  // memoیِ صفحه را نمی‌شکند، چون prop نیست).
+  const bookmarkPreferences = useBookmarkStore((state) => state.preferences);
   // مرحله ۱۲: فاصلهٔ زنده از صفحهٔ فعال، برای تأخیرِ اولویت‌دار،
   // بدونِ اینکه وابستگیِ effectِ رندرِ پایه باشد (وگرنه، هر
   // تغییرِ صفحهٔ فعال، effectِ همهٔ صفحه‌ها را از نو راه
@@ -352,7 +430,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
       setBlobUrl(cachedBlobUrl);
       setRenderFailed(false);
     }
-  }, [cachedBlobUrl, blobUrl, revokedBlobUrls]);
+  }, [cachedBlobUrl, blobUrl, revokedBlobUrls, revokedTick]);
 
   // الف: پاس اول (Fast Base Render) برای اسکرول بدون لگ
   useEffect(() => {
@@ -391,17 +469,32 @@ const PdfPageItem = React.memo(function PdfPageItem({
           onPageRatioMeasured(pageNumber - 1, baseViewport.height / baseViewport.width);
         }
 
-        const maxDimension = Math.max(baseViewport.width, baseViewport.height);
-        const optimalScale = maxDimension > 1600 ? 1.55 : 1.9;
-        const viewport = page.getViewport({ scale: optimalScale });
+        // مرحله ۲۰ — لایهٔ پایهٔ فوق‌سبک: مقیاس، dpr با کفِ ۱٫۵ و
+        // سقفِ ۱٫۸۵ است و ضلعِ بوم از ۲۲۰۰ پیکسل نمی‌گذرد تا اسکرول
+        // سبک بماند؛ تیزیِ نهایی با لایهٔ دیپ (بومِ مستقیم) می‌آید،
+        // نه با سنگین‌کردنِ پایه. (مرحلهٔ ۱۹ پایه را PNG و مقیاسِ
+        // max(dpr, 2.0) کرده بود که همان کندیِ گزارش‌شده را ساخت.)
+        let optimalScale = Math.min(Math.max(window.devicePixelRatio || 1, 1.5), 1.85);
+        let viewport = page.getViewport({ scale: optimalScale });
+        const maxBaseSide = Math.max(viewport.width, viewport.height);
+        if (maxBaseSide > 2200) {
+          optimalScale = Number((optimalScale * (2200 / maxBaseSide)).toFixed(3));
+          viewport = page.getViewport({ scale: optimalScale });
+        }
 
         tempCanvas = document.createElement('canvas');
         tempCanvas.width = Math.max(1, Math.floor(viewport.width));
         tempCanvas.height = Math.max(1, Math.floor(viewport.height));
-        const context = tempCanvas.getContext('2d', { alpha: false });
-
+        // مرحله ۱۷: بومِ استاندارد (بدونِ alpha:false که بافرِ
+        // اولیه را سیاه می‌کند) و پر کردنِ سفید، پیش از هر کاری.
+        const context = tempCanvas.getContext('2d');
         context.fillStyle = '#ffffff';
         context.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+        // مرحله ۱۶: هموارسازیِ باکیفیتِ صریح برایِ پاسِ پایه (پیش‌فرضِ
+        // مرورگر، کیفیتِ پایین است و بافتِ آناتومی را زبر می‌کند؛
+        // پاسِ HiDPI در سرویس، از قبل همین را داشت).
+        context.imageSmoothingEnabled = true;
+        context.imageSmoothingQuality = 'high';
 
         const renderTask = page.render({
           canvasContext: context,
@@ -437,7 +530,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             setBlobUrl(nextUrl);
           },
           'image/webp',
-          0.93
+          0.90
         );
       } catch (err) {
         if (tempCanvas) {
@@ -485,6 +578,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
     effectiveCachedBlobUrl,
     effectiveBlobUrl,
     retryTick,
+    revokedTick,
     onPageRatioMeasured,
     onStorePageBlob,
   ]);
@@ -498,55 +592,121 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // گیتِ نزدیکی هم از `isNearViewport`ی مرزی می‌آید، نه از
   // `distanceFromActive` که در هر قدمِ اسکرول عوض می‌شود.
   useEffect(() => {
-    if (!pdfDoc || !isNearViewport) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const needsHiDpi = renderZoomLevel > 1.08 || dpr > 1.15;
-    if (!needsHiDpi) {
-      setHiDpiUrl(null);
+    // مرحله ۲۰ — لایهٔ دیپ، دیگر URL نیست: یک drawable است که رویِ
+    // بومِ دیپ می‌نشیند. خروج از نزدیکی، drawable را فوراً خالی
+    // می‌کند تا بومِ دیپ پاک شود و تصویرِ پایه دیده شود؛ ورودِ
+    // دوباره، از کشِ سرویس (اگر مانده) بی‌درنگ، وگرنه با رندرِ
+    // تازه، برمی‌گردد.
+    if (!pdfDoc || !isNearViewport) {
+      if (hiDpiDrawable) setHiDpiDrawable(null);
       return;
     }
 
-    const cachedSharp = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel);
-    if (cachedSharp) {
-      setHiDpiUrl(cachedSharp);
+    const clipKey = clipRect
+      ? `${Math.round(clipRect.x || 0)},${Math.round(clipRect.y || 0)},${Math.round(clipRect.width)},${Math.round(clipRect.height)}`
+      : '';
+    // مرحله ۲۰ — تغییرِ برش، drawableیِ کهنه را فوراً خالی می‌کند تا
+    // تایلِ قدیمی، لحظه‌ای در باکسِ برشِ تازه دیده نشود؛ تا رسیدنِ
+    // تایلِ تازه، لایهٔ پایه دیده می‌شود.
+    const clipChanged = clipKey !== lastClipKeyRef.current;
+    if (clipChanged && hiDpiDrawable) setHiDpiDrawable(null);
+
+    const cachedDrawable = hiDpiRenderService.peekHiDpiPage(filePath, pageNumber, renderZoomLevel, clipRect);
+    if (cachedDrawable) {
+      if (cachedDrawable !== hiDpiDrawable) setHiDpiDrawable(cachedDrawable);
+      lastClipKeyRef.current = clipKey;
+      if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return;
     }
 
     let isCancelled = false;
-    const debounceMs = isActivePage ? 170 : 320;
+    // مرحله ۲۰ — تغییرِ برش (پس از توقفِ اسکرول در زومِ بالا) بدونِ
+    // دیبانس رندر می‌شود، چون توقفِ ۱۲۰ میلی‌ثانیه‌ایِ والد از قبل،
+    // ازدحام را مهار کرده است؛ بقیهٔ حالت‌ها همان ۱۷۰/۳۲۰ قبلی‌اند.
+    const debounceMs = clipChanged ? 0 : (isActivePage ? 170 : 320);
 
     const timer = setTimeout(async () => {
       if (isCancelled) return;
-      const sharpUrl = await hiDpiRenderService.renderPdfPageHiDpi({
+      const drawable = await hiDpiRenderService.renderPdfPageHiDpi({
         pdfDoc,
         filePath,
         pageNumber,
         zoomLevel: renderZoomLevel,
+        // مرحله ۱۹ — عرضِ نمایشیِ صفحه در DOM (pageWidth = عرضِ
+        // کانتینر × زوم) تا سرویس، مقیاس را از رویِ پیکسلِ واقعیِ
+        // نمایش حساب کند، نه فقط ضریبِ زوم.
+        displayWidthPx: pageWidth,
+        clipRect: clipRect || null,
       });
-      if (!isCancelled && sharpUrl) {
-        setHiDpiUrl(sharpUrl);
+      if (isCancelled) return;
+      if (drawable) {
+        setHiDpiDrawable(drawable);
+        lastClipKeyRef.current = clipKey;
       }
+      // نشستِ وعده، چه موفق چه ناموفق: صفحه دیگر هدفِ معلق نیست.
+      if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
     }, debounceMs);
 
     return () => {
       isCancelled = true;
       clearTimeout(timer);
     };
-  }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage]);
+  }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage, onHiDpiSettled, pageWidth, clipRect, hiDpiDrawable]);
+
+  // مرحله ۲۰ — بومِ دیپ رندر و نشاندنِ drawable رویِ آن: بوم، دقیقاً
+  // به اندازهٔ drawable (پیکسلِ دستگاه) ساخته می‌شود و CSS آن را به
+  // اندازهٔ باکسِ خودش (برش یا کلِ صفحه) می‌رساند؛ پس تراکم،
+  // یک‌به‌یک حفظ می‌شود. هنگامِ تعلیقِ اسکرول یا نبودِ drawable،
+  // بوم پاک می‌شود تا لایهٔ پایه دیده شود. توجه: drawable متعلق به
+  // کشِ سرویس است و این‌جا هرگز close نمی‌شود؛ بستن، فقط هنگامِ
+  // تخلیه از کش انجام می‌شود.
+  const deepCanvasRef = useRef(null);
+  const lastClipKeyRef = useRef('');
+  useEffect(() => {
+    const c = deepCanvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    if (!hiDpiDrawable || deepSuspended) {
+      if (c.width > 0 && c.height > 0) ctx.clearRect(0, 0, c.width, c.height);
+      return;
+    }
+    const dw = hiDpiDrawable.width || 0;
+    const dh = hiDpiDrawable.height || 0;
+    if (!dw || !dh) return;
+    if (c.width !== dw || c.height !== dh) {
+      c.width = dw;
+      c.height = dh;
+    }
+    ctx.clearRect(0, 0, c.width, c.height);
+    try {
+      ctx.drawImage(hiDpiDrawable, 0, 0);
+    } catch (_) {}
+  }, [hiDpiDrawable, deepSuspended]);
 
   const handleFrameContextMenu = useCallback(
     (e) => {
       e.preventDefault();
       e.stopPropagation();
       const dataUrl = extractDataUrlFromImgElement(imgRef.current);
-      onContextMenu?.(e, pageNumber - 1, dataUrl);
+      // مرحله ۱۳: مختصاتِ عمودیِ کلیک نسبت به بالایِ همین صفحه
+      // (نه کلِ سند) تا بوک‌مارک دقیقاً کنارِ همان سکانس بنشیند.
+      let yRatio = 0;
+      try {
+        const rect = e.currentTarget ? e.currentTarget.getBoundingClientRect() : null;
+        if (rect && rect.height > 0) {
+          yRatio = clampYRatio((e.clientY - rect.top) / rect.height);
+        }
+      } catch (_) {}
+      onContextMenu?.(e, pageNumber - 1, dataUrl, yRatio);
     },
     [onContextMenu, pageNumber]
   );
 
   // تصویر HiDPI در صورت آماده بودن بدون هیچ پرشی جایگزین تصویر پایه می‌شود
-  const activeSrc = hiDpiUrl || effectiveCachedBlobUrl || effectiveBlobUrl;
+  // مرحله ۲۰ — activeSrc فقط لایهٔ پایه است؛ لایهٔ دیپ، دیگر از راهِ
+  // <img> نمی‌گذرد و رویِ بومِ خودش می‌نشیند.
+  const activeSrc = effectiveCachedBlobUrl || effectiveBlobUrl;
 
   // مرحله ۱۱ — تعویضِ بدونِ چشمکِ زوم (Zero-Flash Zoom Swap):
   // <img>، همیشه displayedSrc را نشان می‌دهد؛ وقتی activeSrc
@@ -564,7 +724,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
       return;
     }
     if (next === displayedSrc) return;
-    if (!displayedSrc) {
+    // مرحله ۱۷: displayedSrcِ خالی یا باطل‌شده، بدونِ هیچ تأخیرِ
+    // decode، بی‌درنگ جایگزین می‌شود؛ decode فقط وقتی است که یک
+    // تصویرِ سالمِ قبلی روی صفحه است و می‌خواهیم زومِ تازه را
+    // جایِ آن بنشانیم (بدونِ چشمک).
+    if (!displayedSrc || (revokedBlobUrls && revokedBlobUrls.has(displayedSrc))) {
       setDisplayedSrc(next);
       return;
     }
@@ -614,17 +778,15 @@ const PdfPageItem = React.memo(function PdfPageItem({
     if (!erroredUrlsRef.current.has(badSrc)) {
       erroredUrlsRef.current.add(badSrc);
       if (erroredUrlsRef.current.size > 50) erroredUrlsRef.current.clear();
-      if (badSrc === hiDpiUrl) {
-        setHiDpiUrl(null);
-      } else {
-        if (onDropPageBlob) onDropPageBlob(pageNumber, badSrc);
-        setBlobUrl(null);
-      }
+      // مرحله ۲۰ — خطایِ <img> فقط به لایهٔ پایه مربوط می‌شود؛ لایهٔ
+      // دیپ، URL ندارد که باطل شود.
+      if (onDropPageBlob) onDropPageBlob(pageNumber, badSrc);
+      setBlobUrl(null);
     } else {
       setBlobUrl(null);
     }
     setRenderFailed(false);
-  }, [activeSrc, hiDpiUrl, onDropPageBlob, pageNumber]);
+  }, [activeSrc, onDropPageBlob, pageNumber]);
 
   // کالبدشکافیِ ناحیه‌های مردهٔ جزئی: برای چرخشِ ۹۰/۲۷۰، کادرِ
   // چیدمانِ wrapper باید ابعادِ جابه‌جا شده (ارتفاعِ کارت × عرضِ
@@ -653,7 +815,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
       {/* مانتِ دائمیِ لایهٔ حاشیه‌نویسی (رفعِ صفحاتِ مردهٔ PDF، بخش ۱ تسک):
           قبلاً AnnotationLayer فقط وقتی activeSrc آماده بود مانت می‌شد؛
           پس صفحه‌های در حالِ رندر، صفحه‌های با فاصلهٔ ۴ از صفحهٔ فعال
-          (بیرونِ RENDER_RADIUS=۳ ولی داخلِ پنجرهٔ DOM_OVERSCAN=۴) و
+          (بیرونِ RENDER_RADIUS=۴ ولی داخلِ پنجرهٔ DOM_OVERSCAN=۵) و
           صفحه‌های رندرِ ناموفق، اصلاً لایه نداشتند و هیچ ورودی‌ای
           نمی‌گرفتند (کرسر هم به حالتِ عادی برمی‌گشت). حالا لایه همیشه
           مانت است و تا وقتی تصویر آماده نیست، روی placeholder می‌نشیند.
@@ -740,6 +902,24 @@ const PdfPageItem = React.memo(function PdfPageItem({
           </div>
         )}
 
+        {/* مرحله ۲۰ — بومِ دیپ رندر: بالایِ تصویرِ پایه، زیرِ هایلایت
+            و لایهٔ حاشیه‌نویسی؛ pointerEvents none تا هیچ تعاملی را
+            نگیرد. وقتی clipRect هست، بوم دقیقاً همان مستطیلِ
+            قابل‌مشاهده است، وگرنه کلِ صفحه. */}
+        <canvas
+          ref={deepCanvasRef}
+          className="deep-render-canvas"
+          style={{
+            position: 'absolute',
+            left: clipRect ? `${clipRect.x}px` : '0px',
+            top: clipRect ? `${clipRect.y}px` : '0px',
+            width: clipRect ? `${clipRect.width}px` : '100%',
+            height: clipRect ? `${clipRect.height}px` : '100%',
+            pointerEvents: 'none',
+            display: !deepSuspended && hiDpiDrawable ? 'block' : 'none',
+          }}
+        />
+
         {/* هایلایتِ نتایجِ جستجوی درون‌متنی (مرحله ۴): داخلِ همان wrapperِ
             چرخان قرار می‌گیرد تا چرخش را به‌ارث ببرد؛ مختصات‌ها درصدی‌اند،
             پس با زوم هم بی‌نیاز از محاسبهٔ مجدد هم‌تراز می‌مانند.
@@ -790,6 +970,32 @@ const PdfPageItem = React.memo(function PdfPageItem({
           isNearViewport={distanceFromActive <= 1}
         />
       </div>
+      {/* مرحله ۱۴: بوک‌مارک‌ها رویِ لبهٔ حاشیهٔ خودِ صفحه
+          می‌نشینند (مطابقِ تصویرِ مرجعِ کاربر): ۱۴ پیکسل از لبه،
+          با zIndex 45 که بالایِ لایهٔ غیرفعالِ حاشیه‌نویسی (۱۸)
+          است ولی زیرِ حالتِ فعالِ ویرایش (۱۰۰) می‌ماند؛ بالایِ
+          صفحه، top صفر است وگرنه ۱۲ پیکسل بالاتر از نقطه. */}
+      {(pageBookmarks || []).map((bm) => (
+        <div
+          key={bm.id}
+          style={{
+            position: 'absolute',
+            top: bm.yRatio <= 0 ? '0px' : `calc(${bm.yRatio * 100}% - 12px)`,
+            left: bm.side === 'left' ? undefined : 'calc(100% + 10px)',
+            right: bm.side === 'left' ? 'calc(100% + 10px)' : undefined,
+            zIndex: 50,
+          }}
+        >
+          <BookmarkMarker
+            bookmark={bm}
+            imageUrl={resolveBookmarkImage(bm, bookmarkPreferences)}
+            onOpen={onOpenBookmark}
+            onDelete={onDeleteBookmark}
+            onRename={onRenameBookmark}
+            onMove={onMoveBookmark}
+          />
+        </div>
+      ))}
     </div>
   );
 }, arePdfPagePropsEqual);
@@ -817,9 +1023,105 @@ export default function PdfViewer({ filePath }) {
   const triggerHiDpiRender = useReaderStore((state) => state.triggerHiDpiRender);
   const pdfPageGap = useReaderStore((state) => state.pdfPageGap ?? 12);
   const rotation = useReaderStore((state) => state.rotation);
+  const rotationRef = useRef(rotation);
+  rotationRef.current = rotation;
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
   const targetPage = useReaderStore((state) => state.targetPage);
   const clearTargetPage = useReaderStore((state) => state.clearTargetPage);
+  const jumpToPage = useReaderStore((state) => state.jumpToPage);
+
+  // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
+  const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(filePath)] || EMPTY_PAGE_BOOKMARKS);
+  const loadBookmarksForFile = useBookmarkStore((state) => state.loadBookmarksForFile);
+  const loadBookmarkPreferences = useBookmarkStore((state) => state.loadPreferences);
+  const deleteBookmark = useBookmarkStore((state) => state.deleteBookmark);
+  const updateBookmark = useBookmarkStore((state) => state.updateBookmark);
+  const openBookmarkStudio = useBookmarkStore((state) => state.openStudio);
+  const bookmarkJumpTarget = useBookmarkStore((state) => state.jumpTarget);
+  const clearBookmarkJumpTarget = useBookmarkStore((state) => state.clearJumpTarget);
+  const pendingBookmarkJumpRef = useRef(null);
+
+  // مرحله ۱۷: بارگذاریِ بوک‌مارک‌ها و تنظیماتشان، ۴۰۰ میلی‌ثانیه
+  // پس از باز شدنِ فایل انجام می‌شود تا لحظهٔ باز شدن، فقط صرفِ
+  // صفحهٔ اول شود (بوتِ برنامه در App.jsx، تنظیمات را از قبل دارد).
+  useEffect(() => {
+    if (!filePath) return;
+    const timerId = setTimeout(() => {
+      loadBookmarksForFile(filePath);
+      loadBookmarkPreferences();
+    }, 400);
+    return () => clearTimeout(timerId);
+  }, [filePath, loadBookmarksForFile, loadBookmarkPreferences]);
+
+  const pageBookmarkMap = useMemo(() => {
+    const map = {};
+    (pageBookmarkList || []).forEach((bm) => {
+      if (!map[bm.page]) map[bm.page] = [];
+      map[bm.page].push(bm);
+    });
+    return map;
+  }, [pageBookmarkList]);
+
+  const handleOpenBookmark = useCallback((bm) => {
+    if (!bm) return;
+    openBookmarkStudio({ filePath, page: bm.page, yRatio: bm.yRatio, bookmarkId: bm.id });
+  }, [openBookmarkStudio, filePath]);
+
+  const handleDeleteBookmark = useCallback((bm) => {
+    if (!bm) return;
+    deleteBookmark(filePath, bm.id);
+  }, [deleteBookmark, filePath]);
+
+  const handleRenameBookmark = useCallback((bm, newName) => {
+    if (!bm) return;
+    updateBookmark(filePath, bm.id, { name: newName });
+  }, [updateBookmark, filePath]);
+
+  // مرحله ۱۸ — ثبتِ مکانِ تازهٔ بوک‌مارک پس از پایانِ درگ (فقط یک
+  // ذخیره در pointerup؛ در حینِ حرکت، هیچ IPCای صدا زده نمی‌شود).
+  const handleMoveBookmark = useCallback((bm, patch) => {
+    if (!bm || !patch) return;
+    updateBookmark(filePath, bm.id, patch);
+  }, [updateBookmark, filePath]);
+
+  // پرشِ نقطه‌ای به بوک‌مارک: اول jumpToPage تا پنجرهٔ مجازی رویِ
+  // صفحهٔ هدف بنشیند، بعد که targetPage پاک شد، اسکرولِ دقیق به
+  // pageOffsetTop + pageHeight*yRatio با مختصاتِ واقعیِ DOM.
+  // اسکرولِ دقیق، آنی (auto) است تا با اسکرولِ نرمِ پرشِ صفحه،
+  // حرکتِ دوتایی و لرزش نسازد.
+  useEffect(() => {
+    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== filePath) return;
+    pendingBookmarkJumpRef.current = bookmarkJumpTarget;
+    jumpToPage(bookmarkJumpTarget.page);
+    clearBookmarkJumpTarget();
+  }, [bookmarkJumpTarget, filePath, jumpToPage, clearBookmarkJumpTarget]);
+
+  useEffect(() => {
+    const pending = pendingBookmarkJumpRef.current;
+    if (!pending || targetPage !== null) return;
+    const container = containerRef.current;
+    const el = document.getElementById(`comic-page-${pending.page}`);
+    const scrollToBookmarkPoint = (targetEl, targetContainer) => {
+      const cRect = targetContainer.getBoundingClientRect();
+      const eRect = targetEl.getBoundingClientRect();
+      const padTop = parseFloat(window.getComputedStyle(targetContainer).paddingTop) || 0;
+      targetContainer.scrollTo({
+        top: targetContainer.scrollTop + (eRect.top - cRect.top) - padTop + eRect.height * pending.yRatio,
+        behavior: 'auto',
+      });
+    };
+    if (!container || !el) {
+      const timer = setTimeout(() => {
+        const retryEl = document.getElementById(`comic-page-${pending.page}`);
+        const retryContainer = containerRef.current;
+        if (retryEl && retryContainer) scrollToBookmarkPoint(retryEl, retryContainer);
+        pendingBookmarkJumpRef.current = null;
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+    scrollToBookmarkPoint(el, container);
+    pendingBookmarkJumpRef.current = null;
+  }, [targetPage]);
 
   const isSnippingActive = useAppStore((state) => state.isSnippingActive);
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
@@ -829,6 +1131,8 @@ export default function PdfViewer({ filePath }) {
   const { handleContextMenu } = useContextMenu();
 
   const [numPages, setNumPages] = useState(0);
+  const numPagesRef = useRef(numPages);
+  numPagesRef.current = numPages;
   const [pdfDoc, setPdfDoc] = useState(null);
   // مرحله ۵ ـ بخش الف: وضعیتِ «در حالِ ساختِ خروجیِ PDF» برای غیرفعال
   // کردنِ دکمهٔ خروجیِ تولبار در طولِ پردازش.
@@ -855,9 +1159,6 @@ export default function PdfViewer({ filePath }) {
   const [errorMsg, setErrorMsg] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [activePage, setActivePage] = useState(1);
-  // مرحله ۱۱: جهتِ اسکرولِ فعلی ('down' | 'up') — فقط هنگامِ
-  // عوض شدنِ جهت، setState می‌شود تا رندرِ اضافی نسازد.
-  const [scrollDirection, setScrollDirection] = useState('down');
   const [defaultRatio, setDefaultRatio] = useState(1.4142);
   const [containerWidth, setContainerWidth] = useState(900);
   const [ratioTick, setRatioTick] = useState(0);
@@ -886,6 +1187,36 @@ export default function PdfViewer({ filePath }) {
   const isResumingRef = useRef(false);
   const hasResumedRef = useRef(false);
   const pendingResumePageRef = useRef(null);
+  // مرحله ۱۸ — نگهبانِ قفلِ اسکرولِ باز شدن/پرش + علامتِ اسکرولِ برنامه‌ای:
+  // resumeTimerRef، تایمرِ همگام‌سازیِ نهاییِ باز شدن است که عمداً به
+  // cleanupِ افکتِ ازسرگیری وصل نیست (وگرنه هر بازمحاسبهٔ آفست، آن را
+  // می‌کشت و قفل برایِ همیشه می‌ماند — همان باگِ گزارش‌شده)؛ فقط در
+  // شروعِ باز شدنِ فایلِ تازه پاک می‌شود. lockWatchdogRef، سقفِ
+  // ۲۵۰ میلی‌ثانیه‌ایِ قفل‌هاست. programmaticScrollAtRef، زمانِ آخرین
+  // اسکرولِ برنامه‌ای (باز شدن، پرش، زومِ ناحیه‌ای) را نگه می‌دارد تا
+  // هندلرِ اسکرول، اسکرولِ دستیِ کاربر را از آن تشخیص بدهد.
+  const resumeTimerRef = useRef(null);
+  const lockWatchdogRef = useRef(null);
+  const programmaticScrollAtRef = useRef(0);
+  const markProgrammaticScroll = () => {
+    programmaticScrollAtRef.current = Date.now();
+  };
+  const releaseScrollLocks = () => {
+    isResumingRef.current = false;
+    isJumpingRef.current = false;
+  };
+  const armScrollLockWatchdog = () => {
+    if (lockWatchdogRef.current) clearTimeout(lockWatchdogRef.current);
+    lockWatchdogRef.current = setTimeout(() => {
+      lockWatchdogRef.current = null;
+      isResumingRef.current = false;
+      isJumpingRef.current = false;
+      // اگر همگام‌سازیِ اولیه هرگز کامل نشد، دنبال‌کردنِ اسکرولِ واقعیِ
+      // کاربر از قفلِ ابدی مهم‌تر است: hasResumed هم آزاد می‌شود تا
+      // صفحهٔ فعال، از رویِ scrollTopِ واقعی محاسبه شود.
+      hasResumedRef.current = true;
+    }, 250);
+  };
   const abortControllerRef = useRef(null);
   const customRatiosRef = useRef(new Map());
   const pageBlobCacheRef = useRef(new Map());
@@ -895,14 +1226,14 @@ export default function PdfViewer({ filePath }) {
   // item still holds it (eviction race). The set is append-only and
   // capped; a revoked URL is never trusted again as a cached image.
   const revokedBlobUrlsRef = useRef(new Set());
+  // مرحله ۱۷: شمارندهٔ باطل‌شدنِ Blobها — هر تخلیه، آن را عوض
+  // می‌کند تا افکتِ رندرِ پایهٔ صفحه‌ها، باطل‌شدن را ببیند (Set
+  // خودش، با جهشِ درجا، هیچ propای را عوض نمی‌کند).
+  const [revokedTick, setRevokedTick] = useState(0);
   const prevZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
   activePageRef.current = activePage;
-  // مرحله ۱۱: جهتِ آخرین اسکرول (برای پیش‌رندرِ جهت‌دار) و
-  // آخرین scrollTop (با ناحیهٔ مردهٔ ۲ پیکسل).
-  const scrollDirectionRef = useRef('down');
-  const lastScrollTopRef = useRef(0);
   // مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایلِ بازسازی‌شده (در صورتِ
   // وجود)، برای جستجو روی صفحه‌هایِ رستریِ بدونِ لایهٔ متن.
   const searchIndexRef = useRef(null);
@@ -949,6 +1280,8 @@ export default function PdfViewer({ filePath }) {
   const [searchScannedCount, setSearchScannedCount] = useState(0);
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
+  const safeZoomRef = useRef(safeZoom);
+  safeZoomRef.current = safeZoom;
   const safePageGap = Math.max(0, Math.min(48, Math.round(Number(pdfPageGap) ?? 12)));
 
   // مرحله ۱۲: زومِ «تثبیت‌شده» برای رسترایزِ سنگین — در حینِ
@@ -961,6 +1294,13 @@ export default function PdfViewer({ filePath }) {
   // همان ماشهٔ «توقفِ اسکرول» برای شارپ شدنِ صفحه‌هاست.
   const [rasterZoomLevel, setRasterZoomLevel] = useState(safeZoom);
   const rasterZoomRef = useRef(safeZoom);
+
+  // مرحله ۲۰ — برش‌هایِ دیپ رندر و تعلیقِ هنگامِ حرکت.
+  const [deepClipRects, setDeepClipRects] = useState({});
+  const deepClipRectsRef = useRef({});
+  const [deepSuspended, setDeepSuspended] = useState(false);
+  const deepSuspendedRef = useRef(false);
+  const deepStopTimerRef = useRef(null);
   useEffect(() => {
     if (rasterZoomRef.current === safeZoom) return;
     const timer = setTimeout(() => {
@@ -969,6 +1309,82 @@ export default function PdfViewer({ filePath }) {
     }, 150);
     return () => clearTimeout(timer);
   }, [safeZoom]);
+
+  // مرحله ۱۶ — HUDِ ری‌رندر، فقط هنگامِ تغییرِ زوم (نه اسکرول و
+  // نه باز شدنِ کتاب): نشست، با تغییرِ زومِ تثبیت‌شده شروع
+  // می‌شود؛ هدف‌ها دقیقاً همان صفحه‌هایی‌اند که پاسِ HiDPI
+  // برایشان شروع می‌شود (نزدیکِ صفحهٔ فعال + گیتِ needsHiDpi)؛
+  // تکمیل، با نشستِ وعدهٔ HiDPI (کش، موفقیت یا شکست) علامت
+  // می‌خورد؛ و تایمرِ محافظِ ۱۲۰۰ میلی‌ثانیه، هرگز اجازهٔ گیر
+  // کردن رویِ هیچ عددی را نمی‌دهد.
+  const zoomHudSessionRef = useRef(null);
+  const zoomHudSafetyRef = useRef(null);
+  const zoomHudGreenRef = useRef(null);
+  const prevSettledZoomRef = useRef(null);
+  const [zoomHud, setZoomHud] = useState({ visible: false, done: 0, total: 0, isDone: false });
+
+  const completeZoomHud = useCallback(() => {
+    const session = zoomHudSessionRef.current;
+    if (!session) return;
+    if (zoomHudSafetyRef.current) { clearTimeout(zoomHudSafetyRef.current); zoomHudSafetyRef.current = null; }
+    setZoomHud((prev) => ({ ...prev, visible: true, done: prev.total, isDone: true }));
+    if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+    zoomHudGreenRef.current = setTimeout(() => {
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+    }, 800);
+  }, []);
+
+  const handleHiDpiSettled = useCallback((pageNumber) => {
+    const session = zoomHudSessionRef.current;
+    if (!session || typeof pageNumber !== 'number') return;
+    if (!session.targets.has(pageNumber)) return;
+    session.done.add(pageNumber);
+    setZoomHud((prev) => ({ ...prev, done: session.done.size }));
+    if (session.done.size >= session.targets.size) completeZoomHud();
+  }, [completeZoomHud]);
+
+  useEffect(() => {
+    if (!filePath) return undefined;
+    const prev = prevSettledZoomRef.current;
+    if (prev && prev.file === filePath && prev.zoom === rasterZoomLevel) return undefined;
+    const changedFile = !prev || prev.file !== filePath;
+    prevSettledZoomRef.current = { file: filePath, zoom: rasterZoomLevel };
+    if (changedFile) {
+      if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+      if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+      return undefined;
+    }
+    // تغییرِ واقعیِ زوم در همان فایل: نشستِ تازه. صفحه‌هایِ هدف،
+    // همان‌هایی‌اند که افکتِ HiDPI برایشان اجرا می‌شود.
+    // مرحله ۱۹: هدف‌هایِ HUD، همان صفحه‌هایِ نزدیک‌اند — بدونِ گیتِ
+    // needsHiDpi، چون پاسِ HiDPI حالا در تمامِ سطوحِ زوم اجرا می‌شود.
+    const active = activePageRef.current || 1;
+    const targets = new Set(
+      (visiblePageNumbers || []).filter(
+        (p) => Math.abs(p - active) <= 1
+      )
+    );
+    if (targets.size === 0) return undefined;
+    if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+    if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+    zoomHudSessionRef.current = { targets, done: new Set() };
+    setZoomHud({ visible: true, done: 0, total: targets.size, isDone: false });
+    zoomHudSafetyRef.current = setTimeout(() => { completeZoomHud(); }, 1200);
+    return () => {
+      if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+    };
+  }, [filePath, rasterZoomLevel, completeZoomHud]);
+
+  // مرحله ۱۵ — درگِ چهارجهته با ماوس (دکمهٔ چپ در مطالعهٔ عادی،
+  // دکمهٔ وسط در هر حالتی؛ جزئیاتِ کامل در useDragPan).
+  const { handlePanMouseDown, isPanning } = useDragPan({
+    containerRef,
+    isAnnotationActive,
+    isAreaZoomActive,
+  });
 
   const clearAllCachedPageBlobs = useCallback(() => {
     for (const [, url] of pageBlobCacheRef.current.entries()) {
@@ -999,10 +1415,10 @@ export default function PdfViewer({ filePath }) {
     // فاز ۳: تخلیه، اولِ قدیمی‌ترین صفحهٔ خارج از دید را می‌زند (نه
     // لزوماً قدیمی‌ترینِ مطلق) تا صفحه‌های در دید، بی‌دلیل از کش
     // نیفتند. اگر همهٔ صفحه‌های کش در دید بودند، قدیمی‌ترین می‌رود
-    // تا سقف، همیشه برقرار بماند. (سقف از قبل ۱۸ بود — کمتر از
-    // ۳۰ای که تسک گفته بود — پس بالا برده نشد.)
+    // تا سقف، همیشه برقرار بماند. مرحله ۱۷: سقف ۳۰ صفحه و حاشیهٔ
+    // امن ۱۰ صفحه است تا بازگشت به بالا، بی‌درنگ از کش خوانده شود.
     // Stage 8 Part B: eviction keeps a margin around the active page
-    // (activePage +/- 6, prompt section 1.3) because
+    // (activePage +/- 10, stage 17) because
     // visiblePageNumbersRef updates only
     // during render and can lag behind a fast scroll; evicting a page
     // the user is flying toward produced permanently blank pages.
@@ -1010,7 +1426,7 @@ export default function PdfViewer({ filePath }) {
       const visible = visiblePageNumbersRef.current || [];
       const guarded = new Set(visible);
       const center = activePageRef.current || 1;
-      for (let pn = center - 6; pn <= center + 6; pn++) guarded.add(pn);
+      for (let pn = center - 10; pn <= center + 10; pn++) guarded.add(pn);
       let evictKey = null;
       for (const key of cache.keys()) {
         if (!guarded.has(key)) { evictKey = key; break; }
@@ -1019,6 +1435,7 @@ export default function PdfViewer({ filePath }) {
       const evictUrl = cache.get(evictKey);
       if (evictUrl) {
         revokedBlobUrlsRef.current.add(evictUrl);
+        setRevokedTick((tick) => tick + 1);
         try {
           URL.revokeObjectURL(evictUrl);
         } catch (_) {}
@@ -1036,6 +1453,7 @@ export default function PdfViewer({ filePath }) {
   const handleDropPageBlob = useCallback((pageNum, blobUrl) => {
     if (!pageNum || !blobUrl) return;
     revokedBlobUrlsRef.current.add(blobUrl);
+    setRevokedTick((tick) => tick + 1);
     if (revokedBlobUrlsRef.current.size > 500) revokedBlobUrlsRef.current.clear();
     const cache = pageBlobCacheRef.current;
     if (cache.get(pageNum) === blobUrl) cache.delete(pageNum);
@@ -1557,9 +1975,22 @@ export default function PdfViewer({ filePath }) {
     hasResumedRef.current = false;
     isResumingRef.current = true;
     pendingResumePageRef.current = null;
+    // مرحله ۱۸: تایمرِ همگام‌سازیِ فایلِ قبلی، با فایلِ تازه می‌میرد تا
+    // نتواند رویِ حالتِ فایلِ تازه بنویسد؛ نگهبانِ ۲۵۰ میلی‌ثانیه‌ای
+    // هم از همین‌جا مسلح می‌شود.
+    if (resumeTimerRef.current) { clearTimeout(resumeTimerRef.current); resumeTimerRef.current = null; }
+    armScrollLockWatchdog();
     customRatiosRef.current.clear();
     clearAllCachedPageBlobs();
     hiDpiRenderService.clearFileCache(filePath);
+    // مرحله ۱۷: پاک‌سازیِ کاملِ حالتِ فایلِ قبلی — مجموعهٔ
+    // باطل‌شده‌ها و نشستِ زومِ HUD هم با فایلِ تازه شروع می‌شوند.
+    revokedBlobUrlsRef.current.clear();
+    if (zoomHudSafetyRef.current) { clearTimeout(zoomHudSafetyRef.current); zoomHudSafetyRef.current = null; }
+    if (zoomHudGreenRef.current) { clearTimeout(zoomHudGreenRef.current); zoomHudGreenRef.current = null; }
+    zoomHudSessionRef.current = null;
+    prevSettledZoomRef.current = null;
+    setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
     setErrorMsg(null);
     setIsLoading(true);
     setPdfDoc(null);
@@ -1581,6 +2012,7 @@ export default function PdfViewer({ filePath }) {
     let activeDoc = null;
     let loadingTask = null;
     let outlineTimerId = null;
+    let searchIndexTimerId = null;
 
     // مرحله ۹ — لایهٔ ۱ و ۳ در کنارِ هم: pdf.js وقتی رمز لازم دارد،
     // این هندلر را صدا می‌زند. کد ۱ (NEED_PASSWORD) یعنی رمزِ
@@ -1817,13 +2249,17 @@ export default function PdfViewer({ filePath }) {
         // extractPageText روی صفحه‌هایِ رستری هم متن داشته باشد.
         // نبودنِ ایندکس، خطا نیست و مسیرِ عادیِ جستجو را عوض
         // نمی‌کند.
+        // مرحله ۱۷: ایندکسِ جستجو، ۴۰۰ میلی‌ثانیه پس از آماده‌شدنِ
+        // سند خوانده می‌شود تا لحظهٔ باز شدن، فقط صرفِ صفحهٔ اول شود.
         try {
-          coreApi.getSearchIndex(filePath).then((res) => {
-            if (!isMounted) return;
-            if (res && res.found && res.index && res.index.pages) {
-              searchIndexRef.current = res.index;
-            }
-          }).catch(() => {});
+          searchIndexTimerId = setTimeout(() => {
+            coreApi.getSearchIndex(filePath).then((res) => {
+              if (!isMounted) return;
+              if (res && res.found && res.index && res.index.pages) {
+                searchIndexRef.current = res.index;
+              }
+            }).catch(() => {});
+          }, 400);
         } catch (_) {}
         setNumPages(doc.numPages);
         setActivePage(savedPage);
@@ -1838,8 +2274,8 @@ export default function PdfViewer({ filePath }) {
         {
           const outlineRunId = (outlineRunRef.current += 1);
           setPdfOutline([], filePath, 'loading');
-          // مرحله ۷ ـ نهاییِ دوم: استخراجِ فهرست، ۶۰۰ میلی‌ثانیه
-          // به تعویق می‌افتد تا در لحظهٔ باز شدنِ کتاب، صفِ ورکرِ
+          // مرحله ۷ ـ نهاییِ دوم (مرحله ۱۷: ۴۰۰ میلی‌ثانیه):
+          // استخراجِ فهرست به تعویق می‌افتد تا در لحظهٔ باز شدنِ کتاب، صفِ ورکرِ
           // pdf.js و پایپ‌لاینِ Range، ۱۰۰٪ صرفِ نمایشِ فوریِ
           // صفحهٔ اول شوند (ده‌ها getDestination/getPageIndex،
           // دیگر با رندرِ صفحهٔ اول رقابت نمی‌کنند). محافظِ runId
@@ -1856,7 +2292,7 @@ export default function PdfViewer({ filePath }) {
                 setPdfOutline([], filePath, 'done');
               }
             });
-          }, 600);
+          }, 400);
         }
       } catch (err) {
         if (err?.name === 'AbortError') return;
@@ -1879,6 +2315,7 @@ export default function PdfViewer({ filePath }) {
     return () => {
       isMounted = false;
       if (outlineTimerId) clearTimeout(outlineTimerId);
+      if (searchIndexTimerId) clearTimeout(searchIndexTimerId);
       readingActivity.end();
       abortController.abort();
       clearAllCachedPageBlobs();
@@ -2377,18 +2814,85 @@ export default function PdfViewer({ filePath }) {
       setActivePage(targetResumePage);
       activePageRef.current = targetResumePage;
       setCurrentPage(targetResumePage);
+      // مرحله ۱۸ — همگام‌سازیِ تضمین‌شدهٔ ویوپورتِ اولیه (Guaranteed
+      // Initial Viewport Sync): به‌جایِ یک اسکرولِ تک‌مرحله‌ایِ کورکورانه،
+      // سه مرحله: (۱) آنی، (۲) پس از دو فریمِ انیمیشن — وقتی paddingTop و
+      // صفحاتِ پنجره واقعاً در DOM نشسته‌اند و scrollHeight از ویوپورت
+      // بزرگ‌تر شده — و (۳) پس از ۱۱۰ میلی‌ثانیه با آفستِ زندهٔ
+      // pageOffsetsRef. اگر باز هم بیش از یک صفحه فاصله بود، یک بازبینیِ
+      // ۱۰۰ میلی‌ثانیه‌ای، دوباره اسکرول می‌کند؛ و اگر باز هم ننشست،
+      // صفحهٔ فعال از رویِ scrollTopِ واقعیِ فعلی همگام می‌شود — پس
+      // حالت، هرگز با چیزی که کاربر می‌بیند دروغ نمی‌گوید.
+      markProgrammaticScroll();
       container.scrollTop = targetTop;
-
-      const timer = setTimeout(() => {
-        if (containerRef.current) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const c = containerRef.current;
+          if (!c) return;
+          if (c.scrollHeight > c.clientHeight) {
+            markProgrammaticScroll();
+            c.scrollTop = pageOffsetsRef.current[targetResumePage - 1] || targetTop;
+          }
+        });
+      });
+      // توجه: این تایمر عمداً به cleanupِ این افکت وصل نیست. در نسخهٔ
+      // قبل، هر بازاجرایِ افکت (مثلاً با تغییرِ containerWidth یا
+      // pageOffsets پس از اندازه‌گیریِ نسبتِ واقعیِ صفحه) تایمرِ
+      // ۱۱۰ میلی‌ثانیه‌ای را پاک می‌کرد، اما pendingResumePage از قبل
+      // null شده بود؛ پس hasResumed هرگز true و isResuming هرگز false
+      // نمی‌شد و اسکرول برایِ همیشه «قفل» می‌ماند. تایمر، فقط در شروعِ
+      // باز شدنِ فایلِ تازه پاک می‌شود.
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      resumeTimerRef.current = setTimeout(() => {
+        resumeTimerRef.current = null;
+        const c = containerRef.current;
+        if (c) {
           const finalTop = pageOffsetsRef.current[targetResumePage - 1] || 0;
-          containerRef.current.scrollTop = finalTop;
+          markProgrammaticScroll();
+          c.scrollTop = finalTop;
+          setTimeout(() => {
+            const c2 = containerRef.current;
+            if (!c2) return;
+            const offs = pageOffsetsRef.current;
+            const avgH = offs.length > 0 ? c2.scrollHeight / offs.length : 800;
+            const finalTop2 = offs[targetResumePage - 1] || 0;
+            if (Math.abs(c2.scrollTop - finalTop2) > avgH) {
+              markProgrammaticScroll();
+              c2.scrollTop = finalTop2;
+              setTimeout(() => {
+                const c3 = containerRef.current;
+                if (!c3) return;
+                if (Math.abs(c3.scrollTop - finalTop2) > avgH) {
+                  const offs3 = pageOffsetsRef.current;
+                  const hts3 = pageHeightsRef.current;
+                  if (!offs3 || offs3.length === 0) return;
+                  const center = c3.scrollTop + (c3.clientHeight || 800) / 2;
+                  let lo = 0;
+                  let hi = offs3.length - 1;
+                  let found = 0;
+                  while (lo <= hi) {
+                    const mid = (lo + hi) >>> 1;
+                    const top = offs3[mid] || 0;
+                    const bottom = top + (hts3[mid] || 800) + safePageGap;
+                    if (center < top) hi = mid - 1;
+                    else if (center >= bottom) lo = mid + 1;
+                    else { found = mid; break; }
+                    if (lo > hi) found = Math.max(0, Math.min(offs3.length - 1, lo - 1));
+                  }
+                  const syncPage = Math.max(1, Math.min(numPages, found + 1));
+                  if (syncPage !== activePageRef.current) {
+                    activePageRef.current = syncPage;
+                    setActivePage(syncPage);
+                    setCurrentPage(syncPage);
+                  }
+                }
+              }, 100);
+            }
+          }, 100);
         }
         hasResumedRef.current = true;
         isResumingRef.current = false;
       }, 110);
-
-      return () => clearTimeout(timer);
     } else {
       container.scrollTop = 0;
       hasResumedRef.current = true;
@@ -2421,11 +2925,27 @@ export default function PdfViewer({ filePath }) {
 
       const targetScrollLeft = normCenterX * c.scrollWidth - c.clientWidth / 2;
 
+      markProgrammaticScroll();
       c.scrollTop = Math.max(0, targetScrollTop);
       c.scrollLeft = Math.max(0, targetScrollLeft);
+      if (rect?.pageNumber && rect.pageNumber >= 1 && rect.pageNumber <= numPages) {
+        // مرحله ۱۸ — صفحهٔ مقصدِ زومِ ناحیه‌ای، همان صفحهٔ فعال می‌شود تا
+        // در مرکزِ isNearViewport بنشیند و پاسِ HiDPI برایش اجرا شود؛
+        // پیش از این، صفحهٔ فعالِ قبلی می‌ماند و صفحهٔ زوم‌شده، اگر بیش
+        // از یک صفحه فاصله داشت، هرگز شارپ نمی‌شد.
+        setActivePage(rect.pageNumber);
+        activePageRef.current = rect.pageNumber;
+        setCurrentPage(rect.pageNumber);
+      }
+      // مرحله ۱۸ — ری‌رندرِ HiDPI، بدونِ انتظارِ ۱۵۰ میلی‌ثانیه‌ایِ زومِ
+      // تثبیت‌شده: زومِ ناحیه‌ای یک پرشِ گسسته است، نه درگِ لغزنده؛ پس
+      // rasterZoomLevel همان‌جا با زومِ تازه (سقف‌دار با safeZoom)
+      // همگام می‌شود و افکتِ HiDPI، بی‌درنگ با ضریبِ تازه اجرا می‌شود.
+      rasterZoomRef.current = safeZoom;
+      setRasterZoomLevel(safeZoom);
       clearAreaZoomTarget();
     });
-  }, [areaZoomTarget, zoomLevel, numPages, pageOffsets.length, clearAreaZoomTarget]);
+  }, [areaZoomTarget, zoomLevel, numPages, pageOffsets.length, clearAreaZoomTarget, setCurrentPage]);
 
   // ۶. حفظ کانون دید هنگام تغییر زوم عادی
   useEffect(() => {
@@ -2452,14 +2972,12 @@ export default function PdfViewer({ filePath }) {
     }
 
     const centerIndex = Math.max(0, Math.min(numPages - 1, activePage - 1));
-    // مرحله ۱۱: پنجرهٔ DOM، جهت‌دار است — در جهتِ حرکت، یک صفحه
-    // بیشتر از شعاعِ متقارنِ قبلی (DOM_OVERSCAN=۴) نگه داشته
-    // می‌شود تا صفحه‌هایِ پیشِ رو، پیش از رسیدنِ چشمِ کاربر در
-    // DOM باشند. خلافِ جهت، شعاعِ قبلی حفظ می‌شود.
-    const behindOverscan = scrollDirection === 'down' ? DOM_OVERSCAN - 1 : DOM_OVERSCAN + 1;
-    const aheadOverscan = scrollDirection === 'down' ? DOM_OVERSCAN + 1 : DOM_OVERSCAN - 1;
-    const startIdx = Math.max(0, centerIndex - behindOverscan);
-    const endIdx = Math.min(numPages - 1, centerIndex + aheadOverscan);
+    // مرحله ۱۷: پنجرهٔ DOM، کاملاً متقارن و پایدار است — همیشه
+    // DOM_OVERSCAN صفحه از بالا و همان‌قدر از پایین مانت‌اند؛
+    // نوسانِ جهتِ اسکرول (آستانهٔ ۲ پیکسلیِ مرحلهٔ ۱۱) دیگر
+    // صفحه‌ها را از DOM حذف و اضافه نمی‌کند.
+    const startIdx = Math.max(0, centerIndex - DOM_OVERSCAN);
+    const endIdx = Math.min(numPages - 1, centerIndex + DOM_OVERSCAN);
 
     const pages = [];
     for (let i = startIdx; i <= endIdx; i++) {
@@ -2478,7 +2996,9 @@ export default function PdfViewer({ filePath }) {
       paddingTop: pTop,
       paddingBottom: pBottom,
     };
-  }, [numPages, activePage, pageOffsets, pageHeights, totalHeight, safePageGap, scrollDirection]);
+  }, [numPages, activePage, pageOffsets, pageHeights, totalHeight, safePageGap]);
+
+
 
   // فاز ۳: صفحه‌های در دید را برای تخلیهٔ کش، در ref نگه دار.
   visiblePageNumbersRef.current = visiblePageNumbers;
@@ -2495,6 +3015,83 @@ export default function PdfViewer({ filePath }) {
     [defaultRatio]
   );
 
+  // مرحله ۲۰ — محاسبهٔ برشِ قابل‌مشاهدهٔ هر صفحهٔ در DOM.
+  // مختصات، پیکسلِ CSS نسبت به گوشهٔ بالایِ چپِ خودِ صفحه‌اند و
+  // با فرمولِ خودِ ویوور هم‌ترازند: چون spacerیِ paddingTop + چیدمانِ
+  // جریانیِ صفحه‌ها، آفستِ مطلقِ pageOffsets را بازسازی می‌کند،
+  // بالایِ صفحه در مختصاتِ اسکرول، همان pageOffsets[i] است.
+  // فقط وقتی زوم بالایِ ۱٫۶ و چرخش صفر است، برش ساخته می‌شود؛ در
+  // غیرِ این صورت null یعنی «صفحهٔ کامل». برش، ۳۰٪ حاشیهٔ امن در
+  // هر چهار طرف دارد و به مرزهایِ صفحه کلمپ می‌شود. صفحه‌ای که
+  // اصلاً دیده نمی‌شود هم null می‌گیرد (صفحهٔ کامل) تا بومِ خالی
+  // ساخته نشود. فقط وقتی مقادیر واقعاً عوض شده باشند، state
+  // به‌روز می‌شود و هویتِ آبجکتِ clipRect برایِ ممو پایدار می‌ماند
+  // (برایِ صفحه‌هایِ بی‌تغییر، همان آبجکتِ قبلی بازمی‌گردد).
+  const computeDeepClips = useCallback(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const pages = visiblePageNumbersRef.current || [];
+    if (pages.length === 0) return;
+    const scrollTop = container.scrollTop || 0;
+    const scrollLeft = container.scrollLeft || 0;
+    const clientW = container.clientWidth || 0;
+    const clientH = container.clientHeight || 0;
+    if (!clientW || !clientH) return;
+    const zoom = safeZoomRef.current || 1;
+    const rot = rotationRef.current || 0;
+    const offs = pageOffsetsRef.current || [];
+    const hts = pageHeightsRef.current || [];
+    const next = {};
+    let changed = false;
+    const prev = deepClipRectsRef.current || {};
+    for (const pageNum of pages) {
+      const idx = pageNum - 1;
+      const pageTop = offs[idx] || 0;
+      const pageH = hts[idx] || 0;
+      // عرضِ صفحه در نمایش: همان فرمولِ پراپِ pageWidth، ولی با
+      // clientWidthِ زندهٔ DOM (دقیق‌تر از state که با آستانهٔ
+      // ۲ پیکسل به‌روز می‌شود؛ اختلافِ حداکثر ۲ پیکسل، زیرِ حاشیهٔ
+      // ۳۰٪ گم می‌شود).
+      const pageW = Math.max(1, Math.round(clientW * (Math.round(zoom * 100) / 100)));
+      let rect = null;
+      if (zoom > 1.6 && rot === 0 && pageH > 0) {
+        const pageLeft = pageW <= clientW ? (clientW - pageW) / 2 : 0;
+        const visX0 = Math.max(0, scrollLeft - pageLeft);
+        const visX1 = Math.min(pageW, scrollLeft + clientW - pageLeft);
+        const visY0 = Math.max(0, scrollTop - pageTop);
+        const visY1 = Math.min(pageH, scrollTop + clientH - pageTop);
+        if (visX1 > visX0 && visY1 > visY0) {
+          const visW = visX1 - visX0;
+          const visH = visY1 - visY0;
+          const mx = visW * 0.3;
+          const my = visH * 0.3;
+          const x0 = Math.max(0, Math.round(visX0 - mx));
+          const y0 = Math.max(0, Math.round(visY0 - my));
+          const x1 = Math.min(pageW, Math.round(visX1 + mx));
+          const y1 = Math.min(pageH, Math.round(visY1 + my));
+          if (x1 > x0 && y1 > y0) {
+            rect = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+          }
+        }
+      }
+      const p = prev[pageNum];
+      const same = (!p && !rect) || (p && rect && p.x === rect.x && p.y === rect.y && p.width === rect.width && p.height === rect.height);
+      next[pageNum] = same ? (p || null) : rect;
+      if (!same) changed = true;
+    }
+    if (changed) {
+      deepClipRectsRef.current = next;
+      setDeepClipRects(next);
+    }
+  }, []);
+
+  // مرحله ۲۰ — بازمحاسبهٔ برش‌ها پس از تغییرِ زوم، اندازه، چرخش،
+  // فایل یا آفست‌ها (با کمی تأخیر تا آفست‌هایِ تازه در ref بنشینند).
+  useEffect(() => {
+    const timerId = setTimeout(() => { computeDeepClips(); }, 60);
+    return () => clearTimeout(timerId);
+  }, [rasterZoomLevel, containerWidth, rotation, numPages, pageOffsets, filePath, computeDeepClips]);
+
   // ۸. رصد اسکرول Passive + فراخوانی ری‌رندر HiDPI پس از توقف اسکرول
   useEffect(() => {
     const container = containerRef.current;
@@ -2505,18 +3102,12 @@ export default function PdfViewer({ filePath }) {
     let rafId = null;
 
     const updateActivePageFromScroll = () => {
-      // مرحله ۱۱: جهتِ اسکرول، پیش از هر early return محاسبه
-      // می‌شود (با ناحیهٔ مردهٔ ۲ پیکسل) تا پنجرهٔ پیش‌رندر، حتی
-      // هنگامِ پرش هم در جهتِ حرکت گسترش یابد.
-      const currentTop = container.scrollTop || 0;
-      const deltaTop = currentTop - lastScrollTopRef.current;
-      if (deltaTop > 2 || deltaTop < -2) {
-        const nextDirection = deltaTop > 0 ? 'down' : 'up';
-        lastScrollTopRef.current = currentTop;
-        if (scrollDirectionRef.current !== nextDirection) {
-          scrollDirectionRef.current = nextDirection;
-          setScrollDirection(nextDirection);
-        }
+      // مرحله ۱۸ — اسکرولِ دستیِ کاربر، قفل‌ها را فوری آزاد می‌کند:
+      // چرخِ ماوس، نوارِ اسکرول و درگ، هیچ علامتِ برنامه‌ای ندارند؛
+      // اسکرول‌هایِ برنامه‌ای (باز شدن، پرش، زومِ ناحیه‌ای) تا
+      // ۱۵۰ میلی‌ثانیه پس از علامت‌گذاری، «برنامه‌ای» حساب می‌شوند.
+      if (Date.now() - (programmaticScrollAtRef.current || 0) > 150) {
+        releaseScrollLocks();
       }
       if (isJumpingRef.current || isResumingRef.current || !hasResumedRef.current) {
         return;
@@ -2573,6 +3164,20 @@ export default function PdfViewer({ filePath }) {
       scrollIdleTimerRef.current = setTimeout(() => {
         triggerHiDpiRender?.();
       }, 220);
+
+      // مرحله ۲۰ — هنگامِ حرکت، بومِ دیپ پنهان می‌شود تا فقط لایهٔ
+      // پایهٔ سبک دیده شود؛ ۱۲۰ میلی‌ثانیه پس از توقف، برشِ تازه
+      // حساب و بومِ دیپ دوباره نشان داده می‌شود.
+      if (!deepSuspendedRef.current) {
+        deepSuspendedRef.current = true;
+        setDeepSuspended(true);
+      }
+      if (deepStopTimerRef.current) clearTimeout(deepStopTimerRef.current);
+      deepStopTimerRef.current = setTimeout(() => {
+        deepSuspendedRef.current = false;
+        setDeepSuspended(false);
+        computeDeepClips();
+      }, 120);
     };
 
     let resizeObserver = null;
@@ -2590,6 +3195,7 @@ export default function PdfViewer({ filePath }) {
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+      if (deepStopTimerRef.current) clearTimeout(deepStopTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       container.removeEventListener('scroll', handleScroll);
     };
@@ -2677,12 +3283,14 @@ export default function PdfViewer({ filePath }) {
       containerRef.current
     ) {
       isJumpingRef.current = true;
+      armScrollLockWatchdog();
       const targetIdx = targetPage - 1;
       setActivePage(targetPage);
       activePageRef.current = targetPage;
 
       const targetOffset = pageOffsetsRef.current[targetIdx];
       if (targetOffset !== undefined) {
+        markProgrammaticScroll();
         containerRef.current.scrollTo({
           top: targetOffset,
           behavior: 'smooth',
@@ -2694,9 +3302,9 @@ export default function PdfViewer({ filePath }) {
         updateReadingProgress(filePath, targetPage, numPages);
       }
 
-      setTimeout(() => {
-        isJumpingRef.current = false;
-      }, 550);
+      // مرحله ۱۸: آزادسازیِ قفلِ پرش، دیگر با تایمرِ ۵۵۰ میلی‌ثانیه‌ای
+      // نیست؛ نگهبانِ ۲۵۰ میلی‌ثانیه‌ای (armScrollLockWatchdog) و
+      // اسکرولِ دستیِ کاربر، آن را آزاد می‌کنند.
     }
   }, [targetPage, numPages, filePath, clearTargetPage, updateReadingProgress]);
 
@@ -2714,11 +3322,12 @@ export default function PdfViewer({ filePath }) {
   );
 
   const handlePageContextMenu = useCallback(
-    (e, pageIndex, imageSrc) => {
+    (e, pageIndex, imageSrc, yRatio) => {
       handleContextMenu(e, {
         pageIndex,
         imagePath: imageSrc,
         dataUrl: imageSrc,
+        yRatio: typeof yRatio === 'number' ? yRatio : undefined,
         comic: useReaderStore.getState().comicData,
       });
     },
@@ -3000,6 +3609,14 @@ export default function PdfViewer({ filePath }) {
         style={{
           ...styles.scrollContainer,
           pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
+          cursor: isPanning ? 'grabbing' : undefined,
+          userSelect: isPanning ? 'none' : undefined,
+        }}
+        onMouseDown={handlePanMouseDown}
+        onWheel={() => {
+          // مرحله ۱۸ — چرخِ ماوس، همیشه یعنی کاربر: قفل‌هایِ باز شدن
+          // و پرش، فوری آزاد می‌شوند تا اسکرول از ثانیهٔ اول آزاد باشد.
+          releaseScrollLocks();
         }}
         onContextMenu={handleContainerContextMenu}
       >
@@ -3015,16 +3632,14 @@ export default function PdfViewer({ filePath }) {
             visiblePageNumbers.map((pageNum) => {
               const index = pageNum - 1;
               const distance = Math.abs(pageNum - activePage);
-              // مرحله ۱۱: پیش‌رندرِ جهت‌دار — به‌جای شعاعِ متقارنِ
-              // ثابت (RENDER_RADIUS=۳)، در جهتِ حرکت ۵ صفحه و
-              // خلافِ جهت ۲ صفحه رندر می‌شوند؛ صفحه‌هایِ بعدی،
-              // همیشه پیش از رسیدنِ چشمِ کاربر آماده‌اند. فاصلهٔ
-              // مطلق، همچنان برای اولویتِ رندر (distanceFromActive)
+              // مرحله ۱۷: شعاعِ رندر، متقارن و پایدار است
+              // (RENDER_RADIUS در هر دو جهت). فاصلهٔ مطلق،
+              // همچنان برای اولویتِ رندر (distanceFromActive)
               // به PdfPageItem می‌رود.
               const signedDistance = pageNum - activePage;
-              const shouldRender = scrollDirection === 'down'
-                ? (signedDistance >= -2 && signedDistance <= 5)
-                : (signedDistance >= -5 && signedDistance <= 2);
+              // مرحله ۱۷: شعاعِ رندرِ پایه، متقارن است — همیشه
+              // RENDER_RADIUS صفحه از بالا و همان‌قدر از پایین.
+              const shouldRender = signedDistance >= -RENDER_RADIUS && signedDistance <= RENDER_RADIUS;
               const cachedUrl = pageBlobCacheRef.current.get(pageNum) || null;
               const pageAnnots = annotationsByPage[String(pageNum)] || EMPTY_PAGE_ANNOTATIONS;
 
@@ -3046,8 +3661,9 @@ export default function PdfViewer({ filePath }) {
                   cachedBlobUrl={cachedUrl}
                   onStorePageBlob={storePageBlobInCache}
                   revokedBlobUrls={revokedBlobUrlsRef.current}
+                  revokedTick={revokedTick}
                   onDropPageBlob={handleDropPageBlob}
-                  expectedHeight={pageHeights[index]}
+                  expectedHeight={(pageHeights || [])[index]}
                   pageWidth={containerWidth * (Math.round(safeZoom * 100) / 100)}
                   rotation={rotation}
                   pageAnnotations={pageAnnots}
@@ -3056,6 +3672,13 @@ export default function PdfViewer({ filePath }) {
                   onCommitPageAnnotations={handleCommitPageAnnotations}
                   onPageRatioMeasured={handlePageRatioMeasured}
                   onContextMenu={handlePageContextMenu}
+                  pageBookmarks={pageBookmarkMap[pageNum] || EMPTY_PAGE_BOOKMARKS}
+                  onOpenBookmark={handleOpenBookmark}
+                  onDeleteBookmark={handleDeleteBookmark}
+                  onRenameBookmark={handleRenameBookmark}
+                  onHiDpiSettled={handleHiDpiSettled}
+                  clipRect={deepClipRects[pageNum] || null}
+                  deepSuspended={deepSuspended}
                 />
               );
             })}
@@ -3063,6 +3686,12 @@ export default function PdfViewer({ filePath }) {
           <div style={{ height: `${paddingBottom}px`, width: '100%', flexShrink: 0 }} />
         </div>
       </div>
+      <RenderProgressHud
+        total={zoomHud.total}
+        done={zoomHud.done}
+        isDone={zoomHud.isDone}
+        visible={zoomHud.visible}
+      />
     </div>
   );
 }
@@ -3125,7 +3754,15 @@ const styles = {
     height: '100%',
     overflowY: 'auto',
     overflowX: 'auto',
-    padding: '10px 0',
+    // مرحله ۱۹ — بازگشتِ پس‌زمینهٔ پشتِ صفحات به سیاهِ مایل به
+    // خاکستریِ پیش از مرحلهٔ ۱۸: عددِ پیشین، --bg خودِ برنامه
+    // (#0a0f13) است که کانتینرِ شفاف، پیش از مرحلهٔ ۱۸ همان را نشان
+    // می‌داد؛ نه #05070b و نه #000000ِ پرامپت، چون کاربر سیاهِ
+    // خاکستری‌مایه خواست و عددِ پیشین هم دقیقاً همین است. فقط خودِ
+    // برگهٔ کاغذ (pageWrapper) سفید می‌ماند. پدینگِ افقیِ ۸۰ = جایِ
+    // مارکرِ ۶۸ + پلِ اتصالِ ۱۰ پیکسل + حاشیهٔ امن.
+    backgroundColor: '#0a0f13',
+    padding: '10px 80px',
     position: 'relative',
     userSelect: 'none',
     direction: 'ltr',
@@ -3146,11 +3783,15 @@ const styles = {
     marginLeft: '0',
     marginRight: '0',
     padding: '0',
-    backgroundColor: 'transparent',
+    // مرحله ۱۷: کاغذِ صفحه همیشه سفید است تا پیش از آماده‌شدنِ
+    // تصویر هم، کاغذِ سفید با اسکلتِ ملایم دیده شود، نه صفحهٔ سیاه.
+    backgroundColor: '#ffffff',
     lineHeight: 0,
     fontSize: 0,
     position: 'relative',
-    contain: 'layout paint',
+    // مرحله ۱۶: contain: paint، بیرون‌زدگیِ مارکر را می‌بُرید؛ با
+    // layout style، مارکرِ بیرونِ کادر دیده می‌شود.
+    contain: 'layout style',
     boxSizing: 'border-box',
   },
   pageImage: {
@@ -3163,7 +3804,7 @@ const styles = {
     boxShadow: '0 4px 18px rgba(0, 0, 0, 0.45)',
     userSelect: 'none',
     WebkitUserDrag: 'none',
-    imageRendering: 'high-quality',
+    imageRendering: 'auto',
   },
   pagePlaceholder: {
     width: '100%',

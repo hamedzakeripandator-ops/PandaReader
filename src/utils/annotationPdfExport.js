@@ -30,6 +30,7 @@ import {
   quadraticPoint,
   resolveArrowGeometry,
 } from './annotationEngine';
+import { normalizeMixedBidiLine } from './bidiTextEngine';
 
 // --- چرخش در مربعِ واحد (مختصاتِ y-down) ---------------------------------
 // rotateUnitSquare نقطه را به اندازهٔ degrees، ساعتگرد می‌چرخاند.
@@ -635,7 +636,9 @@ function drawTextItem(ctx, item, px, py, unitScale) {
     ctx.save();
     ctx.font = `bold ${fontSize}px ${fontFamily}`;
     ctx.direction = detectTextDirection(text) === 'rtl' ? 'rtl' : 'ltr';
-    const lines = text.split(/\r?\n/);
+    // مرحله ۱۴: خط‌ها نرمال‌شده اندازه‌گیری می‌شوند تا عرضِ
+    // کپسول، با همان متنی که کشیده می‌شود، یکی باشد.
+    const lines = text.split(/\r?\n/).map(normalizeMixedBidiLine);
     let maxW = 0;
     for (const ln of lines) {
       const w = ctx.measureText(ln || ' ').width;
@@ -675,7 +678,10 @@ function drawTextItem(ctx, item, px, py, unitScale) {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   ctx.fillStyle = item.color || '#22d3ee';
-  const lines = text.split(/\r?\n/);
+  // مرحله ۱۴: خط‌هایِ ترکیبی، نرمال‌شده کشیده می‌شوند؛
+  // ctx.direction و ترازِ دستیِ lx دست نمی‌خورند تا هندسهٔ
+  // بلوک، دقیقاً مثلِ قبل بماند.
+  const lines = text.split(/\r?\n/).map(normalizeMixedBidiLine);
   const lineHeight = fontSize * 1.3;
   // برای متنِ راست‌چین، خطوطِ کوتاه‌تر به راست چسبیده‌اند (مثلِ
   // align='right در Konva) و لبهٔ راستِ بلوک روی px + blockWidth است؛
@@ -771,6 +777,10 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
     }
     lines[lines.length - 1] = `${trimmed}...`;
   }
+  // مرحله ۱۴: خط‌هایِ wrapشده، نرمال‌شده اندازه‌گیری و کشیده
+  // می‌شوند (trim با «...» رویِ متنِ خام انجام شده و بعد،
+  // نرمال‌سازی می‌آید تا کاراکترهایِ کنترلی، trim را خراب نکنند).
+  lines = lines.map(normalizeMixedBidiLine);
   const rightEdge = px + w - pad;
   lines.forEach((ln, i) => {
     const lineWidth = ctx.measureText(ln || ' ').width;

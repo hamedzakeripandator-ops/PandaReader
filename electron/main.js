@@ -105,17 +105,40 @@ const MAX_PDF_RAM_CACHE_BYTES = 8 * 1024 * 1024;
 // resolvePdfServePath در هر درخواستِ Range، سه فراخوانیِ همگامِ دیسک
 // (statSync/openSync/readSync) می‌زد؛ وقتی pdf.js برای باز شدنِ یک
 // کتاب، بیست درخواستِ Range می‌فرستد، همین‌ها تردِ اصلی را قفل
-// می‌کردند. حالا نتیجهٔ resolve تا ۱۰ ثانیه در رم می‌ماند و
+// می‌کردند. حالا نتیجهٔ resolve تا ۶۰ ثانیه در رم می‌ماند و
 // درخواست‌های پیاپی، با صفر I/Oی همگام پاسخ داده می‌شوند. کش، پس از
 // هر ذخیره (invalidateComicRamCache) و پیش از هر ذخیره
 // (closeComicReadStreams) خالی می‌شود تا ساختِ `.orig.bak`،
 // بلافاصله در سروِ بعدی دیده شود. توجه: statِ ناهمگامِ شاخهٔ PDF
 // (برای ETag/304/Range) سرِ جایش می‌ماند — آن، برای درستیِ کشِ
 // مرورگر لازم است و تردِ اصلی را قفل نمی‌کند.
-const PDF_SERVE_PATH_CACHE_TTL_MS = 10000;
+const PDF_SERVE_PATH_CACHE_TTL_MS = 60000;
 const pdfServePathCache = new Map();
 function clearPdfServePathCache() {
   try { pdfServePathCache.clear(); } catch (_) {}
+  // مرحله ۱۷: با خالی شدنِ کشِ مسیر، پرچمِ خالی بودنِ پوشهٔ
+  // orig-backups هم فراموش می‌شود تا پس از هر ذخیره (که پشتیبانِ
+  // تازه می‌سازد)، resolve بعدی دوباره پوشه را ببیند.
+  origBackupsEmptyCache = null;
+}
+
+// مرحله ۱۷: پرچمِ کش‌شدهٔ خالی بودنِ پوشهٔ orig-backups —
+// وقتی پوشه خالی یا غایب است، resolvePdfServePath اصلاً هیچ
+// statSync/readSyncای برایِ پشتیبان‌هایِ جابه‌جاشده نمی‌زند و
+// مستقیم سراغِ فایلِ اصلی می‌رود. پرچم، فقط با
+// clearPdfServePathCache (پیش و پس از هر ذخیره) باطل می‌شود.
+const ORIG_BACKUPS_DIR = path.join(COMIC_DATA_DIR, 'orig-backups');
+let origBackupsEmptyCache = null;
+function isOrigBackupsDirEmpty() {
+  if (origBackupsEmptyCache !== null) return origBackupsEmptyCache;
+  try {
+    const entries = fs.readdirSync(ORIG_BACKUPS_DIR);
+    origBackupsEmptyCache = entries.length === 0;
+  } catch (_) {
+    // غایب یا ناخوانا = چیزی برایِ کاوش نیست.
+    origBackupsEmptyCache = true;
+  }
+  return origBackupsEmptyCache;
 }
 let currentRamCacheBytes = 0;
 
@@ -254,7 +277,7 @@ function isRelocatedBackupPlausible(backupPath, normalizedPath) {
 // اگر پایهٔ خام نیست یا معتبر نیست، همان فایلِ اصلی سرو می‌شود،
 // تا فایلِ سالمِ اصلی، هرگز زیرِ سایهٔ پشتیبانِ خراب نرود.
 // فقط stat + خواندنِ سر/دم است تا در هر درخواستِ Range،
-// سربارِ ناچیزی داشته باشد؛ نتیجه، ۱۰ ثانیه در کش می‌ماند.
+// سربارِ ناچیزی داشته باشد؛ نتیجه، ۶۰ ثانیه در کش می‌ماند.
 function resolvePdfServePath(normalizedPath) {
   if (!normalizedPath || typeof normalizedPath !== 'string') return normalizedPath;
   if (path.extname(normalizedPath).toLowerCase() !== '.pdf') return normalizedPath;
@@ -264,10 +287,17 @@ function resolvePdfServePath(normalizedPath) {
     return cached.servePath;
   }
   let servePath = normalizedPath;
-  const relocatedPath = relocatedOrigBackupPathForServe(normalizedPath);
-  if (relocatedPath && isRelocatedBackupPlausible(relocatedPath, normalizedPath) && isStructurallyPlausiblePdf(relocatedPath)) {
-    servePath = relocatedPath;
-  } else {
+  let foundBackup = false;
+  // مرحله ۱۷: اگر پوشهٔ orig-backups خالی/غایب است، کاوشِ
+  // پشتیبانِ جابه‌جاشده (stat + sidecar + سر/دم) کاملاً حذف می‌شود.
+  if (!isOrigBackupsDirEmpty()) {
+    const relocatedPath = relocatedOrigBackupPathForServe(normalizedPath);
+    if (relocatedPath && isRelocatedBackupPlausible(relocatedPath, normalizedPath) && isStructurallyPlausiblePdf(relocatedPath)) {
+      servePath = relocatedPath;
+      foundBackup = true;
+    }
+  }
+  if (!foundBackup) {
     const origPath = normalizedPath + '.orig.bak';
     if (isStructurallyPlausiblePdf(origPath)) servePath = origPath;
   }

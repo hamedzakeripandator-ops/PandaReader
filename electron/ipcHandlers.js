@@ -1003,7 +1003,30 @@ module.exports = function(app) {
 
   ipcMain.handle('db-action', async (event, requestData) => {
     const { action, payload } = requestData || {};
-    return await executeDbAction(action, payload);
+    const result = await executeDbAction(action, payload);
+    // مرحله ۱۵ — آینهٔ تمپلیت‌ها در پوشهٔ نرم‌افزار: هر بار که
+    // تنظیماتِ بوک‌مارک ذخیره می‌شود، همان savedPresets در
+    // bookmark-backgrounds/bookmark-presets.json هم نوشته می‌شود
+    // تا با extraResources، همراهِ نصاب باشد. نوشتن، اتمیک است
+    // (فایلِ موقت + rename) و شکستش، هرگز پاسخِ دیتابیس را
+    // خراب نمی‌کند؛ مرجعِ حقیقت، همچنان db.json است.
+    if (
+      action === 'SAVE_BOOKMARK_PREFERENCES' &&
+      payload && payload.preferences &&
+      Array.isArray(payload.preferences.savedPresets)
+    ) {
+      try {
+        const { appBgDir } = getBookmarkBackgroundsDirs();
+        if (appBgDir) {
+          if (!fs.existsSync(appBgDir)) fs.mkdirSync(appBgDir, { recursive: true });
+          const tmpPath = path.join(appBgDir, 'bookmark-presets.json.tmp');
+          const finalPath = path.join(appBgDir, 'bookmark-presets.json');
+          fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), presets: payload.preferences.savedPresets }, null, 2), 'utf-8');
+          fs.renameSync(tmpPath, finalPath);
+        }
+      } catch (_) {}
+    }
+    return result;
   });
 
   ipcMain.handle('cancel-extraction', async () => {
@@ -1927,6 +1950,18 @@ module.exports = function(app) {
       const origBackups = dirSizeRecursive(dataDir ? path.join(dataDir, 'orig-backups') : '');
       const extractedTemp = dirSizeRecursive(typeof tempDir === 'string' ? tempDir : '');
       const logs = dirSizeRecursive(dataDir ? path.join(dataDir, 'logs') : '');
+      const searchIndex = dirSizeRecursive(dataDir ? path.join(dataDir, 'search-index') : '');
+      // مرحله ۱۳: سهمِ کاورهایِ سفارشی (بهترین تلاش؛ اگر ورکر
+      // جواب نداد، صفر می‌ماند و مودال فقط مجموع را نشان می‌دهد).
+      let coverCustomCount = 0;
+      let coverCustomBytes = 0;
+      try {
+        const coverStats = await executeDbRequest('GET_COVER_STATS', {}, 30000);
+        if (coverStats && coverStats.type === 'done') {
+          coverCustomCount = coverStats.customFiles || 0;
+          coverCustomBytes = coverStats.customBytes || 0;
+        }
+      } catch (_) {}
       const tempCacheSizeBytes = protectedCache.bytes + origBackups.bytes + extractedTemp.bytes;
       const totalSizeBytes = dbSizeBytes + covers.bytes + tempCacheSizeBytes + logs.bytes;
       return {
@@ -1943,6 +1978,13 @@ module.exports = function(app) {
           protectedCacheSizeBytes: protectedCache.bytes,
           origBackupsSizeBytes: origBackups.bytes,
           extractedTempSizeBytes: extractedTemp.bytes,
+          protectedCacheCount: protectedCache.files,
+          origBackupsCount: origBackups.files,
+          extractedTempCount: extractedTemp.files,
+          searchIndexSizeBytes: searchIndex.bytes,
+          searchIndexCount: searchIndex.files,
+          coverCustomCount,
+          coverCustomBytes,
           logsSizeBytes: logs.bytes,
           totalSizeBytes,
         },
@@ -1961,6 +2003,276 @@ module.exports = function(app) {
       return { success: false, error: (result && result.message) || 'پاک‌سازیِ کاورها انجام نشد.' };
     } catch (err) {
       return { success: false, error: 'پاک‌سازیِ کاورها انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۳: پوشهٔ اختصاصیِ تصاویرِ بوک‌مارک. پوشهٔ اصلی،
+  // همیشه زیرِ dataDir است (در حالتِ Portable هم همان‌جاست)؛
+  // در حالتِ توسعه، پوشهٔ کنارِ پروژه هم خوانده می‌شود تا کاربر
+  // بتواند همان‌جا هم عکس بریزد. اگر پوشه‌ای نبود، ساخته می‌شود.
+  // مرحله ۱۵ — پوشهٔ عکس‌ها و تمپلیت‌هایِ بوک‌مارک، دقیقاً در
+  // پوشهٔ خودِ نرم‌افزار (App-Local Bookmark Assets):
+  // - توسعه (!isPackaged): ریشهٔ پروژه، کنارِ package.json
+  //   (app.getAppPath()/bookmark-backgrounds).
+  // - نصب‌شده (isPackaged): resources/bookmark-backgrounds که
+  //   electron-builder با extraResources از همین پوشهٔ پروژه پر
+  //   می‌کند؛ چون بیرونِ asar است، در زمانِ اجرا قابلِ نوشتن است.
+  // پوشهٔ قدیمیِ dataDir، فقط منبعِ خواندنِ سازگار با نسخه‌هایِ
+  // قبلی است تا عکس‌هایِ قبلیِ کاربر ناپدید نشوند؛ نوشتنِ تازه
+  // (باز کردن، وارد کردن، حذف، presets.json) همیشه در پوشهٔ
+  // همراهِ نرم‌افزار است. کلیدِ projectBgDir برای سازگاری، همان
+  // appBgDir است.
+  function getBookmarkBackgroundsDirs() {
+    const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+    const dataBgDir = dataDir ? path.join(dataDir, 'bookmark-backgrounds') : '';
+    let appBgDir = '';
+    try {
+      if (app && app.isPackaged) {
+        appBgDir = path.join(process.resourcesPath, 'bookmark-backgrounds');
+      } else if (app && typeof app.getAppPath === 'function') {
+        appBgDir = path.join(app.getAppPath(), 'bookmark-backgrounds');
+      }
+    } catch (_) {}
+    return { dataDir, dataBgDir, projectBgDir: appBgDir, appBgDir };
+  }
+
+  function ensureBookmarkBackgroundsDirs() {
+    const { dataBgDir, appBgDir } = getBookmarkBackgroundsDirs();
+    [dataBgDir, appBgDir].forEach((d) => {
+      if (!d) return;
+      try { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); } catch (_) {}
+    });
+    return { dataBgDir, projectBgDir: appBgDir, appBgDir };
+  }
+
+  // حذفِ محتوایِ یک پوشه (نه خودِ پوشه) + شمارشِ قبل از حذف.
+  function clearDirContentsSync(dirPath) {
+    const before = dirSizeRecursive(dirPath);
+    if (!dirPath || !fs.existsSync(dirPath)) return { files: 0, bytes: 0 };
+    try {
+      fs.readdirSync(dirPath).forEach((name) => {
+        try { fs.rmSync(path.join(dirPath, name), { recursive: true, force: true }); } catch (_) {}
+      });
+    } catch (_) {}
+    return before;
+  }
+
+  ipcMain.handle('list-bookmark-backgrounds', async () => {
+    try {
+      const { dataBgDir, appBgDir } = ensureBookmarkBackgroundsDirs();
+      const exts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif']);
+      const files = [];
+      const seen = new Set();
+      // مرحله ۱۵: پوشهٔ نرم‌افزار اول است تا در نامِ تکراری، نسخهٔ
+      // همراهِ نرم‌افزار برنده شود؛ پوشهٔ قدیمیِ dataDir، فقط برای
+      // سازگاری خوانده می‌شود.
+      for (const dir of [appBgDir, dataBgDir]) {
+        if (!dir || !fs.existsSync(dir)) continue;
+        let names = [];
+        try { names = fs.readdirSync(dir); } catch (_) { continue; }
+        for (const name of names) {
+          const ext = path.extname(name).toLowerCase();
+          if (!exts.has(ext)) continue;
+          const key = name.toLowerCase();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const full = path.join(dir, name);
+          let size = 0;
+          try {
+            const st = fs.statSync(full);
+            if (!st.isFile()) continue;
+            size = st.size;
+          } catch (_) { continue; }
+          // سروِ تصویر از راهِ همان هندلرِ comic:// است
+          // (شاخهٔ ?path=)؛ پس هیچ کانالِ تازه‌ای لازم نیست.
+          files.push({ name, url: 'comic://media/?path=' + encodeURIComponent(full), size, source: dir === appBgDir ? 'app' : 'data' });
+        }
+      }
+      return { success: true, files, dirs: { dataDir: dataBgDir, projectDir: appBgDir || '', appDir: appBgDir || '' } };
+    } catch (err) {
+      return { success: false, error: 'خواندنِ پوشهٔ تصاویرِ بوک‌مارک انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  ipcMain.handle('open-bookmark-backgrounds-folder', async () => {
+    try {
+      const { appBgDir } = ensureBookmarkBackgroundsDirs();
+      if (!appBgDir) return { success: false, error: 'پوشهٔ نرم‌افزار در دسترس نیست.' };
+      const { shell } = require('electron');
+      // مرحله ۱۴: openPath در صورتِ شکست، رشتهٔ خطا برمی‌گرداند و
+      // استثنا نمی‌اندازد؛ نسخهٔ مرحلهٔ ۱۳، همین رشته را نادیده
+      // می‌گرفت و همیشه موفقیت گزارش می‌کرد، پس شکست، بی‌صدا
+      // می‌ماند. حالا خطا صریح برگردانده می‌شود تا استودیو آن را
+      // با توست نشان بدهد. path.resolve هم مسیر را یکتا می‌کند.
+      const resolved = path.resolve(appBgDir);
+      const openErr = await shell.openPath(resolved);
+      if (openErr) return { success: false, error: 'باز کردنِ پوشه انجام نشد: ' + String(openErr) };
+      return { success: true, dir: resolved };
+    } catch (err) {
+      return { success: false, error: 'باز کردنِ پوشه انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۴: واردکنندهٔ مستقیمِ عکس به پوشهٔ bookmark-backgrounds —
+  // بدونِ هیچ دیالوگِ ویندوز: مسیرها از درگ‌واندراپِ استودیو یا
+  // انتخاب‌گرِ فایلِ وب می‌آیند. فقط فایل‌هایِ تصویریِ مجاز کپی
+  // می‌شوند؛ نامِ تکراری با پسوندِ شماره‌دار یکتا می‌شود؛ مقصد،
+  // از مرحله ۱۵، همیشه پوشهٔ همراهِ نرم‌افزار است.
+  ipcMain.handle('import-bookmark-background-files', async (event, payload) => {
+    try {
+      const { appBgDir } = ensureBookmarkBackgroundsDirs();
+      if (!appBgDir) return { success: false, error: 'پوشهٔ نرم‌افزار در دسترس نیست.' };
+      const rawPaths = Array.isArray(payload && payload.paths) ? payload.paths : [];
+      const exts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif']);
+      const imported = [];
+      const skipped = [];
+      let count = 0;
+      for (const raw of rawPaths) {
+        if (count >= 100) { skipped.push({ path: String(raw || ''), reason: 'بیش از ۱۰۰ فایل در یک مرحله' }); continue; }
+        count += 1;
+        try {
+          const src = typeof raw === 'string' ? raw.trim() : '';
+          if (!src) { skipped.push({ path: '', reason: 'مسیرِ خالی' }); continue; }
+          const st = fs.statSync(src);
+          if (!st.isFile()) { skipped.push({ path: src, reason: 'فایل نیست' }); continue; }
+          const ext = path.extname(src).toLowerCase();
+          if (!exts.has(ext)) { skipped.push({ path: src, reason: 'پسوندِ تصویریِ مجاز نیست' }); continue; }
+          const base = path.basename(src, ext).replace(/[\\/:*?"<>|]/g, '_').slice(0, 80) || 'image';
+          let name = base + ext;
+          let n = 2;
+          while (fs.existsSync(path.join(appBgDir, name))) { name = base + '-' + n + ext; n += 1; }
+          fs.copyFileSync(src, path.join(appBgDir, name));
+          imported.push({ name, url: 'comic://media/?path=' + encodeURIComponent(path.join(appBgDir, name)) });
+        } catch (err) {
+          skipped.push({ path: String(raw || ''), reason: String((err && err.message) || err) });
+        }
+      }
+      return { success: true, imported, skipped, dir: appBgDir };
+    } catch (err) {
+      return { success: false, error: 'وارد کردنِ عکس‌ها انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۵: حذفِ یک عکس از پوشهٔ بوک‌مارک — اول پوشهٔ همراهِ
+  // نرم‌افزار، بعد پوشهٔ قدیمیِ dataDir (سازگاری). نام، فقط
+  // basename است تا هیچ مسیری از بیرون تزریق نشود؛ فقط پسوندهایِ
+  // تصویریِ مجاز حذف می‌شوند.
+  ipcMain.handle('delete-bookmark-background', async (event, payload) => {
+    try {
+      const rawName = typeof payload === 'string' ? payload : (payload && payload.name) || '';
+      const name = path.basename(String(rawName || '').trim());
+      if (!name || name === '.' || name === '..') return { success: false, error: 'نامِ فایل معتبر نیست.' };
+      const ext = path.extname(name).toLowerCase();
+      if (!['.png', '.jpg', '.jpeg', '.webp', '.avif', '.gif'].includes(ext)) {
+        return { success: false, error: 'فقط فایل‌هایِ تصویری حذف می‌شوند.' };
+      }
+      const { appBgDir, dataBgDir } = ensureBookmarkBackgroundsDirs();
+      for (const dir of [appBgDir, dataBgDir]) {
+        if (!dir) continue;
+        const full = path.join(dir, name);
+        try {
+          const st = fs.statSync(full);
+          if (!st.isFile()) continue;
+          fs.unlinkSync(full);
+          return { success: true, name, dir };
+        } catch (_) { continue; }
+      }
+      return { success: false, error: 'فایل در پوشهٔ بوک‌مارک پیدا نشد.' };
+    } catch (err) {
+      return { success: false, error: 'حذفِ عکس انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۵: خواندنِ تمپلیت‌هایِ همراهِ نرم‌افزار
+  // (bookmark-presets.json) برای ادغام در بارگذاریِ تنظیمات.
+  // نبودنِ فایل، یعنی هنوز تمپلیتی همراه نشده — خطا نیست.
+  ipcMain.handle('get-app-bookmark-presets', async () => {
+    try {
+      const { appBgDir } = ensureBookmarkBackgroundsDirs();
+      if (!appBgDir) return { success: false, error: 'پوشهٔ نرم‌افزار در دسترس نیست.' };
+      const finalPath = path.join(appBgDir, 'bookmark-presets.json');
+      if (!fs.existsSync(finalPath)) return { success: true, presets: [] };
+      let parsed = null;
+      try {
+        parsed = JSON.parse(fs.readFileSync(finalPath, 'utf-8'));
+      } catch (_) {
+        return { success: false, error: 'فایلِ تمپلیت‌هایِ همراه، خراب است و نادیده گرفته شد.' };
+      }
+      const presets = Array.isArray(parsed && parsed.presets) ? parsed.presets : [];
+      return { success: true, presets };
+    } catch (err) {
+      return { success: false, error: 'خواندنِ تمپلیت‌هایِ همراه انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۳: پاک‌سازیِ فقط کاورها — به هیچ کشِ دیگری دست
+  // نمی‌زند (نه orig-backups، نه protected-cache، نه search-index).
+  ipcMain.handle('clear-only-covers', async (event, payload) => {
+    try {
+      const preserveCustom = !(payload && payload.preserveCustom === false);
+      const result = await executeDbRequest('CLEAR_ONLY_COVERS', { preserveCustom }, 60000);
+      if (result && result.type === 'done') {
+        return { success: true, clearedFiles: result.clearedFiles || 0, freedBytes: result.freedBytes || 0, keptCustom: result.keptCustom || 0 };
+      }
+      return { success: false, error: (result && result.message) || 'پاک‌سازیِ کاورها انجام نشد.' };
+    } catch (err) {
+      return { success: false, error: 'پاک‌سازیِ کاورها انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۳: پاک‌سازیِ فقط کش‌هایِ موقت — به پوشهٔ covers و
+  // کاورهایِ کتابخانه دست نمی‌زند. orig-backups فقط وقتی پاک
+  // می‌شود که کاربر در مودال، تیکش را زده باشد. توجه: اگر کتابی
+  // باز است، استخراجِ موقتِ آن هم پاک می‌شود و کتاب باید دوباره
+  // باز شود؛ مودال، همین را به کاربر می‌گوید.
+  ipcMain.handle('clear-only-caches', async (event, payload) => {
+    try {
+      const includeOrigBackups = Boolean(payload && payload.includeOrigBackups);
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+      const beforeTemp = dirSizeRecursive(typeof tempDir === 'string' ? tempDir : '');
+      cleanupExtractedDiskCache('__FORCE_ALL__', true);
+      const protectedCache = clearDirContentsSync(getProtectedCacheDir());
+      const searchIndex = clearDirContentsSync(dataDir ? path.join(dataDir, 'search-index') : '');
+      const origBackups = includeOrigBackups
+        ? clearDirContentsSync(dataDir ? path.join(dataDir, 'orig-backups') : '')
+        : { files: 0, bytes: 0 };
+      const clearedFiles = beforeTemp.files + protectedCache.files + searchIndex.files + origBackups.files;
+      const freedBytes = beforeTemp.bytes + protectedCache.bytes + searchIndex.bytes + origBackups.bytes;
+      return {
+        success: true,
+        clearedFiles,
+        freedBytes,
+        breakdown: {
+          extractedTemp: beforeTemp,
+          protectedCache,
+          searchIndex,
+          origBackups,
+        },
+      };
+    } catch (err) {
+      return { success: false, error: 'پاک‌سازیِ کش‌ها انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحله ۱۳: پیش‌نمایشِ هرس (فقط خواندن؛ هیچ چیز پاک نمی‌شود)
+  // تا مودال، تعدادِ دقیق را پیش از تأیید نشان بدهد.
+  ipcMain.handle('preview-prune-missing-files', async () => {
+    try {
+      const result = await executeDbRequest('PREVIEW_PRUNE_MISSING_FILES', {}, 60000);
+      if (result && result.type === 'done') {
+        return {
+          success: true,
+          removed: Array.isArray(result.removed) ? result.removed : [],
+          skipped: Array.isArray(result.skipped) ? result.skipped : [],
+          removedCount: result.removedCount || 0,
+          skippedCount: result.skippedCount || 0,
+          coverFilesDeleted: result.coverFilesDeleted || 0,
+          coverBytesFreed: result.coverBytesFreed || 0,
+        };
+      }
+      return { success: false, error: (result && result.message) || 'پیش‌نمایشِ هرس انجام نشد.' };
+    } catch (err) {
+      return { success: false, error: 'پیش‌نمایشِ هرس انجام نشد: ' + String((err && err.message) || err) };
     }
   });
 

@@ -27,6 +27,8 @@ export default function ProfileView() {
   // مرحله ۶ ـ بخش الف: آمارِ واقعیِ مطالعه از دیتابیس. تا وقتی
   // بارگذاری نشده، summary برابر null است تا عددِ جعلی نشان داده نشود.
   const [readingSummary, setReadingSummary] = useState(null);
+  // مرحله ۱۴: مجموعِ زمانِ حضور در برنامه.
+  const [totalAppSeconds, setTotalAppSeconds] = useState(0);
   useEffect(() => {
     let isMounted = true;
     (async () => {
@@ -38,8 +40,14 @@ export default function ProfileView() {
         if (readingActivity && typeof readingActivity.waitForPendingFlush === 'function') {
           await readingActivity.waitForPendingFlush();
         }
+        // مرحله ۱۴: مثلِ آمارِ مطالعه، پیش از خواندن، منتظرِ
+        // فلاشِ حضور می‌مانیم.
+        if (readingActivity && typeof readingActivity.waitForAppFlush === 'function') {
+          await readingActivity.waitForAppFlush();
+        }
         if (!isMounted) return;
         const res = await coreApi.getReadingStats();
+        if (isMounted && res) setTotalAppSeconds(Number(res.totalAppSeconds) || 0);
         if (isMounted && res && res.days) {
           setReadingSummary(computeReadingSummary(res.days));
         } else if (isMounted) {
@@ -217,6 +225,10 @@ export default function ProfileView() {
           <div style={styles.statBox}>
             <strong style={styles.statVal}>{readingSummary ? formatReadingHours(readingSummary.totalSeconds) : '—'}</strong>
             <span style={styles.statLbl}>زمان مطالعه</span>
+          </div>
+          <div style={styles.statBox}>
+            <strong style={styles.statVal}>{formatReadingHours(totalAppSeconds)}</strong>
+            <span style={styles.statLbl}>حضور در برنامه</span>
           </div>
           <div style={styles.statBox}>
             <strong style={styles.statVal}>{totalComics}</strong>
