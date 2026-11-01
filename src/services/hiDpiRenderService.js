@@ -227,8 +227,12 @@ function makePngLruCache(limit) {
     get size() { return map.size; },
   };
 }
-const basePngCache = makePngLruCache(30);
-const deepPngCache = makePngLruCache(6);
+// مرحلهٔ ۳۰ — سقفِ کش‌ها کم شد (پایه ۳۰→۱۲، دیپ ۶→۳):
+// دیپِ ۲۰ مگاپیکسلی، هر ورودی تا ~۸۰ مگابایت تصویرِ دیکدشده
+// نگه می‌دارد؛ ۶ ورودی، سقفِ نظریِ ~۴۸۰ مگابایت بود و ۳ ورودی،
+// آن را به ~۲۴۰ مگابایت می‌رساند (فقط صفحهٔ فعال و ۲ همسایه).
+const basePngCache = makePngLruCache(12);
+const deepPngCache = makePngLruCache(3);
 export function registerBasePngUrl(key, url) { basePngCache.register(key, url); }
 export function revokeBasePngUrl(key) { basePngCache.revoke(key); }
 export function registerDeepPngUrl(key, url) { deepPngCache.register(key, url); }

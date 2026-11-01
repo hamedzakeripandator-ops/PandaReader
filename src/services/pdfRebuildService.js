@@ -30,11 +30,15 @@
 import { PDFDocument } from 'pdf-lib';
 import { normalizeSearchText } from '../utils/persianSearch';
 
-// مرحله ۱۱: مقیاسِ ۱.۴۵ و کیفیتِ ۰.۸۰ (پیش‌تر ۲.۰ و ۰.۹۲) — حجمِ
-// خروجی تا ~۷۰٪ کمتر و رندر، سریع‌تر؛ کیفیتِ خواندنِ کمیک/متن
-// در این مقیاس، همچنان کاملاً خواناست.
-export const DEFAULT_REBUILD_SCALE = 1.45;
-export const REBUILD_JPEG_QUALITY = 0.80;
+// مرحلهٔ ۳۰ — بازگشتِ آگاهانه به مقیاسِ ۲٫۰ و کیفیتِ ۰٫۹۲:
+// مرحلهٔ ۱۱، این دو را برایِ کم‌شدنِ ~۷۰٪ حجم پایین آورده بود،
+// ولی همان افت، علتِ «بی‌کیفیت شدنِ کپیِ بازسازی‌شده و خراب
+// شدنِ زوم» است: صفحهٔ رستریِ ۱٫۴۵x با JPEGِ ۰٫۸۰، در زومِ
+// ۳۵۰٪، دیگر جزئیاتی برایِ دیپ‌رندر ندارد. بازسازی، همچنان
+// رستری است (مسیرِ آخر) ولی با وضوحِ بیشتر؛ حجمِ خروجی،
+// دوباره بزرگ‌تر می‌شود و سقفِ ۱۶ مگاپیکسلِ بوم، سرِ جایش است.
+export const DEFAULT_REBUILD_SCALE = 2.0;
+export const REBUILD_JPEG_QUALITY = 0.92;
 // سقفِ پیکسلِ بوم: بوم‌های غول‌پیکر، در Chromium خراب می‌شوند.
 const MAX_REBUILD_CANVAS_PIXELS = 16000000;
 // مرحله ۱۱: دسته‌های ۳ صفحه‌ایِ موازی برای فازِ رندر؛ اسمبلیِ
@@ -191,6 +195,7 @@ export async function rebuildEditablePdfFromPdfJs({
   pdfDoc,
   preparedPages,
   onProgress,
+  signal,
   scale = DEFAULT_REBUILD_SCALE,
   jpegQuality = REBUILD_JPEG_QUALITY,
   renderPage = defaultRenderPage,
@@ -211,6 +216,14 @@ export async function rebuildEditablePdfFromPdfJs({
 
   const searchPages = {};
   for (let batchStart = 1; batchStart <= total; batchStart += REBUILD_BATCH_SIZE) {
+    // مرحلهٔ ۳۰ — لغوِ دستی: در مرزِ دسته‌هایِ ۳ صفحه‌ای بررسی
+    // می‌شود؛ دستهٔ در حالِ اجرا تمام می‌شود و بعد، هیچ صفحهٔ
+    // تازه‌ای رندر نمی‌شود و هیچ فایلی نوشته نمی‌شود.
+    if (signal && signal.aborted) {
+      const abortErr = new Error('عملیاتِ بازسازی لغو شد.');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
     const batchEnd = Math.min(total, batchStart + REBUILD_BATCH_SIZE - 1);
     const batchNums = [];
     for (let n = batchStart; n <= batchEnd; n++) batchNums.push(n);

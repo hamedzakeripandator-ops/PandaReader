@@ -8,6 +8,7 @@ const STORAGE_KEYS = {
   RECENTS: 'comic_reader_recents_v4',
   DOWNLOADS: 'comic_reader_downloads_v4',
   DOWNLOADS_DIR: 'comic_reader_downloads_dir_v4',
+  RECENT_LIMIT: 'comicReader.recentLimit.v1',
 };
 
 // متغیرهای مدیریت تایمر دی‌بانس و ذخیره اضطراری پیشرفت مطالعه
@@ -86,6 +87,24 @@ const writeLocal = (key, data) => {
   }
 };
 
+// مرحلهٔ ۳۰ — اعتبارسنجیِ حدِ نمایشِ Recent: عددِ صحیحِ ۱ تا ۵۰۰
+// یا رشتهٔ 'all'؛ هر مقدارِ دیگری، پیش‌فرضِ ۱۰۰ برمی‌گرداند.
+function normalizeRecentLimit(value) {
+  if (value === 'all') return 'all';
+  const n = Number(value);
+  if (Number.isInteger(n) && n >= 1 && n <= 500) return n;
+  return 100;
+}
+function readRecentLimit() {
+  try {
+    const raw = localStorage.getItem('comicReader.recentLimit.v1');
+    if (raw === null || raw === undefined || raw === '') return 100;
+    return normalizeRecentLimit(JSON.parse(raw));
+  } catch (_) {
+    return 100;
+  }
+}
+
 const useLibraryStore = create((set, get) => ({
   library: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
   libraryItems: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
@@ -93,6 +112,10 @@ const useLibraryStore = create((set, get) => ({
   activeFolderId: 'ALL', // 'ALL' | 'PINNED' | 'UNFOLDERED' | folder.id
   favorites: readLocal(STORAGE_KEYS.FAVORITES, []),
   recentItems: readLocal(STORAGE_KEYS.RECENTS, []),
+  // مرحلهٔ ۳۰ — حدِ نمایشِ مواردِ اخیر در نمایِ Recent (پیش‌فرض
+  // ۱۰۰؛ 'all' یعنی همهٔ مواردِ نگه‌داشته‌شده تا سقفِ ۵۰۰).
+  // این، فقط حدِ نمایش است و چیزی را از نگهداری پاک نمی‌کند.
+  recentLimit: readRecentLimit(),
   downloads: readLocal(STORAGE_KEYS.DOWNLOADS, []),
   downloadsFolderPath: readLocal(STORAGE_KEYS.DOWNLOADS_DIR, ''),
   cachedCovers: {},
@@ -196,7 +219,8 @@ const useLibraryStore = create((set, get) => ({
               });
             }
           });
-          const mergedRecents = Array.from(mergedRecentsMap.values()).slice(0, 100);
+          // مرحلهٔ ۳۰ — سقفِ نگهداری، ۱۰۰→۵۰۰ (حدِ نمایش، جداست).
+          const mergedRecents = Array.from(mergedRecentsMap.values()).slice(0, 500);
           set({ recentItems: mergedRecents });
           writeLocal(STORAGE_KEYS.RECENTS, mergedRecents);
         }
@@ -758,7 +782,8 @@ const useLibraryStore = create((set, get) => ({
     const filtered = currentRecents.filter(
       (item) => normalizePath(item.path || item.filePath) !== norm
     );
-    const updated = [recentEntry, ...filtered].slice(0, 100);
+    // مرحلهٔ ۳۰ — سقفِ نگهداری، ۱۰۰→۵۰۰ (حدِ نمایش، جداست).
+    const updated = [recentEntry, ...filtered].slice(0, 500);
 
     set({ recentItems: updated });
     writeLocal(STORAGE_KEYS.RECENTS, updated);
@@ -902,6 +927,13 @@ const useLibraryStore = create((set, get) => ({
     set({ recentItems: [] });
     writeLocal(STORAGE_KEYS.RECENTS, []);
     coreApi.dbAction({ action: 'CLEAR_RECENTS' }).catch(() => {});
+  },
+
+  // مرحلهٔ ۳۰ — تغییرِ حدِ نمایشِ Recent + ذخیره در localStorage.
+  setRecentLimit: (value) => {
+    const limit = normalizeRecentLimit(value);
+    set({ recentLimit: limit });
+    writeLocal(STORAGE_KEYS.RECENT_LIMIT, limit);
   },
 
   // ۶. مدیریت دانلودها

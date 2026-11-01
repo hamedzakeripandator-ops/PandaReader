@@ -60,6 +60,7 @@ const useReaderStore = create((set, get) => ({
   preAreaZoomLevel: null,
   areaZoomTarget: null, // { id, targetZoom, pageNumber, pageRatioX, pageRatioY, normCenterX, normCenterY, rect, timestamp }
   hiDpiRenderTick: 0,
+  deepRefreshTick: 0, // مرحلهٔ ۳۰ — نسلِ اجباریِ دیپ پس از ذخیرهٔ درجا
   detailRenderTick: 0, // مرحله ۲۴ — نسلِ رندرِ تایلِ جزئیات (هر اسکرول، حتی برنامه‌ای)
   comicPageGap: getInitialComicGap(),
   pdfPageGap: getInitialPdfGap(),
@@ -260,6 +261,11 @@ const useReaderStore = create((set, get) => ({
   // مدیریت زوم استاندارد، زوم باکسی و ری‌رندر باکیفیت (HiDPI)
   triggerHiDpiRender: () =>
     set((state) => ({ hiDpiRenderTick: (state.hiDpiRenderTick + 1) % 100000 })),
+
+  // مرحلهٔ ۳۰ — پس از ذخیرهٔ درجا، دیپِ صفحه‌هایِ نزدیک، با همان
+    // زوم هم از نو رندر می‌شود (امضایِ قبلی در آیتم پاک می‌شود).
+  requestDeepRefresh: () =>
+    set((state) => ({ deepRefreshTick: (state.deepRefreshTick + 1) % 100000 })),
 
   // مرحله ۲۴ — شلیکِ رندرِ تایلِ جزئیات پس از توقفِ اسکرول.
   triggerDetailRender: () =>

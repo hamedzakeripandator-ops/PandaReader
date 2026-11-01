@@ -43,6 +43,7 @@ const PageListRow = React.memo(function PageListRow({
       )}
 
       <div
+        data-panel-page={pageNum}
         ref={isActive ? activePageRef : null}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
@@ -133,6 +134,28 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const panelSkipBlurRef = useRef(false);
   const [editingBookmarkId, setEditingBookmarkId] = useState(null);
   const [editingBookmarkName, setEditingBookmarkName] = useState('');
+  // مرحلهٔ ۳۰ — آکاردئونِ بوک‌مارک‌ها + تاگلِ مستقلِ تمپلیت‌ها
+  // (وضعیت در localStorage می‌ماند؛ پیش‌فرض، باز).
+  const [isBookmarksSectionOpen, setIsBookmarksSectionOpen] = useState(() => {
+    try { return localStorage.getItem('comicReader.rightPanelBookmarksOpen') !== '0'; } catch (_) { return true; }
+  });
+  const [isBookmarkTemplatesOpen, setIsBookmarkTemplatesOpen] = useState(() => {
+    try { return localStorage.getItem('comicReader.rightPanelBookmarkTemplatesOpen') !== '0'; } catch (_) { return true; }
+  });
+  const toggleBookmarksSection = useCallback(() => {
+    setIsBookmarksSectionOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('comicReader.rightPanelBookmarksOpen', next ? '1' : '0'); } catch (_) {}
+      return next;
+    });
+  }, []);
+  const toggleBookmarkTemplates = useCallback(() => {
+    setIsBookmarkTemplatesOpen((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('comicReader.rightPanelBookmarkTemplatesOpen', next ? '1' : '0'); } catch (_) {}
+      return next;
+    });
+  }, []);
   const commitPanelRename = useCallback(async (fp, id) => {
     if (editingBookmarkId !== id) return;
     const finalName = (editingBookmarkName || '').trim().slice(0, 30);
@@ -375,31 +398,26 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
     };
   }, [filePath, comicData?.cover, customCoverFromStore]);
 
-  // اسکرول خودکار درون باکس لیست صفحات
+  // مرحلهٔ ۳۰ — صفحهٔ فعلی، همیشه در وسطِ عمودیِ کادرِ لیستِ
+  // صفحات قرار می‌گیرد (فرمولِ پرامپت). activeTab در این فایل
+  // وجود ندارد؛ وابستگی‌ها، currentPage و باز بودنِ پنل و شمارِ
+  // صفحه‌هایِ پردازش‌شده‌اند تا پس از ساخته شدنِ لیست هم اجرا شود.
   useEffect(() => {
     if (!isRightSidebarOpen) return;
     const rafId = requestAnimationFrame(() => {
-      if (activePageRef.current && scrollContainerRef.current) {
-        const container = scrollContainerRef.current;
-        const el = activePageRef.current;
-
-        const elTop = el.offsetTop;
-        const elBottom = elTop + el.offsetHeight;
-        const containerTop = container.scrollTop;
-        const containerBottom = containerTop + container.clientHeight;
-
-        if (elTop < containerTop + 30) {
-          container.scrollTo({ top: Math.max(0, elTop - 35), behavior: 'auto' });
-        } else if (elBottom > containerBottom - 30) {
-          container.scrollTo({
-            top: elBottom - container.clientHeight + 35,
-            behavior: 'auto',
-          });
-        }
+      const listEl = scrollContainerRef.current;
+      if (!listEl) return;
+      const activeItemEl = listEl.querySelector(`[data-panel-page="${currentPage}"]`) || activePageRef.current;
+      if (listEl && activeItemEl) {
+        const listRect = listEl.getBoundingClientRect();
+        const itemRect = activeItemEl.getBoundingClientRect();
+        const itemCenterInScroll = listEl.scrollTop + (itemRect.top - listRect.top) + itemRect.height * 0.5;
+        const targetScrollTop = Math.max(0, itemCenterInScroll - listEl.clientHeight * 0.5);
+        listEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
       }
     });
     return () => cancelAnimationFrame(rafId);
-  }, [currentPage, isRightSidebarOpen]);
+  }, [currentPage, isRightSidebarOpen, processedPages.length]);
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -665,12 +683,19 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
         {filePath ? (
           <div style={styles.bookmarkPanel}>
             <div style={styles.panelTitleRow}>
-              <div style={styles.titleWithIcon}>
+              <button
+                type="button"
+                onClick={toggleBookmarksSection}
+                aria-expanded={isBookmarksSectionOpen}
+                style={styles.bookmarkSectionToggle}
+                title={isBookmarksSectionOpen ? 'بستنِ بخشِ بوک‌مارک‌ها' : 'باز کردنِ بخشِ بوک‌مارک‌ها'}
+              >
                 <span style={{ color: 'var(--accent)', display: 'flex' }}>
                   <Icons.Bookmark size={15} />
                 </span>
                 <span style={styles.panelHeaderTitle}>بوک‌مارک‌ها ({sortedBookmarks.length.toLocaleString('fa-IR')})</span>
-              </div>
+                <span style={styles.bookmarkSectionChevron}>{isBookmarksSectionOpen ? '▾' : '◂'}</span>
+              </button>
               <button
                 type="button"
                 onClick={() => openBookmarkStudio({ filePath, page: currentPage, yRatio: computeViewportCenterYRatio(currentPage) })}
@@ -681,6 +706,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 <span>افزودن</span>
               </button>
             </div>
+            {isBookmarksSectionOpen && (
+            <div style={styles.bookmarkSectionBody}>
             {sortedBookmarks.length === 0 ? (
               <div style={styles.emptyNotice}>هنوز بوک‌مارکی برای این کتاب نساخته‌اید.</div>
             ) : (
@@ -754,13 +781,21 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 غیرخالی = لیستِ کارتی + دکمهٔ ساختِ تازه. */}
             <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: '1px solid var(--border)' }}>
               <div style={{ ...styles.panelTitleRow, marginBottom: '8px' }}>
-                <div style={styles.titleWithIcon}>
+              <button
+                type="button"
+                onClick={toggleBookmarkTemplates}
+                aria-expanded={isBookmarkTemplatesOpen}
+                style={styles.bookmarkSectionToggle}
+                title={isBookmarkTemplatesOpen ? 'بستنِ تمپلیت‌هایِ من' : 'باز کردنِ تمپلیت‌هایِ من'}
+              >
                   <span style={{ color: 'var(--accent)', display: 'flex' }}>
                     <Icons.Bookmark size={14} />
                   </span>
                   <span style={styles.panelHeaderTitle}>تمپلیت‌هایِ من</span>
-                </div>
+                <span style={styles.bookmarkSectionChevron}>{isBookmarkTemplatesOpen ? '▾' : '◂'}</span>
+              </button>
               </div>
+              <div style={{ display: isBookmarkTemplatesOpen ? undefined : 'none' }}>
               {savedPresets.length === 0 ? (
                 <button
                   type="button"
@@ -822,7 +857,10 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   </button>
                 </>
               )}
+              </div>
             </div>
+            </div>
+            )}
           </div>
         ) : null}
 
@@ -1833,6 +1871,28 @@ const styles = {
     textAlign: 'center',
   },
   // مرحله ۱۳: کارتِ بوک‌مارک‌ها
+  bookmarkSectionToggle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    backgroundColor: 'transparent',
+    border: 'none',
+    padding: 0,
+    cursor: 'pointer',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+  },
+  bookmarkSectionChevron: {
+    color: 'var(--muted)',
+    fontSize: '13px',
+    lineHeight: 1,
+  },
+  // مرحلهٔ ۳۰ — بدنهٔ بازشوندهٔ بوک‌مارک‌ها: سقفِ ۳۸vh + اسکرولِ
+  // داخلی تا با ۱۰۰ بوک‌مارک هم کلِ پنل را اشغال نکند.
+  bookmarkSectionBody: {
+    maxHeight: '38vh',
+    overflowY: 'auto',
+  },
   bookmarkPanel: {
     border: '1px solid var(--border)',
     borderRadius: '12px',

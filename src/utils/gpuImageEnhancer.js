@@ -151,7 +151,10 @@ export async function encodeCanvasToWebpUrl(canvas) {
     const blob = await encodeCanvasToBlob(canvas, 'image/webp', 0.95);
     if (!blob) return null;
     try {
-      return URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      // مرحلهٔ ۳۰ — آزادسازیِ بومِ موقت پس از انکد (مثلِ PNG).
+      try { canvas.width = 0; canvas.height = 0; } catch (_) {}
+      return url;
     } catch (_) {
       return null;
     }
@@ -168,7 +171,13 @@ export async function encodeCanvasToLightweightPngUrl(canvas) {
     const blob = await encodeCanvasToPng(canvas);
     if (!blob) return null;
     try {
-      return URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
+      // مرحلهٔ ۳۰ — بومِ موقت، پس از انکد آزاد می‌شود (width=0):
+      // فراخواننده (PdfViewer) هم همین کار را می‌کند؛ آزادسازیِ
+      // دوباره، no-op است و هیچ فراخوانندهٔ دیگری، این بوم را
+      // پس از انکد، دوباره استفاده نمی‌کند.
+      try { canvas.width = 0; canvas.height = 0; } catch (_) {}
+      return url;
     } catch (_) {
       return null;
     }

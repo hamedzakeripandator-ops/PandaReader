@@ -1769,9 +1769,13 @@ parentPort.on('message', (request) => {
       }
 
       case 'GET_RECENTS': {
+        // مرحلهٔ ۳۰ — سقفِ نگهداریِ مواردِ اخیر در خروجیِ دیتابیس،
+        // از ۱۰۰ به ۵۰۰ رسید تا انتخابِ حدِ نمایش تا ۵۰۰/همه،
+        // دادهٔ واقعی داشته باشد (نقشهٔ history خودش سقفی نداشت؛
+        // سقفِ مؤثر، همین slice و sliceِ استور بود).
         const recents = Object.values(db.history)
           .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
-          .slice(0, 100);
+          .slice(0, 500);
         sendReply({ type: 'done', action, recents });
         break;
       }

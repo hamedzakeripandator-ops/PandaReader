@@ -840,8 +840,17 @@ export async function renderPageOverlay(items, geometry) {
   if (document?.fonts?.ready) await document.fonts.ready;
   await ensureExportFonts(overlayItems);
 
+  // مرحلهٔ ۳۰ — مقیاسِ overlay، دقیقاً ۳٫۰ (پرامپت) با سقفِ
+  // ۶۰۰۰ پیکسل برایِ ضلعِ بوم: برایِ صفحه‌هایِ معمولی، دقیقاً
+  // ۳٫۰ است (قبلاً هم برایِ آن‌ها ۳٫۰ بود)؛ فقط صفحه‌هایِ غول‌پیکر
+  // (ضلعِ بالایِ ۲۰۰۰ واحد) که قبلاً تا ۱٫۵ افت می‌کردند، حالا
+  // تا سقفِ ۶۰۰۰ پیکسل بالا می‌آیند، نه بیشتر (جلوگیری از بومِ
+  // چندصد مگابایتی).
   const maxDim = Math.max(geometry.rawWidth, geometry.rawHeight);
-  const scale = Math.min(3, Math.max(1.5, 3000 / maxDim));
+  let scale = 3.0;
+  if (Math.max(geometry.rawWidth, geometry.rawHeight) * scale > 6000) {
+    scale = 6000 / Math.max(geometry.rawWidth, geometry.rawHeight);
+  }
   const canvasW = Math.max(1, Math.round(geometry.rawWidth * scale));
   const canvasH = Math.max(1, Math.round(geometry.rawHeight * scale));
   const makeCanvas = () => {
@@ -899,9 +908,10 @@ export async function renderPageOverlay(items, geometry) {
  * @param {Function} args.getPageViewport - async (pageNumber) => { width, height, transform, rotate, view } در scale=1.
  * @param {number} args.cssRotation - چرخشِ انتخابیِ کاربر (درجه).
  * @param {Function} [args.onProgress] - (done, total) => void برای ییلدِ UI.
+ * @param {AbortSignal} [args.signal] - مرحلهٔ ۳۰: سیگنالِ لغوِ دستی.
  * @returns {Promise<{pages: Object, totalItems: number, annotatedPages: number}>}
  */
-export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageViewport, cssRotation, onProgress }) {
+export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageViewport, cssRotation, onProgress, signal }) {
   const pageNumbers = Object.keys(annotationsByPage || {})
     .map(Number)
     .filter((n) => Number.isFinite(n) && Array.isArray(annotationsByPage[n]) && annotationsByPage[n].length > 0)
@@ -909,6 +919,13 @@ export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageView
   const pages = {};
   let totalItems = 0;
   for (let i = 0; i < pageNumbers.length; i++) {
+    // مرحلهٔ ۳۰ — لغوِ دستی: بینِ صفحه‌ها بررسی می‌شود؛ لغو،
+    // فایلی نمی‌سازد و چیزی روی دیسک نمی‌نویسد.
+    if (signal && signal.aborted) {
+      const abortErr = new Error('عملیاتِ آماده‌سازیِ خروجی لغو شد.');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
     const pageNum = pageNumbers[i];
     const items = annotationsByPage[pageNum];
     totalItems += items.length;

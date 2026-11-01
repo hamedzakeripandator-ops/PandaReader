@@ -442,6 +442,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   pdfDoc,
   zoomLevel,
   hiDpiRenderTick,
+  deepRefreshTick,
   distanceFromActive,
   isNearViewport,
   isActivePage,
@@ -473,12 +474,19 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // (PNG) دارد که در یک تگِ <img> نمایش داده می‌شوند
   // (deepUrl || baseUrl). آینه‌هایِ ref برایِ آزادسازیِ همگام‌اند؛
   // ثبت و آزادسازیِ نهایی در کشِ LRUِ سرویس انجام می‌شود
-  // (پایه ۳۰ ورودی، دیپ ۶ ورودی).
+  // (پایه ۱۲ ورودی، دیپ ۳ ورودی).
   const [baseUrl, setBaseUrl] = useState(null);
   const baseUrlRef = useRef(null);
   const [deepUrl, setDeepUrl] = useState(null);
   const deepUrlRef = useRef(null);
   const deepDoneRef = useRef(null);
+  // مرحلهٔ ۳۰ — شمارندهٔ رندرهایِ فعالِ همین صفحه (پایه + دیپ):
+  // page.cleanup() فقط وقتی صدا زده می‌شود که هیچ رندری رویِ
+  // این صفحه در حالِ اجرا نباشد (شرطِ پرامپت)، تا رندرِ هم‌زمانِ
+  // دیگر خراب نشود. lastDeepRefreshRef هم نسلِ دیده‌شدهٔ
+  // deepRefreshTick را نگه می‌دارد.
+  const pageRenderFlightRef = useRef(0);
+  const lastDeepRefreshRef = useRef(0);
   const imgRef = useRef(null);
   const displayedSrc = deepUrl || baseUrl;
   // مرحلهٔ ۱۳: تنظیماتِ بوک‌مارک (اشتراکِ داخلی؛ تغییرش نادر است و
@@ -518,8 +526,23 @@ const PdfPageItem = React.memo(function PdfPageItem({
           hooks.onCancel(() => {
             try { renderTask?.cancel(); } catch (_) {}
           });
+          // مرحلهٔ ۳۰ — no-opِ پیش‌فرض تا اگر getPage خودش خطا
+          // داد، catch به TDZ نخورد (تابع، بعداً جایگزین می‌شود).
+          let markPageRenderDone = () => {};
           const page = await pdfDoc.getPage(pageNumber);
           if (hooks.isCancelled()) return;
+          // مرحلهٔ ۳۰ — شمارشِ رندرِ فعال + آزادسازیِ pdf.js:
+          let renderFlightCounted = false;
+          markPageRenderDone = () => {
+            if (!renderFlightCounted) return;
+            renderFlightCounted = false;
+            pageRenderFlightRef.current = Math.max(0, pageRenderFlightRef.current - 1);
+            if (pageRenderFlightRef.current === 0) {
+              try { if (typeof page.cleanup === 'function') page.cleanup(); } catch (_) {}
+            }
+          };
+          pageRenderFlightRef.current += 1;
+          renderFlightCounted = true;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width > 0 && baseViewport.height > 0) {
             onPageRatioMeasured?.(pageNumber - 1, baseViewport.height / baseViewport.width);
@@ -540,6 +563,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           context.imageSmoothingQuality = 'high';
           renderTask = page.render({ canvasContext: context, viewport });
           await renderTask.promise;
+          markPageRenderDone();
           if (hooks.isCancelled()) {
             tmp.width = 0;
             tmp.height = 0;
@@ -563,6 +587,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           const gate = deepGateRef.current || {};
           if (!gate.deepRuns && typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
         } catch (err) {
+          markPageRenderDone();
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           setRenderFailed(true);
           throw err;
@@ -596,6 +621,20 @@ const PdfPageItem = React.memo(function PdfPageItem({
     };
   }, [pdfDoc, filePath, pageNumber]);
 
+  // مرحلهٔ ۳۰ — تخلیهٔ نشانیِ پایه وقتی صفحه از فاصلهٔ ۶ دورتر
+  // شد (سقفِ پرامپت): پنجرهٔ DOM فقط ‎±۳‎ صفحه مانت می‌کند و
+  // unmount هم نشانی را آزاد می‌کند، پس این اثر، شبکهٔ امنِ
+  // واگراییِ مرکزِ اسکرول و صفحهٔ فعال است، نه مسیرِ اصلی.
+  useEffect(() => {
+    const dist = distanceRef.current ?? 99;
+    if (dist > 6 && baseUrlRef.current) {
+      revokeBasePngUrl(`${filePath}:${pageNumber}`);
+      baseUrlRef.current = null;
+      setBaseUrl(null);
+      setBaseReady(false);
+    }
+  }, [distanceFromActive, shouldRender, filePath, pageNumber]);
+
   // مرحلهٔ ۲۹ — تعریفِ pageBoxRef سرِ جایش می‌ماند: اثرِ تایل که
   // از آن می‌خواند حذف شد، ولی wrapper با ref={pageBoxRef} به
   // کارتِ صفحه وصل است و فرودِ زومِ باکسی، همچنان به همین ref
@@ -626,7 +665,27 @@ const PdfPageItem = React.memo(function PdfPageItem({
     }
     if (!baseReady) return undefined;
     if (!pageWidth || pageWidth <= 0) return undefined;
-    const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}`;
+    // مرحلهٔ ۳۰ — نسلِ اجباریِ دیپ (پس از ذخیرهٔ درجا): اگر
+    // deepRefreshTick عوض شده، امضایِ قبلی پاک می‌شود تا دیپ،
+    // با همان زوم/عرض هم از نو رندر شود.
+    if (deepRefreshTick !== lastDeepRefreshRef.current) {
+      lastDeepRefreshRef.current = deepRefreshTick;
+      deepDoneRef.current = null;
+      if (deepUrlRef.current) {
+        revokeDeepPngUrl(cacheKey);
+        deepUrlRef.current = null;
+        setDeepUrl(null);
+      }
+    }
+    // مرحلهٔ ۳۰ — سقفِ تطبیقیِ دیپ بر اساسِ زومِ نشسته:
+    // تا ۱۲۵٪ سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسل، بالاتر از آن سقفِ
+    // ۵۱۲۰ پیکسل / ۲۰ مگاپیکسلِ مرحلهٔ ۲۹. طبقه (tier) در امضا
+    // هست تا عبور از مرزِ ۱۲۵٪ با همان زومِ کوانتیزه، دیپِ
+    // کهنه را نگه ندارد.
+    const deepTier = (renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo';
+    const deepSideCap = deepTier === 'hi' ? 5120 : 3600;
+    const deepAreaCap = deepTier === 'hi' ? 20000000 : 9000000;
+    const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|${deepTier}`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return undefined;
@@ -644,8 +703,23 @@ const PdfPageItem = React.memo(function PdfPageItem({
           hooks.onCancel(() => {
             try { renderTask?.cancel(); } catch (_) {}
           });
+          // مرحلهٔ ۳۰ — no-opِ پیش‌فرض (مثلِ پاسِ پایه).
+          let markPageRenderDone = () => {};
           const page = await pdfDoc.getPage(pageNumber);
           if (hooks.isCancelled()) return;
+          // مرحلهٔ ۳۰ — شمارشِ رندرِ فعال + آزادسازیِ pdf.js
+          // (همان الگویِ پاسِ پایه؛ شمارنده، مشترکِ هر دو پاس است).
+          let renderFlightCounted = false;
+          markPageRenderDone = () => {
+            if (!renderFlightCounted) return;
+            renderFlightCounted = false;
+            pageRenderFlightRef.current = Math.max(0, pageRenderFlightRef.current - 1);
+            if (pageRenderFlightRef.current === 0) {
+              try { if (typeof page.cleanup === 'function') page.cleanup(); } catch (_) {}
+            }
+          };
+          pageRenderFlightRef.current += 1;
+          renderFlightCounted = true;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width <= 0 || baseViewport.height <= 0) return;
           const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 2.5);
@@ -655,8 +729,8 @@ const PdfPageItem = React.memo(function PdfPageItem({
           let targetScale = Math.max(quantizeZoom(renderZoomLevel) * dpr * 1.2, requiredScale, 3.0);
           const rawW = baseViewport.width * targetScale;
           const rawH = baseViewport.height * targetScale;
-          const sideScale = Math.max(rawW, rawH) > 5120 ? 5120 / Math.max(rawW, rawH) : 1;
-          const areaScale = (rawW * rawH) > 20000000 ? Math.sqrt(20000000 / (rawW * rawH)) : 1;
+          const sideScale = Math.max(rawW, rawH) > deepSideCap ? deepSideCap / Math.max(rawW, rawH) : 1;
+          const areaScale = (rawW * rawH) > deepAreaCap ? Math.sqrt(deepAreaCap / (rawW * rawH)) : 1;
           targetScale = targetScale * Math.min(sideScale, areaScale);
           const viewport = page.getViewport({ scale: targetScale });
           const tmp = document.createElement('canvas');
@@ -669,6 +743,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           tmpCtx.imageSmoothingQuality = 'high';
           renderTask = page.render({ canvasContext: tmpCtx, viewport });
           await renderTask.promise;
+          markPageRenderDone();
           if (hooks.isCancelled()) {
             tmp.width = 0;
             tmp.height = 0;
@@ -700,13 +775,14 @@ const PdfPageItem = React.memo(function PdfPageItem({
           registerDeepPngUrl(cacheKey, url);
           if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
         } catch (err) {
+          markPageRenderDone();
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           throw err;
         }
       },
     });
     return undefined;
-  }, [shouldRender, baseReady, pdfDoc, filePath, pageNumber, renderZoomLevel, pageWidth, hiDpiRenderTick, onHiDpiSettled]);
+  }, [shouldRender, baseReady, pdfDoc, filePath, pageNumber, renderZoomLevel, pageWidth, hiDpiRenderTick, deepRefreshTick, onHiDpiSettled]);
 
 
   const handleFrameContextMenu = useCallback(
@@ -807,6 +883,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           ref={imgRef}
           src={displayedSrc || undefined}
           className="pdf-page-image"
+          decoding="async"
           alt=""
           draggable={false}
           style={{
@@ -947,6 +1024,9 @@ export default function PdfViewer({ filePath }) {
   const clearAreaZoomTarget = useReaderStore((state) => state.clearAreaZoomTarget);
   const hiDpiRenderTick = useReaderStore((state) => state.hiDpiRenderTick);
   const triggerHiDpiRender = useReaderStore((state) => state.triggerHiDpiRender);
+  // مرحلهٔ ۳۰ — نسلِ اجباریِ دیپ پس از ذخیرهٔ درجا.
+  const deepRefreshTick = useReaderStore((state) => state.deepRefreshTick);
+  const requestDeepRefresh = useReaderStore((state) => state.requestDeepRefresh);
   const pdfPageGap = useReaderStore((state) => state.pdfPageGap ?? 12);
   const rotation = useReaderStore((state) => state.rotation);
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
@@ -1077,6 +1157,14 @@ export default function PdfViewer({ filePath }) {
   }, []);
   useEffect(() => () => {
     if (saveStateTimerRef.current) clearTimeout(saveStateTimerRef.current);
+  }, []);
+  // مرحلهٔ ۳۰ — کنترلِ لغوِ خروجی/بازسازی (AbortController):
+  // لغو، در فازِ آماده‌سازی (overlay) و بازسازی (بینِ دسته‌هایِ
+  // ۳ صفحه‌ای) اثر می‌کند؛ نوشتنِ نهاییِ main، تک‌مرحله‌ای و
+  // اتمیک است و پس از شروع، قابلِ لغو نیست.
+  const exportAbortRef = useRef(null);
+  const handleCancelExport = useCallback(() => {
+    try { exportAbortRef.current?.abort(); } catch (_) {}
   }, []);
   const [errorMsg, setErrorMsg] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -1440,6 +1528,10 @@ export default function PdfViewer({ filePath }) {
   // ساخته می‌شوند تا با viewportِ طبیعیِ بازسازی هم‌تراز شوند؛
   // مسیرِ معمولیِ ذخیره، دست نمی‌خورد.
   const handleRebuildSave = useCallback(async (saveMode, pagesMap) => {
+    // مرحلهٔ ۳۰ — اگر از مسیرِ خروجی صدا زده شده، کنترلِ همان
+    // عملیات استفاده می‌شود؛ وگرنه یک کنترلِ تازه ساخته می‌شود.
+    if (!exportAbortRef.current) exportAbortRef.current = new AbortController();
+    const exportSignal = exportAbortRef.current.signal;
     const doc = pdfDocRef.current;
     if (!doc) {
       showSaveStatus('error', 'سندِ PDF هنوز کامل بارگذاری نشده است.', 6000);
@@ -1470,6 +1562,7 @@ export default function PdfViewer({ filePath }) {
               };
             },
             cssRotation: 0,
+            signal: exportSignal,
           })
         : { pages: {}, totalItems: 0, annotatedPages: 0 };
       if (annotatedCount > 0 && prepared.annotatedPages === 0) {
@@ -1480,6 +1573,7 @@ export default function PdfViewer({ filePath }) {
       const rebuilt = await rebuildEditablePdfFromPdfJs({
         pdfDoc: doc,
         preparedPages: prepared.pages,
+        signal: exportSignal,
         onProgress: (pageNum, totalPages) => {
           showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
         },
@@ -1504,11 +1598,12 @@ export default function PdfViewer({ filePath }) {
         const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + ')' : '';
         if (saveMode === 'in-place') {
+          try { requestDeepRefresh?.(); } catch (_) {}
           showSaveStatus('saved-inplace', '✓ فایلِ بازسازی‌شدهٔ بدونِ قفل روی همین فایل ذخیره شد!' + savedSuffix, 4500);
-          showToast(`نسخهٔ تمیزِ بدونِ قفل روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`, { type: 'success' });
+          showToast(`نسخهٔ تمیزِ بدونِ قفل روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: نسخهٔ بازسازی‌شده رستری است و متنِ برداری ندارد.`, { type: 'success' });
         } else {
           showSaveStatus('saved-as', '✓ فایلِ PDFِ بازسازی‌شدهٔ بدونِ قفل ذخیره شد!' + savedSuffix, 4500);
-          showToast(`فایلِ PDFِ بازسازی‌شده با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`, { type: 'success' });
+          showToast(`فایلِ PDFِ بازسازی‌شده با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد. توجه: نسخهٔ بازسازی‌شده رستری است و متنِ برداری ندارد.`, { type: 'success' });
         }
       } else if (result && result.locked) {
         showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
@@ -1518,12 +1613,19 @@ export default function PdfViewer({ filePath }) {
         showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
       }
     } catch (err) {
+      if (exportSignal && exportSignal.aborted) {
+        showSaveStatus('info', 'عملیاتِ بازسازی به درخواستِ شما لغو شد.', 4500);
+        showToast('عملیاتِ بازسازی لغو شد.', { type: 'info' });
+        exportAbortRef.current = null;
+        return;
+      }
       showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
       showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
     } finally {
       setIsExportingPdf(false);
+      if (exportAbortRef.current && exportSignal && exportAbortRef.current.signal === exportSignal) exportAbortRef.current = null;
     }
-  }, [filePath, showToast, showSaveStatus]);
+  }, [filePath, showToast, showSaveStatus, requestDeepRefresh]);
 
   // مرحله ۱۰: شنوندهٔ «ساختِ نسخهٔ کپیِ قابل‌ویرایش با بازسازی» که
   // TopBar، وقتی پروب گفت pdf-lib نمی‌تواند فایل را رمزگشایی کند،
@@ -1543,11 +1645,15 @@ export default function PdfViewer({ filePath }) {
         return;
       }
       rebuildCopyInFlightRef.current = true;
+      // مرحلهٔ ۳۰ — کنترلِ لغوِ کپیِ بازسازی (همان الگویِ خروجی).
+      exportAbortRef.current = new AbortController();
+      const rebuildCopySignal = exportAbortRef.current.signal;
       showSaveStatus('saving-as', 'در حالِ ساختِ نسخهٔ قابل‌ویرایشِ بدونِ قفل…', 0);
       try {
         const rebuilt = await rebuildEditablePdfFromPdfJs({
           pdfDoc: doc,
           preparedPages: {},
+          signal: rebuildCopySignal,
           onProgress: (pageNum, totalPages) => {
             showSaveStatus('saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
           },
@@ -1575,10 +1681,16 @@ export default function PdfViewer({ filePath }) {
           showToast((result && result.error) || 'ساختِ نسخهٔ کپی انجام نشد.', { type: 'error' });
         }
       } catch (err) {
-        showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
-        showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+        if (rebuildCopySignal && rebuildCopySignal.aborted) {
+          showSaveStatus('info', 'ساختِ نسخهٔ کپی لغو شد.', 4500);
+          showToast('ساختِ نسخهٔ کپی لغو شد.', { type: 'info' });
+        } else {
+          showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
+          showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+        }
       } finally {
         rebuildCopyInFlightRef.current = false;
+        exportAbortRef.current = null;
       }
     };
     window.addEventListener('app:rebuild-editable-copy', onRebuildCopy);
@@ -1626,6 +1738,8 @@ export default function PdfViewer({ filePath }) {
       showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
       return;
     }
+    exportAbortRef.current = new AbortController();
+    const exportSignal = exportAbortRef.current.signal;
     setIsExportingPdf(true);
     showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', saveMode === 'in-place' ? 'در حال ذخیرهٔ حاشیه‌نویسی‌ها روی فایل PDF…' : 'در حال نوشتنِ فایلِ PDF…', 0);
     showToast('در حال آماده‌سازیِ خروجیِ PDF…', { type: 'info' });
@@ -1645,11 +1759,17 @@ export default function PdfViewer({ filePath }) {
               };
             },
             cssRotation: rotation,
+            signal: exportSignal,
           })
         : { pages: {}, totalItems: 0, annotatedPages: 0 };
       if (annotatedCount > 0 && prepared.annotatedPages === 0) {
         showSaveStatus('info', 'آیتمِ قابلِ خروجی پیدا نشد.', 4500);
         showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        return;
+      }
+      if (exportSignal.aborted) {
+        showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
         return;
       }
       showToast(saveMode === 'in-place' ? 'در حال ذخیره روی همین فایل…' : 'در حال نوشتنِ فایلِ PDF…', { type: 'info' });
@@ -1678,6 +1798,7 @@ export default function PdfViewer({ filePath }) {
           showSaveStatus('saved-inplace', 'فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.' + savedSuffix, 4500);
           showToast('فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.', { type: 'success' });
         } else if (saveMode === 'in-place') {
+          try { requestDeepRefresh?.(); } catch (_) {}
           showSaveStatus('saved-inplace', '✓ تغییرات با موفقیت روی همین فایل PDF ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`,
@@ -1717,12 +1838,18 @@ export default function PdfViewer({ filePath }) {
         showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
       }
     } catch (err) {
-      showSaveStatus('error', 'خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), 6000);
-      showToast('خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+      if (exportSignal && exportSignal.aborted) {
+        showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
+      } else {
+        showSaveStatus('error', 'خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), 6000);
+        showToast('خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+      }
     } finally {
       setIsExportingPdf(false);
+      exportAbortRef.current = null;
     }
-  }, [filePath, rotation, showToast, isExportingPdf, showSaveStatus, handleRebuildSave]);
+  }, [filePath, rotation, showToast, isExportingPdf, showSaveStatus, handleRebuildSave, requestDeepRefresh]);
 
   // Refinement Final: مالکیتِ Ctrl+Z/Y وارونه شد تا Undoی مضاعف
   // رفع شود. قبلاً این شنونده فقط وقتی استودیو روشن بود ثبت می‌شد
@@ -3248,6 +3375,26 @@ export default function PdfViewer({ filePath }) {
         >
           {(pdfSaveState === 'saving-inplace' || pdfSaveState === 'saving-as') && <Icons.Loader size={18} />}
           <span>{pdfSaveMessage}</span>
+          {(pdfSaveState === 'saving-inplace' || pdfSaveState === 'saving-as') && exportAbortRef.current && (
+            <button
+              type="button"
+              onClick={handleCancelExport}
+              style={{
+                pointerEvents: 'auto',
+                cursor: 'pointer',
+                padding: '4px 12px',
+                borderRadius: '999px',
+                border: '1px solid rgba(255,255,255,0.7)',
+                backgroundColor: 'transparent',
+                color: '#ffffff',
+                fontFamily: 'var(--font-fa)',
+                fontSize: '12px',
+                fontWeight: 700,
+              }}
+            >
+              ✕ لغو عملیات
+            </button>
+          )}
         </div>
       )}
 
@@ -3498,6 +3645,7 @@ export default function PdfViewer({ filePath }) {
                   pdfDoc={pdfDoc}
                   zoomLevel={safeZoom}
                   hiDpiRenderTick={hiDpiRenderTick}
+                  deepRefreshTick={deepRefreshTick}
                   distanceFromActive={distance}
                   isNearViewport={distance <= 1}
                   isActivePage={pageNum === activePage}
