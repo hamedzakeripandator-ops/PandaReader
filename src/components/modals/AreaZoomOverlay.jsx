@@ -151,7 +151,8 @@ export default function AreaZoomOverlay() {
       }
 
       // یافتن کانتینر اسکرول فعال ریدر (کمیک یا PDF)
-      const scrollContainer =
+      // (از مرحلهٔ ۲۵، let است تا تصحیحِ زیر بتواند آن را عوض کند.)
+      let scrollContainer =
         document.querySelector('[data-reader-scroll-container="true"]') ||
         document.querySelector('.comic-page-item')?.parentElement?.parentElement;
 
@@ -172,56 +173,143 @@ export default function AreaZoomOverlay() {
       const boxCenterX = box.x + box.width / 2;
       const boxCenterY = box.y + box.height / 2;
 
-      let normCenterX = 0.5;
-      let normCenterY = 0.5;
+      // مرحله ۲۵ — تصحیحِ انتخابِ کانتینر: اگر چند کانتینرِ اسکرول
+      // مانت باشند، آنی که مستطیلش مرکزِ باکس را در بر دارد،
+      // کانتینرِ درست است (وگرنه همان انتخابِ اول می‌ماند).
+      if (scrollContainer) {
+        const allContainers = document.querySelectorAll('[data-reader-scroll-container="true"]');
+        allContainers.forEach((candidate) => {
+          const r = candidate.getBoundingClientRect();
+          if (boxCenterX >= r.left && boxCenterX <= r.right && boxCenterY >= r.top && boxCenterY <= r.bottom) {
+            scrollContainer = candidate;
+          }
+        });
+      }
+
+      // مرحله ۲۳ — هدف، دقیقاً از رویِ عنصرِ برگه خوانده می‌شود،
+      // نه از رویِ نسبت‌هایِ scrollWidth/scrollHeight. علتِ پرشِ
+      // رندومِ بارِ اول، دقیقاً همین‌جا بود: بلوکِ پایین، نسبت‌هایِ
+      // درستِ برگه (که از elementsFromPoint حساب شده بودند) را با
+      // نسبت‌هایِ کلِ محتوا بازنویسی می‌کرد؛ در بارِ اول، ارتفاعِ
+      // صفحات هنوز با نسبتِ پیش‌فرض تخمین زده شده‌اند و اسپیسرهایِ
+      // پنجرهٔ مجازی هم رویِ همان تخمین‌اند، پس نقطهٔ حاصل،
+      // رندوم بود. حالا نسبت‌هایِ برگه، دست‌نخورده می‌مانند و در
+      // rect هم حمل می‌شوند تا نمایشگر، با rectِ واقعیِ عنصر،
+      // دقیق فرود بیاید.
+      // مختصاتِ باکس، مختصاتِ client هستند (اورلی fixed است) و
+      // با getBoundingClientRect (که آن هم client است) مستقیم
+      // قابلِ مقایسه‌اند؛ هیچ تبدیلی لازم نیست.
       let pageNumber = null;
-      let pageRelativeY = 0.5;
+      let pageRatioX = 0.5;
+      let pageRatioY = 0.5;
 
-      // تشخیص صفحه دقیق زیر مرکز باکس برای قفل بدون خطای اسکرول
+      // مرحله ۲۴ — پیدا کردنِ قطعیِ صفحهٔ هدف:
+      // مسیرِ اول: اولین عنصرِ زیرِ مرکزِ باکس که خودش یا جدش،
+      // ویژگیِ data-page-number دارد. (عنصرِ زیرِ مرکز، معمولاً
+      // خودِ <img> یا لایهٔ داخلی است، نه کارتِ صفحه؛ پس closest
+      // لازم است. اورلی و باکسِ انتخاب، جدِ برگه‌ای ندارند، پس
+      // برایِ آن‌ها null برمی‌گردد و رد می‌شوند.)
       const elementsAtCenter = document.elementsFromPoint(boxCenterX, boxCenterY);
-      const pageEl = elementsAtCenter.find((el) =>
-        el.classList?.contains('comic-page-item')
-      );
-
-      if (pageEl) {
-        const pRect = pageEl.getBoundingClientRect();
-        const rawPage = pageEl.getAttribute('data-page');
-        const rawIdx = pageEl.getAttribute('data-index');
-        pageNumber = rawPage
-          ? parseInt(rawPage, 10)
-          : rawIdx !== null
-          ? parseInt(rawIdx, 10) + 1
-          : null;
-
-        if (pRect.width > 0 && pRect.height > 0) {
-          normCenterX = Math.max(0, Math.min(1, (boxCenterX - pRect.left) / pRect.width));
-          pageRelativeY = Math.max(0, Math.min(1, (boxCenterY - pRect.top) / pRect.height));
+      let pageEl = null;
+      for (const el of elementsAtCenter) {
+        const found = el.closest?.('[data-page-number]');
+        if (found) {
+          pageEl = found;
+          break;
         }
       }
 
-      if (scrollContainer) {
-        const cRect = scrollContainer.getBoundingClientRect();
-        const contentX = scrollContainer.scrollLeft + (boxCenterX - cRect.left);
-        const contentY = scrollContainer.scrollTop + (boxCenterY - cRect.top);
-
-        normCenterX =
-          scrollContainer.scrollWidth > 0
-            ? contentX / scrollContainer.scrollWidth
-            : normCenterX;
-        normCenterY =
-          scrollContainer.scrollHeight > 0
-            ? contentY / scrollContainer.scrollHeight
-            : 0.5;
+      // مسیرِ دوم (اگر مرکزِ باکس رویِ فاصلهٔ بینِ صفحه‌ها،
+      // حاشیه یا اسپیسر افتاده باشد): نزدیک‌ترین برگه از نظرِ
+      // عمودی، از میانِ همهٔ برگه‌هایِ مانت‌شده در کلِ سند.
+      // (فقط صفحه‌هایِ PDF این ویژگی را دارند، پس جستجو در کلِ
+      // سند، امن است.)
+      if (!pageEl) {
+        const candidates = document.querySelectorAll('[data-page-number]');
+        let best = null;
+        let bestDistance = Infinity;
+        candidates.forEach((candidate) => {
+          const r = candidate.getBoundingClientRect();
+          if (r.height <= 0) return;
+          const distance =
+            boxCenterY < r.top
+              ? r.top - boxCenterY
+              : boxCenterY > r.bottom
+              ? boxCenterY - r.bottom
+              : 0;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = candidate;
+          }
+        });
+        pageEl = best;
       }
 
+      if (pageEl) {
+        const pRect = pageEl.getBoundingClientRect();
+        pageNumber = Number(pageEl.getAttribute('data-page-number')) || 1;
+
+        if (pRect.width > 0 && pRect.height > 0) {
+          pageRatioX = Math.min(1, Math.max(0, (boxCenterX - pRect.left) / Math.max(1, pRect.width)));
+          pageRatioY = Math.min(1, Math.max(0, (boxCenterY - pRect.top) / Math.max(1, pRect.height)));
+        }
+      }
+
+      // مرحله ۲۵ — نرم‌هایِ دوگانه، بدونِ بازنویسیِ یکدیگر:
+      // الف) نرم‌هایِ کانتینر (برایِ VerticalViewer که با
+      // normCenter × scrollWidth/scrollHeight فرود می‌آید). توجه:
+      // scrollLeft از لبهٔ محتوا (داخلِ پدینگ) سنجیده می‌شود، ولی
+      // getBoundingClientRect جعبهٔ border است؛ پس پدینگِ چپ/بالا
+      // کم می‌شود تا نقطه دقیق باشد (هر دو ویوور، پدینگِ افقیِ
+      // ۸۰ پیکسل دارند؛ فرمولِ بدونِ این تصحیح، حدودِ ۸۰ پیکسل
+      // خطا می‌داد).
+      // ب) نسبت‌هایِ برگه (برایِ PdfViewer) که بالاتر حساب شدند.
+      let normCenterX = 0.5;
+      let normCenterY = 0.5;
+      let imgRect = null;
+      if (scrollContainer) {
+        const cRect = scrollContainer.getBoundingClientRect();
+        const style = typeof window !== 'undefined' && window.getComputedStyle
+          ? window.getComputedStyle(scrollContainer)
+          : null;
+        const padLeft = style ? parseFloat(style.paddingLeft) || 0 : 0;
+        const padTop = style ? parseFloat(style.paddingTop) || 0 : 0;
+        const contentClickX = scrollContainer.scrollLeft + (boxCenterX - cRect.left - padLeft);
+        const contentClickY = scrollContainer.scrollTop + (boxCenterY - cRect.top - padTop);
+        normCenterX = Math.min(1, Math.max(0, contentClickX / Math.max(1, scrollContainer.scrollWidth)));
+        normCenterY = Math.min(1, Math.max(0, contentClickY / Math.max(1, scrollContainer.scrollHeight)));
+      }
+      // مستطیلِ <img> زیرِ مرکزِ باکس (برایِ تک‌عکس‌هایِ .webp که
+      // وسط‌چین‌اند): صرفاً اطلاعاتی، در rect حمل می‌شود؛ فرودِ
+      // VerticalViewer با نرم‌هایِ کانتینر انجام می‌شود.
+      for (const el of elementsAtCenter) {
+        if (el.tagName === 'IMG') {
+          const r = el.getBoundingClientRect();
+          imgRect = { left: r.left, top: r.top, width: r.width, height: r.height };
+          break;
+        }
+      }
+
+      // توجه به ترتیبِ اعمال: applyAreaZoom در استور، zoomLevel و
+      // areaZoomTarget را در یک set() اتمیک با هم ست می‌کند؛ پس
+      // «اول هدف، بعد زوم» به قوی‌ترین شکلِ ممکن رعایت شده است و
+      // اثرِ یکپارچهٔ مرحلهٔ ۲۴، هرگز با هدفِ خالی اجرا نمی‌شود.
+      // (از مرحلهٔ ۲۴، استور فیلدهایِ درجه‌اولِ pageNumber و
+      // pageRatioX/pageRatioY را هم می‌پذیرد؛ rect برایِ سازگاری
+      // با مصرف‌کننده‌هایِ قدیمی، همچنان پر می‌شود.)
       applyAreaZoom({
         targetZoom: computedZoom,
+        pageNumber,
+        pageRatioX,
+        pageRatioY,
         normCenterX,
         normCenterY,
         rect: {
           ...box,
           pageNumber,
-          pageRelativeY,
+          pageRelativeY: pageRatioY,
+          pageRatioX,
+          imgRect,
         },
       });
 

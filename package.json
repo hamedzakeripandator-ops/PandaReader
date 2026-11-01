@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@neslinesli93/qpdf-wasm": "^0.3.0",
+    "@tanstack/react-virtual": "^3.14.24",
     "jszip": "^3.10.1",
     "konva": "^10.9.0",
     "lucide-react": "^1.61.0",

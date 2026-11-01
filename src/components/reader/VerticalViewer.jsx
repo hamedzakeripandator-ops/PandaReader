@@ -537,34 +537,55 @@ export default function VerticalViewer() {
 
       const { normCenterX = 0.5, normCenterY = 0.5, rect } = areaZoomTarget;
 
-      let targetScrollTop = 0;
-      if (
-        rect?.pageNumber &&
-        rect.pageNumber >= 1 &&
-        rect.pageNumber <= itemsCount &&
-        heights
-      ) {
-        const idx = rect.pageNumber - 1;
-        let pageTop = 0;
-        if (offsets && offsets[idx] !== undefined) {
-          pageTop = offsets[idx];
-        } else {
-          for (let i = 0; i < idx; i++) {
-            pageTop += (heights[i] || 1200) + safePageGap;
+
+      // مرحله ۲۵ — تأیید و تصحیحِ دومرحله‌ای: اگر چیدمانِ ستون
+      // هنوز با زومِ تازه ننشسته بود، یک فریم بعد، موقعیتِ واقعی
+      // با هدف مقایسه و در صورتِ اختلافِ بیش از ۲ پیکسل، یک بارِ
+      // دیگر ست می‌شود. (منطقِ اصلی، همان normCenter × scrollWidth
+      // است که با نرم‌هایِ کانتینرِ تازهٔ اورلی، دقیق شده است.)
+      const applyLanding = () => {
+        let top = 0;
+        if (
+          rect?.pageNumber &&
+          rect.pageNumber >= 1 &&
+          rect.pageNumber <= itemsCount &&
+          heights
+        ) {
+          const idx = rect.pageNumber - 1;
+          let pageTop = 0;
+          if (offsets && offsets[idx] !== undefined) {
+            pageTop = offsets[idx];
+          } else {
+            for (let i = 0; i < idx; i++) {
+              pageTop += (heights[i] || 1200) + safePageGap;
+            }
           }
+          const pageH = heights[idx] || 1200;
+          const relY = typeof rect.pageRelativeY === 'number' ? rect.pageRelativeY : 0.5;
+          top = pageTop + pageH * relY - c.clientHeight / 2;
+        } else {
+          top = normCenterY * c.scrollHeight - c.clientHeight / 2;
         }
-        const pageH = heights[idx] || 1200;
-        const relY = typeof rect.pageRelativeY === 'number' ? rect.pageRelativeY : 0.5;
-        targetScrollTop = pageTop + pageH * relY - c.clientHeight / 2;
-      } else {
-        targetScrollTop = normCenterY * c.scrollHeight - c.clientHeight / 2;
-      }
-
-      const targetScrollLeft = normCenterX * c.scrollWidth - c.clientWidth / 2;
-
-      c.scrollTop = Math.max(0, targetScrollTop);
-      c.scrollLeft = Math.max(0, targetScrollLeft);
-      clearAreaZoomTarget();
+        const left = normCenterX * c.scrollWidth - c.clientWidth / 2;
+        c.scrollTop = Math.max(0, top);
+        c.scrollLeft = Math.max(0, left);
+        return { top: Math.max(0, top), left: Math.max(0, left) };
+      };
+      const first = applyLanding();
+      requestAnimationFrame(() => {
+        const cc = containerRef.current;
+        if (!cc) {
+          clearAreaZoomTarget();
+          return;
+        }
+        if (
+          Math.abs(cc.scrollTop - first.top) > 2 ||
+          Math.abs(cc.scrollLeft - first.left) > 2
+        ) {
+          applyLanding();
+        }
+        clearAreaZoomTarget();
+      });
     });
   }, [
     areaZoomTarget,
@@ -1082,6 +1103,10 @@ export default function VerticalViewer() {
               kernelMatrix="0 -0.10 0 -0.10 1.40 -0.10 0 -0.10 0"
             />
           </filter>
+          {/* مرحلهٔ ۲۶ — فیلترِ anatomy-soft-clarityِ مرحلهٔ ۲۵،
+              به‌طورِ کامل حذف شد: بلارِ گاوسی، حتی ملایم، عکس‌هایِ
+              .webp را از شفافیتِ بومیِ خودشان تارتر نشان می‌داد؛
+              حالا تصاویر با ۱۰۰٪ کیفیتِ واقعیِ خودشان دیده می‌شوند. */}
         </defs>
       </svg>
 

@@ -215,12 +215,12 @@ export function ensurePdfJsEnvironmentReady() {
 
 ensurePdfJsEnvironmentReady();
 
-const DOM_OVERSCAN = 5;
-const RENDER_RADIUS = 4;
-const MAX_CACHED_BLOBS = 30;
+const DOM_OVERSCAN = 7;
+const RENDER_RADIUS = 6;
+const MAX_CACHED_BLOBS = 40;
 
 // مرحله ۴ ـ بخش ب: سقفِ کشِ متنِ جستجو + شعاعِ cleanup. شعاعِ ۶، یک
-// صفحه حاشیه فراتر از پنجرهٔ رندر (DOM_OVERSCAN=۵) نگه می‌دارد.
+// صفحه حاشیه فراتر از پنجرهٔ رندر (DOM_OVERSCAN=۷) نگه می‌دارد.
 const MAX_SEARCH_TEXT_CACHE_PAGES = 500;
 const SEARCH_CLEANUP_RADIUS = 6;
 
@@ -439,15 +439,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
     let isCancelled = false;
     let tempCanvas = null;
     let activePageObj = null;
-
-    // مرحله ۷ ـ نهاییِ دوم: صفحهٔ فعال، بدونِ هیچ تأخیری (۰
-    // میلی‌ثانیه) در همان فریم رندر می‌شود؛ صفحه‌های مجاور، مثلِ
-    // قبل با تأخیرِ اولویت‌دار.
-    // مرحله ۱۲: فاصله از distanceRef خوانده می‌شود، نه از پراپ —
-    // effect، دیگر به distanceFromActive وابسته نیست.
-    const distanceNow = distanceRef.current;
-    const priorityDelay =
-      distanceNow === 0 ? 0 : distanceNow === 1 ? 40 : 100;
+    // مرحلهٔ ۲۶ — همهٔ صفحه‌های داخلِ پنجره، بدونِ هیچ تأخیری
+    // (۰ میلی‌ثانیه) رندر می‌شوند؛ تأخیرِ اولویت‌دارِ قبلی
+    // (۴۰/۱۰۰ میلی‌ثانیه برایِ همسایه‌ها) در اسکرولِ سریع،
+    // صفحه‌های تازه‌وارد را دیر می‌رساند و سفید نشان می‌داد.
+    const priorityDelay = 0;
 
     // Stage 8 Part B: the Part A settle loop (up to 25 x 60ms re-arms
     // driven by a motion ref) is REMOVED. It delayed every non-active
@@ -469,17 +465,22 @@ const PdfPageItem = React.memo(function PdfPageItem({
           onPageRatioMeasured(pageNumber - 1, baseViewport.height / baseViewport.width);
         }
 
-        // مرحله ۲۲ — لایهٔ پایهٔ سریع برایِ اسکرولِ بدونِ لگ:
-        // مقیاس، max(dpr, 2.0) با سقفِ ضلعِ ۲۸۰۰ پیکسل و فرمتِ
-        // WebP با کیفیتِ ۰٫۹۴ است. این لایه، دیگر PNG نیست (دلیلِ
-        // کندیِ مرحلهٔ ۱۹) و آن‌قدر واضح است که تا نشستنِ دیپ،
-        // صفحه تار دیده نشود. نسبتِ واقعیِ صفحه هم همین‌جا ثبت
-        // می‌شود تا کادر، دقیقاً هم‌اندازهٔ تصویر باشد.
+        // مرحلهٔ ۲۶ — لایهٔ پایهٔ سریع برایِ اسکرولِ بدونِ لگ:
+        // مقیاسِ متعادلِ max(dpr, 2.0) با سقفِ ضلعِ ۲۵۶۰ پیکسل
+        // و فرمتِ WebP با کیفیتِ حداکثرِ ۱٫۰ است؛ پس تا نشستنِ
+        // دیپ، صفحه نه تار است و نه سفید می‌ماند. نسبتِ واقعیِ
+        // صفحه هم همین‌جا ثبت می‌شود تا کادر، دقیقاً هم‌اندازهٔ
+        // تصویر باشد.
+        // max(dpr, 2.0) × ۱٫۳۵ (یعنی حداقل ۲٫۷ برابرِ ابعادِ
+        // نقطه‌ایِ PDF) با سقفِ ضلعِ ۳۸۴۰ پیکسل و فرمتِ WebP با
+        // کیفیتِ ۰٫۹۸ است؛ پس حتی پیش از نشستنِ دیپ، صفحه تار
+        // دیده نمی‌شود. نسبتِ واقعیِ صفحه هم همین‌جا ثبت می‌شود
+        // تا کادر، دقیقاً هم‌اندازهٔ تصویر باشد.
         let optimalScale = Math.max(window.devicePixelRatio || 1, 2.0);
         let viewport = page.getViewport({ scale: optimalScale });
         const maxBaseSide = Math.max(viewport.width, viewport.height);
-        if (maxBaseSide > 2800) {
-          optimalScale = Number((optimalScale * (2800 / maxBaseSide)).toFixed(3));
+        if (maxBaseSide > 2560) {
+          optimalScale = Number((optimalScale * (2560 / maxBaseSide)).toFixed(3));
           viewport = page.getViewport({ scale: optimalScale });
         }
 
@@ -531,7 +532,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             setBlobUrl(nextUrl);
           },
           'image/webp',
-          0.94
+          1.0
         );
       } catch (err) {
         if (tempCanvas) {
@@ -612,7 +613,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
 
     let isCancelled = false;
     // مرحله ۲۲ — دیبانس، همان ۱۷۰/۳۲۰ قبلی است؛ خروجی، نشانیِ
-    // blob:یِ PNGِ سوپرسمپل‌شده از WebWorker است.
+    // مرحلهٔ ۲۶ — دیبانس، همان ۱۷۰/۳۲۰ قبلی است؛ خروجی، نشانیِ blob:یِ WebPِ پردازش‌شده با sharp (یا مستقیمِ ۱٫۰ در صورتِ نبودنِ sharp) است.
     const debounceMs = isActivePage ? 170 : 320;
 
     const timer = setTimeout(async () => {
@@ -631,6 +632,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
         // هم (علاوه بر لایهٔ پایه) تا کادر، دقیقاً هم‌اندازهٔ
         // تصویرِ واقعی‌اش باشد.
         onPageRatio: (ratio) => onPageRatioMeasured?.(pageNumber - 1, ratio),
+        // مرحلهٔ ۲۶ — موتورِ sharpِ پروسهٔ اصلی (با پوششِ امن:
+        // اگر کانال نبود یا sharp خطا داد، سرویس به WebPِ
+        // مستقیمِ ۱٫۰ برمی‌گردد).
+        enhanceFn: (buffer) => coreApi.enhanceRenderedPageSharp(buffer),
       });
       if (isCancelled) return;
       if (url) {
@@ -645,6 +650,13 @@ const PdfPageItem = React.memo(function PdfPageItem({
       clearTimeout(timer);
     };
   }, [pdfDoc, filePath, pageNumber, renderZoomLevel, hiDpiRenderTick, isNearViewport, isActivePage, onHiDpiSettled, pageWidth, hiDpiUrl, rotation, onPageRatioMeasured]);
+  // مرحله ۲۵ — رفعِ کرشِ `pageBoxRef is not defined`: در مرحلهٔ ۲۴،
+  // بلوکِ تایلِ قدیمی (که این ref را تعریف می‌کرد) با بلوکِ تازه
+  // جایگزین شد، ولی تعریفِ ref جا ماند، در حالی که هم اثرِ تایل
+  // و هم JSXِ wrapper هنوز به آن ارجاع می‌دادند. این تعریف، همان
+  // refِ گمشده است؛ wrapper با ref={pageBoxRef} به کارتِ صفحه
+  // وصل است و اثرِ تایل و اثرِ وکتور، از همین ref می‌خوانند.
+  const pageBoxRef = useRef(null);
 
 
   const handleFrameContextMenu = useCallback(
@@ -776,20 +788,29 @@ const PdfPageItem = React.memo(function PdfPageItem({
     <div
       id={`comic-page-${pageNumber}`}
       data-page={pageNumber}
+      data-page-number={pageNumber}
       data-index={pageNumber - 1}
       className="comic-page-item pdf-page-container"
       style={{
         ...styles.pageWrapper,
+        // مرحلهٔ ۲۶ — اسکلتِ تیره تا آماده شدنِ تصویر: به‌جایِ
+        // کادرِ سفیدِ کورکنندهٔ #ffffff در محیطِ تیرهٔ #0a0f13،
+        // تا لحظهٔ آماده شدنِ displayedSrc، خاکستریِ تیرهٔ #141c24
+        // است و به محضِ آماده شدنِ تصویر، سفید می‌شود تا در
+        // اسکرولِ سریع، هیچ چشمکِ سفیدی دیده نشود.
+        backgroundColor: displayedSrc ? '#ffffff' : '#141c24',
         height: expectedHeight ? `${expectedHeight}px` : '650px',
         minHeight: expectedHeight ? `${expectedHeight}px` : '650px',
         marginBottom: isLastPage ? '0px' : `${pageGap}px`,
+        marginLeft: 'auto',
+        marginRight: 'auto',
       }}
       onContextMenu={handleFrameContextMenu}
     >
       {/* مانتِ دائمیِ لایهٔ حاشیه‌نویسی (رفعِ صفحاتِ مردهٔ PDF، بخش ۱ تسک):
           قبلاً AnnotationLayer فقط وقتی activeSrc آماده بود مانت می‌شد؛
           پس صفحه‌های در حالِ رندر، صفحه‌های با فاصلهٔ ۴ از صفحهٔ فعال
-          (بیرونِ RENDER_RADIUS=۴ ولی داخلِ پنجرهٔ DOM_OVERSCAN=۵) و
+          (بیرونِ RENDER_RADIUS=۶ ولی داخلِ پنجرهٔ DOM_OVERSCAN=۷) و
           صفحه‌های رندرِ ناموفق، اصلاً لایه نداشتند و هیچ ورودی‌ای
           نمی‌گرفتند (کرسر هم به حالتِ عادی برمی‌گشت). حالا لایه همیشه
           مانت است و تا وقتی تصویر آماده نیست، روی placeholder می‌نشیند.
@@ -799,6 +820,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           و رویدادها را خودش می‌گیرد. لایه آخرین فرزندِ wrapperِ چرخان
           است تا روی تصویر رنگ شود و چرخشِ صفحه را هم به‌ارث ببرد. */}
       <div
+        ref={pageBoxRef}
         style={{
           // در حالتِ جابه‌جا شده، wrapper مطلق و وسط‌چین است (از جریانِ
           // flex خارج می‌شود؛ ارتفاعِ کارت صریح است، پس چیزی فرو
@@ -879,10 +901,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
         )}
 
 
-        {/* هایلایتِ نتایجِ جستجوی درون‌متنی (مرحله ۴): داخلِ همان wrapperِ
+
+
             چرخان قرار می‌گیرد تا چرخش را به‌ارث ببرد؛ مختصات‌ها درصدی‌اند،
             پس با زوم هم بی‌نیاز از محاسبهٔ مجدد هم‌تراز می‌مانند.
-            pointerEvents: none تا هرگز جلوی حاشیه‌نویسی را نگیرد. */}
+            pointerEvents: none تا هرگز جلوی حاشیه‌نویسی را نگیرد. */
+
         {searchHighlights && searchHighlights.length > 0 && (
           <div
             style={{
@@ -1147,14 +1171,15 @@ export default function PdfViewer({ filePath }) {
   // cleanupِ افکتِ ازسرگیری وصل نیست (وگرنه هر بازمحاسبهٔ آفست، آن را
   // می‌کشت و قفل برایِ همیشه می‌ماند — همان باگِ گزارش‌شده)؛ فقط در
   // شروعِ باز شدنِ فایلِ تازه پاک می‌شود. lockWatchdogRef، سقفِ
-  // ۲۵۰ میلی‌ثانیه‌ایِ قفل‌هاست. programmaticScrollAtRef، زمانِ آخرین
-  // اسکرولِ برنامه‌ای (باز شدن، پرش، زومِ ناحیه‌ای) را نگه می‌دارد تا
-  // هندلرِ اسکرول، اسکرولِ دستیِ کاربر را از آن تشخیص بدهد.
+  // ۲۵۰ میلی‌ثانیه‌ایِ قفل‌هاست. programmaticScrollUntilRef، پایانِ
+  // پنجرهٔ «برنامه‌ای» بودنِ اسکرول را نگه می‌دارد (پیش‌فرض ۱۵۰
+  // میلی‌ثانیه؛ برایِ فرودِ زومِ باکسی در مرحلهٔ ۲۵، ۳۵۰ میلی‌ثانیه)
+  // تا هندلرِ اسکرول، اسکرولِ دستیِ کاربر را از آن تشخیص بدهد.
   const resumeTimerRef = useRef(null);
   const lockWatchdogRef = useRef(null);
-  const programmaticScrollAtRef = useRef(0);
-  const markProgrammaticScroll = () => {
-    programmaticScrollAtRef.current = Date.now();
+  const programmaticScrollUntilRef = useRef(0);
+  const markProgrammaticScroll = (durationMs = 150) => {
+    programmaticScrollUntilRef.current = Date.now() + durationMs;
   };
   const releaseScrollLocks = () => {
     isResumingRef.current = false;
@@ -1242,6 +1267,12 @@ export default function PdfViewer({ filePath }) {
   const [searchScannedCount, setSearchScannedCount] = useState(0);
 
   const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
+  // مرحله ۲۵ — بازگشت به چیدمانِ پایدار: تغییرِ داینامیکِ
+  // alignItems در مرحلهٔ ۲۴، مبدأِ افقی را با عبور از آستانه
+  // جابه‌جا می‌کرد و فرودِ زومِ باکسی را به‌هم می‌ریخت. حالا ستون
+  // همیشه وسط‌چین است و کارت، margin: 0 auto دارد؛ چون کارت‌ها
+  // عرضِ ۱۰۰٪ دارند، در حالتِ عادی هیچ سرریزِ منفی‌ای رخ
+  // نمی‌دهد و مبدأ، در همهٔ زوم‌ها یکی می‌ماند.
   const safePageGap = Math.max(0, Math.min(48, Math.round(Number(pdfPageGap) ?? 12)));
 
   // مرحله ۱۲: زومِ «تثبیت‌شده» برای رسترایزِ سنگین — در حینِ
@@ -1369,10 +1400,10 @@ export default function PdfViewer({ filePath }) {
     // فاز ۳: تخلیه، اولِ قدیمی‌ترین صفحهٔ خارج از دید را می‌زند (نه
     // لزوماً قدیمی‌ترینِ مطلق) تا صفحه‌های در دید، بی‌دلیل از کش
     // نیفتند. اگر همهٔ صفحه‌های کش در دید بودند، قدیمی‌ترین می‌رود
-    // تا سقف، همیشه برقرار بماند. مرحله ۱۷: سقف ۳۰ صفحه و حاشیهٔ
+    // تا سقف، همیشه برقرار بماند. مرحله ۱۷: سقف ۴۰ صفحه و حاشیهٔ
     // امن ۱۰ صفحه است تا بازگشت به بالا، بی‌درنگ از کش خوانده شود.
     // Stage 8 Part B: eviction keeps a margin around the active page
-    // (activePage +/- 10, stage 17) because
+    // (activePage +/- 12, stage 26) because
     // visiblePageNumbersRef updates only
     // during render and can lag behind a fast scroll; evicting a page
     // the user is flying toward produced permanently blank pages.
@@ -1380,7 +1411,7 @@ export default function PdfViewer({ filePath }) {
       const visible = visiblePageNumbersRef.current || [];
       const guarded = new Set(visible);
       const center = activePageRef.current || 1;
-      for (let pn = center - 10; pn <= center + 10; pn++) guarded.add(pn);
+      for (let pn = center - 12; pn <= center + 12; pn++) guarded.add(pn);
       let evictKey = null;
       for (const key of cache.keys()) {
         if (!guarded.has(key)) { evictKey = key; break; }
@@ -1917,6 +1948,12 @@ export default function PdfViewer({ filePath }) {
 
   // ۲. بارگذاری سند PDF
   useEffect(() => {
+    // مرحله ۲۳ — ریستِ نقطهٔ کانونیِ زوم با باز شدنِ هر فایل:
+    // لنگرِ فایلِ قبلی، هرگز نباید زومِ فایلِ تازه را بچرخاند.
+    // (اسکرولِ بازگشتِ به صفحهٔ ادامه، لنگر را با handleScroll
+    // تازه می‌کند و فرودِ زومِ ناحیه‌ای هم آن را صراحتاً ست می‌کند.)
+    zoomAnchorRef.current = { page: 1, ratioInPage: 0 };
+    prevAnchorZoomRef.current = safeZoom;
     ensurePdfJsEnvironmentReady();
 
     let isMounted = true;
@@ -2304,6 +2341,38 @@ export default function PdfViewer({ filePath }) {
   const pageOffsetsRef = useRef(pageOffsets);
   pageOffsetsRef.current = pageOffsets;
   const pageHeightsRef = useRef(pageHeights);
+
+  // مرحلهٔ ۲۶ — جبرانِ همگامِ تغییرِ ارتفاعِ صفحه‌هایِ بالایی:
+  // اگر نسبتِ صفحه‌ای بالایِ صفحهٔ فعال عوض شود، pageOffsetsِ
+  // صفحهٔ فعال جابه‌جا می‌شود و اسکرول زیرِ دستِ کاربر می‌پرد.
+  // این useLayoutEffect، پیش از نقاشیِ فریم، scrollTop را به
+  // همان اندازهٔ جابه‌جایی اصلاح می‌کند تا صفحهٔ جلویِ چشم،
+  // حتی ۱ پیکسل هم نپرد. (تغییرِ pageOffsetsِ خودِ صفحهٔ فعال،
+  // فقط از صفحه‌هایِ قبلی می‌آید، پس هر تغییری در آفستِ آن،
+  // لزوماً از بالاست.) در تغییرِ زوم، عوض شدنِ فایل یا زومِ
+  // باکسی، فرودِ یکپارچه مالکِ اسکرول است و این جبران، دخالت
+  // نمی‌کند.
+  const prevOffsetsForCompRef = useRef(null);
+  const prevCompZoomRef = useRef(safeZoom);
+  const prevCompFileRef = useRef(filePath);
+  useLayoutEffect(() => {
+    const prev = prevOffsetsForCompRef.current;
+    const cur = pageOffsets;
+    const activeIdx = (activePageRef.current || 1) - 1;
+    const zoomChanged = prevCompZoomRef.current !== safeZoom;
+    const fileChanged = prevCompFileRef.current !== filePath;
+    prevCompZoomRef.current = safeZoom;
+    prevCompFileRef.current = filePath;
+    if (!fileChanged && !zoomChanged && !areaZoomTarget && prev && cur && prev[activeIdx] !== undefined && cur[activeIdx] !== undefined && prev[activeIdx] !== cur[activeIdx]) {
+      const delta = cur[activeIdx] - prev[activeIdx];
+      const container = containerRef.current;
+      if (container && delta !== 0) {
+        markProgrammaticScroll();
+        container.scrollTop += delta;
+      }
+    }
+    prevOffsetsForCompRef.current = cur;
+  }, [pageOffsets, safeZoom, areaZoomTarget, filePath]);
   pageHeightsRef.current = pageHeights;
 
   // =========================================================================
@@ -2848,75 +2917,97 @@ export default function PdfViewer({ filePath }) {
     }
   }, [isLoading, numPages, pageOffsets, containerWidth, setCurrentPage]);
 
-  // ۵. قفل دقیق اسکرول افقی و عمودی هنگام استفاده از «زوم باکسی» (AreaZoomOverlay)
-  useEffect(() => {
-    if (!areaZoomTarget || !containerRef.current || pageOffsets.length === 0) return;
 
-    const container = containerRef.current;
-    prevZoomRef.current = zoomLevel;
 
-    requestAnimationFrame(() => {
-      if (!containerRef.current) return;
-      const c = containerRef.current;
-      const { normCenterX = 0.5, normCenterY = 0.5, rect } = areaZoomTarget;
-
-      let targetScrollTop = 0;
-      if (rect?.pageNumber && rect.pageNumber >= 1 && rect.pageNumber <= numPages) {
-        const idx = rect.pageNumber - 1;
-        const pTop = pageOffsetsRef.current[idx] || 0;
-        const pHeight = pageHeightsRef.current[idx] || 800;
-        const relY = typeof rect.pageRelativeY === 'number' ? rect.pageRelativeY : 0.5;
-        targetScrollTop = pTop + pHeight * relY - c.clientHeight / 2;
-      } else {
-        targetScrollTop = normCenterY * c.scrollHeight - c.clientHeight / 2;
-      }
-
-      const targetScrollLeft = normCenterX * c.scrollWidth - c.clientWidth / 2;
-
-      markProgrammaticScroll();
-      c.scrollTop = Math.max(0, targetScrollTop);
-      c.scrollLeft = Math.max(0, targetScrollLeft);
-      if (rect?.pageNumber && rect.pageNumber >= 1 && rect.pageNumber <= numPages) {
-        // مرحله ۱۸ — صفحهٔ مقصدِ زومِ ناحیه‌ای، همان صفحهٔ فعال می‌شود تا
-        // در مرکزِ isNearViewport بنشیند و پاسِ HiDPI برایش اجرا شود؛
-        // پیش از این، صفحهٔ فعالِ قبلی می‌ماند و صفحهٔ زوم‌شده، اگر بیش
-        // از یک صفحه فاصله داشت، هرگز شارپ نمی‌شد.
-        setActivePage(rect.pageNumber);
-        activePageRef.current = rect.pageNumber;
-        setCurrentPage(rect.pageNumber);
-      }
-      // مرحله ۱۸ — ری‌رندرِ HiDPI، بدونِ انتظارِ ۱۵۰ میلی‌ثانیه‌ایِ زومِ
-      // تثبیت‌شده: زومِ ناحیه‌ای یک پرشِ گسسته است، نه درگِ لغزنده؛ پس
-      // rasterZoomLevel همان‌جا با زومِ تازه (سقف‌دار با safeZoom)
-      // همگام می‌شود و افکتِ HiDPI، بی‌درنگ با ضریبِ تازه اجرا می‌شود.
-      rasterZoomRef.current = safeZoom;
-      setRasterZoomLevel(safeZoom);
-      clearAreaZoomTarget();
-    });
-  }, [areaZoomTarget, zoomLevel, numPages, pageOffsets.length, clearAreaZoomTarget, setCurrentPage]);
-
-  // ۶. قفلِ همگامِ نقطهٔ کانونیِ زوم (مرحلهٔ ۲۲) — جایگزینِ اثرِ
-  // قبلیِ «ضربِ کلِ scrollTop در ضریبِ زوم» که دو عیب داشت:
-  // ۱) useEffect بود، یعنی پس از نقاشی اجرا می‌شد و کاربر، یک
-  // فریمِ پریده می‌دید؛ ۲) فرض می‌کرد فاصله‌هایِ ثابتِ بینِ
-  // صفحه‌ها (safePageGap) هم با زوم مقیاس می‌شوند، ولی آن‌ها
-  // ثابت‌اند؛ پس مرکز، بیش از حد جابه‌جا می‌شد.
-  // این اثر، useLayoutEffect است (پیش از نقاشیِ فریم) و نقطهٔ
-  // کانونیِ ذخیره‌شده را با آفست‌ها و ارتفاع‌هایِ تازه می‌خواند
-  // (pageOffsetsRef، همان‌جا در رندر به‌روز می‌شود) و scrollTop
-  // را همان‌جا قفل می‌کند. زومِ ناحیه‌ای (areaZoomTarget)،
-  // اسکرولِ مقصدِ خودش را دارد (اثرِ شمارهٔ ۵) و از این اثر
-  // مستثناست؛ prevAnchorZoomRef هم جلویِ قفلِ دوباره را وقتی
-  // هدفِ ناحیه‌ای پاک می‌شود، می‌گیرد.
+  // ۶. اثرِ یکپارچهٔ زوم و اسکرول (مرحلهٔ ۲۴) — جایگزینِ دو اثرِ
+  // جداگانهٔ مرحلهٔ ۲۲/۲۳ (قفلِ زومِ عادی + فرودِ زومِ باکسی).
+  // علتِ تداخلِ قبلی: فرودِ باکسی در useEffectِ پس از نقاشی با
+  // rAF انجام می‌شد و پاک شدنِ هدف، اثرِ قفل را دوباره بیدار
+  // می‌کرد. حالا هر دو شاخه در یک useLayoutEffectِ واحد، پیش از
+  // نقاشیِ فریم، با هم اجرا می‌شوند و پس از فرود، لنگر دوباره با
+  // موقعیتِ تازه همگام می‌شود تا هیچ اثری، حتی ۱ پیکسل، اسکرول
+  // را جابه‌جا نکند.
   useLayoutEffect(() => {
+    const container = containerRef.current;
+    if (!container || pageOffsets.length === 0) return;
     if (areaZoomTarget) {
+      const targetPage = areaZoomTarget.pageNumber ?? areaZoomTarget.rect?.pageNumber ?? null;
+      const pageRatioX = areaZoomTarget.pageRatioX ?? areaZoomTarget.rect?.pageRatioX ?? 0.5;
+      const pageRatioY = areaZoomTarget.pageRatioY ?? areaZoomTarget.rect?.pageRelativeY ?? 0.5;
+      // قفلِ فوریِ لنگر رویِ همان نقطه، در همان لحظهٔ ورودِ هدف.
+      if (targetPage) {
+        zoomAnchorRef.current = { page: targetPage, ratioInPage: pageRatioY, ratioX: pageRatioX };
+      }
+      prevZoomRef.current = zoomLevel;
+      if (targetPage && targetPage >= 1 && targetPage <= numPages) {
+        setActivePage(targetPage);
+        activePageRef.current = targetPage;
+        setCurrentPage(targetPage);
+      }
+      // گامِ ۱ (مرحلهٔ ۲۵): مانت کردنِ صفحهٔ هدف — اسکرول به
+      // بالایِ صفحه (نه به نقطهٔ مرکزیِ تخمینی) تا عنصر در DOM
+      // بیاید؛ فرودِ دقیق در گامِ ۲ با rectِ واقعی انجام می‌شود.
+      // قفلِ برنامه‌ای، ۳۵۰ میلی‌ثانیه است تا در تمامِ مسیرِ فرود،
+      // هیچ اثری اسکرول را پس نگیرد.
+      if (targetPage && targetPage >= 1 && targetPage <= numPages) {
+        const idx = targetPage - 1;
+        markProgrammaticScroll(350);
+        container.scrollTop = Math.max(0, pageOffsetsRef.current[idx] || 0);
+      }
       prevAnchorZoomRef.current = safeZoom;
+      // گامِ ۲: فرودِ دقیق با rectِ واقعیِ عنصر — هم در همین
+      // اثر (اگر عنصر از قبل مانت است) و هم در rAFِ تکمیلیِ پس
+      // از چیده شدنِ نهاییِ Flexbox (اگر تازه مانت شده است).
+      const landPrecisely = () => {
+        if (!containerRef.current) return false;
+        const c = containerRef.current;
+        const pageEl = targetPage ? c.querySelector(`[data-page-number="${targetPage}"]`) : null;
+        if (!pageEl) return false;
+        const pRect = pageEl.getBoundingClientRect();
+        const cRect = c.getBoundingClientRect();
+        // معادلهٔ ناوردا (مرحلهٔ ۲۵): موقعیتِ برگه در فضایِ اسکرول،
+        // از رویِ rectِ واقعی حساب می‌شود و هیچ وابستگی‌ای به
+        // paddingTop یا pageOffsets ندارد. (از نظرِ جبری با فرمولِ
+        // اختلافِ دیدِ مرحلهٔ ۲۴ یکسان است؛ شکلِ ناوردا در برابرِ
+        // جابه‌جاییِ مبدأِ فلکس پایدارتر است.)
+        const pageTopInScroll = c.scrollTop + (pRect.top - cRect.top);
+        const pageLeftInScroll = c.scrollLeft + (pRect.left - cRect.left);
+        const targetScrollTop = pageTopInScroll + pageRatioY * pRect.height - c.clientHeight * 0.5;
+        const targetScrollLeft = pageLeftInScroll + pageRatioX * pRect.width - c.clientWidth * 0.5;
+        markProgrammaticScroll(350);
+        c.scrollTop = Math.max(0, Math.round(targetScrollTop));
+        c.scrollLeft = Math.max(0, Math.round(targetScrollLeft));
+        // همگام‌سازیِ دوبارهٔ لنگر با موقعیتِ تازه، تا پس از پاک
+        // شدنِ هدف، هیچ اثری اسکرول را جابه‌جا نکند.
+        if (targetPage) {
+          zoomAnchorRef.current = { page: targetPage, ratioInPage: pageRatioY, ratioX: pageRatioX };
+        }
+        rasterZoomRef.current = safeZoom;
+        setRasterZoomLevel(safeZoom);
+        return true;
+      };
+      if (landPrecisely()) {
+        clearAreaZoomTarget();
+      } else {
+        let attempts = 0;
+        const retry = () => {
+          if (landPrecisely()) { clearAreaZoomTarget(); return; }
+          attempts += 1;
+          if (attempts < 3) {
+            requestAnimationFrame(retry);
+          } else {
+            rasterZoomRef.current = safeZoom;
+            setRasterZoomLevel(safeZoom);
+            clearAreaZoomTarget();
+          }
+        };
+        requestAnimationFrame(retry);
+      }
       return;
     }
+    // شاخهٔ زومِ عادی (منطقِ مرحلهٔ ۲۲، بدونِ تغییر):
     if (prevAnchorZoomRef.current === safeZoom) return;
     prevAnchorZoomRef.current = safeZoom;
-    const container = containerRef.current;
-    if (!container) return;
     const anchor = zoomAnchorRef.current;
     if (!anchor) return;
     const tops = pageOffsetsRef.current || [];
@@ -2928,13 +3019,11 @@ export default function PdfViewer({ filePath }) {
     if (!newHeight) return;
     const ch = container.clientHeight || 800;
     const target = newTop + anchor.ratioInPage * newHeight - ch * 0.5;
-    // فقط وقتی اختلاف، معنادار است (بیش از ۱ پیکسل) تا از لرزشِ
-    // ناشی از گرد کردن، جلوگیری شود.
     if (Math.abs(container.scrollTop - target) > 1) {
       markProgrammaticScroll();
       container.scrollTop = Math.max(0, target);
     }
-  }, [safeZoom, areaZoomTarget]);
+  }, [safeZoom, areaZoomTarget, zoomLevel, numPages, pageOffsets.length, clearAreaZoomTarget, setCurrentPage, setActivePage]);
 
   // ۷. محاسبه پنجره مجازی DOM
   const { visiblePageNumbers, paddingTop, paddingBottom } = useMemo(() => {
@@ -2986,6 +3075,45 @@ export default function PdfViewer({ filePath }) {
     [defaultRatio]
   );
 
+  // مرحلهٔ ۲۶ — پیش‌خوانیِ ابعادِ صفحات: ۴۰۰ میلی‌ثانیه پس از
+  // در دسترس بودنِ pdfDoc، نسبتِ ابعادِ همهٔ صفحه‌ها در دسته‌هایِ
+  // کوچکِ ۸تایی (با وقفهٔ صفر بینِ دسته‌ها تا ترد قفل نشود)
+  // خوانده می‌شود تا pageRatios از همان ابتدا دقیق باشد و
+  // setPageRatiosِ میانهٔ اسکرول، ارتفاعِ صفحه‌هایِ بالایی را
+  // تکان ندهد. با عوض شدنِ فایل، با توکن لغو می‌شود.
+  // (cleanup عمداً صدا نمی‌شود: صفحهٔ تازه‌گرفته‌شده، فقط برایِ
+  // خواندنِ viewport است و رهاسازیِ آن به کشِ خودِ pdf.js سپرده
+  // می‌شود تا رندرِ هم‌زمانِ همان صفحه در لایهٔ پایه، خراب نشود.)
+  useEffect(() => {
+    if (!pdfDoc || !numPages || numPages <= 0) return;
+    let cancelled = false;
+    const timerId = setTimeout(() => {
+      (async () => {
+        const CHUNK = 8;
+        for (let start = 0; start < numPages && !cancelled; start += CHUNK) {
+          const end = Math.min(numPages, start + CHUNK);
+          for (let i = start; i < end && !cancelled; i++) {
+            try {
+              const page = await pdfDoc.getPage(i + 1);
+              if (cancelled) return;
+              const vp = page.getViewport({ scale: 1.0 });
+              if (vp.width > 0 && vp.height > 0) {
+                handlePageRatioMeasured(i, vp.height / vp.width);
+              }
+            } catch (_) {}
+          }
+          if (!cancelled && end < numPages) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timerId);
+    };
+  }, [pdfDoc, numPages, handlePageRatioMeasured]);
+
 
   // ۸. رصد اسکرول Passive + فراخوانی ری‌رندر HiDPI پس از توقف اسکرول
   useEffect(() => {
@@ -3001,7 +3129,7 @@ export default function PdfViewer({ filePath }) {
       // چرخِ ماوس، نوارِ اسکرول و درگ، هیچ علامتِ برنامه‌ای ندارند؛
       // اسکرول‌هایِ برنامه‌ای (باز شدن، پرش، زومِ ناحیه‌ای) تا
       // ۱۵۰ میلی‌ثانیه پس از علامت‌گذاری، «برنامه‌ای» حساب می‌شوند.
-      if (Date.now() - (programmaticScrollAtRef.current || 0) > 150) {
+      if (Date.now() > (programmaticScrollUntilRef.current || 0)) {
         releaseScrollLocks();
       }
       if (isJumpingRef.current || isResumingRef.current || !hasResumedRef.current) {
@@ -3046,6 +3174,11 @@ export default function PdfViewer({ filePath }) {
     };
 
     const handleScroll = () => {
+      // مرحله ۲۴ — تایمرِ تایلِ جزئیات: در هر اسکرولی (حتی
+      // برنامه‌ایِ ناشی از زومِ باکسی یا پرشِ صفحه) پس از ۱۲۰
+      // میلی‌ثانیه توقف، شلیک می‌شود. این تایمر، پیش از هر گارد
+      // و شاخهٔ دیگری ست می‌شود تا هیچ اسکرولی، تایل را جا
+      // نگذارد. (تایمرِ ۲۲۰ میلی‌ثانیه‌ایِ HiDPI، جداگانه می‌ماند.)
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = null;

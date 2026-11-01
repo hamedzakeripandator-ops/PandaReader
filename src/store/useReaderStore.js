@@ -57,8 +57,9 @@ const useReaderStore = create((set, get) => ({
   targetPage: null,
   zoomLevel: getInitialZoom(),
   preAreaZoomLevel: null,
-  areaZoomTarget: null, // { id, targetZoom, normCenterX, normCenterY, rect }
+  areaZoomTarget: null, // { id, targetZoom, pageNumber, pageRatioX, pageRatioY, normCenterX, normCenterY, rect, timestamp }
   hiDpiRenderTick: 0,
+  detailRenderTick: 0, // مرحله ۲۴ — نسلِ رندرِ تایلِ جزئیات (هر اسکرول، حتی برنامه‌ای)
   comicPageGap: getInitialComicGap(),
   pdfPageGap: getInitialPdfGap(),
   rotation: 0,
@@ -259,6 +260,10 @@ const useReaderStore = create((set, get) => ({
   triggerHiDpiRender: () =>
     set((state) => ({ hiDpiRenderTick: (state.hiDpiRenderTick + 1) % 100000 })),
 
+  // مرحله ۲۴ — شلیکِ رندرِ تایلِ جزئیات پس از توقفِ اسکرول.
+  triggerDetailRender: () =>
+    set((state) => ({ detailRenderTick: (state.detailRenderTick + 1) % 100000 })),
+
   setZoomLevel: (zoom, options = {}) => {
     // مرحله ۳ ـ بخش الف (ممیزی §۲.۵): محافظِ NaN. بدونِ این نگهبان،
     // ورودیِ نامعتبر از Math.min/Max به‌صورتِ NaN بیرون می‌آمد و کلِ
@@ -293,7 +298,7 @@ const useReaderStore = create((set, get) => ({
   },
 
   // اعمال زوم ناحیه‌ای با کشیدن باکس و ثبت مختصات مرکز باکس
-  applyAreaZoom: ({ targetZoom, normCenterX = 0.5, normCenterY = 0.5, rect = null }) => {
+  applyAreaZoom: ({ targetZoom, pageNumber = null, pageRatioX = null, pageRatioY = null, normCenterX = 0.5, normCenterY = 0.5, rect = null }) => {
     // مرحله ۳ ـ بخش الف (ممیزی §۲.۵): همان محافظِ NaN برای مسیرِ زومِ
     // ناحیه‌ای؛ وگرنه targetZoom نامعتبر هم zoomLevel و هم
     // areaZoomTarget.targetZoom را NaN می‌کرد.
@@ -306,16 +311,27 @@ const useReaderStore = create((set, get) => ({
       Math.min(Number(Number(targetZoom).toFixed(2)), MAX_ZOOM)
     );
 
+    // مرحله ۲۴ — فیلدهایِ درجه‌اول: اگر فراخواننده، pageNumber و
+    // نسبت‌ها را صراحتاً نداد (فراخواننده‌هایِ قدیمی)، از rect
+    // خوانده می‌شوند تا رفتارِ قبلی حفظ شود. timestamp، نسلِ هدف
+    // را یکتا می‌کند.
+    const resolvedPageNumber = pageNumber ?? rect?.pageNumber ?? null;
+    const resolvedRatioX = pageRatioX ?? rect?.pageRatioX ?? normCenterX;
+    const resolvedRatioY = pageRatioY ?? rect?.pageRelativeY ?? normCenterY;
     set((state) => ({
       preAreaZoomLevel: savedPreZoom,
       zoomLevel: clampedTarget,
       areaZoomTarget: {
         id: Date.now(),
         targetZoom: clampedTarget,
-         prevZoom: currentZoom,
+        prevZoom: currentZoom,
+        pageNumber: resolvedPageNumber,
+        pageRatioX: resolvedRatioX,
+        pageRatioY: resolvedRatioY,
         normCenterX,
         normCenterY,
         rect,
+        timestamp: Date.now(),
       },
       hiDpiRenderTick: (state.hiDpiRenderTick + 1) % 100000,
     }));

@@ -1,17 +1,26 @@
 // سرویس رندر دو مرحله‌ای باکیفیت (Dual-Pass Progressive HiDPI Rendering)
-// مرحله ۲۲ — بازگشت به PNGِ سوپرسمپل‌شده در <img> (همان تیزیِ
-// مرحلهٔ ۱۹)، ولی این بار انکودِ PNG در WebWorker انجام می‌شود تا
-// تردِ اصلی، صفر میلی‌ثانیه قفل نشود؛ و یک موتورِ دوگانهٔ بهبودِ
-// تصویر (تیزیِ متن + رفعِ ماتیِ عکس) هم در همان Worker اجرا می‌شود.
-// picaِ مرحلهٔ ۲۱ حذف شد: کوچک‌کردنِ بوم به ابعادِ ۱:۱، تراکمِ
-// پیکسلی را از ۲٫۵ برابر به ۱٫۰ برابر رسانده بود و ظرافتِ فونت‌ها
-// را از بین برده بود. در این مرحله، بومِ رندرشده هرگز Downscale
-// نمی‌شود؛ تگِ <img> با فیلترِ Skia Mipmap + Lanczos-3ِ کرومیوم،
-// خودش آن را باکیفیت نشان می‌دهد.
-import { processPdfPageInWorker } from '../utils/gpuImageEnhancer';
+// مرحله ۲۴ — بازطراحیِ موتورِ دیپ‌رندر:
+//   لایهٔ ۱ (کاملِ صفحه): خروجی، در ۱۰۰٪ مواقع و برایِ تمامِ صفحات،
+//     فقط و فقط image/png است. WebPِ مرحلهٔ ۲۳ حذف شد، چون در
+//     کرومیوم، YUV420 لبه‌هایِ رنگی و متن را کدر می‌کند (همان چیزی
+//     که مرحلهٔ ۱۹ ثابت کرده بود). انکودِ PNG، در ورکرِ انکودرِ
+//     خالصِ gpuImageEnhancer انجام می‌شود تا تردِ اصلی، صفر
+//     میلی‌ثانیه قفل شود؛ بومِ اصلی تا جوابِ ورکر، زنده می‌ماند و
+//     اگر ورکر نبود، Fallbackِ تردِ اصلی رویِ همان بوم اجرا می‌شود.
+//   لایهٔ ۲ (برشِ ناحیهٔ دید): دیگر بومِ مستقیم نیست، بلکه یک
+//     <img> با نشانیِ blob: از نوعِ PNG است (Viewport Detail PNG
+//     Overlay) تا از Mipmapِ باکیفیتِ تگِ <img> در کرومیوم استفاده
+//     شود، نه از رسترِ خامِ <canvas>. برش، با حاشیهٔ امنِ ۲۰٪ و با
+//     تراکمِ detailDpr رندر می‌شود و نشانی‌اش، فقط پس از decode
+//     شدن، جایگزینِ تایلِ قبلی می‌شود تا هیچ چشمکی رخ ندهد.
+// فیلترِ SVGِ مرحلهٔ ۲۳ حذف شد (بخشِ ۲٫۱ گزارشِ مرحلهٔ ۲۴).
+// نسبتِ ابعاد، از ویوپورتِ بدونِ چرخش خوانده می‌شود، چون چرخشِ
+// برنامه با CSS اعمال می‌شود، نه با ویوپورتِ pdf.js.
+
+import { renderCanvasToSharpWebP } from '../utils/gpuImageEnhancer';
 
 const MAX_HIDPI_CACHE_ENTRIES = 16;
-const MAX_CANVAS_DIMENSION = 4608; // سقفِ ضلعِ بومِ دیپ (مرحلهٔ ۲۲)
+const MAX_CANVAS_DIMENSION = 4800; // سقفِ ضلعِ بومِ دیپ (مرحلهٔ ۲۳، حفظ شد)
 const MAX_CANVAS_AREA = 18000000; // سقفِ مساحتِ بومِ دیپ: ۱۸ مگاپیکسل
 
 class HiDpiRenderService {
@@ -20,14 +29,15 @@ class HiDpiRenderService {
     this.activePdfTasks = new Map(); // key -> pdfjs RenderTask
   }
 
-  // پله‌بندی ضریب زوم برای جلوگیری از ری‌رندرهای تکراری در تغییرات جزئی اسلایدر
+  // پله‌بندی ضریب زوم برای کلیدِ کش (تا تغییراتِ جزئیِ اسلایدر،
+  // رندرِ تازه نسازند). مقیاسِ واقعیِ رندر، از رویِ
+  // displayWidthPx حساب می‌شود، نه از رویِ همین مقدار.
   quantizeZoom(zoomLevel = 1.0) {
     const z = Math.max(0.5, Math.min(3.5, Number(zoomLevel) || 1.0));
     return Math.round(z * 4) / 4; // گام‌های 0.25 (1.0, 1.25, 1.5, 1.75, 2.0, ...)
   }
 
-  // مرحله ۲۲ — کلیدِ کش، فقط فایل/صفحه/زوم است؛ برشِ مرحلهٔ ۲۰،
-  // از مرحلهٔ ۲۱ حذف شده و دیگر برنگشته است.
+  // کلیدِ کش: فایل/صفحه/زومِ پله‌بندی‌شده.
   buildCacheKey(filePath, pageNumber, zoomLevel) {
     const normPath = (filePath || '').trim().replace(/[\\/]+/g, '\\').toLowerCase();
     const qZoom = this.quantizeZoom(zoomLevel);
@@ -100,30 +110,32 @@ class HiDpiRenderService {
     }
   }
 
-  // تبدیلِ بوم به Blobِ PNG در تردِ اصلی (فقط Fallback، وقتی Worker
-  // در دسترس نیست). toBlob ناهمگام است و تردِ اصلی را قفل نمی‌کند.
-  canvasToPngBlob(canvas) {
-    return new Promise((resolve) => {
-      try {
-        canvas.toBlob((blob) => resolve(blob || null), 'image/png');
-      } catch (_) {
-        resolve(null);
-      }
-    });
+  // سقف‌هایِ یکنواختِ بوم: یک ضریبِ واحد، هر دو محور را با هم
+  // پایین می‌آورد تا نسبتِ ابعاد، ۱۰۰٪ حفظ شود.
+  applyCanvasCaps(baseW, baseH, scale) {
+    let s = scale;
+    const maxSide = Math.max(baseW, baseH) * s;
+    if (maxSide > MAX_CANVAS_DIMENSION) {
+      s *= MAX_CANVAS_DIMENSION / maxSide;
+    }
+    const rawArea = baseW * s * (baseH * s);
+    if (rawArea > MAX_CANVAS_AREA) {
+      s *= Math.sqrt(MAX_CANVAS_AREA / rawArea);
+    }
+    return s;
   }
 
-  // پاس دوم رندر کریستالی برای صفحات PDF — مرحلهٔ ۲۲:
-  //   ۱) مقیاسِ سوپرسمپلِ بالا (فرمولِ دقیقِ پرامپت، هم‌ارزِ
-  //      مرحلهٔ ۱۹): کفِ ۳٫۰، با سقف‌هایِ یکنواختِ ۴۶۰۸/۱۸MP که
-  //      نسبتِ ابعاد را در هر دو محور، ۱۰۰٪ حفظ می‌کنند.
-  //   ۲) رندرِ pdf.js رویِ بومِ موقت (بدونِ هیچ Downscaleای).
-  //   ۳) بهبودِ دو موتوره + انکودِ PNG در WebWorker؛ خروجی، یک
-  //      نشانیِ blob: است که در کشِ LRU می‌نشیند.
-  // نسبتِ ابعاد، از ویوپورتِ بدونِ چرخش خوانده می‌شود (همان رفتارِ
-  // لایهٔ پایه)، چون چرخشِ برنامه با CSS اعمال می‌شود، نه با
-  // ویوپورتِ pdf.js؛ دادنِ rotation به getViewport، تصویر را
-  // پیش‌چرخیده می‌کرد و چرخشِ CSS، آن را دوباره می‌چرخاند.
-  async renderPdfPageHiDpi({ pdfDoc, filePath, pageNumber, zoomLevel = 1.0, displayWidthPx = 0, onPageRatio = null }) {
+  // پاس دوم رندر کریستالی برای صفحات PDF — مرحلهٔ ۲۴، لایهٔ ۱:
+  //   ۱) مقیاسِ سوپرسمپل از رویِ عرضِ نمایشیِ واقعیِ صفحه در DOM
+  //      و تراکمِ مانیتور (فرمولِ مرحلهٔ ۲۳، حفظ شد): dpr بینِ ۲٫۰
+  //      تا ۳٫۰؛ desiredWidth = max(displayWidthPx × dpr × 1.35،
+  //      baseWidth × 3.6)؛ سقفِ ضلعِ ۴۸۰۰ و مساحتِ ۱۸ مگاپیکسل.
+  //   ۲) رندرِ مستقیمِ pdf.js رویِ بومِ موقت (بدونِ ورکرِ پیکسلی،
+  //      بدونِ انتقالِ بیت‌مپِ مخرب، بدونِ Downscale).
+  //   ۳) خروجی، همیشه و فقط PNG است — از طریقِ ورکرِ انکودرِ
+  //      خالص (تردِ اصلی، صفر میلی‌ثانیه قفل نمی‌شود). نشانیِ
+  //      blob: در کشِ LRU می‌نشیند.
+  async renderPdfPageHiDpi({ pdfDoc, filePath, pageNumber, zoomLevel = 1.0, displayWidthPx = 0, onPageRatio = null, enhanceFn = null }) {
     if (!pdfDoc || !pageNumber) return null;
 
     const cacheKey = this.buildCacheKey(filePath, pageNumber, zoomLevel);
@@ -141,35 +153,17 @@ class HiDpiRenderService {
       const baseH = unscaledViewport.height;
       if (!baseW || !baseH) return null;
 
-      // ثبتِ فوریِ نسبتِ واقعیِ صفحه (مرحلهٔ ۲۲، بخش ۲): کادرِ
-      // صفحه، دقیقاً هم‌اندازهٔ تصویرِ واقعی‌اش می‌شود.
+      // ثبتِ فوریِ نسبتِ واقعیِ صفحه (مرحلهٔ ۲۲): کادرِ صفحه،
+      // دقیقاً هم‌اندازهٔ تصویرِ واقعی‌اش می‌شود.
       if (typeof onPageRatio === 'function') {
         try { onPageRatio(baseH / baseW); } catch (_) {}
       }
 
-      // فرمولِ دقیقِ مقیاسِ سوپرسمپل (پرامپتِ مرحلهٔ ۲۲):
-      // در dpr=1 و نمایشِ ۱۰۰۰ پیکسل برایِ صفحهٔ ۵۹۵ نقطه‌ای،
-      // minDisplayScale می‌شود ۴٫۲۰؛ یعنی دقیقاً همان مقیاسِ
-      // مرحلهٔ ۱۹ که متن‌ها را فوق‌العاده تیز نشان می‌داد.
-      const effectiveDpr = Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 2.5);
-      const minDisplayScale = displayWidthPx > 0
-        ? (displayWidthPx * effectiveDpr * 1.25) / Math.max(1, baseW)
-        : 0;
-      let targetScale = Math.max(
-        this.quantizeZoom(zoomLevel) * effectiveDpr * 1.2,
-        minDisplayScale,
-        3.0
-      );
-      // سقف‌هایِ یکنواخت: یک ضریبِ واحد، هر دو محور را با هم
-      // پایین می‌آورد تا نسبتِ ابعاد، ۱۰۰٪ حفظ شود.
-      const maxSide = Math.max(baseW, baseH) * targetScale;
-      if (maxSide > MAX_CANVAS_DIMENSION) {
-        targetScale *= MAX_CANVAS_DIMENSION / maxSide;
-      }
-      const rawArea = baseW * targetScale * (baseH * targetScale);
-      if (rawArea > MAX_CANVAS_AREA) {
-        targetScale *= Math.sqrt(MAX_CANVAS_AREA / rawArea);
-      }
+      // فرمولِ مقیاسِ سوپرسمپل (مرحلهٔ ۲۳، حفظ شد).
+      const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 3.0);
+      const desiredWidth = Math.max(displayWidthPx * dpr * 1.35, baseW * 3.5);
+      let targetScale = desiredWidth / Math.max(1, baseW);
+      targetScale = this.applyCanvasCaps(baseW, baseH, targetScale);
 
       const hiViewport = page.getViewport({ scale: targetScale });
 
@@ -195,41 +189,22 @@ class HiDpiRenderService {
       await renderTask.promise;
       this.activePdfTasks.delete(cacheKey);
 
-      // بهبودِ دو موتوره + انکودِ PNG در WebWorker (۰ میلی‌ثانیه
-      // قفلِ تردِ اصلی). اگر Worker نبود، همان بومِ سوپرسمپل،
-      // در تردِ اصلی به PNG تبدیل می‌شود (تیزیِ مرحلهٔ ۱۹، بدونِ
-      // موتورِ بهبود — نه تاریِ مرحلهٔ ۲۱).
-      let blob = null;
-      try {
-        const result = await processPdfPageInWorker(canvas);
-        if (result && result.blob) {
-          blob = result.blob;
-        } else if (result && result.bitmap) {
-          const tmp = document.createElement('canvas');
-          tmp.width = result.bitmap.width;
-          tmp.height = result.bitmap.height;
-          const tmpCtx = tmp.getContext('2d');
-          tmpCtx.drawImage(result.bitmap, 0, 0);
-          try { result.bitmap.close(); } catch (_) {}
-          blob = await this.canvasToPngBlob(tmp);
-          tmp.width = 0;
-          tmp.height = 0;
-        }
-      } catch (_) {
-        blob = null;
-      }
-      if (!blob) {
-        blob = await this.canvasToPngBlob(canvas);
-      }
+      // مرحلهٔ ۲۶ — مسیرِ تازه: بوم -> WebP ۱٫۰ -> موتورِ sharpِ
+      // پروسهٔ اصلی (lanczos3 + شارپنینگِ دو موتوره + WebP 100)
+      // -> نشانیِ blob:. اگر sharp نبود یا خطا داد، همان WebPِ
+      // مستقیمِ ۱٫۰ برمی‌گردد (بدونِ هیچ دستکاریِ مخربی).
+      // enhanceFn را فراخواننده می‌دهد (پوششی رویِ
+      // coreApi.enhanceRenderedPageSharp) تا سرویس، وابستگیِ
+      // مستقیم به coreApi نگیرد.
+      const sharpResult = await renderCanvasToSharpWebP(canvas, enhanceFn);
 
       canvas.width = 0;
       canvas.height = 0;
       canvas = null;
 
-      if (blob) {
-        const url = URL.createObjectURL(blob);
-        this.storeInCache(cacheKey, url, targetScale);
-        return url;
+      if (sharpResult) {
+        this.storeInCache(cacheKey, sharpResult.url, targetScale);
+        return sharpResult.url;
       }
       return null;
     } catch (err) {
@@ -244,8 +219,6 @@ class HiDpiRenderService {
       return null;
     }
   }
-
-  // پاک‌سازی کامل کش هنگام بستن کتاب یا کمیک
   clearFileCache(filePath) {
     for (const [, task] of this.activePdfTasks.entries()) {
       try {

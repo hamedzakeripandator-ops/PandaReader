@@ -1,203 +1,49 @@
 // ============================================================================
-// src/utils/gpuImageEnhancer.js — مرحله ۲۲
-// بازنویسیِ کامل: picaِ مرحلهٔ ۲۱ حذف شد؛ موتورِ دیپ رندر، حالا یک
-// WebWorkerِ اختصاصی (Inline Blob Worker) است که PNGِ سوپرسمپل‌شده را
-// در تردِ پس‌زمینه می‌سازد. تردِ اصلی، هیچ انکودی انجام نمی‌دهد.
+// src/utils/gpuImageEnhancer.js — مرحله ۲۴
+// بازنویسیِ کاملِ دوم: فیلترِ SVGِ مرحلهٔ ۲۳ حذف شد (دلیلش در
+// گزارشِ مرحلهٔ ۲۴، بخشِ ۲٫۱ آمده است: کامپوزیتورِ کرومیوم،
+// تصویرِ سوپرسمپل‌شده را پیش از کانولوشن، در بافری با رزولوشنِ
+// پایین‌تر رستر می‌کرد و لبه‌هایِ آنتی‌الیاس‌شده را ضخیم و
+// دندانه‌دار نشان می‌داد). این فایل، حالا فقط یک کار می‌کند:
+// انکودِ PNGِ خالص در Worker، بدونِ اینکه تردِ اصلی را قفل کند.
 //
-// چرا این معماری؟ (جمع‌بندیِ تجربهٔ سه مرحله)
-//   - مرحلهٔ ۱۹: PNGِ سوپرسمپل در <img>، متن را فوق‌العاده تیز نشان
-//     می‌داد (فیلترِ Skia Mipmap + Lanczos-3ِ کرومیوم)، ولی انکودِ
-//     PNG رویِ تردِ اصلی، CPU را قفل می‌کرد و عکس‌ها مات بودند.
-//   - مرحلهٔ ۲۰: شیدرِ CAS، قله‌هایِ کنتراست را صاف می‌کرد.
-//   - مرحلهٔ ۲۱: کوچک‌کردنِ بوم با pica به ابعادِ ۱:۱، تراکمِ پیکسلی
-//     را از ۲٫۵ برابر به ۱٫۰ برابر رساند و ظرافتِ فونت‌ها را برد.
-//   پس: سوپرسمپلِ کامل (بدونِ Downscale) + انکودِ PNG در Worker +
-//   موتورِ مجزایِ بهبودِ عکس، هر سه با هم.
+// تفاوتِ حیاتی با ورکرِ مرحلهٔ ۲۲: کدِ ورکر، یک رشتهٔ ثابت است،
+// نه خروجیِ fn.toString(). هیچ تابعی به رشته تبدیل نمی‌شود، هیچ
+// حلقهٔ دستکاریِ پیکسلی در کار نیست، و هیچ getImageData یا
+// putImageDataای وجود ندارد. ورکر فقط بیت‌مپ را می‌گیرد، رویِ
+// OffscreenCanvas می‌کشد و PNG برمی‌گرداند — همین.
 //
-// معماریِ دو موتوره (داخلِ Worker، رویِ OffscreenCanvas):
-//   موتورِ اول — تیزیِ متن (Text Ink & Edge Crispening):
-//     پیکسل‌هایِ متن (کنتراستِ محلیِ بالا + اشباعِ پایین، یا هستهٔ
-//     تیرهٔ جوهر) تیره‌تر و غلیظ‌تر می‌شوند و هاله‌هایِ خاکستریِ
-//     نازکِ دورِ حروف به سفید رانده می‌شوند؛ هیچ بلور یا ریسمپلی
-//     رویِ فونت اعمال نمی‌شود.
-//   موتورِ دوم — رفعِ ماتیِ عکس (Dehaze & Local Clarity):
-//     نواحیِ تصویری، منحنیِ S ملایم + آنشارپِ روشنایی (hue-preserving)
-//     + تقویتِ ملایمِ اشباع می‌گیرند تا غبارِ محو برداشته شود.
-//   تفکیکِ متن/عکس، «نرم» است، نه دودویی: وزنِ w در بازهٔ ۰ تا ۱،
-//   خروجی را بینِ دو موتور میکس می‌کند تا در مرزِ متن و عکس، هیچ
-//   درزِ قابلِ مشاهده‌ای ساخته نشود. (این، انحرافِ آگاهانه از
-//   دسته‌بندیِ سختِ پرامپت است؛ دلیلش در گزارش آمده است.)
-//   آنشارپ، رویِ روشنایی اعمال می‌شود (نه تک‌تکِ کانال‌ها) تا رنگ‌ها
-//   جابه‌جا نشوند؛ و برایِ اینکه حافظه، با صفحه‌هایِ ۱۸ مگاپیکسلی
-//   منفجر نشود، روشنایی فقط در سه ردیفِ لغزان نگه داشته می‌شود
-//   (نه یک آرایهٔ کامل)، و RGB، همان‌جا در بافرِ اصلی نوشته می‌شود.
-//
-// قراردادِ خروجی:
-//   processPdfPageInWorker(sourceCanvas)
-//     → Promise<{ blob } | { bitmap } | null>
-//   - blob: PNGِ آماده از Worker (مسیرِ اصلی).
-//   - bitmap: Worker، convertToBlob نداشت و بیت‌مپِ پردازش‌شده را
-//     برگرداند؛ فراخواننده، آن را در تردِ اصلی به blob تبدیل می‌کند.
-//   - null: Worker در دسترس نیست؛ فراخواننده، از خودِ بومِ ورودی
-//     (بدونِ موتورِ بهبود) blob می‌سازد تا تیزیِ مرحلهٔ ۱۹ حفظ شود.
-//   هیچ‌وقت استثنا پرتاب نمی‌شود.
-//
-// نکتهٔ تک‌منبعی بودنِ کدِ Worker:
-//   تابع‌هایِ موتور (clamp255، smoothstep، processPixels) با
-//   toString() به متنِ Worker تبدیل می‌شوند؛ پس کدی که در Worker
-//   اجرا می‌شود، دقیقاً همان کدی است که در تردِ اصلی قابلِ آزمون
-//   است و هیچ کپیِ دومی برایِ همگام نگه داشتن وجود ندارد. به همین
-//   دلیل، در این سه تابع، هیچ Template Literal و هیچ ${}ای نیست
-//   (حتی در کامنت‌ها)، چون toString()، متنِ خامِ تابع را برمی‌گرداند.
+// قراردادِ encodeCanvasToPng(canvas):
+//   - اول، با createImageBitmap یک کپیِ سخت‌افزاری از بوم گرفته
+//     می‌شود؛ بومِ اصلی تا زمانِ دریافتِ جوابِ ورکر، دست‌نخورده
+//     نگه داشته می‌شود (صفر نمی‌شود) تا اگر ورکر در محیطی نبود،
+//     بلافاصله رویِ همان بومِ اصلی، toBlobِ PNG اجرا شود.
+//   - اگر ورکر جواب داد → همان blob برمی‌گردد.
+//   - اگر ورکر نبود، خطا داد یا در ۶۰ ثانیه جواب نداد → Fallbackِ
+//     تردِ اصلی (canvas.toBlob با image/png) اجرا می‌شود.
+//   - هیچ‌وقت استثنا پرتاب نمی‌شود؛ در بدترین حالت، null برمی‌گردد
+//     و فراخواننده، خودش تصمیم می‌گیرد.
 // ============================================================================
 
-function clamp255(v) {
-  return v < 0 ? 0 : v > 255 ? 255 : v;
-}
-
-function smoothstep(edge0, edge1, x) {
-  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
-  return t * t * (3 - 2 * t);
-}
-
-// موتورِ دوگانهٔ پیکسلی — درجا (in-place) رویِ بافرِ RGBA کار می‌کند.
-// data: Uint8ClampedArray با چیدمانِ RGBA. آلفا دست نمی‌خورد.
-// روشناییِ همسایه‌ها فقط در سه ردیفِ لغزان نگه داشته می‌شود تا
-// حافظه، مستقل از ارتفاعِ صفحه بماند.
-export function processPixels(data, width, height) {
-  if (!data || !width || !height) return;
-  const lumRow = (y) => {
-    const yy = y < 0 ? 0 : y >= height ? height - 1 : y;
-    const row = new Float32Array(width);
-    const base = yy * width * 4;
-    for (let x = 0; x < width; x++) {
-      const o = base + x * 4;
-      row[x] = 0.299 * data[o] + 0.587 * data[o + 1] + 0.114 * data[o + 2];
-    }
-    return row;
-  };
-  // ردیف‌هایِ لغزان: برایِ ردیفِ y، ردیف‌هایِ y-1 و y و y+1 لازم‌اند.
-  // ردیفِ y+2، فقط وقتی محاسبه می‌شود که ردیفِ y نوشته شده باشد،
-  // پس روشناییِ آن، هنوز از دادهٔ دست‌نخورده خوانده می‌شود.
-  let rowPrev = lumRow(0);
-  let rowCurr = lumRow(0);
-  let rowNext = height > 1 ? lumRow(1) : lumRow(0);
-  for (let y = 0; y < height; y++) {
-    const base = y * width * 4;
-    for (let x = 0; x < width; x++) {
-      const o = base + x * 4;
-      const r = data[o];
-      const g = data[o + 1];
-      const b = data[o + 2];
-      const lum = rowCurr[x];
-      let mn = lum;
-      let mx = lum;
-      let sum = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        const row = dy < 0 ? rowPrev : dy > 0 ? rowNext : rowCurr;
-        const xx0 = x - 1 < 0 ? 0 : x - 1;
-        const xx1 = x;
-        const xx2 = x + 1 >= width ? width - 1 : x + 1;
-        const l0 = row[xx0];
-        const l1 = row[xx1];
-        const l2 = row[xx2];
-        if (l0 < mn) mn = l0;
-        if (l0 > mx) mx = l0;
-        if (l1 < mn) mn = l1;
-        if (l1 > mx) mx = l1;
-        if (l2 < mn) mn = l2;
-        if (l2 > mx) mx = l2;
-        sum += l0 + l1 + l2;
-      }
-      const range = mx - mn;
-      const mean = sum / 9;
-      const maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
-      const minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
-      const sat = maxC > 0 ? (maxC - minC) / maxC : 0;
-      // وزنِ نرمِ متن: لبهٔ پُرکنتراستِ کم‌اشباع، یا هستهٔ تیرهٔ جوهر.
-      const edgeText = smoothstep(0.15, 0.45, range / 255) * (1 - smoothstep(0.25, 0.5, sat));
-      const inkText = (1 - smoothstep(90, 170, lum)) * (1 - smoothstep(0.25, 0.5, sat));
-      let w = edgeText > inkText * 0.9 ? edgeText : inkText * 0.9;
-      if (w > 1) w = 1;
-      // شاخهٔ متن: تیره‌کردنِ جوهر + سفید کردنِ هالهٔ نازک.
-      let tr = r;
-      let tg = g;
-      let tb = b;
-      const darken = w * Math.min(1, Math.max(0, (170 - lum) / 170)) * 0.45;
-      tr = tr * (1 - darken);
-      tg = tg * (1 - darken);
-      tb = tb * (1 - darken);
-      if (lum > 210 && mn < 120) {
-        const halo = w * 0.85;
-        tr = tr + (255 - tr) * halo;
-        tg = tg + (255 - tg) * halo;
-        tb = tb + (255 - tb) * halo;
-      }
-      // شاخهٔ عکس: منحنیِ S ملایم + آنشارپِ روشنایی + اشباعِ ملایم.
-      let pr = r;
-      let pg = g;
-      let pb = b;
-      const sc = (c) => {
-        const t = c / 255;
-        const y = t * t * (3 - 2 * t);
-        return c + (y * 255 - c) * 0.35;
-      };
-      pr = sc(pr);
-      pg = sc(pg);
-      pb = sc(pb);
-      const delta = (lum - mean) * 0.55;
-      pr = pr + delta;
-      pg = pg + delta;
-      pb = pb + delta;
-      const gray = (pr + pg + pb) / 3;
-      pr = gray + (pr - gray) * 1.12;
-      pg = gray + (pg - gray) * 1.12;
-      pb = gray + (pb - gray) * 1.12;
-      // میکسِ نرمِ دو شاخه با وزنِ متن.
-      data[o] = clamp255(tr * w + pr * (1 - w));
-      data[o + 1] = clamp255(tg * w + pg * (1 - w));
-      data[o + 2] = clamp255(tb * w + pb * (1 - w));
-    }
-    rowPrev = rowCurr;
-    rowCurr = rowNext;
-    rowNext = lumRow(y + 2);
+// کدِ ورکرِ انکودرِ خالصِ PNG — رشتهٔ ثابت، بدونِ toString.
+export const PNG_WORKER_CODE = `
+self.onmessage = async (e) => {
+  const { id, bitmap } = e.data;
+  try {
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    self.postMessage({ id, ok: true, blob });
+  } catch (err) {
+    try { bitmap.close(); } catch (_) {}
+    self.postMessage({ id, ok: false });
   }
-}
+};
+`;
 
-// --- ساختِ متنِ Worker از همین تابع‌هایِ بالا (تک‌منبع) ------------------
-function buildWorkerSource() {
-  const parts = [];
-  parts.push('\'use strict\';');
-  parts.push('self.onmessage = async function (e) {');
-  parts.push('  const data = e.data || {};');
-  parts.push('  try {');
-  parts.push('    const bitmap = data.bitmap;');
-  parts.push('    if (!bitmap) { self.postMessage({ type: \'error\', id: data.id, message: \'no bitmap\' }); return; }');
-  parts.push('    const off = new OffscreenCanvas(bitmap.width, bitmap.height);');
-  parts.push('    const ctx = off.getContext(\'2d\');');
-  parts.push('    ctx.drawImage(bitmap);');
-  parts.push('    try { bitmap.close(); } catch (err) {}');
-  parts.push('    const img = ctx.getImageData(0, 0, off.width, off.height);');
-  parts.push('    processPixels(img.data, off.width, off.height);');
-  parts.push('    ctx.putImageData(img, 0, 0);');
-  parts.push('    try {');
-  parts.push('      const blob = await off.convertToBlob({ type: \'image/png\' });');
-  parts.push('      self.postMessage({ type: \'blob\', id: data.id, blob: blob });');
-  parts.push('    } catch (err) {');
-  parts.push('      const outBitmap = off.transferToImageBitmap();');
-  parts.push('      self.postMessage({ type: \'bitmap\', id: data.id, bitmap: outBitmap }, [outBitmap]);');
-  parts.push('    }');
-  parts.push('  } catch (err) {');
-  parts.push('    self.postMessage({ type: \'error\', id: data.id, message: (err && err.message) || \'worker failed\' });');
-  parts.push('  }');
-  parts.push('};');
-  parts.push(clamp255.toString());
-  parts.push(smoothstep.toString());
-  parts.push(processPixels.toString());
-  return parts.join('\n');
-}
-
-// --- مدیریتِ تک‌نمونهٔ Worker در تردِ اصلی -------------------------------
+// --- مدیریتِ تک‌نمونهٔ ورکر در تردِ اصلی -------------------------------
 let workerInstance = null;
 let workerFailed = false;
 let nextReqId = 1;
@@ -207,8 +53,7 @@ function getWorker() {
   if (workerInstance) return workerInstance;
   if (workerFailed) return null;
   try {
-    const src = buildWorkerSource();
-    const blob = new Blob([src], { type: 'text/javascript' });
+    const blob = new Blob([PNG_WORKER_CODE], { type: 'text/javascript' });
     const url = URL.createObjectURL(blob);
     const w = new Worker(url);
     // اسکریپت، همان‌جا خوانده شده؛ نشانیِ Blob لازم نیست بماند.
@@ -225,7 +70,7 @@ function getWorker() {
       workerFailed = true;
       for (const [, entry] of pendingRequests) {
         clearTimeout(entry.timer);
-        entry.resolve({ type: 'error', message: 'worker error' });
+        entry.resolve({ ok: false });
       }
       pendingRequests.clear();
     };
@@ -237,44 +82,373 @@ function getWorker() {
   }
 }
 
-export async function processPdfPageInWorker(sourceCanvas) {
+function canvasToPngBlobFallback(canvas) {
+  return new Promise((resolve) => {
+    try {
+      canvas.toBlob((blob) => resolve(blob || null), 'image/png');
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+export async function encodeCanvasToPng(canvas) {
   try {
-    if (!sourceCanvas || !sourceCanvas.width || !sourceCanvas.height) return null;
+    if (!canvas || !canvas.width || !canvas.height) return null;
     const w = getWorker();
-    if (!w) return null;
-    if (typeof createImageBitmap !== 'function') return null;
-    // انتقالِ Zero-Copy: بیت‌مپ، بدونِ کپی، به Worker می‌رود.
-    const bitmap = await createImageBitmap(sourceCanvas);
-    const id = nextReqId++;
-    const result = await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingRequests.delete(id);
-        resolve({ type: 'error', message: 'worker timeout' });
-      }, 60000);
-      pendingRequests.set(id, { resolve, timer });
-      try {
-        w.postMessage({ id, bitmap }, [bitmap]);
-      } catch (_) {
-        clearTimeout(timer);
-        pendingRequests.delete(id);
-        resolve({ type: 'error', message: 'post failed' });
-      }
-    });
-    if (result.type === 'blob' && result.blob) return { blob: result.blob };
-    if (result.type === 'bitmap' && result.bitmap) return { bitmap: result.bitmap };
+    if (w && typeof createImageBitmap === 'function') {
+      // کپیِ سخت‌افزاری؛ بومِ اصلی تا جوابِ ورکر، زنده می‌ماند.
+      const bitmap = await createImageBitmap(canvas);
+      const id = nextReqId++;
+      const result = await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingRequests.delete(id);
+          resolve({ ok: false, timeout: true });
+        }, 60000);
+        pendingRequests.set(id, { resolve, timer });
+        try {
+          w.postMessage({ id, bitmap }, [bitmap]);
+        } catch (_) {
+          clearTimeout(timer);
+          pendingRequests.delete(id);
+          resolve({ ok: false });
+        }
+      });
+      if (result.ok && result.blob) return result.blob;
+      // ورکر جوابِ خوب نداد → Fallback رویِ همان بومِ اصلی.
+    }
+    return await canvasToPngBlobFallback(canvas);
+  } catch (_) {
+    try {
+      return await canvasToPngBlobFallback(canvas);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+export function isPngEncoderWorkerAvailable() {
+  return !workerFailed;
+}
+
+// ============================================================================
+// موتورِ ۲ — آپ‌اسکیل و فوکوسِ نرمِ تصاویرِ آناتومی (مرحلهٔ ۲۵)
+// جایگزینِ کاملِ pica (که از مرحلهٔ ۲۲ در هیچ فایلی نیست و در این
+// فایل هم هرگز نبوده است). این موتور، برایِ عکس‌ها ساخته شده، نه
+// برایِ متن: رویِ متنِ برداری، موتورِ ۱ (بومِ وکتورِ نمایشگر)
+// می‌نشیند و این فیلتر، هرگز رویِ متن اعمال نمی‌شود.
+//
+// معماری:
+//   گامِ الف — درون‌یابیِ نرمِ دو-مکعبی: اگر ابعادِ هدف، بزرگ‌تر
+//     از مبدأ باشد، اول با imageSmoothingQuality='high' به ابعادِ
+//     هدف کشیده می‌شود تا هیچ شکستگیِ پیکسلی در رگ‌ها و اعصاب
+//     نیاید.
+//   گامِ ب — فیلترِ دوطرفهٔ فوکوسِ نرم (Bilateral Soft-Focus):
+//     برایِ هر پیکسل، همسایگیِ ۳×۳ با دو وزن بررسی می‌شود:
+//     وزنِ مکانیِ گاوسی (۱،۲،۱؛ ۲،۴،۲؛ ۱،۲،۱) و وزنِ تشابهٔ رنگی
+//     exp(-Δ²/2σr²) با σr=۲۸. در نواحیِ هموار (گرادیانِ کم، مثلِ
+//     سایه‌روشنِ عضله و غضروف)، خروجی همان میانگینِ دوطرفه است:
+//     نویزِ JPEG/WebP یکدست و مخملی می‌شود.
+//   گامِ ج — هدایتِ گرادیان (Gradient-Directed Edge Refinement):
+//     در مرزها (گرادیانِ بالا، مثلِ رگ و عصب)، خروجی به‌سمتِ یک
+//     آنشارپِ ملایم (center + edgePush×(center - bilateral))
+//     کشیده می‌شود؛ اما نتیجه، در بازهٔ [min, max] هر ۹ پیکسلِ
+//     همسایگی — با احتسابِ خودِ مرکز — clamp می‌شود. این همان
+//     نکته‌ای است که مرحلهٔ ۲۰ را خراب کرد (clampِ بدونِ مرکز،
+//     قله‌ها را صاف می‌کرد): اینجا مرکز هم در بازه هست، پس نه
+//     قله صاف می‌شود و نه هالهٔ سفید ساخته می‌شود (Zero-Halo).
+//     وزنِ لبه، smoothstep رویِ گرادیانِ سوبل است (۰٫۰۸ تا ۰٫۳۵).
+//   اجرا: اول WebGL2 (شیدرِ GLSL ES 3.00، بدونِ هیچ readback؛
+//     خروجی همان بومِ GL است که مستقیم toBlob می‌شود). اگر WebGL2
+//     نبود، Fallbackِ CPU رویِ همان بوم (فقط تا ۸ مگاپیکسل؛
+//     بزرگ‌تر از آن، بدونِ تغییر برمی‌گردد تا ترد قفل نشود).
+//   هیچ‌وقت استثنا پرتاب نمی‌شود؛ در بدترین حالت، بومِ ورودی
+//   (یا نسخهٔ آپ‌اسکیل‌شده‌اش) بدونِ فیلتر برمی‌گردد.
+//   توجه به جهتِ بافت در WebGL: با flipY=false و v معکوس‌شده،
+//   ردیفِ اولِ بافت همان ردیفِ بالایِ بوم است و تصویر وارونه
+//   نمی‌شود.
+// ============================================================================
+
+const ANATOMY_CPU_MAX_PIXELS = 8000000;
+
+const BILATERAL_VERTEX_SHADER = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_uv = vec2((a_pos.x + 1.0) * 0.5, 1.0 - (a_pos.y + 1.0) * 0.5);
+}`;
+
+const BILATERAL_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+uniform sampler2D u_image;
+uniform vec2 u_texel;
+uniform float u_sigmaRange;
+uniform float u_edgePush;
+uniform float u_strength;
+in vec2 v_uv;
+out vec4 outColor;
+void main() {
+  vec4 centerSample = texture(u_image, v_uv);
+  vec3 center = centerSample.rgb;
+  float lumCenter = dot(center, vec3(0.299, 0.587, 0.114));
+  vec3 bilateral = vec3(0.0);
+  float wsum = 0.0;
+  vec3 mn = center;
+  vec3 mx = center;
+  float gx = 0.0;
+  float gy = 0.0;
+  for (int dy = -1; dy <= 1; dy++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      vec2 uv = v_uv + vec2(float(dx), float(dy)) * u_texel;
+      vec3 s = texture(u_image, uv).rgb;
+      float l = dot(s, vec3(0.299, 0.587, 0.114));
+      mn = min(mn, s);
+      mx = max(mx, s);
+      float spatial = (dx == 0 && dy == 0) ? 4.0 : ((dx == 0 || dy == 0) ? 2.0 : 1.0);
+      float d = l - lumCenter;
+      float range = exp(-(d * d) / (2.0 * u_sigmaRange * u_sigmaRange));
+      float w = spatial * range;
+      bilateral += s * w;
+      wsum += w;
+      float gxW = dx == -1 ? (dy == 0 ? -2.0 : -1.0) : (dx == 1 ? (dy == 0 ? 2.0 : 1.0) : 0.0);
+      float gyW = dy == -1 ? (dx == 0 ? -2.0 : -1.0) : (dy == 1 ? (dx == 0 ? 2.0 : 1.0) : 0.0);
+      gx += l * gxW;
+      gy += l * gyW;
+    }
+  }
+  bilateral /= max(wsum, 1e-6);
+  float grad = sqrt(gx * gx + gy * gy) / (4.0 * 255.0);
+  float edgeW = smoothstep(0.08, 0.35, grad);
+  vec3 sharpened = center + u_edgePush * (center - bilateral);
+  sharpened = clamp(sharpened, mn, mx);
+  vec3 outRgb = mix(bilateral, sharpened, edgeW * u_strength);
+  outColor = vec4(outRgb, centerSample.a);
+}`;
+
+function compileShader(gl, type, source) {
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    gl.deleteShader(shader);
     return null;
+  }
+  return shader;
+}
+
+function runBilateralWebGL2(sourceCanvas, { sigmaRange = 28, edgePush = 0.55, strength = 0.6 } = {}) {
+  try {
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    if (!w || !h) return null;
+    const glCanvas = document.createElement('canvas');
+    glCanvas.width = w;
+    glCanvas.height = h;
+    // preserveDrawingBuffer لازم است تا پس از draw، بوم برایِ
+    // createImageBitmap/toBlob خالی نماند.
+    const gl = glCanvas.getContext('webgl2', { antialias: false, alpha: true, preserveDrawingBuffer: true });
+    if (!gl) return null;
+    const vs = compileShader(gl, gl.VERTEX_SHADER, BILATERAL_VERTEX_SHADER);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, BILATERAL_FRAGMENT_SHADER);
+    if (!vs || !fs) return null;
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+    gl.useProgram(program);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(program, 'a_pos');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // نمونه‌برداری در مرکزِ دقیقِ تکسل‌ها، بدونِ ترکیبِ خطی.
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
+    gl.uniform2f(gl.getUniformLocation(program, 'u_texel'), 1 / w, 1 / h);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_sigmaRange'), sigmaRange);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_edgePush'), edgePush);
+    gl.uniform1f(gl.getUniformLocation(program, 'u_strength'), strength);
+    gl.viewport(0, 0, w, h);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    return glCanvas;
   } catch (_) {
     return null;
   }
 }
 
-export function isWorkerEnhancerAvailable() {
-  return !workerFailed;
+function runBilateralCpu(sourceCanvas, { sigmaRange = 28, edgePush = 0.55, strength = 0.6 } = {}) {
+  try {
+    const w = sourceCanvas.width;
+    const h = sourceCanvas.height;
+    if (!w || !h || w * h > ANATOMY_CPU_MAX_PIXELS) return null;
+    const ctx = sourceCanvas.getContext('2d');
+    if (!ctx) return null;
+    let img;
+    try {
+      img = ctx.getImageData(0, 0, w, h);
+    } catch (_) {
+      return null;
+    }
+    const data = img.data;
+    const out = new Uint8ClampedArray(data);
+    const spatial = [[1, 2, 1], [2, 4, 2], [1, 2, 1]];
+    const clampByte = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const o = (y * w + x) * 4;
+        const cr = data[o];
+        const cg = data[o + 1];
+        const cb = data[o + 2];
+        const lumC = 0.299 * cr + 0.587 * cg + 0.114 * cb;
+        let sr = 0;
+        let sg = 0;
+        let sb = 0;
+        let wsum = 0;
+        let mnR = cr;
+        let mnG = cg;
+        let mnB = cb;
+        let mxR = cr;
+        let mxG = cg;
+        let mxB = cb;
+        let gx = 0;
+        let gy = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx < 0 ? 0 : x + dx >= w ? w - 1 : x + dx;
+            const yy = y + dy < 0 ? 0 : y + dy >= h ? h - 1 : y + dy;
+            const oo = (yy * w + xx) * 4;
+            const r = data[oo];
+            const g = data[oo + 1];
+            const b = data[oo + 2];
+            const l = 0.299 * r + 0.587 * g + 0.114 * b;
+            const d = l - lumC;
+            const range = Math.exp(-(d * d) / (2 * sigmaRange * sigmaRange));
+            const wt = spatial[dy + 1][dx + 1] * range;
+            sr += r * wt;
+            sg += g * wt;
+            sb += b * wt;
+            wsum += wt;
+            if (r < mnR) mnR = r;
+            if (g < mnG) mnG = g;
+            if (b < mnB) mnB = b;
+            if (r > mxR) mxR = r;
+            if (g > mxG) mxG = g;
+            if (b > mxB) mxB = b;
+            const gxW = dx === -1 ? (dy === 0 ? -2 : -1) : dx === 1 ? (dy === 0 ? 2 : 1) : 0;
+            const gyW = dy === -1 ? (dx === 0 ? -2 : -1) : dy === 1 ? (dx === 0 ? 2 : 1) : 0;
+            gx += l * gxW;
+            gy += l * gyW;
+          }
+        }
+        const br = sr / wsum;
+        const bg = sg / wsum;
+        const bb = sb / wsum;
+        const grad = Math.sqrt(gx * gx + gy * gy) / (4 * 255);
+        let t = grad < 0.08 ? 0 : grad > 0.35 ? 1 : (grad - 0.08) / (0.35 - 0.08);
+        const edgeT = t * t * (3 - 2 * t) * strength;
+        const shR = clampByte(cr + edgePush * (cr - br), mnR, mxR);
+        const shG = clampByte(cg + edgePush * (cg - bg), mnG, mxG);
+        const shB = clampByte(cb + edgePush * (cb - bb), mnB, mxB);
+        out[o] = br + (shR - br) * edgeT;
+        out[o + 1] = bg + (shG - bg) * edgeT;
+        out[o + 2] = bb + (shB - bb) * edgeT;
+      }
+    }
+    ctx.putImageData(new ImageData(out, w, h), 0, 0);
+    return sourceCanvas;
+  } catch (_) {
+    return null;
+  }
 }
 
-// برایِ آزمون و اشکال‌زدایی: متنِ کاملِ Workerِ ساخته‌شده.
-export function buildWorkerSourceForTest() {
-  return buildWorkerSource();
+export async function upscaleAndEnhanceAnatomyCanvas(sourceCanvas, options = {}) {
+  try {
+    if (!sourceCanvas || !sourceCanvas.width || !sourceCanvas.height) return null;
+    const { targetWidth = 0, targetHeight = 0, strength = 0.6, sigmaRange = 28, edgePush = 0.55 } = options;
+    let work = sourceCanvas;
+    // گامِ الف — آپ‌اسکیلِ نرمِ دو-مکعبی (فقط وقتی هدف بزرگ‌تر است).
+    if (targetWidth > 0 && targetHeight > 0 && (targetWidth !== sourceCanvas.width || targetHeight !== sourceCanvas.height)) {
+      const tmp = document.createElement('canvas');
+      tmp.width = Math.max(1, Math.round(targetWidth));
+      tmp.height = Math.max(1, Math.round(targetHeight));
+      const tctx = tmp.getContext('2d');
+      if (!tctx) return sourceCanvas;
+      tctx.fillStyle = '#ffffff';
+      tctx.fillRect(0, 0, tmp.width, tmp.height);
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = 'high';
+      tctx.drawImage(sourceCanvas, 0, 0, tmp.width, tmp.height);
+      work = tmp;
+    }
+    // گامِ ب/ج — اول WebGL2، بعد Fallbackِ CPU.
+    if (typeof document !== 'undefined') {
+      const glCanvas = runBilateralWebGL2(work, { sigmaRange, edgePush, strength });
+      if (glCanvas) return glCanvas;
+    }
+    const cpu = runBilateralCpu(work, { sigmaRange, edgePush, strength });
+    if (cpu) return cpu;
+    return work;
+  } catch (_) {
+    return sourceCanvas;
+  }
 }
 
-export default { processPdfPageInWorker, isWorkerEnhancerAvailable, processPixels };
+// ============================================================================
+// مرحلهٔ ۲۶ — چسبِ موتورِ sharp (پروسهٔ اصلیِ Electron).
+// از مرحلهٔ ۲۶، مسیرِ HiDPIِ سرویس دیگر از انکودرِ PNGِ ورکر و
+// موتورِ Bilateralِ مرحلهٔ ۲۵ استفاده نمی‌کند؛ آن دو اکسپورت،
+// برایِ سازگاری و استفادهٔ احتمالیِ بعدی، در فایل مانده‌اند ولی
+// هیچ فراخواننده‌ای در مسیرِ رندر ندارند (پس هیچ هزینهٔ زمانی
+// هم ندارند). مسیرِ تازه، این است:
+//   بوم -> WebP با کیفیتِ ۱٫۰ -> موتورِ sharpِ پروسهٔ اصلی
+//   (lanczos3 + شارپنینگِ دو موتوره + WebP 100) -> نشانیِ blob:
+// اگر sharp در دسترس نبود یا خطا داد، همان WebPِ مستقیمِ ۱٫۰
+// برگردانده می‌شود تا تصویر همیشه در بالاترین کیفیتِ WebP باشد.
+// sharpFn، تابعی است که فراخواننده می‌دهد (معمولاً پوششی رویِ
+// coreApi.enhanceRenderedPageSharp) تا این فایل، وابستگیِ مستقیم
+// به coreApi نگیرد. تابع هرگز استثنا نمی‌دهد؛ فقط در صورتِ
+// شکستِ کاملِ هر دو مسیر، null برمی‌گردد.
+// ============================================================================
+
+function canvasToWebPBlob(canvas) {
+  return new Promise((resolve) => {
+    try {
+      canvas.toBlob((blob) => resolve(blob || null), 'image/webp', 1.0);
+    } catch (_) {
+      resolve(null);
+    }
+  });
+}
+
+export async function renderCanvasToSharpWebP(canvas, sharpFn = null) {
+  try {
+    if (!canvas || !canvas.width || !canvas.height) return null;
+    const webpBlob = await canvasToWebPBlob(canvas);
+    if (!webpBlob) return null;
+    if (typeof sharpFn === 'function') {
+      try {
+        const buffer = new Uint8Array(await webpBlob.arrayBuffer());
+        const res = await sharpFn(buffer);
+        if (res && res.success && res.buffer) {
+          const outBlob = new Blob([res.buffer], { type: 'image/webp' });
+          return { url: URL.createObjectURL(outBlob), viaSharp: true };
+        }
+      } catch (_) {
+        // سقوط به WebPِ مستقیمِ زیر.
+      }
+    }
+    return { url: URL.createObjectURL(webpBlob), viaSharp: false };
+  } catch (_) {
+    return null;
+  }
+}
+
+export default { PNG_WORKER_CODE, encodeCanvasToPng, isPngEncoderWorkerAvailable, upscaleAndEnhanceAnatomyCanvas, renderCanvasToSharpWebP };
