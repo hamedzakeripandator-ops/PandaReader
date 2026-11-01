@@ -291,12 +291,4 @@ contextBridge.exposeInMainWorld('api', {
     } catch (_) {}
   },
 
-  // مرحلهٔ ۲۶ — موتورِ sharp برایِ پردازشِ تصویرِ HiDPI.
-  // توجه: payload عمداً از sanitizePayload رد نمی‌شود، چون آن
-  // تابع با JSON، آرایهٔ تایپ‌شدهٔ Uint8Array را به آبجکتِ سادهٔ
-  // {0:.., 1:..} تبدیل و بافر را خراب می‌کند. invokeِ Electron،
-  // Uint8Array را با structured clone سالم منتقل می‌کند.
-  enhanceRenderedPageSharp: (payload) => {
-    return ipcRenderer.invoke('enhance-rendered-page-sharp', payload);
-  }
 });

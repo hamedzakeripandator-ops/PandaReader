@@ -942,6 +942,7 @@ export default function TopBar({
           borderStyle: 'solid',
           borderColor: effectiveReaderMode ? 'var(--border)' : 'transparent',
           zIndex: 9000,
+          flexShrink: 0,
         }}
       >
         {/* ۱. لوگو و نام برنامه */}

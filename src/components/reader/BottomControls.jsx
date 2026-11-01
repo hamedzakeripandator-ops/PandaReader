@@ -163,7 +163,8 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
 
   if (!comicData) return null;
 
-  const minZoom = 0.4;
+  // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+  const minZoom = 0.1;
   const maxZoom = 3.5;
   const displayZoom = Math.round(zoomLevel * 100);
   const fillPercentage = Math.min(

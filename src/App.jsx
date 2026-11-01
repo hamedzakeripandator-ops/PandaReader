@@ -940,8 +940,14 @@ const styles = {
     flex: 1,
     display: 'flex',
     flexDirection: 'column',
+    width: '100%',
+    height: '100%',
+    minWidth: 0,
+    minHeight: 0,
     overflow: 'hidden',
     position: 'relative',
+    isolation: 'isolate',
+    zIndex: 1,
     borderRadius: 'var(--radius-lg)',
   },
   // مرحله ۳ ـ بخش الف: Fallback سبکِ Suspense برای محتوای مرکزی؛
@@ -1026,6 +1032,7 @@ const styles = {
     top: 0,
     bottom: 0,
     zIndex: 42,
+    flexShrink: 0,
   },
   leftHotspot: {
     position: 'absolute',

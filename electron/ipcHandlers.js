@@ -4,20 +4,6 @@ const fs = require('fs');
 const { Worker } = require('worker_threads');
 const directoryService = require('./services/directoryService');
 
-// مرحلهٔ ۲۶ — بارگذاریِ ایمنِ sharp (موتورِ C++ِ libvips برایِ
-// پردازشِ تصویرِ HiDPI). اگر نصب نشده باشد یا باینریِ بومی با
-// نسخهٔ Electron هم‌خوان نباشد (خطایِ NODE_MODULE_VERSION)،
-// require شکست می‌خورد و هندلر، به‌جایِ کرش، «در دسترس نیست»
-// برمی‌گرداند تا رندرر به WebPِ مستقیم برگردد. در آن صورت،
-// اجرایِ `npx electron-rebuild -f -w sharp` در پوشهٔ پروژه،
-// باینری را برایِ Electron بازسازی می‌کند.
-let sharpLib = null;
-try {
-  sharpLib = require('sharp');
-} catch (err) {
-  console.warn('[sharp] not available, HiDPI will use direct WebP 1.0:', err && err.message ? err.message : err);
-}
-
 // مرحله ۷ ـ بخش الف: لاگرِ دیسک برای خطاهای ورکرِ دیتابیس و
 // ذخیرهٔ PDF. تنبل ساخته می‌شود تا متغیرِ محیطیِ
 // COMIC_READER_DATA_DIR (که main.js پیش از اسپاونِ ورکر تنظیم
@@ -2532,57 +2518,4 @@ module.exports = function(app) {
     }
   });
 
-  // مرحلهٔ ۲۶ — موتورِ دوگانهٔ sharp (libvips) برایِ تصویرِ رندرشدهٔ
-  // صفحه: آپ‌اسکیلِ Lanczos3 (فقط وقتی ابعادِ هدف داده شده باشد)
-  // + شارپنینگِ تطبیقیِ دو موتوره (m1 ملایم برایِ بافت‌هایِ نرمِ
-  // آناتومی، m2 قوی برایِ لبه‌هایِ تیزِ متن و خطوطِ اشاره) +
-  // خروجیِ WebP با بالاترین کیفیت (quality 100، nearLossless،
-  // smartSubsample 4:4:4). ورودی، بافرِ WebPِ رندرر است که با
-  // structured cloneِ Electron سالم می‌رسد (Uint8Array)؛ اگر به
-  // هر دلیلی به‌صورتِ آبجکتِ ساده آمده باشد، از مقادیرش بازسازی
-  // می‌شود. هر خطایی، به‌جایِ کرش، {success:false} برمی‌گرداند
-  // تا رندرر به WebPِ مستقیمِ ۱٫۰ برگردد.
-  ipcMain.handle('enhance-rendered-page-sharp', async (_event, payload = {}) => {
-    try {
-      if (!sharpLib) return { success: false, error: 'sharp-unavailable' };
-      const input = payload && payload.buffer;
-      if (!input || input.length === 0) return { success: false, error: 'empty-buffer' };
-      let inputBuffer;
-      if (Buffer.isBuffer(input)) inputBuffer = input;
-      else if (input instanceof Uint8Array) inputBuffer = Buffer.from(input);
-      else if (Array.isArray(input)) inputBuffer = Buffer.from(input);
-      else if (typeof input === 'object') inputBuffer = Buffer.from(Object.values(input));
-      else return { success: false, error: 'invalid-buffer' };
-      let pipeline = sharpLib(inputBuffer, { failOn: 'none' });
-      const targetWidth = Number(payload.targetWidth) || 0;
-      const targetHeight = Number(payload.targetHeight) || 0;
-      if (targetWidth > 0 && targetHeight > 0) {
-        pipeline = pipeline.resize(targetWidth, targetHeight, {
-          kernel: sharpLib.kernel.lanczos3,
-          withoutEnlargement: false,
-        });
-      }
-      pipeline = pipeline.sharpen({
-        sigma: 0.75,
-        m1: 0.35,
-        m2: 1.85,
-        x1: 2.0,
-        y2: 10.0,
-        y3: 20.0,
-      });
-      const outBuffer = await pipeline
-        .webp({
-          quality: 100,
-          alphaQuality: 100,
-          lossless: false,
-          nearLossless: true,
-          smartSubsample: true,
-          effort: 2,
-        })
-        .toBuffer();
-      return { success: true, buffer: outBuffer };
-    } catch (err) {
-      return { success: false, error: String((err && err.message) || err) };
-    }
-  });
 };

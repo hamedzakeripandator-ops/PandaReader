@@ -167,7 +167,8 @@ export default function AreaZoomOverlay() {
       const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
       const computedZoom = Math.min(
         3.5,
-        Math.max(0.6, Number((currentZoom * scaleMultiplier).toFixed(2)))
+        // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+        Math.max(0.1, Number((currentZoom * scaleMultiplier).toFixed(2)))
       );
 
       const boxCenterX = box.x + box.width / 2;
@@ -331,7 +332,8 @@ export default function AreaZoomOverlay() {
     const mult =
       Math.min(window.innerWidth / dragBox.width, window.innerHeight / dragBox.height) *
       0.88;
-    previewZoomPercent = Math.round(Math.min(3.5, Math.max(0.6, zoomLevel * mult)) * 100);
+    // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+    previewZoomPercent = Math.round(Math.min(3.5, Math.max(0.1, zoomLevel * mult)) * 100);
   }
 
   return (

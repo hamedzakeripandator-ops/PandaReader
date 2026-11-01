@@ -4,7 +4,8 @@ import { coreApi } from '../services/coreApi';
 let saveZoomTimer = null;
 let saveGapTimer = null;
 
-const MIN_ZOOM = 0.4;
+// Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3.5;
 
 const getInitialZoom = () => {
@@ -349,14 +350,17 @@ const useReaderStore = create((set, get) => ({
     }));
   },
 
+  // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
   zoomIn: () => {
     const current = get().zoomLevel;
-    get().setZoomLevel(current + 0.12);
+    const step = current < 0.5 ? 0.1 : 0.12;
+    get().setZoomLevel(current + step);
   },
 
   zoomOut: () => {
     const current = get().zoomLevel;
-    get().setZoomLevel(current - 0.12);
+    const step = current < 0.5 ? 0.1 : 0.12;
+    get().setZoomLevel(current - step);
   },
 
   resetZoom: async () => {

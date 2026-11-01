@@ -427,7 +427,8 @@ export default function VerticalViewer() {
     updateBookmark(currentFilePath, bm.id, patch);
   }, [updateBookmark, currentFilePath]);
 
-  const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
+  // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+  const safeZoom = Math.min(3.5, Math.max(0.1, Number(zoomLevel) || 1));
   // عرضِ واقعیِ هر کادر = عرضِ کانتینر × ضریبِ زوم (همان درصدی که
   // zoomWrapper با آن ساخته می‌شود؛ بدونِ کف، چون wrapper هم کفی
   // ندارد). تا قبل از اندازه‌گیری، صفر است و کادر، چیدمانِ قدیمی را
@@ -903,7 +904,8 @@ export default function VerticalViewer() {
         const currentZoom = useReaderStore.getState().zoomLevel || 1.0;
         const nextZoom = Math.min(
           3.5,
-          Math.max(0.4, parseFloat((currentZoom * factor).toFixed(2)))
+          // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
+          Math.max(0.1, parseFloat((currentZoom * factor).toFixed(2)))
         );
 
         if (nextZoom !== currentZoom) {

@@ -587,26 +587,6 @@ export const coreApi = {
     } catch (_) {}
   },
 
-  // مرحلهٔ ۲۶ — پردازشِ تصویرِ رندرشدهٔ صفحه با موتورِ sharpِ
-  // پروسهٔ اصلی (lanczos3 + شارپنینگِ دو موتوره + WebP 100).
-  // ورودی، Uint8Arrayِ بافرِ WebP است. اگر sharp در دسترس نباشد
-  // یا کانال وصل نباشد، {success:false} برمی‌گردد تا فراخواننده
-  // به WebPِ مستقیمِ ۱٫۰ برگردد؛ هرگز استثنا پرتاب نمی‌شود.
-  enhanceRenderedPageSharp: async (buffer, options = {}) => {
-    const api = getApi();
-    if (!api?.enhanceRenderedPageSharp) {
-      return { success: false, error: 'محیط الکترون در دسترس نیست.' };
-    }
-    try {
-      return await api.enhanceRenderedPageSharp({
-        buffer,
-        targetWidth: options.targetWidth || 0,
-        targetHeight: options.targetHeight || 0,
-      });
-    } catch (err) {
-      return { success: false, error: err?.message || 'خطا در پردازش تصویر با sharp' };
-    }
-  }
 };
 
 export default coreApi;
