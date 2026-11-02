@@ -30,21 +30,36 @@
 import { PDFDocument } from 'pdf-lib';
 import { normalizeSearchText } from '../utils/persianSearch';
 
-// مرحلهٔ ۳۰ — بازگشتِ آگاهانه به مقیاسِ ۲٫۰ و کیفیتِ ۰٫۹۲:
-// مرحلهٔ ۱۱، این دو را برایِ کم‌شدنِ ~۷۰٪ حجم پایین آورده بود،
-// ولی همان افت، علتِ «بی‌کیفیت شدنِ کپیِ بازسازی‌شده و خراب
-// شدنِ زوم» است: صفحهٔ رستریِ ۱٫۴۵x با JPEGِ ۰٫۸۰، در زومِ
-// ۳۵۰٪، دیگر جزئیاتی برایِ دیپ‌رندر ندارد. بازسازی، همچنان
-// رستری است (مسیرِ آخر) ولی با وضوحِ بیشتر؛ حجمِ خروجی،
-// دوباره بزرگ‌تر می‌شود و سقفِ ۱۶ مگاپیکسلِ بوم، سرِ جایش است.
-export const DEFAULT_REBUILD_SCALE = 2.0;
-export const REBUILD_JPEG_QUALITY = 0.92;
+// مرحلهٔ ۳۳ — بازگشتِ آگاهانه به سرعت، به دستورِ صریحِ کاربر:
+// مقیاسِ ۱٫۵، کیفیتِ JPEGِ ۰٫۸۴، سقفِ ۴٫۵ مگاپیکسل و سقفِ ضلعِ
+// ۲۴۰۰ پیکسل، دسته‌هایِ ۴ صفحه‌ای. هشدارِ صریح: مرحلهٔ ۳۰،
+// مقیاس را از ۱٫۴۵/۰٫۸۰ به ۲٫۰/۰٫۹۲ بالا برده بود چون افتِ
+// کیفیت، «بی‌کیفیت شدنِ کپیِ بازسازی‌شده و خراب شدنِ زوم» را
+// ساخته بود؛ این مرحله، آگاهانه به سمتِ سرعت برمی‌گردد و
+// نسخهٔ بازسازی‌شده، نرم‌تر از خروجیِ مرحلهٔ ۳۰ خواهد بود.
+// تبدیلِ JPEG، از همان اول هم باینری و ناهمگام بود
+// (canvasToJpegBytes با canvas.toBlob)؛ هیچ toDataURLای در این
+// مسیر نبود که حذف شود — کندیِ واقعی، پیکسلِ زیادِ هر صفحه
+// بود، نه رشتهٔ Base64.
+// مرحلهٔ ۳۴ — بازگشتِ دوم به سرعت، به دستورِ صریحِ کاربر:
+// مقیاسِ ۱٫۳۵، کیفیتِ JPEGِ ۰٫۸۲، سقفِ ۳٫۲ مگاپیکسل و سقفِ ضلعِ
+// ۲۰۰۰ پیکسل، دسته‌هایِ ۲ صفحه‌ایِ ترتیبی (نه موازیِ ۴تایی).
+// آزادسازیِ بوم و cleanupِ صفحه، فقط پس از اتمامِ کاملِ دسته
+// انجام می‌شود تا cleanupِ یک صفحه، منابعِ مشترکِ صفحه‌هایِ
+// دیگرِ همان دسته را در ورکرِ pdf.js خراب نکند. اگر toBlob
+// خالی برگرداند، toDataURL پشتیبان است تا هیچ صفحه‌ای، کلِ
+// بازسازی را شکست ندهد. هشدارِ پابرجا: نسخهٔ بازسازی‌شده،
+// نرم‌تر از خروجیِ مرحلهٔ ۳۰ (۲٫۰/۰٫۹۲) خواهد بود.
+export const DEFAULT_REBUILD_SCALE = 1.35;
+export const REBUILD_JPEG_QUALITY = 0.82;
 // سقفِ پیکسلِ بوم: بوم‌های غول‌پیکر، در Chromium خراب می‌شوند.
-const MAX_REBUILD_CANVAS_PIXELS = 16000000;
-// مرحله ۱۱: دسته‌های ۳ صفحه‌ایِ موازی برای فازِ رندر؛ اسمبلیِ
+const MAX_REBUILD_CANVAS_PIXELS = 3200000;
+// سقفِ ضلعِ بومِ بازسازی (مرحلهٔ ۳۳).
+const MAX_REBUILD_CANVAS_SIDE = 2000;
+// مرحله ۱۱/۳۳: دسته‌های ۴ صفحه‌ایِ موازی برای فازِ رندر؛ اسمبلیِ
 // pdf-lib (embedJpg/addPage/drawImage) همچنان ترتیبی است، چون
 // جهشِ (mutation) سندِ pdf-lib موازی‌پذیر نیست.
-const REBUILD_BATCH_SIZE = 3;
+const REBUILD_BATCH_SIZE = 2;
 
 // مرحله ۱۱: همان منطقِ تشخیصِ جهتِ PdfViewer.extractPageText
 // (بدونِ وابستگی به pdfjsLib): ضربِ ماتریسِ آفین و تشخیصِ
@@ -173,20 +188,35 @@ async function defaultRenderPage(pdfPage, scale, overlay) {
 }
 
 function canvasToJpegBytes(canvas, quality) {
+  // مرحلهٔ ۳۴ — اگر toBlob خالی برگرداند (یا arrayBuffer آن
+  // شکست خورد)، بلافاصله با toDataURL پشتیبان گرفته می‌شود تا
+  // تحتِ هیچ شرایطی، یک صفحه، کلِ بازسازی را شکست ندهد.
+  function fallbackToDataUrl(resolve, reject) {
+    try {
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const base64 = (dataUrl.split(',')[1] || '');
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      resolve(bytes);
+    } catch (err) {
+      reject(err);
+    }
+  }
   return new Promise((resolve, reject) => {
     try {
       canvas.toBlob((blob) => {
-        if (!blob) {
-          reject(new Error('تبدیلِ بومِ صفحه به تصویر انجام نشد.'));
+        if (blob) {
+          blob.arrayBuffer().then(
+            (ab) => resolve(new Uint8Array(ab)),
+            () => fallbackToDataUrl(resolve, reject)
+          );
           return;
         }
-        blob.arrayBuffer().then(
-          (ab) => resolve(new Uint8Array(ab)),
-          (err) => reject(err)
-        );
+        fallbackToDataUrl(resolve, reject);
       }, 'image/jpeg', quality);
-    } catch (err) {
-      reject(err);
+    } catch (_) {
+      fallbackToDataUrl(resolve, reject);
     }
   });
 }
@@ -216,7 +246,7 @@ export async function rebuildEditablePdfFromPdfJs({
 
   const searchPages = {};
   for (let batchStart = 1; batchStart <= total; batchStart += REBUILD_BATCH_SIZE) {
-    // مرحلهٔ ۳۰ — لغوِ دستی: در مرزِ دسته‌هایِ ۳ صفحه‌ای بررسی
+    // مرحلهٔ ۳۰ — لغوِ دستی: در مرزِ دسته‌هایِ ۴ صفحه‌ای بررسی
     // می‌شود؛ دستهٔ در حالِ اجرا تمام می‌شود و بعد، هیچ صفحهٔ
     // تازه‌ای رندر نمی‌شود و هیچ فایلی نوشته نمی‌شود.
     if (signal && signal.aborted) {
@@ -228,19 +258,29 @@ export async function rebuildEditablePdfFromPdfJs({
     const batchNums = [];
     for (let n = batchStart; n <= batchEnd; n++) batchNums.push(n);
     // فازِ رندرِ موازی: getPage + رندرِ بوم + JPEG + استخراجِ متن،
-    // برای حداکثر ۳ صفحه هم‌زمان. هر صفحه، بومِ مستقلِ خودش را
+    // برای حداکثر ۴ صفحه هم‌زمان. هر صفحه، بومِ مستقلِ خودش را
     // دارد و رندرهای pdf.js روی صفحه‌های متفاوت، مستقل‌اند.
     const rendered = await Promise.all(batchNums.map(async (pageNum) => {
       const pdfPage = await pdfDoc.getPage(pageNum);
       const natural = pdfPage.getViewport({ scale: 1 });
       const pagePixels = Math.max(1, natural.width) * Math.max(1, natural.height);
-      const effectiveScale = Math.min(scale, Math.sqrt(MAX_REBUILD_CANVAS_PIXELS / pagePixels));
+      const effectiveScale = Math.min(scale, Math.sqrt(MAX_REBUILD_CANVAS_PIXELS / pagePixels), MAX_REBUILD_CANVAS_SIDE / Math.max(natural.width, natural.height));
       const overlay = preparedPages && preparedPages[pageNum] ? preparedPages[pageNum] : null;
       const canvas = await renderPage(pdfPage, effectiveScale, overlay);
       const jpegBytes = await canvasToJpegBytes(canvas, jpegQuality);
       const entry = includeSearchIndex ? await extractPageTextEntry(pdfPage, natural) : null;
-      return { pageNum, natural, jpegBytes, entry };
+      // مرحلهٔ ۳۴ — آزادسازی، دیگر وسطِ دسته نیست: بوم و شیءِ
+      // صفحه تا پایانِ کاملِ دسته زنده می‌مانند و پس از Promise.all
+      // (پایین‌تر) آزاد می‌شوند.
+      return { pageNum, natural, jpegBytes, entry, canvas, pdfPage };
     }));
+    // مرحلهٔ ۳۴ — آزادسازیِ دسته، پس از اتمامِ کاملِ آن: بوم‌ها
+    // خالی و صفحه‌هایِ pdf.js، cleanup می‌شوند (پیش از اسمبلی،
+    // چون اسمبلی فقط jpegBytes و entry را می‌خواهد).
+    for (const renderedPage of rendered) {
+      try { if (renderedPage.canvas) { renderedPage.canvas.width = 0; renderedPage.canvas.height = 0; } } catch (_) {}
+      try { if (renderedPage.pdfPage && typeof renderedPage.pdfPage.cleanup === 'function') renderedPage.pdfPage.cleanup(); } catch (_) {}
+    }
     // فازِ اسمبلیِ ترتیبی: ترتیبِ صفحه‌ها حفظ می‌شود و جهشِ سند،
     // هرگز موازی نمی‌شود.
     for (const renderedPage of rendered) {

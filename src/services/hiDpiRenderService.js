@@ -224,6 +224,17 @@ function makePngLruCache(limit) {
       revokeUrlSilently(map.get(key));
       map.delete(key);
     },
+    get(key) {
+      if (!key) return undefined;
+      const url = map.get(key);
+      if (!url) return undefined;
+      map.delete(key);
+      map.set(key, url);
+      return url;
+    },
+    keys() {
+      return [...map.keys()];
+    },
     get size() { return map.size; },
   };
 }
@@ -231,10 +242,27 @@ function makePngLruCache(limit) {
 // دیپِ ۲۰ مگاپیکسلی، هر ورودی تا ~۸۰ مگابایت تصویرِ دیکدشده
 // نگه می‌دارد؛ ۶ ورودی، سقفِ نظریِ ~۴۸۰ مگابایت بود و ۳ ورودی،
 // آن را به ~۲۴۰ مگابایت می‌رساند (فقط صفحهٔ فعال و ۲ همسایه).
-const basePngCache = makePngLruCache(12);
+const basePngCache = makePngLruCache(18);
 const deepPngCache = makePngLruCache(3);
+// مرحلهٔ ۳۴ — سقفِ کشِ پایه ۱۲→۱۸ صفحه: unmount دیگر نشانی‌ها
+// را باطل نمی‌کند و LRU، مالکِ آزادسازی است؛ ۱۸ صفحه،
+// رفت‌وبرگشتِ اسکرول را بدونِ رندرِ دوباره پوشش می‌دهد.
 export function registerBasePngUrl(key, url) { basePngCache.register(key, url); }
 export function revokeBasePngUrl(key) { basePngCache.revoke(key); }
+export function getBasePngUrl(key) { return basePngCache.get(key); }
+// مرحلهٔ ۳۴ — خالی کردنِ کشِ یک فایل (بسته شدنِ فایل): همهٔ
+// ورودی‌هایِ همان فایل، از هر دو کش، باطل می‌شوند.
+export function clearFileCache(filePath) {
+  const norm = normFilePath(filePath);
+  if (!norm) return;
+  for (const cache of [basePngCache, deepPngCache]) {
+    for (const key of cache.keys()) {
+      const sep = key.lastIndexOf(':');
+      if (sep < 0) continue;
+      if (normFilePath(key.slice(0, sep)) === norm) cache.revoke(key);
+    }
+  }
+}
 export function registerDeepPngUrl(key, url) { deepPngCache.register(key, url); }
 export function revokeDeepPngUrl(key) { deepPngCache.revoke(key); }
 

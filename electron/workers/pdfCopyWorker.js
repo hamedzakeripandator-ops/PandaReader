@@ -133,7 +133,31 @@ async function handleCopy(filePath, tempPath, password) {
   });
   postProgress('copy-probe', 0.05, 'بررسیِ محافظت انجام شد.');
   if (!probe.protected && !probe.readOnly) {
-    return { success: true, alreadyUnlocked: true, pageCount: probe.pageCount, textGate: 'not-needed' };
+    // مرحلهٔ ۳۳ — فایل، رمزی ندارد ولی کاربر «کپی» خواسته است:
+    // به‌جای برگرداندنِ alreadyUnlocked بدونِ هیچ فایلی، یک
+    // کپیِ واقعی ساخته می‌شود (qpdf، سپس pdf-lib، سپس باینری).
+    // این شاخه، فقط برای فایل‌های بدونِ رمز است؛ فایلِ قفل‌دار،
+    // هرگز به این‌جا نمی‌رسد و ردِ رمزگشایی‌اش همچنان بلند است
+    // (شاخهٔ پایین‌تر: کدِ PDF_COPY_PASSWORD_REQUIRED /
+    // PDF_COPY_UNSUPPORTED_ENCRYPTION، بدونِ کپیِ باینریِ خاموش).
+    const bytes = await fs.promises.readFile(filePath);
+    postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل…');
+    const built = await saver.buildUnencryptedCopyBytes({ bytes, logger: makeLogger() });
+    await fs.promises.writeFile(tempPath, Buffer.from(built.bytes));
+    const tempStat = await fs.promises.stat(tempPath);
+    if (built.unlockedBy === 'binary' && tempStat.size !== size) {
+      throw new Error('کپیِ باینری ناقص نوشته شد (' + tempStat.size + ' از ' + size + ' بایت).');
+    }
+    postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
+    return {
+      success: true,
+      alreadyUnlocked: false,
+      binaryCopy: built.unlockedBy === 'binary',
+      unlockedBy: built.unlockedBy || undefined,
+      pageCount: probe.pageCount,
+      textGate: 'not-needed',
+      tempPath,
+    };
   }
   if (probe.protected && size <= COPY_QPDF_MAX_BYTES) {
     const bytes = await fs.promises.readFile(filePath);

@@ -9,10 +9,10 @@ import useDragPan from '../../hooks/useDragPan';
 import { isTextInputElement } from '../../hooks/useKeyboard';
 import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
-import { rebuildEditablePdfFromPdfJs } from '../../services/pdfRebuildService';
+import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 import thumbnailService from '../../services/thumbnailService';
-import renderQueue, { registerBasePngUrl, revokeBasePngUrl, registerDeepPngUrl, revokeDeepPngUrl } from '../../services/hiDpiRenderService';
+import renderQueue, { registerBasePngUrl, revokeBasePngUrl, registerDeepPngUrl, revokeDeepPngUrl, getBasePngUrl, clearFileCache } from '../../services/hiDpiRenderService';
 import { encodeCanvasToLightweightPngUrl, encodeCanvasToWebpUrl } from '../../utils/gpuImageEnhancer';
 import Icons from '../common/Icons';
 import { normalizeSearchText } from '../../utils/persianSearch';
@@ -523,7 +523,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // «نشست»ِ HUD، وقتی دیپ برایِ این صفحه در راه است، زود شلیک
   // نشود).
   const deepGateRef = useRef({ deepRuns: false });
-  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) <= ((renderZoomLevel || 0) <= 1.15 ? 0 : 1)) };
+  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) === 0 && (renderZoomLevel || 0) > 1.2) };
 
   // مرحلهٔ ۳۱ — تنها نقطهٔ آزادسازیِ شیءهایِ صفحه: unmountِ
   // آیتم (خروج از پنجرهٔ DOM_OVERSCAN). وابستگیِ خالی، یعنی
@@ -539,22 +539,47 @@ const PdfPageItem = React.memo(function PdfPageItem({
     };
   }, []);
 
-  // مرحلهٔ ۲۹ — پاسِ اول: لایهٔ پایهٔ سریع (WebP) رویِ بومِ موقت،
-  // سپس نشانیِ blob: در یک تگِ <img> (بازگشت به موتورِ مرحلهٔ ۱۹):
-  // مقیاسِ پایه = max(dpr, 2.0) با سقفِ یکنواختِ ضلعِ ۲۵۶۰ پیکسل،
-  // پس‌زمینهٔ سفید، smoothing high، فرمتِ WebP با کیفیتِ ۰٫۹۵.
-  // نسبتِ صفحه فقط در همین پاس اندازه‌گیری می‌شود.
+  // مرحلهٔ ۳۴ — پاسِ اول (تک‌پاسِ مطالعهٔ عادی): لایهٔ پایهٔ
+  // سریع (WebP) رویِ بومِ موقت، سپس نشانیِ blob در یک تگِ <img>:
+  // مقیاسِ پایه = min(max(dpr × 1.15, 1.75), 2.0) با سقفِ یکنواختِ
+  // ضلعِ ۱۹۲۰ پیکسل، پس‌زمینهٔ سفید، smoothing high، فرمتِ WebP
+  // با کیفیتِ ۰٫۹۰، با انکدِ بومیِ canvas.toBlob (چندتردیِ C++ِ
+  // کرومیوم؛ بدونِ کپیِ پیکسل به Worker). انکدرِ Worker فقط وقتی
+  // toBlob خالی برگرداند، پشتیبان است. نسبتِ صفحه فقط در همین
+  // پاس اندازه‌گیری می‌شود.
   useEffect(() => {
     if (!shouldRender || !pdfDoc) return undefined;
     const key = `base:${filePath}:${pageNumber}`;
     const distance = distanceRef.current ?? 99;
     const priority = distance === 0 ? 1 : distance === 1 ? 2 : 3;
+    // مرحلهٔ ۳۴ — کشِ اول: اگر نشانیِ پایهٔ همین صفحه در کشِ
+    // LRUِ ۱۸ صفحه‌ایِ سرویس هست، بی‌درنگ همان نشانی نشان داده
+    // می‌شود؛ هیچ getPage و رندری لازم نیست. گیتِ سرعتِ اسکرول:
+    // صفحه‌هایِ غیرفعال ۶۵ میلی‌ثانیه صبر می‌کنند تا صفحه‌هایِ
+    // عبوری اصلاً رندر نشوند؛ صفحهٔ فعال (distance 0، از جمله
+    // صفحهٔ اولِ باز شدنِ کتاب) بی‌درنگ رندر می‌شود. صفحه‌ها در
+    // لبهٔ پنجره با distance 3 وارد می‌شوند، پس همین گیت،
+    // صفحه‌هایِ عبوری را می‌گیرد و cleanupِ unmount، تایمرشان
+    // را پاک می‌کند.
+    const baseCacheKey = `${filePath}:${pageNumber}`;
+    const cachedBaseUrl = getBasePngUrl(baseCacheKey);
+    if (cachedBaseUrl) {
+      baseUrlRef.current = cachedBaseUrl;
+      setBaseUrl(cachedBaseUrl);
+      setBaseReady(true);
+      setRenderFailed(false);
+      const cachedGate = deepGateRef.current || {};
+      if (!cachedGate.deepRuns && typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
+      return () => {
+        renderQueue.cancel(key);
+      };
+    }
     renderQueue.enqueue({
       key,
       filePath,
       kind: 'base',
       priority,
-      delayMs: priority === 3 ? 120 : 0,
+      delayMs: distance === 0 ? 0 : 65,
       run: async (hooks) => {
         try {
           let renderTask = null;
@@ -570,11 +595,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
           if (baseViewport.width > 0 && baseViewport.height > 0) {
             onPageRatioMeasured?.(pageNumber - 1, baseViewport.height / baseViewport.width);
           }
-          // مقیاسِ پایه = max(dpr, 2.0) با سقفِ یکنواختِ ضلعِ ۲۵۶۰.
-          const dpr = Math.max(window.devicePixelRatio || 1, 2.0);
+          // مرحلهٔ ۳۴ — مقیاسِ پایه = min(max(dpr × 1.15, 1.75), 2.0)
+          // با سقفِ یکنواختِ ضلعِ ۱۹۲۰ پیکسل.
+          const dpr = Math.min(Math.max((window.devicePixelRatio || 1) * 1.15, 1.75), 2.0);
           let scale = dpr;
           const maxSide = Math.max(baseViewport.width, baseViewport.height) * scale;
-          if (maxSide > 2560) scale = 2560 / Math.max(baseViewport.width, baseViewport.height);
+          if (maxSide > 1920) scale = 1920 / Math.max(baseViewport.width, baseViewport.height);
           const viewport = page.getViewport({ scale });
           const tmp = document.createElement('canvas');
           tmp.width = Math.max(1, Math.floor(viewport.width));
@@ -591,7 +617,21 @@ const PdfPageItem = React.memo(function PdfPageItem({
             tmp.height = 0;
             return;
           }
-          const url = await encodeCanvasToWebpUrl(tmp);
+          // مرحلهٔ ۳۳ — انکدِ بومیِ canvas.toBlob (WebP با کیفیتِ
+          // ۰٫۹۰)؛ فقط وقتی toBlob خالی برگرداند، انکدرِ Workerِ
+          // مرحلهٔ ۲۹/۳۰ پشتیبان است (بدونِ کپیِ پیکسل در مسیرِ اصلی).
+          const url = await new Promise((resolve) => {
+            try {
+              tmp.toBlob(async (blob) => {
+                if (blob) {
+                  try { resolve(URL.createObjectURL(blob)); return; } catch (_) {}
+                }
+                try { resolve(await encodeCanvasToWebpUrl(tmp)); } catch (_) { resolve(null); }
+              }, 'image/webp', 0.90);
+            } catch (_) {
+              encodeCanvasToWebpUrl(tmp).then(resolve, () => resolve(null));
+            }
+          });
           tmp.width = 0;
           tmp.height = 0;
           if (hooks.isCancelled()) {
@@ -635,7 +675,9 @@ const PdfPageItem = React.memo(function PdfPageItem({
     return () => {
       renderQueue.cancel(`base:${filePath}:${pageNumber}`);
       renderQueue.cancel(`deep:${filePath}:${pageNumber}`);
-      revokeBasePngUrl(`${filePath}:${pageNumber}`);
+      // مرحلهٔ ۳۴ — unmount، نشانیِ پایه را باطل نمی‌کند: مالکِ
+      // نشانی‌ها کشِ LRUِ ۱۸ صفحه‌ایِ سرویس است و فقط سقفِ کش یا
+      // clearFileCache (بسته شدنِ فایل) آن را آزاد می‌کند.
       revokeDeepPngUrl(`${filePath}:${pageNumber}`);
       baseUrlRef.current = null;
       deepUrlRef.current = null;
@@ -663,25 +705,26 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const pageBoxRef = useRef(null);
 
 
-  // مرحلهٔ ۲۹/۳۱ — پاسِ دوم: دیپ‌رندرِ سوپرسمپلِ PNG (موتورِ
+  // مرحلهٔ ۳۳ — پاسِ دوم: دیپ‌رندرِ سوپرسمپلِ PNG (موتورِ
   // مرحلهٔ ۱۹)، پس از آماده شدنِ پایه و فقط در سکونِ کاملِ
   // اسکرول (سیگنالِ hiDpiRenderTick با ۴۲۰ میلی‌ثانیه سکون):
-  // تا زومِ ۱٫۱۵ فقط صفحهٔ فعال، بالاتر از آن همسایهٔ بلافصل
-  // هم با ۲۰۰ میلی‌ثانیه تأخیر.
-  // فرمولِ دقیقِ مرحلهٔ ۱۹ با سقف‌هایِ یکنواختِ ۵۱۲۰ پیکسل /
-  // ۲۰ مگاپیکسل؛ انکدِ PNG با Worker؛ تعویض پس از decode، بدونِ
-  // چشمک. خروج از فاصلهٔ ۱، نشانیِ دیپ را همان‌جا آزاد می‌کند
-  // (سقوط به پایهٔ کش‌شده) و کشِ LRUِ سرویس حداکثر ۶ ورودیِ PNG
-  // را نگه می‌دارد. چرخش، گیت ندارد (رندرِ تمام‌صفحه است و CSS
-  // می‌چرخاند). نشستِ HUD را همین پاس اعلام می‌کند.
+  // فقط و فقط وقتی زومِ نشسته بالایِ ۱٫۲ باشد و فقط برایِ خودِ
+  // صفحهٔ فعال (distance === 0). در زومِ عادی (<= ۱٫۲) این پاس
+  // اصلاً اجرا نمی‌شود و مطالعه، تک‌پاس (فقط پایه) است.
+  // فرمولِ دقیقِ مرحلهٔ ۱۹؛ انکدِ PNG با Worker؛ تعویض پس از
+  // decode، بدونِ چشمک. خروج از صفحهٔ فعال، نشانیِ دیپ را
+  // همان‌جا آزاد می‌کند (سقوط به پایهٔ کش‌شده) و کشِ LRUِ سرویس
+  // حداکثر ۶ ورودیِ PNG را نگه می‌دارد. چرخش، گیت ندارد (رندرِ
+  // تمام‌صفحه است و CSS می‌چرخاند). نشستِ HUD را همین پاس
+  // اعلام می‌کند.
   useEffect(() => {
     const dist = distanceRef.current ?? 99;
     const cacheKey = `${filePath}:${pageNumber}`;
     const key = `deep:${filePath}:${pageNumber}`;
-    // مرحلهٔ ۳۱ — سقفِ فاصلهٔ دیپ بر اساسِ زومِ نشسته: تا ۱٫۱۵
-    // فقط صفحهٔ فعال، بالاتر از آن تا همسایهٔ بلافصل.
-    const deepMaxDist = (renderZoomLevel || 0) <= 1.15 ? 0 : 1;
-    if (!shouldRender || !pdfDoc || dist > deepMaxDist) {
+    // مرحلهٔ ۳۳ — دیپ فقط در زومِ بالایِ ۱٫۲ و فقط صفحهٔ فعال:
+    // در زومِ عادی (<= ۱٫۲) این پاس اصلاً اجرا نمی‌شود و تصویرِ
+    // پایهٔ تک‌پاس، همان چیزی است که دیده می‌شود.
+    if (!shouldRender || !pdfDoc || dist !== 0 || (renderZoomLevel || 0) <= 1.2) {
       renderQueue.cancel(key);
       revokeDeepPngUrl(cacheKey);
       deepUrlRef.current = null;
@@ -703,28 +746,25 @@ const PdfPageItem = React.memo(function PdfPageItem({
         setDeepUrl(null);
       }
     }
-    // مرحلهٔ ۳۱ — سقفِ تطبیقیِ دیپ بر اساسِ زومِ نشسته:
-    // تا ۱۱۵٪ (زومِ عادی تا متوسط): سقفِ سبکِ ۳۲۰۰ پیکسل /
-    // ۷ مگاپیکسل و فقط صفحهٔ فعال (طبقهٔ light)؛ ۱۱۵٪ تا ۱۲۵٪:
-    // سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسلِ مرحلهٔ ۳۰ (lo)؛ بالاتر از
-    // ۱۲۵٪: سقفِ ۵۱۲۰ پیکسل / ۲۰ مگاپیکسلِ مرحلهٔ ۲۹ (hi).
-    // طبقه (tier) در امضاست تا عبور از مرزِ ۱۱۵٪ با همان زومِ
-    // کوانتیزه، دیپِ کهنه را نگه ندارد.
-    const deepTier = (renderZoomLevel || 0) <= 1.15 ? 'light' : ((renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo');
-    const deepSideCap = deepTier === 'light' ? 3200 : (deepTier === 'hi' ? 5120 : 3600);
-    const deepAreaCap = deepTier === 'light' ? 7000000 : (deepTier === 'hi' ? 20000000 : 9000000);
+    // مرحلهٔ ۳۳ — سقفِ تطبیقیِ دیپ (طبقهٔ lightِ مرحلهٔ ۳۱، چون
+    // دیپ زیرِ ۱٫۲ اصلاً اجرا نمی‌شود، دست‌نیافتنی شد و حذف شد):
+    // ۱٫۲ تا ۱٫۲۵: سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسل (lo)؛ بالاتر از
+    // ۱٫۲۵: سقفِ ۵۱۲۰ پیکسل / ۲۰ مگاپیکسل (hi). طبقه در امضاست.
+    const deepTier = (renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo';
+    const deepSideCap = deepTier === 'hi' ? 5120 : 3600;
+    const deepAreaCap = deepTier === 'hi' ? 20000000 : 9000000;
     const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|${deepTier}`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return undefined;
     }
-    const priority = dist === 0 ? 1 : 2;
+    const priority = 1;
     renderQueue.enqueue({
       key,
       filePath,
       kind: 'deep',
       priority,
-      delayMs: dist === 0 ? 0 : 200,
+      delayMs: 0,
       run: async (hooks) => {
         try {
           let renderTask = null;
@@ -1274,9 +1314,20 @@ export default function PdfViewer({ filePath }) {
   const scrollIdleTimerRef = useRef(null);
   const activePageRef = useRef(1);
   activePageRef.current = activePage;
+  // مرحلهٔ ۳۴ — همگام‌سازیِ معوقِ صفحهٔ فعال با استورِ سراسری
+  // (تایمرِ ۱۲۰ میلی‌ثانیه‌ای + سقفِ ۲۵۰ میلی‌ثانیه‌ای).
+  const storeSyncTimerRef = useRef(null);
+  const lastStoreSyncAtRef = useRef(0);
   // مرحله ۱۱: ایندکسِ جستجویِ کناریِ فایلِ بازسازی‌شده (در صورتِ
   // وجود)، برای جستجو روی صفحه‌هایِ رستریِ بدونِ لایهٔ متن.
   const searchIndexRef = useRef(null);
+  // مرحلهٔ ۳۴ — با بسته شدنِ فایل (تعویضِ filePath یا unmountِ
+  // خواننده)، کشِ LRUِ همان فایل خالی می‌شود؛ در غیرِ این صورت،
+  // نشانی‌هایِ blob تا سقفِ ۱۸ صفحه زنده می‌مانند و unmountِ
+  // صفحه‌ها، آن‌ها را باطل نمی‌کند.
+  useEffect(() => {
+    return () => { try { clearFileCache(filePath); } catch (_) {} };
+  }, [filePath]);
 
   // مرحله ۴ — جستجوی درون‌متنی PDF (غیرمسدودکننده):
   // pdfDocRef آینهٔ همان سندِ state است (سندِ دومی باز نمی‌شود)؛
@@ -1563,8 +1614,8 @@ export default function PdfViewer({ filePath }) {
     const exportSignal = exportAbortRef.current.signal;
     const doc = pdfDocRef.current;
     if (!doc) {
-      showSaveStatus('error', 'سندِ PDF هنوز کامل بارگذاری نشده است.', 6000);
-      showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+      showSaveStatus('error', 'فایل هنوز کامل باز نشده است.', 6000);
+      showToast('فایل هنوز کامل باز نشده است.', { type: 'warning' });
       return;
     }
     const itemsMap = pagesMap || {};
@@ -1573,8 +1624,8 @@ export default function PdfViewer({ filePath }) {
       0
     );
     setIsExportingPdf(true);
-    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', 'در حالِ بازسازیِ صفحاتِ بدونِ قفل…', 0);
-    showToast('ذخیرهٔ معمولی ممکن نیست؛ نسخهٔ تمیزِ بدونِ قفل بازسازی می‌شود…', { type: 'info' });
+    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', 'در حالِ ساختِ نسخهٔ تصویری…', 0);
+    showToast('ذخیرهٔ معمولی ممکن نیست؛ نسخهٔ تصویری ساخته می‌شود…', { type: 'info' });
     try {
       const prepared = annotatedCount > 0
         ? await prepareAnnotatedPdfExport({
@@ -1595,8 +1646,8 @@ export default function PdfViewer({ filePath }) {
           })
         : { pages: {}, totalItems: 0, annotatedPages: 0 };
       if (annotatedCount > 0 && prepared.annotatedPages === 0) {
-        showSaveStatus('info', 'آیتمِ قابلِ خروجی پیدا نشد.', 4500);
-        showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        showSaveStatus('info', 'حاشیه‌نویسیِ قابلِ خروجی پیدا نشد.', 4500);
+        showToast('حاشیه‌نویسیِ قابلِ خروجی پیدا نشد.', { type: 'info' });
         return;
       }
       const rebuilt = await rebuildEditablePdfFromPdfJs({
@@ -1604,19 +1655,24 @@ export default function PdfViewer({ filePath }) {
         preparedPages: prepared.pages,
         signal: exportSignal,
         onProgress: (pageNum, totalPages) => {
-          showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
+          const pct = totalPages > 0 ? Math.round((pageNum / totalPages) * 100) : 0;
+          showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', `در حالِ ساختِ صفحهٔ ${pageNum} از ${totalPages} (${pct}٪)…`, 0);
         },
       });
       // مرحلهٔ ۳۲ — بایت‌هایِ خامِ Uint8Array مستقیم از IPC می‌روند (بدونِ رفت‌وبرگشتِ base64).
-      const result = await coreApi.saveRebuiltPdf({
+      const rebuildSavePayload = {
         pdfPath: filePath,
         pdfBytes: rebuilt.bytes,
         mode: saveMode,
         expectedPageCount: rebuilt.pageCount,
-        // مرحله ۱۱: ایندکسِ جستجویِ کناری، کنارِ فایلِ خروجی
-        // ذخیره می‌شود تا Ctrl+F روی فایلِ رستری هم کار کند.
         searchIndex: rebuilt.searchIndex || undefined,
-      });
+      };
+      // مرحلهٔ ۳۴ — ارسالِ دوگانه برایِ خروجی‌هایِ زیرِ ۲۵
+      // مگابایت: باینری اولویت دارد و base64، پشتیبان است.
+      if (rebuilt.bytes && rebuilt.bytes.length > 0 && rebuilt.bytes.length < 25 * 1024 * 1024) {
+        try { rebuildSavePayload.base64 = rebuildPdfBytesToBase64(rebuilt.bytes); } catch (_) {}
+      }
+      const result = await coreApi.saveRebuiltPdf(rebuildSavePayload);
       if (result && result.canceled) {
         showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
         showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
@@ -1626,30 +1682,40 @@ export default function PdfViewer({ filePath }) {
         const savedName = String((result && result.outputPath) || filePath || '').split(/[\\/]/).pop() || '';
         const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + ')' : '';
-        if (saveMode === 'in-place') {
+        if (result.fellBackToCopy) {
+          // مرحلهٔ ۳۳ — نوشتنِ درجا به‌خاطرِ قفلِ فایل ممکن نشد و
+          // main، خودکار در یک فایلِ کپی ذخیره کرد: همان مکانیزمِ
+          // کپیِ بازسازی‌شده — باز کردنِ کپیِ جدید و فعال‌سازیِ
+          // استودیو روی آن، با رویدادِ app:editable-copy-ready.
+          showSaveStatus('saved-as', '✓ نسخهٔ تصویری در یک فایلِ کپی ذخیره شد!' + savedSuffix, 4500);
+          showToast(`نسخهٔ تصویری در یک فایلِ کپی ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
+          window.dispatchEvent(new CustomEvent('app:editable-copy-ready', {
+            detail: { copyPath: result.outputPath, preservedPage: useReaderStore.getState().currentPage || 1, pageCount: rebuilt.pageCount },
+          }));
+        } else if (saveMode === 'in-place') {
           try { requestDeepRefresh?.(); } catch (_) {}
-          showSaveStatus('saved-inplace', '✓ فایلِ بازسازی‌شدهٔ بدونِ قفل روی همین فایل ذخیره شد!' + savedSuffix, 4500);
-          showToast(`نسخهٔ تمیزِ بدونِ قفل روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: نسخهٔ بازسازی‌شده رستری است و متنِ برداری ندارد.`, { type: 'success' });
+          showSaveStatus('saved-inplace', '✓ نسخهٔ تصویری روی همین فایل ذخیره شد!' + savedSuffix, 4500);
+          showToast(`نسخهٔ تصویری روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
         } else {
-          showSaveStatus('saved-as', '✓ فایلِ PDFِ بازسازی‌شدهٔ بدونِ قفل ذخیره شد!' + savedSuffix, 4500);
-          showToast(`فایلِ PDFِ بازسازی‌شده با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد. توجه: نسخهٔ بازسازی‌شده رستری است و متنِ برداری ندارد.`, { type: 'success' });
+          showSaveStatus('saved-as', '✓ نسخهٔ تصویری ذخیره شد!' + savedSuffix, 4500);
+          showToast(`نسخهٔ تصویری با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
         }
       } else if (result && result.locked) {
-        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
-        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
+        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', 6000);
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', { type: 'error' });
       } else {
-        showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
-        showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
+        showSaveStatus('error', (result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', 6000);
+        showToast((result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', { type: 'error' });
       }
     } catch (err) {
       if (exportSignal && exportSignal.aborted) {
-        showSaveStatus('info', 'عملیاتِ بازسازی به درخواستِ شما لغو شد.', 4500);
+        showSaveStatus('info', 'ساختِ نسخهٔ تصویری لغو شد.', 4500);
         showToast('عملیاتِ بازسازی لغو شد.', { type: 'info' });
         exportAbortRef.current = null;
         return;
       }
-      showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
-      showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+      showSaveStatus('error', 'ساختِ نسخهٔ تصویری انجام نشد: ' + (err && err.message ? err.message : String(err)), 6000);
+      showToast('ساختِ نسخهٔ تصویری انجام نشد: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
     } finally {
       setIsExportingPdf(false);
       if (exportAbortRef.current && exportSignal && exportAbortRef.current.signal === exportSignal) exportAbortRef.current = null;
@@ -1666,42 +1732,56 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     const onRebuildCopy = async (e) => {
       const detail = e && e.detail ? e.detail : {};
-      if (!detail.filePath || detail.filePath !== filePath) return;
+      // مرحلهٔ ۳۴ — تفاوتِ رشتهٔ filePath، هرگز درخواست را
+      // نادیده نمی‌گیرد: رویِ همان سندِ بازشدهٔ فعلی کار
+      // می‌کنیم (مسیرِ منبع: detail.filePath || filePath؛ مسیرِ
+      // خروجی: desiredPath/desiredName از مودال).
       if (rebuildCopyInFlightRef.current) return;
       const doc = pdfDocRef.current;
       if (!doc) {
-        showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+        showSaveStatus('error', 'برایِ ساختِ نسخهٔ کپی تصویری، اول باید فایل در خواننده باز شده باشد.', 6000);
+        showToast('فایل هنوز کامل باز نشده است.', { type: 'warning' });
         return;
       }
       rebuildCopyInFlightRef.current = true;
+      setIsExportingPdf(true);
       // مرحلهٔ ۳۰ — کنترلِ لغوِ کپیِ بازسازی (همان الگویِ خروجی).
       exportAbortRef.current = new AbortController();
       const rebuildCopySignal = exportAbortRef.current.signal;
-      showSaveStatus('saving-as', 'در حالِ ساختِ نسخهٔ قابل‌ویرایشِ بدونِ قفل…', 0);
+      showSaveStatus('saving-as', 'در حالِ ساختِ نسخهٔ کپی تصویری…', 0);
       try {
         const rebuilt = await rebuildEditablePdfFromPdfJs({
           pdfDoc: doc,
           preparedPages: {},
           signal: rebuildCopySignal,
           onProgress: (pageNum, totalPages) => {
-            showSaveStatus('saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
+            const pct = totalPages > 0 ? Math.round((pageNum / totalPages) * 100) : 0;
+            showSaveStatus('saving-as', `در حالِ ساختِ نسخهٔ کپی تصویری… صفحهٔ ${pageNum} از ${totalPages} (${pct}٪)`, 0);
           },
         });
         // مرحلهٔ ۳۲ — بایت‌هایِ خامِ Uint8Array مستقیم از IPC می‌روند (بدونِ رفت‌وبرگشتِ base64).
-        const result = await coreApi.saveRebuiltPdf({
-          pdfPath: filePath,
+        // مرحلهٔ ۳۴ — ارسالِ دوگانه برایِ خروجی‌هایِ زیرِ ۲۵
+        // مگابایت (باینری + base64ِ پشتیبان)؛ مسیرِ منبع:
+        // detail.filePath || filePath؛ مسیرِ خروجی از مودال
+        // می‌آید و در غیابش، main کنارِ فایلِ اصلی -copy.pdf
+        // می‌سازد.
+        const rebuildCopyPayload = {
+          pdfPath: detail.filePath || filePath,
           pdfBytes: rebuilt.bytes,
           mode: 'copy',
           expectedPageCount: rebuilt.pageCount,
-          // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر از مودالِ محافظت.
           desiredName: detail.desiredName || undefined,
           desiredPath: detail.desiredPath || undefined,
           searchIndex: rebuilt.searchIndex || undefined,
-        });
+        };
+        if (rebuilt.bytes && rebuilt.bytes.length > 0 && rebuilt.bytes.length < 25 * 1024 * 1024) {
+          try { rebuildCopyPayload.base64 = rebuildPdfBytesToBase64(rebuilt.bytes); } catch (_) {}
+        }
+        const result = await coreApi.saveRebuiltPdf(rebuildCopyPayload);
         if (result && result.success) {
-          showSaveStatus('saved-as', 'نسخهٔ قابل‌ویرایش ساخته شد؛ در حالِ باز کردنِ آن…', 4500);
+          showSaveStatus('saved-as', '✓ نسخهٔ کپی تصویری ساخته شد و باز گردید', 4500);
           window.dispatchEvent(new CustomEvent('app:editable-copy-ready', {
-            detail: { copyPath: result.outputPath, preservedPage: detail.preservedPage || 1, pageCount: rebuilt.pageCount },
+            detail: { copyPath: result.copyPath || result.outputPath, preservedPage: detail.preservedPage || 1, pageCount: rebuilt.pageCount },
           }));
         } else if (result && result.canceled) {
           showSaveStatus('info', 'ساختِ نسخهٔ کپی لغو شد.', 4500);
@@ -1714,12 +1794,13 @@ export default function PdfViewer({ filePath }) {
           showSaveStatus('info', 'ساختِ نسخهٔ کپی لغو شد.', 4500);
           showToast('ساختِ نسخهٔ کپی لغو شد.', { type: 'info' });
         } else {
-          showSaveStatus('error', 'خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), 6000);
-          showToast('خطا در بازسازیِ فایل: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+          showSaveStatus('error', 'ساختِ نسخهٔ تصویری انجام نشد: ' + (err && err.message ? err.message : String(err)), 6000);
+          showToast('ساختِ نسخهٔ تصویری انجام نشد: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
         }
       } finally {
         rebuildCopyInFlightRef.current = false;
         exportAbortRef.current = null;
+        setIsExportingPdf(false);
       }
     };
     window.addEventListener('app:rebuild-editable-copy', onRebuildCopy);
@@ -1741,8 +1822,8 @@ export default function PdfViewer({ filePath }) {
     if (!coreApi.isAvailable()) {
       // مرحله ۷ ـ نهاییِ دوم: حتی در این شاخهٔ برگشتِ زودهنگام هم
       // بنر، بلافاصله در همان میلی‌ثانیهٔ کلیک دیده می‌شود.
-      showSaveStatus('error', 'خروجیِ PDF فقط در نسخهٔ دسکتاپ (Electron) در دسترس است.', 6000);
-      showToast('خروجیِ PDF فقط در نسخهٔ دسکتاپ (Electron) در دسترس است.', { type: 'warning' });
+      showSaveStatus('error', 'خروجی فقط در نسخهٔ دسکتاپ در دسترس است.', 6000);
+      showToast('خروجی فقط در نسخهٔ دسکتاپ در دسترس است.', { type: 'warning' });
       return;
     }
     const saveMode = mode === 'in-place' ? 'in-place' : 'save-as';
@@ -1763,15 +1844,15 @@ export default function PdfViewer({ filePath }) {
     }
     const doc = pdfDocRef.current;
     if (!doc) {
-      showSaveStatus('error', 'سندِ PDF هنوز کامل بارگذاری نشده است.', 6000);
-      showToast('سندِ PDF هنوز کامل بارگذاری نشده است.', { type: 'warning' });
+      showSaveStatus('error', 'فایل هنوز کامل باز نشده است.', 6000);
+      showToast('فایل هنوز کامل باز نشده است.', { type: 'warning' });
       return;
     }
     exportAbortRef.current = new AbortController();
     const exportSignal = exportAbortRef.current.signal;
     setIsExportingPdf(true);
-    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', saveMode === 'in-place' ? 'در حال ذخیرهٔ حاشیه‌نویسی‌ها روی فایل PDF…' : 'در حال نوشتنِ فایلِ PDF…', 0);
-    showToast('در حال آماده‌سازیِ خروجیِ PDF…', { type: 'info' });
+    showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', saveMode === 'in-place' ? 'در حالِ ذخیرهٔ فایل…' : 'در حالِ ذخیرهٔ فایل…', 0);
+    showToast('در حالِ آماده‌سازیِ خروجی…', { type: 'info' });
     try {
       const prepared = annotatedCount > 0
         ? await prepareAnnotatedPdfExport({
@@ -1792,8 +1873,8 @@ export default function PdfViewer({ filePath }) {
           })
         : { pages: {}, totalItems: 0, annotatedPages: 0 };
       if (annotatedCount > 0 && prepared.annotatedPages === 0) {
-        showSaveStatus('info', 'آیتمِ قابلِ خروجی پیدا نشد.', 4500);
-        showToast('آیتمِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        showSaveStatus('info', 'حاشیه‌نویسیِ قابلِ خروجی پیدا نشد.', 4500);
+        showToast('حاشیه‌نویسیِ قابلِ خروجی پیدا نشد.', { type: 'info' });
         return;
       }
       if (exportSignal.aborted) {
@@ -1801,7 +1882,7 @@ export default function PdfViewer({ filePath }) {
         showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
         return;
       }
-      showToast(saveMode === 'in-place' ? 'در حال ذخیره روی همین فایل…' : 'در حال نوشتنِ فایلِ PDF…', { type: 'info' });
+      showToast(saveMode === 'in-place' ? 'در حالِ ذخیرهٔ فایل…' : 'در حالِ ذخیرهٔ فایل…', { type: 'info' });
       const result = await coreApi.exportAnnotatedPdf({
         pdfPath: filePath,
         pages: prepared.pages,
@@ -1824,11 +1905,11 @@ export default function PdfViewer({ filePath }) {
         const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
         const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + (result.incremental ? '، ذخیرهٔ افزایشی' : '') + ')' : '';
         if (result.restoredClean) {
-          showSaveStatus('saved-inplace', 'فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.' + savedSuffix, 4500);
-          showToast('فایل به نسخهٔ تمیزِ بدونِ حاشیه‌نویسی برگردانده شد.', { type: 'success' });
+          showSaveStatus('saved-inplace', 'فایل به حالتِ بدونِ حاشیه‌نویسی برگشت.' + savedSuffix, 4500);
+          showToast('فایل به حالتِ بدونِ حاشیه‌نویسی برگشت.', { type: 'success' });
         } else if (saveMode === 'in-place') {
           try { requestDeepRefresh?.(); } catch (_) {}
-          showSaveStatus('saved-inplace', '✓ تغییرات با موفقیت روی همین فایل PDF ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-inplace', '✓ تغییرات روی همین فایل ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`,
             { type: 'success' }
@@ -1836,14 +1917,14 @@ export default function PdfViewer({ filePath }) {
         } else {
           showSaveStatus('saved-as', '✓ فایل PDF جدید با موفقیت ذخیره شد!' + savedSuffix, 4500);
           showToast(
-            `فایلِ PDF با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`,
+            `فایل با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`,
             { type: 'success' }
           );
         }
       } else if (result && result.locked) {
         // هات‌فیکسِ مرحله ۶: پیامِ دقیقِ قفل، به‌جای خطای عمومی.
-        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', 6000);
-        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره ذخیره کنید. فایلِ اصلی دست نخورده باقی ماند.', { type: 'error' });
+        showSaveStatus('error', 'فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', 6000);
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', { type: 'error' });
       } else if (result && result.rebuildNeeded) {
         // مرحله ۱۰: ذخیرهٔ معمولی رد شد چون pdf-lib نمی‌تواند فایل
         // را رمزگشایی کند (AES-256/ObjStm) — ولی سند همین حالا در
@@ -1859,20 +1940,20 @@ export default function PdfViewer({ filePath }) {
         // می‌شود تا کاربر، همان‌جا کپیِ قابل‌ویرایش (بی‌اتلافِ
         // qpdf یا بازسازی) بسازد. حاشیه‌نویسی‌ها در دیتابیس
         // می‌مانند و از دست نمی‌روند.
-        showSaveStatus('info', 'این فایل محافظت‌شده است؛ مودالِ انتخابِ روش باز می‌شود: مطالعه در برنامه بدونِ کپی، کپیِ برداری با qpdf، یا کپیِ بازسازی‌شده.', 6000);
-        showToast('این فایل محافظت‌شده است؛ مودالِ انتخابِ روشِ کپی باز می‌شود.', { type: 'info' });
+        showSaveStatus('info', 'این فایل محافظت‌شده است؛ روشِ ویرایش را انتخاب کنید.', 6000);
+        showToast('این فایل محافظت‌شده است؛ روشِ ویرایش را انتخاب کنید.', { type: 'info' });
         window.dispatchEvent(new CustomEvent('app:open-protection-modal', { detail: { filePath } }));
       } else {
-        showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
-        showToast((result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', { type: 'error' });
+        showSaveStatus('error', (result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', 6000);
+        showToast((result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', { type: 'error' });
       }
     } catch (err) {
       if (exportSignal && exportSignal.aborted) {
         showSaveStatus('info', 'ذخیرهٔ فایل لغو شد.', 4500);
         showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
       } else {
-        showSaveStatus('error', 'خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), 6000);
-        showToast('خطا در آماده‌سازیِ خروجی: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+        showSaveStatus('error', 'آماده‌سازیِ خروجی انجام نشد: ' + (err && err.message ? err.message : String(err)), 6000);
+        showToast('آماده‌سازیِ خروجی انجام نشد: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
       }
     } finally {
       setIsExportingPdf(false);
@@ -3133,7 +3214,25 @@ export default function PdfViewer({ filePath }) {
       if (nextPage !== activePageRef.current) {
         activePageRef.current = nextPage;
         setActivePage(nextPage);
-        setCurrentPage(nextPage);
+        // مرحلهٔ ۳۴ — setCurrentPageِ سراسری (که TopBar و
+        // BottomControls و RightPanel را بازرندر می‌کند) از فریمِ
+        // اسکرول جدا شد: ۱۲۰ میلی‌ثانیه پس از توقف، یا حداکثر هر
+        // ۲۵۰ میلی‌ثانیه یک بار در اسکرولِ پیوسته.
+        if (storeSyncTimerRef.current) {
+          clearTimeout(storeSyncTimerRef.current);
+          storeSyncTimerRef.current = null;
+        }
+        const storeSyncNow = Date.now();
+        if (storeSyncNow - (lastStoreSyncAtRef.current || 0) >= 250) {
+          lastStoreSyncAtRef.current = storeSyncNow;
+          setCurrentPage(nextPage);
+        } else {
+          storeSyncTimerRef.current = setTimeout(() => {
+            storeSyncTimerRef.current = null;
+            lastStoreSyncAtRef.current = Date.now();
+            if (activePageRef.current === nextPage) setCurrentPage(nextPage);
+          }, 120);
+        }
 
         if (filePath) {
           updateReadingProgress(filePath, nextPage, numPages);
@@ -3201,6 +3300,7 @@ export default function PdfViewer({ filePath }) {
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+      if (storeSyncTimerRef.current) clearTimeout(storeSyncTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       container.removeEventListener('scroll', handleScroll);
     };

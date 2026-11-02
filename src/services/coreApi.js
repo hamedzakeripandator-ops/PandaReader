@@ -474,7 +474,9 @@ export const coreApi = {
     // مرحلهٔ ۳۲ — ورودیِ باینری (Uint8Array) یا base64ِ قدیمی، هر دو
     // قبول‌اند؛ باینری اولویت دارد و از sanitize نمی‌گذرد.
     const hasBinary = payload?.pdfBytes instanceof Uint8Array && payload.pdfBytes.length > 0;
-    const hasBase64 = typeof payload?.base64 === 'string' && payload.base64.length > 0;
+    const hasBase64 = (typeof payload?.base64 === 'string' && payload.base64.length > 0) || (typeof payload?.base64Data === 'string' && payload.base64Data.length > 0);
+    // مرحلهٔ ۳۴ — پشتیبانِ ارسالِ دوگانه (base64/base64Data) هم
+    // قبول است؛ باینری در main اولویت دارد.
     if (!payload?.pdfPath || (!hasBinary && !hasBase64)) {
       return { success: false, error: 'دادهٔ فایلِ بازسازی‌شده کامل نیست.' };
     }

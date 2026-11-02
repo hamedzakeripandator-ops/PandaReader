@@ -576,6 +576,42 @@ function sanitizeCopyFileName(name, fallbackBase) {
 // مودال، نامِ خودکارِ <base>-editable.pdf. اگر مسیرِ نهایی از
 // قبل وجود داشته باشد، پسوندِ شماره‌دار (-2 … -100) می‌گیرد؛
 // اگر هیچ نامی آزاد نباشد، null برمی‌گردد.
+// مرحلهٔ ۳۴ — مسیرِ خروجیِ کپیِ بازسازی: همان اولویتِ
+// resolveCopyOutputPath (اول desiredPath، بعد desiredName)،
+// ولی نامِ خودکار، <base>-copy.pdf است (نه -editable.pdf) تا
+// با نام‌گذاریِ کپیِ qpdf تداخل نکند. شماره‌دار -2…-100؛ اگر
+// هیچ نامی آزاد نباشد، null برمی‌گردد.
+function resolveRebuildCopyOutputPath(pdfPath, desiredName, desiredPath) {
+  const dir = path.dirname(pdfPath);
+  const baseName = path.basename(pdfPath, path.extname(pdfPath));
+  let candidate = null;
+  if (desiredPath && typeof desiredPath === 'string') {
+    const p = desiredPath.trim();
+    if (path.isAbsolute(p)) {
+      let withExt = p;
+      if (path.extname(withExt).toLowerCase() !== '.pdf') withExt += '.pdf';
+      if (fs.existsSync(path.dirname(withExt))) candidate = withExt;
+    }
+  }
+  if (!candidate) {
+    if (desiredName && typeof desiredName === 'string' && desiredName.trim()) {
+      candidate = path.join(dir, sanitizeCopyFileName(desiredName, baseName));
+    } else {
+      candidate = path.join(dir, baseName + '-copy.pdf');
+    }
+  }
+  if (fs.existsSync(candidate)) {
+    const cDir = path.dirname(candidate);
+    const cBase = path.basename(candidate, '.pdf');
+    for (let i = 2; i <= 100; i++) {
+      const numbered = path.join(cDir, cBase + '-' + i + '.pdf');
+      if (!fs.existsSync(numbered)) return numbered;
+    }
+    return null;
+  }
+  return candidate;
+}
+
 function resolveCopyOutputPath(pdfPath, desiredName, desiredPath) {
   const dir = path.dirname(pdfPath);
   const baseName = path.basename(pdfPath, path.extname(pdfPath));
@@ -1577,9 +1613,10 @@ module.exports = function(app) {
   // کپی، .orig.bak ساخته نمی‌شود.
   // مرحله ۸ ـ اصلاحِ نهایی: کارِ سنگین در ورکرِ جدا انجام می‌شود
   // (پروسهٔ اصلی قفل نمی‌شود)، پیشرفت با 'pdf-copy-progress' به
-  // رندرر می‌رسد، لغو با 'cancel-pdf-copy' کار را خاتمه می‌دهد، و
-  // حالتِ alreadyUnlocked دیگر با Buffer.from(undefined) کرش
-  // نمی‌کند — کپی‌ای نوشته نمی‌شود و مسیرِ فایلِ اصلی برمی‌گردد.
+  // رندرر می‌رسد، لغو با 'cancel-pdf-copy' کار را خاتمه می‌دهد.
+  // مرحلهٔ ۳۳: حالتِ alreadyUnlocked دیگر مسیرِ اصلی را
+  // برنمی‌گرداند — کاربر «کپی» خواسته است، پس یک کپیِ واقعی با
+  // زنجیرهٔ buildUnencryptedCopyBytes ساخته و نوشته می‌شود.
   ipcMain.handle('create-unlocked-pdf-copy', async (event, payload) => {
     let tempPath = null;
     try {
@@ -1623,7 +1660,13 @@ module.exports = function(app) {
             return { success: false, error: (inMain && inMain.error) || 'ساختِ نسخهٔ کپی انجام نشد.' };
           }
           if (inMain.alreadyUnlocked || !inMain.bytes) {
-            return { success: true, copyPath: filePath, pageCount: inMain.pageCount, textGate: 'not-needed', alreadyUnlocked: true };
+            // مرحلهٔ ۳۳ — فایل، رمزی ندارد ولی کاربر «کپی» خواسته
+            // است: به‌جای برگرداندنِ مسیرِ اصلی، یک کپیِ واقعی با
+            // همان زنجیرهٔ بدونِ رمز (qpdf، سپس pdf-lib، سپس
+            // باینری) ساخته می‌شود.
+            const built = await saver.buildUnencryptedCopyBytes({ bytes, logger: saveLogger });
+            await atomicWriteBuffer(copyPath, Buffer.from(built.bytes));
+            return { success: true, copyPath, pageCount: inMain.pageCount, textGate: 'not-needed', alreadyUnlocked: false, unlockedBy: built.unlockedBy || undefined };
           }
           await atomicWriteBuffer(copyPath, Buffer.from(inMain.bytes));
           return { success: true, copyPath, pageCount: inMain.pageCount, textGate: inMain.textGate, alreadyUnlocked: false, unlockedBy: inMain.unlockedBy || undefined };
@@ -1636,9 +1679,9 @@ module.exports = function(app) {
         return { success: false, code: (copy && copy.code) || undefined, error: (copy && copy.error) || 'ساختِ نسخهٔ کپی انجام نشد.', pageCount: (copy && copy.pageCount) || -1 };
       }
       if (copy.alreadyUnlocked) {
-        // فایل، قفلِ فعالی ندارد: هیچ‌چیز نوشته نشده است؛ مسیرِ
-        // فایلِ اصلی برمی‌گردد تا رندرر، استودیو را روی همان فایل
-        // فعال کند (بدونِ جابه‌جاییِ بیهوده).
+        // مرحلهٔ ۳۳: ورکرِ جدید برای فایلِ بدونِ رمز، دیگر
+        // alreadyUnlocked برنمی‌گرداند (کپیِ واقعی می‌سازد)؛ این
+        // شاخه فقط تورِ ایمنیِ سازگاریِ عقب‌رو مانده است.
         cleanupPdfCopyTemp(tempPath);
         tempPath = null;
         return { success: true, copyPath: filePath, pageCount: copy.pageCount, textGate: 'not-needed', alreadyUnlocked: true };
@@ -2372,40 +2415,51 @@ module.exports = function(app) {
 
   ipcMain.handle('save-rebuilt-pdf', async (event, payload) => {
     try {
-      const { pdfPath, base64, pdfBytes, mode, expectedPageCount } = payload || {};
+      const { pdfPath, base64, base64Data, pdfBytes, mode, expectedPageCount } = payload || {};
       const normalizedMode = mode === 'in-place' ? 'in-place' : (mode === 'copy' ? 'copy' : 'save-as');
+      // مرحلهٔ ۳۴ — هر سه حالت، لاگ می‌شوند (ورود + نتیجه).
+      try { const lg = getIpcLogger(); if (lg && typeof lg.info === 'function') lg.info('save-rebuilt-pdf mode=' + normalizedMode); } catch (_) {}
       if (!pdfPath || typeof pdfPath !== 'string' || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'فایل PDF پیدا نشد.' };
       }
       if (path.extname(pdfPath).toLowerCase() !== '.pdf') {
         return { success: false, error: 'فقط فایل‌های PDF قابلِ بازسازی‌اند.' };
       }
-      // مرحلهٔ ۳۲ — ورودیِ باینری (Uint8Array از structured clone)
-      // اولویت دارد؛ base64 فقط برایِ سازگاریِ عقب‌رو مانده است.
+      // مرحلهٔ ۳۳ — تبدیلِ ورودی به Buffer، برایِ تمامِ انواع،
+      // صددرصد مقاوم: Buffer، هر Uint8Array (با byteOffsetِ
+      // دلخواه، چون structured clone می‌تواند viewِ بریده‌شده
+      // بدهد)، ArrayBuffer، آرایهٔ اعداد، رشتهٔ base64 با/بدونِ
+      // پیشوندِ data: (base64Dataِ پرامپت + base64ِ قدیمی).
+      // نکتهٔ صادقانه: Buffer.from(view) برایِ Uint8Array هم
+      // درست است (فقط بایت‌هایِ همان view را می‌گیرد)؛ تبدیلِ
+      // صریحِ (buffer, byteOffset, byteLength) فقط برایِ شفافیت
+      // و پوششِ DataView و ArrayBuffer و آرایه و base64 است.
       let bytes = null;
-      if (pdfBytes instanceof Uint8Array && pdfBytes.length > 0) {
-        // معادلِ سقفِ قبلیِ رشته (۵۰۰ میلیون کاراکترِ base64 ≈ ۳۷۵ مگابایت).
-        if (pdfBytes.length > 375000000) {
-          return { success: false, error: 'دادهٔ PDFِ بازسازی‌شده معتبر نیست.' };
-        }
+      if (Buffer.isBuffer(pdfBytes)) {
+        bytes = pdfBytes;
+      } else if (ArrayBuffer.isView(pdfBytes)) {
+        bytes = Buffer.from(pdfBytes.buffer, pdfBytes.byteOffset, pdfBytes.byteLength);
+      } else if (pdfBytes instanceof ArrayBuffer) {
         bytes = Buffer.from(pdfBytes);
+      } else if (Array.isArray(pdfBytes)) {
+        bytes = Buffer.from(pdfBytes);
+      } else if (typeof base64Data === 'string' && base64Data.length > 0) {
+        const clean = base64Data.replace(/^data:application\/pdf;base64,/, '');
+        bytes = Buffer.from(clean, 'base64');
       } else if (typeof base64 === 'string' && base64.length > 0 && base64.length <= 500000000) {
         bytes = Buffer.from(base64, 'base64');
-      } else {
+      }
+      if (!bytes || bytes.length === 0 || bytes.length > 375000000) {
         return { success: false, error: 'دادهٔ PDFِ بازسازی‌شده معتبر نیست.' };
       }
-      if (bytes.length <= 5 || bytes.slice(0, 5).toString('ascii') !== '%PDF-') {
+      // مرحلهٔ ۳۳ — اعتبارسنجیِ سبک: فقط غیرخالی بودنِ معنادار
+      // (بیش از ۱۰۰ بایت) و وجودِ هدرِ %PDF- در ۱۰۲۴ بایتِ اول.
+      // گیتِ سخت‌گیرانهٔ validateSavedPdfBytes (بارگذاریِ کاملِ
+      // pdf-lib + تطابقِ دقیقِ شمارِ صفحه + سقفِ صفرِ آبجکتِ
+      // خراب) که خروجیِ سالمِ pdf-lib را رد می‌کرد، از این مسیر
+      // حذف شد؛ خودِ تابع برایِ فراخواننده‌هایِ دیگرش می‌ماند.
+      if (bytes.length <= 100 || bytes.slice(0, 1024).toString('latin1').indexOf('%PDF-') === -1) {
         return { success: false, error: 'خروجیِ بازسازی‌شده، یک فایلِ PDF معتبر نیست.' };
-      }
-      let saver;
-      try { saver = require('./services/pdfAnnotationSaver'); } catch (_) {
-        return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد.' };
-      }
-      let saveLogger = null;
-      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const validation = await saver.validateSavedPdfBytes(bytes, expected, saveLogger, 0);
-      if (!validation || !validation.ok) {
-        return { success: false, error: (validation && validation.reason) || 'راستی‌آزماییِ فایلِ بازسازی‌شده انجام نشد.' };
       }
       let outputPath = null;
       if (normalizedMode === 'in-place') {
@@ -2413,7 +2467,7 @@ module.exports = function(app) {
       } else if (normalizedMode === 'copy') {
         // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر (از مودالِ محافظت) با
         // همان حلقهٔ شماره‌دار؛ در غیابِ آن، نامِ خودکار.
-        outputPath = resolveCopyOutputPath(pdfPath, payload && payload.desiredName, payload && payload.desiredPath);
+        outputPath = resolveRebuildCopyOutputPath(pdfPath, payload && payload.desiredName, payload && payload.desiredPath);
         if (!outputPath) {
           return { success: false, error: 'نامِ مناسبی برای نسخهٔ کپی پیدا نشد؛ پوشهٔ فایل را خلوت کنید و دوباره تلاش کنید.' };
         }
@@ -2440,21 +2494,49 @@ module.exports = function(app) {
         const ensured = ensureRelocatedOrigBackup(pdfPath, dataDir);
         backupCreated = Boolean(ensured && ensured.created);
       }
+      // مرحلهٔ ۳۳ — اگر نوشتنِ درجا به‌خاطرِ قفلِ ویندوز شکست
+      // خورد، هرگز خطا داده نمی‌شود: خودکار در یک کپیِ کنارِ
+      // فایلِ اصلی ذخیره می‌شود و همان کپی، در برنامه باز می‌شود
+      // (رندرر با fellBackToCopy، رویدادِ editable-copy-ready را
+      // می‌فرستد). فایلِ اصلی دست نمی‌خورد.
+      let effectiveMode = normalizedMode;
+      let fellBackToCopy = false;
       try {
         await atomicWriteBuffer(outputPath, bytes);
       } catch (err) {
-        if (err && err.code === 'FILE_LOCKED') {
+        if (err && err.code === 'FILE_LOCKED' && normalizedMode === 'in-place') {
+          const dir = path.dirname(pdfPath);
+          const baseName = path.basename(pdfPath, path.extname(pdfPath));
+          let fallbackPath = path.join(dir, baseName + ' - کپی بازسازی‌شده.pdf');
+          if (fs.existsSync(fallbackPath)) {
+            let found = null;
+            for (let i = 2; i <= 100; i++) {
+              const numbered = path.join(dir, baseName + ' - کپی بازسازی‌شده-' + i + '.pdf');
+              if (!fs.existsSync(numbered)) { found = numbered; break; }
+            }
+            if (!found) {
+              return { success: false, locked: true, error: err.message };
+            }
+            fallbackPath = found;
+          }
+          await atomicWriteBuffer(fallbackPath, bytes);
+          outputPath = fallbackPath;
+          effectiveMode = 'copy';
+          fellBackToCopy = true;
+        } else if (err && err.code === 'FILE_LOCKED') {
           return { success: false, locked: true, error: err.message };
+        } else {
+          throw err;
         }
-        throw err;
       }
-      if (normalizedMode === 'in-place') {
+      if (!fellBackToCopy && normalizedMode === 'in-place') {
         invalidateComicRamCache(app, pdfPath);
       }
       // مرحله ۱۱: ایندکسِ جستجویِ کناری، بهترین‌تلاش و هرگز
       // مانعِ موفقیتِ ذخیره نمی‌شود.
       const searchIndexSaved = writeSearchIndexFile(outputPath, payload && payload.searchIndex);
-      return { success: true, outputPath, mode: normalizedMode, pageCount: expected, backupCreated, searchIndexSaved };
+      try { const lg = getIpcLogger(); if (lg && typeof lg.info === 'function') lg.info('save-rebuilt-pdf done mode=' + effectiveMode + ' output=' + outputPath); } catch (_) {}
+      return { success: true, outputPath, copyPath: effectiveMode === 'copy' ? outputPath : null, mode: effectiveMode, fellBackToCopy, pageCount: expectedPageCount, backupCreated, searchIndexSaved };
     } catch (err) {
       if (err && err.code === 'FILE_LOCKED') {
         return { success: false, locked: true, error: err.message };

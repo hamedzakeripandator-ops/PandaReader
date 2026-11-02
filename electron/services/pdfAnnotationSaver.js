@@ -4069,6 +4069,43 @@ async function tryQpdfBaseForSave(buildBytes, savePassword, logger, expectedPage
   }
 }
 
+// ===========================================================================
+// مرحلهٔ ۳۳ — زنجیرهٔ ساختِ کپی برای فایل‌های بدونِ رمز:
+// qpdf، سپس pdf-lib (load با ignoreEncryption + save)، سپس
+// کپیِ باینریِ همان بایت‌ها. این تابع، هرگز برای ورودیِ بدونِ
+// رمز throw نمی‌کند و هرگز برای فایلِ قفل‌دار صدا زده نمی‌شود.
+// مرزِ امنیتی: کپیِ باینریِ فایلِ رمزدار، «قابل‌ویرایش» نیست و
+// نباید به‌عنوانِ کپیِ بازشده برگردد؛ پس این زنجیره، فقط از
+// شاخهٔ alreadyUnlocked (پروب: protected=false) فراخوانی می‌شود
+// و createUnlockedPdfCopy (که مسیرهایِ ذخیره به معنایِ
+// alreadyUnlocked بودنش وابسته‌اند) دست نمی‌خورد.
+// ===========================================================================
+async function buildUnencryptedCopyBytesImpl({ bytes, logger }) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
+  if (buf.length < 8 || buf.slice(0, 5).toString('latin1') !== '%PDF-') {
+    throw new Error('بایت‌های ورودی، یک فایلِ PDF معتبر نیستند.');
+  }
+  try {
+    const qpdfAttempt = await tryQpdfDecrypt(buf, '', logger);
+    if (qpdfAttempt && qpdfAttempt.ok && qpdfAttempt.bytes && qpdfAttempt.bytes.length >= 8 && Buffer.from(qpdfAttempt.bytes).slice(0, 5).toString('latin1') === '%PDF-') {
+      return { bytes: Buffer.from(qpdfAttempt.bytes), unlockedBy: 'qpdf' };
+    }
+  } catch (_) {}
+  try {
+    const { PDFDocument } = getPdfLib();
+    const doc = await PDFDocument.load(buf, { ignoreEncryption: true });
+    const saved = await doc.save();
+    if (saved && saved.length >= 8) {
+      return { bytes: Buffer.from(saved), unlockedBy: 'pdflib' };
+    }
+  } catch (_) {}
+  return { bytes: buf, unlockedBy: 'binary' };
+}
+
+async function buildUnencryptedCopyBytes(args) {
+  return withSilencedPdfLibWarnings(() => buildUnencryptedCopyBytesImpl(args));
+}
+
 async function createUnlockedPdfCopyImpl({ bytes, logger, onProgress, password, probeHint, allowHeavyFallback }) {
   const { PDFDocument, PDFName } = getPdfLib();
   const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || []);
@@ -4608,4 +4645,4 @@ function isQpdfAvailable() {
   } catch (_) { return Promise.resolve(false); }
 }
 
-module.exports = { saveAnnotatedPdf, origBackupPathFor, relocatedOrigBackupPathFor, resolveOrigBackupsDir, describePdfEncryption, describePdfEncryptionForPath, encryptionInfoFromDoc, writeOrigBackupSidecar, verifyRelocatedOrigBackup, healUnparseableIndirectObjectsInBuffer, hasObjStmInBytes, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes, parseEncryptDictFromPath, parseEncryptDictText, encryptionInfoFromParsedDict, isQpdfAvailable };
+module.exports = { saveAnnotatedPdf, origBackupPathFor, relocatedOrigBackupPathFor, resolveOrigBackupsDir, describePdfEncryption, describePdfEncryptionForPath, encryptionInfoFromDoc, writeOrigBackupSidecar, verifyRelocatedOrigBackup, healUnparseableIndirectObjectsInBuffer, hasObjStmInBytes, parseInvalidObjectWarnings, validateSavedPdfBytes, saveByIncrementalUpdate, validateIncrementalBytes, probePdfProtection, createUnlockedPdfCopy, buildUnencryptedCopyBytes, withSilencedPdfLibWarnings, probePdfProtectionFast, probePdfProtectionForPath, prepareProtectedPdfForReading, neutralizeEncryptTrailer, verifyNeutralizedBytes, parseEncryptDictFromPath, parseEncryptDictText, encryptionInfoFromParsedDict, isQpdfAvailable };
