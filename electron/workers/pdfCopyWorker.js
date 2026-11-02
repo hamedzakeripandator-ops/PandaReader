@@ -12,6 +12,7 @@
 //   { type: 'probe', filePath }
 //   { type: 'copy', filePath, tempPath, password }
 //   { type: 'prepare', filePath, password, cacheDir }
+//   { type: 'export', pdfPath, pages, outputPath, mode, password, dataDir }
 // پیام‌های خروجی:
 //   { type: 'progress', stage, fraction, label }
 //   { type: 'log', level, message, detail }
@@ -246,6 +247,24 @@ if (parentPort && saver) {
       } else if (msg.type === 'prepare') {
         const result = await handlePrepare(msg.filePath, msg.password, msg.cacheDir);
         parentPort.postMessage({ type: 'done', result });
+      } else if (msg.type === 'export') {
+        // مرحلهٔ ۳۲ — ذخیرهٔ سنگینِ pdf-libِ حاشیه‌نویسی‌شده، از پروسهٔ
+        // اصلی به ورکر منتقل شد (همان saver با همان آرگومان‌هایِ
+        // فراخوانِ مستقیم). catchِ dispatcherِ پایین، هر throw را به
+        // پیامِ 'error' تبدیل می‌کند و پروسهٔ اصلی آن را علامتِ
+        // برگشت به اجرایِ مستقیم می‌داند.
+        if (!saver) throw new Error('ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد.');
+        const result = await saver.saveAnnotatedPdf({
+          pdfPath: msg.pdfPath,
+          pages: msg.pages,
+          outputPath: msg.outputPath,
+          mode: msg.mode,
+          logger: makeLogger(),
+          password: typeof msg.password === 'string' ? msg.password : '',
+          dataDir: typeof msg.dataDir === 'string' ? msg.dataDir : '',
+        });
+        parentPort.postMessage({ type: 'done', result: result || { success: false, error: 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.' } });
+
       } else if (msg.type === 'copy') {
         if (!msg.tempPath || typeof msg.tempPath !== 'string') {
           parentPort.postMessage({ type: 'error', message: 'مسیرِ فایلِ موقتِ کپی مشخص نشده است.' });

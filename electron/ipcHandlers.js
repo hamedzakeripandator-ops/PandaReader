@@ -170,6 +170,74 @@ function runPdfCopyWorker({ kind, filePath, tempPath, sender, timeoutMs, passwor
   });
 }
 
+// مرحلهٔ ۳۲ — اجرایِ ذخیرهٔ PDFِ حاشیه‌نویسی‌شده در ورکرِ جدا، نه در
+// پروسهٔ اصلی (pdf-lib رویِ فایل‌هایِ بزرگ، حلقهٔ رویداد را قفل می‌کرد
+// و «Not Responding» نشان می‌داد). عمداً در نقشهٔ کارهایِ کپی ثبت
+// نمی‌شود تا دکمهٔ «لغوِ ساختِ کپی» نتواند آن را بکشد؛ در صورتِ خطایِ
+// ساختِ ورکر، خطایِ ورکر یا تایم‌اوت، فراخواننده به اجرایِ مستقیم برمی‌گردد.
+function runAnnotatedExportWorker({ pdfPath, pages, outputPath, mode, password, dataDir, sender, timeoutMs }) {
+  const workerPath = path.join(__dirname, 'workers', 'pdfCopyWorker.js');
+  let worker;
+  try {
+    worker = new Worker(workerPath);
+  } catch (err) {
+    const spawnErr = new Error('ورکرِ خروجیِ PDF ساخته نشد: ' + String((err && err.message) || err));
+    spawnErr.code = 'WORKER_SPAWN_FAILED';
+    throw spawnErr;
+  }
+  let timer = null;
+  let settled = false;
+  const finish = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    try { worker.terminate(); } catch (_) {}
+  };
+  return new Promise((resolve, reject) => {
+    const settleReject = (err) => {
+      if (settled) return;
+      settled = true;
+      finish();
+      reject(err);
+    };
+    worker.on('message', (msg) => {
+      try {
+        if (!msg || typeof msg !== 'object') return;
+        if (msg.type === 'log') {
+          try {
+            const lg = getIpcLogger();
+            if (lg && typeof lg[msg.level] === 'function') lg[msg.level]('[pdf-copy-worker] ' + msg.message, msg.detail || '');
+          } catch (_) {}
+        } else if (msg.type === 'done') {
+          if (settled) return;
+          settled = true;
+          finish();
+          resolve(msg.result);
+        } else if (msg.type === 'error') {
+          settleReject(new Error(msg.message || 'ورکرِ خروجیِ PDF خطا داد.'));
+        }
+      } catch (_) {}
+    });
+    worker.on('error', (err) => {
+      settleReject(new Error('ورکرِ خروجیِ PDF خطا داد: ' + String((err && err.message) || err)));
+    });
+    worker.on('exit', (code) => {
+      if (settled) return;
+      settleReject(new Error('ورکرِ خروجیِ PDF بدونِ نتیجه پایان یافت (کدِ خروج: ' + code + ').'));
+    });
+    if (timeoutMs && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settleReject(new Error('ساختِ PDFِ حاشیه‌نویسی‌شده در ورکر بیش از حد طول کشید.'));
+      }, timeoutMs);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    }
+    try {
+      worker.postMessage({ type: 'export', pdfPath, pages, outputPath, mode, password: typeof password === 'string' ? password : '', dataDir: typeof dataDir === 'string' ? dataDir : '' });
+    } catch (err) {
+      settleReject(new Error('ارسالِ کار به ورکرِ خروجیِ PDF انجام نشد: ' + String((err && err.message) || err)));
+    }
+  });
+}
+
 function cancelPdfCopyJobsForSender(sender) {
   let count = 0;
   for (const job of pdfCopyJobs.values()) {
@@ -1375,27 +1443,33 @@ module.exports = function(app) {
         if (path.extname(finalPath).toLowerCase() !== '.pdf') finalPath += '.pdf';
       }
 
-      let saver;
+      // مرحلهٔ ۳۲ — اول ورکر امتحان می‌شود (پروسهٔ اصلی هرگز قفل
+      // نمی‌شود)؛ در صورتِ خطایِ ساختِ ورکر، خطایِ ورکر یا تایم‌اوت،
+      // به فراخوانِ مستقیم برمی‌گردیم (همان رفتارِ قبلی). توجه: DONEِ
+      // ورکر با { success: false }، شکستِ سطحِ saver است و همان‌طور
+      // برمی‌گردد (کارِ دوبرابر نمی‌شود)؛ فقط خطاهایِ انتقالی fallback
+      // می‌خورند. اگر ورکر فایل را نوشت ولی در رساندنِ نتیجه شکست
+      // خورد، فراخوانِ مستقیم همان خروجی را دوباره می‌نویسد (نوشتن
+      // اتمیک است، پس فایلِ ناقص نمی‌ماند).
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+      const savePassword = typeof password === 'string' ? password : '';
+      let result = null;
       try {
-        saver = require('./services/pdfAnnotationSaver');
-      } catch (_) {
-        return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد؛ فایل را در پوشهٔ electron/services قرار دهید.' };
+        result = await runAnnotatedExportWorker({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, password: savePassword, dataDir, sender: event.sender, timeoutMs: 300000 });
+      } catch (workerErr) {
+        try { const lg = getIpcLogger(); if (lg) lg.warn('export-annotated-pdf: worker failed, falling back to direct save', String((workerErr && workerErr.message) || workerErr)); } catch (_) {}
       }
-      // مرحله ۶ ـ بخش ب: بستنِ استریم‌ها باید *پیش* از نوشتن
-      // انجام شود، نه فقط پس از آن (invalidate پس از ذخیره)؛ وگرنه
-      // در اولین ذخیرهٔ درجا — وقتی هنوز .orig.bakای نیست و comic://
-      // مستقیم روی pdfPath استریم دارد — پنجرهٔ قفلِ ویندوز باز
-      // می‌ماند. پس از ساخته‌شدنِ .orig.bak، استریم‌های بعدی دیگر
-      // روی pdfPath باز نمی‌شوند و این فراخوانی، عملاً بی‌اثر است.
-      if (normalizedMode === 'in-place') {
-        closeComicReadStreams(app, pdfPath);
+      if (!result) {
+        let saver;
+        try {
+          saver = require('./services/pdfAnnotationSaver');
+        } catch (_) {
+          return { success: false, error: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد؛ فایل را در پوشهٔ electron/services قرار دهید.' };
+        }
+        let saveLogger = null;
+        try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
+        result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger, password: savePassword, dataDir });
       }
-      // مرحله ۷ ـ نهایی: لاگرِ دیسک به saver تزریق می‌شود تا
-      // تشخیصِ آبجکت‌های غیرقابل‌پارس (شماره + آفست + ۲۰۰ بایتِ
-      // اطراف) در logs/app.log ثبت شود.
-      let saveLogger = null;
-      try { saveLogger = getIpcLogger(); } catch (_) { saveLogger = null; }
-      const result = await saver.saveAnnotatedPdf({ pdfPath, pages, outputPath: finalPath, mode: normalizedMode, logger: saveLogger, password: typeof password === 'string' ? password : '', dataDir: (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '' });
       if (result && result.success && (result.mode === 'in-place' || path.resolve(finalPath) === path.resolve(pdfPath))) {
         invalidateComicRamCache(app, pdfPath);
       }
@@ -2298,7 +2372,7 @@ module.exports = function(app) {
 
   ipcMain.handle('save-rebuilt-pdf', async (event, payload) => {
     try {
-      const { pdfPath, base64, mode, expectedPageCount } = payload || {};
+      const { pdfPath, base64, pdfBytes, mode, expectedPageCount } = payload || {};
       const normalizedMode = mode === 'in-place' ? 'in-place' : (mode === 'copy' ? 'copy' : 'save-as');
       if (!pdfPath || typeof pdfPath !== 'string' || !fs.existsSync(pdfPath)) {
         return { success: false, error: 'فایل PDF پیدا نشد.' };
@@ -2306,14 +2380,20 @@ module.exports = function(app) {
       if (path.extname(pdfPath).toLowerCase() !== '.pdf') {
         return { success: false, error: 'فقط فایل‌های PDF قابلِ بازسازی‌اند.' };
       }
-      if (!base64 || typeof base64 !== 'string' || base64.length === 0 || base64.length > 500000000) {
+      // مرحلهٔ ۳۲ — ورودیِ باینری (Uint8Array از structured clone)
+      // اولویت دارد؛ base64 فقط برایِ سازگاریِ عقب‌رو مانده است.
+      let bytes = null;
+      if (pdfBytes instanceof Uint8Array && pdfBytes.length > 0) {
+        // معادلِ سقفِ قبلیِ رشته (۵۰۰ میلیون کاراکترِ base64 ≈ ۳۷۵ مگابایت).
+        if (pdfBytes.length > 375000000) {
+          return { success: false, error: 'دادهٔ PDFِ بازسازی‌شده معتبر نیست.' };
+        }
+        bytes = Buffer.from(pdfBytes);
+      } else if (typeof base64 === 'string' && base64.length > 0 && base64.length <= 500000000) {
+        bytes = Buffer.from(base64, 'base64');
+      } else {
         return { success: false, error: 'دادهٔ PDFِ بازسازی‌شده معتبر نیست.' };
       }
-      const expected = Number(expectedPageCount);
-      if (!Number.isFinite(expected) || expected < 1 || expected > 100000) {
-        return { success: false, error: 'شمارِ صفحه‌های موردِ انتظار معتبر نیست.' };
-      }
-      const bytes = Buffer.from(base64, 'base64');
       if (bytes.length <= 5 || bytes.slice(0, 5).toString('ascii') !== '%PDF-') {
         return { success: false, error: 'خروجیِ بازسازی‌شده، یک فایلِ PDF معتبر نیست.' };
       }

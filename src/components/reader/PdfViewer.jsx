@@ -9,7 +9,7 @@ import useDragPan from '../../hooks/useDragPan';
 import { isTextInputElement } from '../../hooks/useKeyboard';
 import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
-import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
+import { rebuildEditablePdfFromPdfJs } from '../../services/pdfRebuildService';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 import thumbnailService from '../../services/thumbnailService';
 import renderQueue, { registerBasePngUrl, revokeBasePngUrl, registerDeepPngUrl, revokeDeepPngUrl } from '../../services/hiDpiRenderService';
@@ -465,6 +465,17 @@ const PdfPageItem = React.memo(function PdfPageItem({
   pageFilter,
   scrollContainerRef,
 }) {
+  // مرحلهٔ ۳۲ — همهٔ اشتراک‌هایِ استور، در بالاترین نقطهٔ بدنهٔ
+  // کامپوننت‌اند (پیش از هر متغیرِ محاسباتی): خواندنِ یک const پیش
+  // از خطِ تعریفش، خطایِ TDZ می‌دهد و مرحلهٔ ۳۱ دقیقاً همین‌جا کرش
+  // می‌کرد (shouldMount پیش از isAnnotationActive خوانده می‌شد).
+  // مرحلهٔ ۱۳: تنظیماتِ بوک‌مارک (اشتراکِ داخلی؛ تغییرش نادر است و
+  // memoیِ صفحه را نمی‌شکند، چون prop نیست).
+  const bookmarkPreferences = useBookmarkStore((state) => state.preferences);
+  // مرحلهٔ ۳۱ — اشتراکِ وضعیتِ استودیو برایِ مانتِ تنبلِ لایهٔ
+  // حاشیه‌نویسی: تغییرِ آن، آیتمِ memoشده را هم بازرندر می‌کند، پس
+  // لایه دقیقاً هنگامِ فعال/غیرفعال شدنِ استودیو مانت/unmount می‌شود.
+  const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const [renderFailed, setRenderFailed] = useState(false);
   const [retryTick, setRetryTick] = useState(0);
   const [baseReady, setBaseReady] = useState(false);
@@ -480,18 +491,28 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const [deepUrl, setDeepUrl] = useState(null);
   const deepUrlRef = useRef(null);
   const deepDoneRef = useRef(null);
-  // مرحلهٔ ۳۰ — شمارندهٔ رندرهایِ فعالِ همین صفحه (پایه + دیپ):
-  // page.cleanup() فقط وقتی صدا زده می‌شود که هیچ رندری رویِ
-  // این صفحه در حالِ اجرا نباشد (شرطِ پرامپت)، تا رندرِ هم‌زمانِ
-  // دیگر خراب نشود. lastDeepRefreshRef هم نسلِ دیده‌شدهٔ
-  // deepRefreshTick را نگه می‌دارد.
-  const pageRenderFlightRef = useRef(0);
+  // مرحلهٔ ۳۱ — آزادسازیِ معوقِ pdf.js (جایگزینِ شمارندهٔ
+  // مرحلهٔ ۳۰): page.cleanup() دیگر بلافاصله پس از رندر صدا
+  // زده نمی‌شود، چون پاسِ دیپِ همان صفحه، چند صد میلی‌ثانیه
+  // بعد به همان فونت‌ها و operatorList نیاز دارد و cleanupِ
+  // زودهنگام، وادارش می‌کند همه‌چیز را از نو بسازد. در عوض،
+  // هر شیءِ صفحه‌ای که getPage برگرداند، این‌جا ثبت می‌شود و
+  // فقط در unmountِ آیتم (خروج از پنجرهٔ DOM) cleanup می‌شود؛
+  // تعویضِ سند هم با cleanup/destroyِ سند در والد آزاد می‌شود.
+  // lastDeepRefreshRef، نسلِ دیده‌شدهٔ deepRefreshTick را نگه
+  // می‌دارد.
+  const pagesToCleanRef = useRef([]);
+  const trackPageForDeferredCleanup = (page) => {
+    if (page && !pagesToCleanRef.current.includes(page)) pagesToCleanRef.current.push(page);
+  };
   const lastDeepRefreshRef = useRef(0);
   const imgRef = useRef(null);
   const displayedSrc = deepUrl || baseUrl;
-  // مرحلهٔ ۱۳: تنظیماتِ بوک‌مارک (اشتراکِ داخلی؛ تغییرش نادر است و
-  // memoیِ صفحه را نمی‌شکند، چون prop نیست).
-  const bookmarkPreferences = useBookmarkStore((state) => state.preferences);
+  // مرحلهٔ ۳۱ — شرطِ مانتِ تنبل: استودیو فعال باشد یا صفحه،
+  // حاشیه‌نویسیِ ذخیره‌شده داشته باشد. در غیرِ این صورت، لایه
+  // اصلاً مانت نمی‌شود (نه کامپوننت، نه Stageِ Konva).
+  const hasPageAnnotations = Array.isArray(pageAnnotations) && pageAnnotations.length > 0;
+  const shouldMountAnnotationLayer = isAnnotationActive || hasPageAnnotations;
   // مرحلهٔ ۱۲: فاصلهٔ زنده از صفحهٔ فعال، برایِ اولویتِ صفِ رندر،
   // بدونِ اینکه وابستگیِ effectِ رندرِ پایه باشد (وگرنه، هر
   // تغییرِ صفحهٔ فعال، effectِ همهٔ صفحه‌ها را از نو راه
@@ -502,7 +523,21 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // «نشست»ِ HUD، وقتی دیپ برایِ این صفحه در راه است، زود شلیک
   // نشود).
   const deepGateRef = useRef({ deepRuns: false });
-  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) <= 1) };
+  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) <= ((renderZoomLevel || 0) <= 1.15 ? 0 : 1)) };
+
+  // مرحلهٔ ۳۱ — تنها نقطهٔ آزادسازیِ شیءهایِ صفحه: unmountِ
+  // آیتم (خروج از پنجرهٔ DOM_OVERSCAN). وابستگیِ خالی، یعنی
+  // این cleanup فقط در unmount اجرا می‌شود، نه در هر بازرندر
+  // یا تغییرِ زوم؛ پس پاسِ دیپ، همیشه رویِ صفحهٔ زنده می‌دود.
+  useEffect(() => {
+    return () => {
+      const pages = pagesToCleanRef.current || [];
+      pagesToCleanRef.current = [];
+      for (const page of pages) {
+        try { if (page && typeof page.cleanup === 'function') page.cleanup(); } catch (_) {}
+      }
+    };
+  }, []);
 
   // مرحلهٔ ۲۹ — پاسِ اول: لایهٔ پایهٔ سریع (WebP) رویِ بومِ موقت،
   // سپس نشانیِ blob: در یک تگِ <img> (بازگشت به موتورِ مرحلهٔ ۱۹):
@@ -526,23 +561,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
           hooks.onCancel(() => {
             try { renderTask?.cancel(); } catch (_) {}
           });
-          // مرحلهٔ ۳۰ — no-opِ پیش‌فرض تا اگر getPage خودش خطا
-          // داد، catch به TDZ نخورد (تابع، بعداً جایگزین می‌شود).
-          let markPageRenderDone = () => {};
           const page = await pdfDoc.getPage(pageNumber);
+          // مرحلهٔ ۳۱ — ثبت برایِ cleanupِ معوقِ unmount (نه
+          // cleanupِ فوری؛ پاسِ دیپِ همین صفحه هنوز در راه است).
+          trackPageForDeferredCleanup(page);
           if (hooks.isCancelled()) return;
-          // مرحلهٔ ۳۰ — شمارشِ رندرِ فعال + آزادسازیِ pdf.js:
-          let renderFlightCounted = false;
-          markPageRenderDone = () => {
-            if (!renderFlightCounted) return;
-            renderFlightCounted = false;
-            pageRenderFlightRef.current = Math.max(0, pageRenderFlightRef.current - 1);
-            if (pageRenderFlightRef.current === 0) {
-              try { if (typeof page.cleanup === 'function') page.cleanup(); } catch (_) {}
-            }
-          };
-          pageRenderFlightRef.current += 1;
-          renderFlightCounted = true;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width > 0 && baseViewport.height > 0) {
             onPageRatioMeasured?.(pageNumber - 1, baseViewport.height / baseViewport.width);
@@ -563,7 +586,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
           context.imageSmoothingQuality = 'high';
           renderTask = page.render({ canvasContext: context, viewport });
           await renderTask.promise;
-          markPageRenderDone();
           if (hooks.isCancelled()) {
             tmp.width = 0;
             tmp.height = 0;
@@ -587,7 +609,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
           const gate = deepGateRef.current || {};
           if (!gate.deepRuns && typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
         } catch (err) {
-          markPageRenderDone();
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           setRenderFailed(true);
           throw err;
@@ -642,9 +663,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const pageBoxRef = useRef(null);
 
 
-  // مرحلهٔ ۲۹ — پاسِ دوم: دیپ‌رندرِ سوپرسمپلِ PNG (موتورِ مرحلهٔ ۱۹)
-  // برایِ صفحهٔ فعال و همسایه‌هایِ بلافصل (distance <= 1)، پس از
-  // آماده شدنِ پایه و در توقفِ اسکرول (سیگنالِ hiDpiRenderTick).
+  // مرحلهٔ ۲۹/۳۱ — پاسِ دوم: دیپ‌رندرِ سوپرسمپلِ PNG (موتورِ
+  // مرحلهٔ ۱۹)، پس از آماده شدنِ پایه و فقط در سکونِ کاملِ
+  // اسکرول (سیگنالِ hiDpiRenderTick با ۴۲۰ میلی‌ثانیه سکون):
+  // تا زومِ ۱٫۱۵ فقط صفحهٔ فعال، بالاتر از آن همسایهٔ بلافصل
+  // هم با ۲۰۰ میلی‌ثانیه تأخیر.
   // فرمولِ دقیقِ مرحلهٔ ۱۹ با سقف‌هایِ یکنواختِ ۵۱۲۰ پیکسل /
   // ۲۰ مگاپیکسل؛ انکدِ PNG با Worker؛ تعویض پس از decode، بدونِ
   // چشمک. خروج از فاصلهٔ ۱، نشانیِ دیپ را همان‌جا آزاد می‌کند
@@ -655,7 +678,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
     const dist = distanceRef.current ?? 99;
     const cacheKey = `${filePath}:${pageNumber}`;
     const key = `deep:${filePath}:${pageNumber}`;
-    if (!shouldRender || !pdfDoc || dist > 1) {
+    // مرحلهٔ ۳۱ — سقفِ فاصلهٔ دیپ بر اساسِ زومِ نشسته: تا ۱٫۱۵
+    // فقط صفحهٔ فعال، بالاتر از آن تا همسایهٔ بلافصل.
+    const deepMaxDist = (renderZoomLevel || 0) <= 1.15 ? 0 : 1;
+    if (!shouldRender || !pdfDoc || dist > deepMaxDist) {
       renderQueue.cancel(key);
       revokeDeepPngUrl(cacheKey);
       deepUrlRef.current = null;
@@ -677,14 +703,16 @@ const PdfPageItem = React.memo(function PdfPageItem({
         setDeepUrl(null);
       }
     }
-    // مرحلهٔ ۳۰ — سقفِ تطبیقیِ دیپ بر اساسِ زومِ نشسته:
-    // تا ۱۲۵٪ سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسل، بالاتر از آن سقفِ
-    // ۵۱۲۰ پیکسل / ۲۰ مگاپیکسلِ مرحلهٔ ۲۹. طبقه (tier) در امضا
-    // هست تا عبور از مرزِ ۱۲۵٪ با همان زومِ کوانتیزه، دیپِ
-    // کهنه را نگه ندارد.
-    const deepTier = (renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo';
-    const deepSideCap = deepTier === 'hi' ? 5120 : 3600;
-    const deepAreaCap = deepTier === 'hi' ? 20000000 : 9000000;
+    // مرحلهٔ ۳۱ — سقفِ تطبیقیِ دیپ بر اساسِ زومِ نشسته:
+    // تا ۱۱۵٪ (زومِ عادی تا متوسط): سقفِ سبکِ ۳۲۰۰ پیکسل /
+    // ۷ مگاپیکسل و فقط صفحهٔ فعال (طبقهٔ light)؛ ۱۱۵٪ تا ۱۲۵٪:
+    // سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسلِ مرحلهٔ ۳۰ (lo)؛ بالاتر از
+    // ۱۲۵٪: سقفِ ۵۱۲۰ پیکسل / ۲۰ مگاپیکسلِ مرحلهٔ ۲۹ (hi).
+    // طبقه (tier) در امضاست تا عبور از مرزِ ۱۱۵٪ با همان زومِ
+    // کوانتیزه، دیپِ کهنه را نگه ندارد.
+    const deepTier = (renderZoomLevel || 0) <= 1.15 ? 'light' : ((renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo');
+    const deepSideCap = deepTier === 'light' ? 3200 : (deepTier === 'hi' ? 5120 : 3600);
+    const deepAreaCap = deepTier === 'light' ? 7000000 : (deepTier === 'hi' ? 20000000 : 9000000);
     const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|${deepTier}`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
@@ -696,30 +724,18 @@ const PdfPageItem = React.memo(function PdfPageItem({
       filePath,
       kind: 'deep',
       priority,
-      delayMs: dist === 0 ? 0 : 60,
+      delayMs: dist === 0 ? 0 : 200,
       run: async (hooks) => {
         try {
           let renderTask = null;
           hooks.onCancel(() => {
             try { renderTask?.cancel(); } catch (_) {}
           });
-          // مرحلهٔ ۳۰ — no-opِ پیش‌فرض (مثلِ پاسِ پایه).
-          let markPageRenderDone = () => {};
           const page = await pdfDoc.getPage(pageNumber);
+          // مرحلهٔ ۳۱ — ثبت برایِ cleanupِ معوقِ unmount (مثلِ
+          // پاسِ پایه).
+          trackPageForDeferredCleanup(page);
           if (hooks.isCancelled()) return;
-          // مرحلهٔ ۳۰ — شمارشِ رندرِ فعال + آزادسازیِ pdf.js
-          // (همان الگویِ پاسِ پایه؛ شمارنده، مشترکِ هر دو پاس است).
-          let renderFlightCounted = false;
-          markPageRenderDone = () => {
-            if (!renderFlightCounted) return;
-            renderFlightCounted = false;
-            pageRenderFlightRef.current = Math.max(0, pageRenderFlightRef.current - 1);
-            if (pageRenderFlightRef.current === 0) {
-              try { if (typeof page.cleanup === 'function') page.cleanup(); } catch (_) {}
-            }
-          };
-          pageRenderFlightRef.current += 1;
-          renderFlightCounted = true;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width <= 0 || baseViewport.height <= 0) return;
           const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 2.5);
@@ -743,7 +759,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
           tmpCtx.imageSmoothingQuality = 'high';
           renderTask = page.render({ canvasContext: tmpCtx, viewport });
           await renderTask.promise;
-          markPageRenderDone();
           if (hooks.isCancelled()) {
             tmp.width = 0;
             tmp.height = 0;
@@ -775,7 +790,6 @@ const PdfPageItem = React.memo(function PdfPageItem({
           registerDeepPngUrl(cacheKey, url);
           if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
         } catch (err) {
-          markPageRenderDone();
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           throw err;
         }
@@ -964,14 +978,25 @@ const PdfPageItem = React.memo(function PdfPageItem({
           </div>
         )}
 
-        {/* لایه تعاملی استودیو ویرایش روی صفحه — همیشه مانت است */}
-        <AnnotationLayer
-          pageNumber={pageNumber}
-          items={pageAnnotations}
-          onCommitPageItems={onCommitPageAnnotations}
-          rotation={rotation}
-          isNearViewport={distanceFromActive <= 1}
-        />
+        {/* مرحلهٔ ۳۱ — مانتِ تنبلِ لایهٔ حاشیه‌نویسی: وقتی
+            استودیو خاموش است و صفحه هیچ حاشیه‌نویسی‌ای ندارد،
+            اصلاً مانت نمی‌شود (نه کامپوننت، نه Stageِ Konva).
+            این، استیجِ کاملِ صفحه‌هایِ نزدیکِ خالی را هم حذف
+            می‌کند (لایه، از قبل برایِ صفحه‌هایِ دورِ خالی Stage
+            نمی‌ساخت، ولی خودِ کامپوننت با همهٔ افکت‌هایش مانت
+            می‌شد). با فعال شدنِ استودیو یا داشتنِ آیتم، مانت
+            می‌شود؛ پس ورودیِ طراحی و نمایشِ آیتم‌ها حفظ است.
+            وقتی استودیو فعال است، لایه همچنان همیشه مانت است و
+            رفعِ صفحاتِ مرده سرِ جایش می‌ماند. */}
+        {shouldMountAnnotationLayer ? (
+          <AnnotationLayer
+            pageNumber={pageNumber}
+            items={pageAnnotations}
+            onCommitPageItems={onCommitPageAnnotations}
+            rotation={rotation}
+            isNearViewport={distanceFromActive <= 1}
+          />
+        ) : null}
       </div>
       {/* مرحله ۱۴: بوک‌مارک‌ها رویِ لبهٔ حاشیهٔ خودِ صفحه
           می‌نشینند (مطابقِ تصویرِ مرجعِ کاربر): ۱۴ پیکسل از لبه،
@@ -1007,6 +1032,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
 // ۳. کامپوننت اصلی PdfViewer (مجهز به Dual-Pass HiDPI و Area Box Zoom)
 // ============================================================================
 export default function PdfViewer({ filePath }) {
+  // مرحلهٔ ۳۲ — این اشتراک، در بالاترین نقطهٔ بدنهٔ کامپوننت است
+  // (قانون: هیچ constای پیش از خطِ تعریفش خوانده نمی‌شود؛ در مرحلهٔ
+  // ۳۱، نسخهٔ آیتم از همین اشتراک، پایین‌تر از اولین استفاده‌اش بود و
+  // با خطایِ TDZ کرش می‌کرد).
+  const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const zoomLevel = useReaderStore((state) => state.zoomLevel);
   const setZoomLevel = useReaderStore((state) => state.setZoomLevel);
   const setPdfOutline = useReaderStore((state) => state.setPdfOutline);
@@ -1129,7 +1159,6 @@ export default function PdfViewer({ filePath }) {
 
   const isSnippingActive = useAppStore((state) => state.isSnippingActive);
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
-  const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const showToast = useAppStore((state) => state.showToast);
   const updateReadingProgress = useLibraryStore((state) => state.updateReadingProgress);
   const { handleContextMenu } = useContextMenu();
@@ -1578,10 +1607,10 @@ export default function PdfViewer({ filePath }) {
           showSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
         },
       });
-      const base64 = rebuildPdfBytesToBase64(rebuilt.bytes);
+      // مرحلهٔ ۳۲ — بایت‌هایِ خامِ Uint8Array مستقیم از IPC می‌روند (بدونِ رفت‌وبرگشتِ base64).
       const result = await coreApi.saveRebuiltPdf({
         pdfPath: filePath,
-        base64,
+        pdfBytes: rebuilt.bytes,
         mode: saveMode,
         expectedPageCount: rebuilt.pageCount,
         // مرحله ۱۱: ایندکسِ جستجویِ کناری، کنارِ فایلِ خروجی
@@ -1658,10 +1687,10 @@ export default function PdfViewer({ filePath }) {
             showSaveStatus('saving-as', `در حالِ بازسازیِ صفحهٔ ${pageNum} از ${totalPages}…`, 0);
           },
         });
-        const base64 = rebuildPdfBytesToBase64(rebuilt.bytes);
+        // مرحلهٔ ۳۲ — بایت‌هایِ خامِ Uint8Array مستقیم از IPC می‌روند (بدونِ رفت‌وبرگشتِ base64).
         const result = await coreApi.saveRebuiltPdf({
           pdfPath: filePath,
-          base64,
+          pdfBytes: rebuilt.bytes,
           mode: 'copy',
           expectedPageCount: rebuilt.pageCount,
           // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر از مودالِ محافظت.
@@ -1830,8 +1859,8 @@ export default function PdfViewer({ filePath }) {
         // می‌شود تا کاربر، همان‌جا کپیِ قابل‌ویرایش (بی‌اتلافِ
         // qpdf یا بازسازی) بسازد. حاشیه‌نویسی‌ها در دیتابیس
         // می‌مانند و از دست نمی‌روند.
-        showSaveStatus('info', 'این فایل محافظت‌شده است؛ برای ذخیره، نسخهٔ کپیِ قابل‌ویرایش ساخته می‌شود…', 6000);
-        showToast('این فایل محافظت‌شده است؛ مودالِ ساختِ نسخهٔ کپی باز می‌شود.', { type: 'info' });
+        showSaveStatus('info', 'این فایل محافظت‌شده است؛ مودالِ انتخابِ روش باز می‌شود: مطالعه در برنامه بدونِ کپی، کپیِ برداری با qpdf، یا کپیِ بازسازی‌شده.', 6000);
+        showToast('این فایل محافظت‌شده است؛ مودالِ انتخابِ روشِ کپی باز می‌شود.', { type: 'info' });
         window.dispatchEvent(new CustomEvent('app:open-protection-modal', { detail: { filePath } }));
       } else {
         showSaveStatus('error', (result && result.error) || 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.', 6000);
@@ -3118,7 +3147,8 @@ export default function PdfViewer({ filePath }) {
       // برنامه‌ایِ ناشی از زومِ باکسی یا پرشِ صفحه) پس از ۱۲۰
       // میلی‌ثانیه توقف، شلیک می‌شود. این تایمر، پیش از هر گارد
       // و شاخهٔ دیگری ست می‌شود تا هیچ اسکرولی، تایل را جا
-      // نگذارد. (تایمرِ ۲۲۰ میلی‌ثانیه‌ایِ HiDPI، جداگانه می‌ماند.)
+      // نگذارد. (تایمرِ ۴۲۰ میلی‌ثانیه‌ایِ HiDPIِ مرحلهٔ ۳۱،
+      // جداگانه می‌ماند.)
       if (!rafId) {
         rafId = requestAnimationFrame(() => {
           rafId = null;
@@ -3129,9 +3159,13 @@ export default function PdfViewer({ filePath }) {
       if (scrollIdleTimerRef.current) {
         clearTimeout(scrollIdleTimerRef.current);
       }
+      // مرحلهٔ ۳۱ — سکونِ کاملِ ۴۲۰ میلی‌ثانیه (پیش‌تر ۲۲۰):
+      // تا وقتی کاربر در حالِ ورق زدن و اسکرول است، فقط لایهٔ
+      // پایهٔ فوق‌سریعِ WebP کار می‌کند و دیپ، تردِ اصلی و GPU
+      // را درگیرِ انکد/دیکدِ PNG نمی‌کند.
       scrollIdleTimerRef.current = setTimeout(() => {
         triggerHiDpiRender?.();
-      }, 220);
+      }, 420);
 
       // مرحله ۲۲ — به‌روزرسانیِ نقطهٔ کانونیِ زوم در هر رویدادِ
       // اسکرول (همگام، نه با rAF) تا اثرِ قفل، همیشه تازه‌ترین

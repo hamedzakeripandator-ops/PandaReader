@@ -863,7 +863,12 @@ export async function renderPageOverlay(items, geometry) {
   };
   const [canvas, ctx] = makeCanvas();
   const [hlCanvas, hlCtx] = makeCanvas();
-  if (!ctx || !hlCtx) return null;
+  if (!ctx || !hlCtx) {
+    // مرحلهٔ ۳۲ — بوم‌هایِ موقت حتی در این خروجِ زودهنگام هم آزاد می‌شوند.
+    try { canvas.width = 0; canvas.height = 0; } catch (_) {}
+    try { hlCanvas.width = 0; hlCanvas.height = 0; } catch (_) {}
+    return null;
+  }
 
   // مقیاسِ واحدِ یکنواخت → پیکسلِ بوم: بر اساسِ عرضِ دیده‌شده (viewport).
   const unitScale = (scale * geometry.viewport.width) / 1000;
@@ -893,10 +898,14 @@ export async function renderPageOverlay(items, geometry) {
       drawArrowItemCanvas(targetCtx, item, geometry, canvasW, canvasH, unitScale);
     }
   }
-  return {
-    overlayPng: hasMain ? canvas.toDataURL('image/png') : null,
-    highlightPng: hasHighlight ? hlCanvas.toDataURL('image/png') : null,
-  };
+  const overlayPng = hasMain ? canvas.toDataURL('image/png') : null;
+  const highlightPng = hasHighlight ? hlCanvas.toDataURL('image/png') : null;
+  // مرحلهٔ ۳۲ — آزادسازیِ فوریِ بوم‌هایِ موقت بلافاصله پس از گرفتنِ
+  // خروجی، تا حافظهٔ گرافیکیِ بوم‌هایِ تا ۶۰۰۰ پیکسلی در کتاب‌هایِ
+  // پرحاشیه در رم انباشته نشود (صفر کردنِ ابعاد، بکینگ‌استور را آزاد می‌کند).
+  try { canvas.width = 0; canvas.height = 0; } catch (_) {}
+  try { hlCanvas.width = 0; hlCanvas.height = 0; } catch (_) {}
+  return { overlayPng, highlightPng };
 }
 
 // --- ارکستراسیونِ کلِ خروجی -------------------------------------------------
@@ -926,6 +935,11 @@ export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageView
       abortErr.name = 'AbortError';
       throw abortErr;
     }
+    // مرحلهٔ ۳۲ — ییلدِ پیش از رندرِ هر صفحهٔ دارایِ حاشیه‌نویسی
+    // (پیش از این، ییلد در انتهایِ حلقه بود و صفحهٔ اول بدونِ ییلد
+    // رندر می‌شد): تردِ اصلی آزاد می‌شود تا نوارِ پیشرفت و دکمهٔ
+    // لغو، در تمامِ مدت با نرخِ ۶۰ فریم واکنش‌گرا بمانند.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const pageNum = pageNumbers[i];
     const items = annotationsByPage[pageNum];
     totalItems += items.length;
@@ -948,8 +962,6 @@ export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageView
       };
     }
     if (typeof onProgress === 'function') onProgress(i + 1, pageNumbers.length);
-    // ییلد تا UI بینِ صفحه‌ها نفس بکشد (رندرِ overlay می‌تواند سنگین باشد).
-    await new Promise((resolve) => setTimeout(resolve, 0));
   }
   return { pages, totalItems, annotatedPages: Object.keys(pages).length };
 }

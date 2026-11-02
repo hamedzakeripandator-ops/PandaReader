@@ -471,7 +471,11 @@ export const coreApi = {
   saveRebuiltPdf: async (payload) => {
     const api = getApi();
     if (!api?.saveRebuiltPdf) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
-    if (!payload?.pdfPath || typeof payload?.base64 !== 'string') {
+    // مرحلهٔ ۳۲ — ورودیِ باینری (Uint8Array) یا base64ِ قدیمی، هر دو
+    // قبول‌اند؛ باینری اولویت دارد و از sanitize نمی‌گذرد.
+    const hasBinary = payload?.pdfBytes instanceof Uint8Array && payload.pdfBytes.length > 0;
+    const hasBase64 = typeof payload?.base64 === 'string' && payload.base64.length > 0;
+    if (!payload?.pdfPath || (!hasBinary && !hasBase64)) {
       return { success: false, error: 'دادهٔ فایلِ بازسازی‌شده کامل نیست.' };
     }
     try {

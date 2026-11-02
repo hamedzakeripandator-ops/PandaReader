@@ -41,16 +41,20 @@ function AppTimeWidget() {
     };
   }, []);
 
+  // مرحلهٔ ۳۱ — چیدمانِ عمودیِ ضدِ برش: سطرِ اول، آیکون +
+  // عنوانِ کوتاه؛ سطرهایِ مقدار، کامل و بدونِ ellipsis. پیش‌تر،
+  // مقدارها در یک ردیفِ تنگ با nowrap/ellipsis بریده می‌شدند و
+  // ساعتِ مطالعه با «...» ناتمام می‌ماند.
   return (
     <div style={styles.appTimeWidget} title="زمانِ حضور در برنامه">
-      <span style={styles.appTimeIcon}>
-        <Icons.Clock size={15} />
-      </span>
-      <div style={styles.appTimeTexts}>
+      <div style={styles.appTimeHeaderRow}>
+        <span style={styles.appTimeIcon}>
+          <Icons.Clock size={15} />
+        </span>
         <span style={styles.appTimeTitle}>زمانِ حضور در برنامه</span>
-        <span style={styles.appTimeLine}>مجموعِ حضور در اپ: {formatReadingHours(total)}</span>
-        <span style={styles.appTimeLine}>نشستِ فعلی: {formatReadingHours(session)}</span>
       </div>
+      <span style={styles.appTimeLine}>مجموعِ حضور در اپ: {formatReadingHours(total)}</span>
+      <span style={styles.appTimeLine}>نشستِ فعلی: {formatReadingHours(session)}</span>
     </div>
   );
 }
@@ -327,7 +331,10 @@ const styles = {
     color: 'var(--text)',
     cursor: 'pointer',
     textAlign: 'right',
-    direction: 'rtl',
+    // مرحلهٔ ۳۲ — کلیدِ تکراریِ `direction: 'rtl'` که اینجا بود، حذف شد
+    // (هشدارِ کلیدِ تکراریِ Vite را می‌ساخت)؛ جهتِ مؤثر حالا همان `ltr`ِ
+    // بالایِ همین شیء است که با نیتِ توضیحِ مرحلهٔ ۴ می‌خواند (اول آیکون
+    // در سمتِ چپ، بعد نام).
     transition: 'all 0.2s ease',
     outline: 'none',
   },
@@ -417,27 +424,26 @@ const styles = {
     direction: 'rtl',
     backgroundColor: 'var(--panel2)',
     borderRadius: '16px',
-    padding: '10px 14px',
+    padding: '10px 12px',
     display: 'flex',
-    alignItems: 'flex-start',
-    gap: '12px',
+    flexDirection: 'column',
+    gap: '6px',
     borderWidth: '1px',
     borderStyle: 'solid',
     borderColor: 'var(--border)',
     width: '100%',
     boxSizing: 'border-box',
   },
+  appTimeHeaderRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
   appTimeIcon: {
     color: '#f59e0b',
     display: 'flex',
     paddingTop: '2px',
     flexShrink: 0,
-  },
-  appTimeTexts: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '3px',
-    minWidth: 0,
   },
   appTimeTitle: {
     fontFamily: 'var(--font-fa)',
@@ -447,11 +453,12 @@ const styles = {
   },
   appTimeLine: {
     fontFamily: 'var(--font-fa)',
-    fontSize: '11px',
+    fontSize: '12px',
+    fontWeight: 700,
+    lineHeight: 1.4,
     color: 'var(--muted)',
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
+    whiteSpace: 'normal',
+    wordBreak: 'keep-all',
   },
   profileCard: {
     // مرحله ۴ — جهتِ صریحِ ردیف: آواتار چپ‌ترین، بعد اسم، بعد فلش.

@@ -2123,6 +2123,30 @@ parentPort.on('message', (request) => {
         break;
       }
 
+      // مرحلهٔ ۳۱ — مجموعِ حاشیه‌نویسی‌ها برایِ نمایِ پروفایل:
+      // فقط خواندنی است (writeDB ندارد) و رویِ نقشهٔ درون‌حافظه‌ای
+      // می‌دود، پس برایِ کتابخانه‌هایِ بزرگ هم ارزان است. شکلِ
+      // ذخیره: db.annotations[مسیرِ نرمال] = {شمارهٔ صفحه: [آیتم]}.
+      case 'GET_ANNOTATION_TOTALS': {
+        const allDocs = (db.annotations && typeof db.annotations === 'object') ? db.annotations : {};
+        let totalItems = 0;
+        let annotatedPages = 0;
+        let annotatedFiles = 0;
+        for (const docKey of Object.keys(allDocs)) {
+          const doc = allDocs[docKey] || {};
+          let docItems = 0;
+          for (const pageKey of Object.keys(doc)) {
+            const pageItems = Array.isArray(doc[pageKey]) ? doc[pageKey] : [];
+            if (pageItems.length > 0) annotatedPages += 1;
+            docItems += pageItems.length;
+          }
+          if (docItems > 0) annotatedFiles += 1;
+          totalItems += docItems;
+        }
+        sendReply({ type: 'done', action, totalItems, annotatedPages, annotatedFiles });
+        break;
+      }
+
       case 'SAVE_ANNOTATIONS': {
         const { filePath, pageNumber, items = [] } = payload;
         const norm = normalizePath(filePath);

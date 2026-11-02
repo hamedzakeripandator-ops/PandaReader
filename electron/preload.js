@@ -215,7 +215,13 @@ contextBridge.exposeInMainWorld('api', {
   },
 
   saveRebuiltPdf: (payload) => {
-    return ipcRenderer.invoke('save-rebuilt-pdf', sanitizePayload(payload));
+    // مرحلهٔ ۳۲ — pdfBytes باینری است و نباید از sanitizePayload
+    // بگذرد (چرخهٔ JSON آن، Uint8Array را نابود می‌کند)؛ بقیهٔ فیلدها
+    // مثلِ قبل تمیز می‌شوند و بایت‌ها با structured clone می‌روند.
+    const { pdfBytes, ...rest } = payload || {};
+    const cleanRest = sanitizePayload(rest);
+    if (pdfBytes instanceof Uint8Array && pdfBytes.length > 0) cleanRest.pdfBytes = pdfBytes;
+    return ipcRenderer.invoke('save-rebuilt-pdf', cleanRest);
   },
 
   changeDataDirectory: (payload) => {

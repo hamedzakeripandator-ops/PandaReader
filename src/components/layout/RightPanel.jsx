@@ -398,13 +398,17 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
     };
   }, [filePath, comicData?.cover, customCoverFromStore]);
 
-  // مرحلهٔ ۳۰ — صفحهٔ فعلی، همیشه در وسطِ عمودیِ کادرِ لیستِ
-  // صفحات قرار می‌گیرد (فرمولِ پرامپت). activeTab در این فایل
-  // وجود ندارد؛ وابستگی‌ها، currentPage و باز بودنِ پنل و شمارِ
-  // صفحه‌هایِ پردازش‌شده‌اند تا پس از ساخته شدنِ لیست هم اجرا شود.
+  // مرحلهٔ ۳۰/۳۱ — صفحهٔ فعلی، همیشه در وسطِ عمودیِ کادرِ
+  // لیستِ صفحات قرار می‌گیرد (فرمولِ پرامپت). مرحلهٔ ۳۱: با
+  // Debounceِ ۲۵۰ میلی‌ثانیه پس از توقفِ تغییرِ currentPage،
+  // تا در حینِ اسکرولِ سریعِ PDF، انیمیشن‌هایِ smoothِ
+  // پی‌درپی، کامپوزیتورِ مرورگر را لگ‌دار نکنند. activeTab در
+  // این فایل وجود ندارد؛ وابستگی‌ها، currentPage و باز بودنِ
+  // پنل و شمارِ صفحه‌هایِ پردازش‌شده‌اند تا پس از ساخته شدنِ
+  // لیست هم اجرا شود.
   useEffect(() => {
-    if (!isRightSidebarOpen) return;
-    const rafId = requestAnimationFrame(() => {
+    if (!isRightSidebarOpen) return undefined;
+    const timerId = setTimeout(() => {
       const listEl = scrollContainerRef.current;
       if (!listEl) return;
       const activeItemEl = listEl.querySelector(`[data-panel-page="${currentPage}"]`) || activePageRef.current;
@@ -415,8 +419,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
         const targetScrollTop = Math.max(0, itemCenterInScroll - listEl.clientHeight * 0.5);
         listEl.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
       }
-    });
-    return () => cancelAnimationFrame(rafId);
+    }, 250);
+    return () => clearTimeout(timerId);
   }, [currentPage, isRightSidebarOpen, processedPages.length]);
 
   useEffect(() => {

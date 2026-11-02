@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import useSettingsStore from '../../store/useSettingsStore';
 import useLibraryStore from '../../store/useLibraryStore';
+import useBookmarkStore from '../../store/useBookmarkStore';
 import useAppStore from '../../store/useAppStore';
 import Icons from '../../components/common/Icons';
 import { coreApi } from '../../services/coreApi';
@@ -14,6 +15,61 @@ const PRESET_GRADIENTS = [
   { id: 'emerald', label: 'زمردی تیره', gradient: 'linear-gradient(135deg, #10b981 0%, #064e3b 100%)' },
   { id: 'sunset', label: 'غروب نارنجی', gradient: 'linear-gradient(135deg, #f59e0b 0%, #b91c1c 100%)' },
 ];
+
+// مرحلهٔ ۳۱ — ابزارهایِ شاخص‌هایِ استعداد و نمودارها. همهٔ
+// فرمول‌ها، ورودی‌هایِ واقعیِ دیتابیس را می‌گیرند و خروجی،
+// همیشه بینِ ۰ تا ۱۰۰ است؛ دادهٔ صفر، صفر می‌دهد، نه عددِ جعلی.
+function clampScore(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function skillLabelFor(score) {
+  if (score >= 90) return 'نخبه';
+  if (score >= 75) return 'پژوهشگرِ ارشد';
+  if (score >= 60) return 'خوانندهٔ حرفه‌ای';
+  if (score >= 40) return 'در مسیرِ رشد';
+  return 'تازه‌کار';
+}
+
+// N روزِ اخیرِ تقویمی (محلی) با دقیقه‌هایِ مطالعهٔ هر روز.
+// کلیدهایِ دیتابیس، تاریخِ محلیِ YYYY-MM-DD هستند.
+function buildLastDays(daysMap, n) {
+  const out = [];
+  const today = new Date();
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const entry = (daysMap && daysMap[key]) || {};
+    out.push({ key, label: key.slice(5).replace('-', '/'), minutes: Math.round((Number(entry.seconds) || 0) / 60) });
+  }
+  return out;
+}
+
+// منحنیِ هموارِ Catmull-Rom به بزیر (برایِ خطِ نمودارِ مساحتی).
+function buildSmoothPath(pts) {
+  if (pts.length === 0) return '';
+  if (pts.length === 1) return `M ${pts[0].x} ${pts[0].y}`;
+  let d = `M ${pts[0].x} ${pts[0].y}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+// نقطهٔ رادار: زاویهٔ ۰ در بالا، ساعت‌گرد.
+function radarPoint(cx, cy, r, index, total, ratio) {
+  const angle = (Math.PI * 2 * index) / total - Math.PI / 2;
+  return [cx + Math.cos(angle) * r * ratio, cy + Math.sin(angle) * r * ratio];
+}
 
 export default function ProfileView() {
   const { profile, updateProfile, setProfileAvatar, initSettings } = useSettingsStore();
@@ -29,6 +85,13 @@ export default function ProfileView() {
   const [readingSummary, setReadingSummary] = useState(null);
   // مرحله ۱۴: مجموعِ زمانِ حضور در برنامه.
   const [totalAppSeconds, setTotalAppSeconds] = useState(0);
+  // مرحلهٔ ۳۱ — نقشهٔ روزهایِ مطالعه (برایِ نمودارِ ۷/۱۴ روزه)،
+  // مجموعِ حاشیه‌نویسی‌ها (از ورکرِ دیتابیس)، بازهٔ نمودار و
+  // پرچمِ انیمیشنِ لودِ نمودارها.
+  const [readingDays, setReadingDays] = useState({});
+  const [annotationTotals, setAnnotationTotals] = useState(null);
+  const [chartDays, setChartDays] = useState(14);
+  const [isChartAnimated, setIsChartAnimated] = useState(false);
   useEffect(() => {
     let isMounted = true;
     (async () => {
@@ -50,11 +113,29 @@ export default function ProfileView() {
         if (isMounted && res) setTotalAppSeconds(Number(res.totalAppSeconds) || 0);
         if (isMounted && res && res.days) {
           setReadingSummary(computeReadingSummary(res.days));
+          setReadingDays(res.days);
         } else if (isMounted) {
           setReadingSummary(computeReadingSummary({}));
+          setReadingDays({});
         }
+        // مرحلهٔ ۳۱ — مجموعِ حاشیه‌نویسی‌ها از ورکر (فقط خواندنی،
+        // بدونِ نوشتن در دیتابیس). خرابی‌اش، شاخص‌ها را خراب
+        // نمی‌کند؛ صفر می‌ماند.
+        try {
+          if (isMounted && coreApi.dbAction) {
+            const totals = await coreApi.dbAction({ action: 'GET_ANNOTATION_TOTALS', payload: {} });
+            if (isMounted && totals && totals.type === 'done') {
+              setAnnotationTotals({
+                totalItems: Number(totals.totalItems) || 0,
+                annotatedPages: Number(totals.annotatedPages) || 0,
+                annotatedFiles: Number(totals.annotatedFiles) || 0,
+              });
+            }
+          }
+        } catch (_) {}
       } catch (_) {
         if (isMounted) setReadingSummary(computeReadingSummary({}));
+        if (isMounted) setReadingDays({});
       }
     })();
     return () => { isMounted = false; };
@@ -72,6 +153,20 @@ export default function ProfileView() {
     if (profile?.dailyGoalPages) setDailyGoal(profile.dailyGoalPages);
   }, [profile]);
 
+  // مرحلهٔ ۳۱ — شمارندهٔ بوک‌مارک‌ها (الگویِ سایدبار) و پرچمِ
+  // انیمیشنِ نمودارها (یک فریم پس از مانت، تا ترنزیشنِ ۰٫۹
+  // ثانیه‌ای از صفر تا مقدارِ واقعی دیده شود).
+  const totalBookmarkCount = useBookmarkStore((state) => state.totalBookmarkCount);
+  const loadAllBookmarks = useBookmarkStore((state) => state.loadAllBookmarks);
+  useEffect(() => {
+    if (loadAllBookmarks) loadAllBookmarks();
+  }, [loadAllBookmarks]);
+  useEffect(() => {
+    let rafId = null;
+    rafId = requestAnimationFrame(() => setIsChartAnimated(true));
+    return () => { if (rafId) cancelAnimationFrame(rafId); };
+  }, []);
+
   // مرحله ۶ ـ بخش الف: «صفحه خوانده‌شده» حالا از آمارِ واقعیِ
   // ثبت‌شده می‌آید، نه از جمعِ شمارهٔ صفحهٔ جاریِ کتاب‌ها (که
   // موقعیتِ فعلی را می‌شمرد، نه صفحاتِ واقعاً خوانده‌شده را، و با
@@ -82,6 +177,72 @@ export default function ProfileView() {
   const effectiveLibrary = library || libraryItems || [];
   const totalComics = effectiveLibrary.length;
   const totalFavorites = favorites?.length || 0;
+
+  // مرحلهٔ ۳۱ — کتاب‌هایِ تمام‌شده: پیشرفتِ ۱۰۰٪ یا رسیدنِ
+  // صفحهٔ جاری به کلِ صفحه‌ها (برایِ آیتم‌هایِ بدونِ پیشرفت،
+  // از lastPage/totalPages حساب می‌شود).
+  const finishedBooks = useMemo(() => {
+    return effectiveLibrary.filter((item) => {
+      if (!item) return false;
+      const totalP = Number(item.totalPages) || 0;
+      const lastP = Number(item.lastPage || item.currentPage) || 0;
+      if (Number(item.progress) >= 100) return true;
+      return totalP > 1 && lastP >= totalP;
+    }).length;
+  }, [effectiveLibrary]);
+
+  // مرحلهٔ ۳۱ — ۵ شاخصِ استعداد (۰ تا ۱۰۰) از آمارِ واقعی.
+  // تمرکز: میانگینِ دقیقهٔ مطالعهٔ روزانه (سقفِ ۶۰ دقیقه برایِ
+  // نمرهٔ کاملِ این جزء) + نسبتِ مطالعه به حضور در اپ.
+  // تحلیل: تراکمِ بوک‌مارک و حاشیه‌نویسی در روز + حجمِ کلِ آن‌ها.
+  // سرعتِ بصری: صفحه در ساعت + صفحه در روز (سقف‌هایِ ۴۰ و ۵۰).
+  // استقامت: بهترین رکوردِ پیوستگی (سقفِ ۳۰ روز) + روزهایِ فعال
+  // (سقفِ ۹۰) + کلِ زمانِ مطالعه (سقفِ ۱۰۰ ساعت).
+  // جامع: میانگینِ وزنیِ چهار شاخصِ دیگر.
+  const aptitudeMetrics = useMemo(() => {
+    if (!readingSummary) return null;
+    const totalSeconds = Number(readingSummary.totalSeconds) || 0;
+    const totalPages = Number(readingSummary.totalPages) || 0;
+    const totalDays = Math.max(1, Number(readingSummary.totalDays) || 0);
+    const bestStreak = Number(readingSummary.bestStreak) || 0;
+    const avgDailyMin = totalSeconds / totalDays / 60;
+    const studyPresence = totalSeconds / Math.max(1, Number(totalAppSeconds) || 0);
+    const focus = clampScore(0.6 * Math.min(100, (avgDailyMin / 60) * 100) + 0.4 * Math.min(1, studyPresence) * 100);
+    const pagesPerHour = totalSeconds > 0 ? totalPages / (totalSeconds / 3600) : 0;
+    const avgDailyPages = totalPages / totalDays;
+    const velocity = clampScore(0.5 * Math.min(100, (pagesPerHour / 40) * 100) + 0.5 * Math.min(100, (avgDailyPages / 50) * 100));
+    const markCount = (Number(totalBookmarkCount) || 0) + (annotationTotals ? Number(annotationTotals.totalItems) || 0 : 0);
+    const density = markCount / totalDays;
+    const analytical = clampScore(0.5 * Math.min(100, (density / 2) * 100) + 0.5 * Math.min(100, (markCount / 40) * 100));
+    const stamina = clampScore(0.5 * Math.min(100, (bestStreak / 30) * 100) + 0.3 * Math.min(100, (Number(readingSummary.totalDays) || 0) / 90 * 100) + 0.2 * Math.min(100, (totalSeconds / 360000) * 100));
+    const overall = clampScore(0.3 * focus + 0.25 * analytical + 0.2 * velocity + 0.25 * stamina);
+    return [
+      { id: 'focus', name: 'استعدادِ تمرکزِ عمیق', short: 'تمرکز', value: focus, color: '#00f2fe', desc: `میانگینِ ${Math.round(avgDailyMin)} دقیقه مطالعه در روز` },
+      { id: 'analytical', name: 'استعدادِ تحلیل و پژوهشگری', short: 'تحلیل', value: analytical, color: '#7c3aed', desc: `${markCount} بوک‌مارک و حاشیه‌نویسی` },
+      { id: 'velocity', name: 'چابکیِ پردازشِ بصری', short: 'سرعت', value: velocity, color: '#10b981', desc: `${Math.round(pagesPerHour)} صفحه در ساعت` },
+      { id: 'stamina', name: 'استقامت و پیوستگیِ ذهنی', short: 'استقامت', value: stamina, color: '#f59e0b', desc: `بهترین رکورد: ${bestStreak} روزِ پیوسته` },
+      { id: 'overall', name: 'امتیازِ جامعِ استعدادِ مطالعه', short: 'جامع', value: overall, color: '#ec4899', desc: `${finishedBooks} کتابِ تمام‌شده از ${totalComics} عنوان` },
+    ];
+  }, [readingSummary, totalAppSeconds, totalBookmarkCount, annotationTotals, finishedBooks, totalComics]);
+
+  // مرحلهٔ ۳۱ — دادهٔ نمودارِ روند (دقیقهٔ مطالعهٔ هر روز).
+  const trendDays = useMemo(() => buildLastDays(readingDays, chartDays), [readingDays, chartDays]);
+  const trendMax = Math.max(1, ...trendDays.map((d) => d.minutes));
+  const chartW = 640;
+  const chartH = 240;
+  const chartPad = { l: 8, r: 8, t: 16, b: 30 };
+  const chartPts = trendDays.map((d, i) => {
+    const x = trendDays.length === 1
+      ? chartW / 2
+      : chartPad.l + (i / (trendDays.length - 1)) * (chartW - chartPad.l - chartPad.r);
+    const y = chartPad.t + (1 - d.minutes / trendMax) * (chartH - chartPad.t - chartPad.b);
+    return { x, y };
+  });
+  const chartLinePath = buildSmoothPath(chartPts);
+  const chartAreaPath = chartPts.length > 0
+    ? `${chartLinePath} L ${chartPts[chartPts.length - 1].x} ${chartH - chartPad.b} L ${chartPts[0].x} ${chartH - chartPad.b} Z`
+    : '';
+  const chartBarW = trendDays.length > 1 ? ((chartW - chartPad.l - chartPad.r) / (trendDays.length - 1)) * 0.42 : 24;
 
   const currentAvatarImg = profile?.avatar || profile?.customAvatar || null;
 
@@ -315,6 +476,208 @@ export default function ProfileView() {
           </>
         ) : (
           <p style={styles.sectionDesc}>در حال بارگذاریِ آمار…</p>
+        )}
+      </div>
+
+      {/* مرحلهٔ ۳۱ — شاخص‌هایِ استعداد و مهارتِ مطالعه */}
+      <div style={styles.sectionCard}>
+        <div style={styles.sectionHeaderRow}>
+          <span style={{ color: 'var(--accent)', display: 'flex' }}>
+            <Icons.Zap size={18} />
+          </span>
+          <h4 style={styles.sectionTitle}>شاخص‌هایِ استعداد و مهارتِ مطالعه</h4>
+        </div>
+        <p style={styles.sectionDesc}>
+          این عددها از آمارِ واقعیِ خودت حساب می‌شوند (زمانِ مطالعه، صفحه‌هایِ خوانده‌شده، روزهایِ فعال و پیوسته، بوک‌مارک‌ها، حاشیه‌نویسی‌ها و کتاب‌هایِ تمام‌شده)؛ هیچ عددِ فرضی‌ای در آن‌ها نیست.
+        </p>
+        {aptitudeMetrics ? (
+          <>
+            <div style={styles.metricGrid}>
+              {aptitudeMetrics.map((m) => (
+                <div key={m.id} style={m.id === 'overall' ? { ...styles.metricCard, ...styles.metricCardOverall } : styles.metricCard}>
+                  <div style={styles.metricRingWrap}>
+                    <svg width="64" height="64" viewBox="0 0 64 64">
+                      <circle cx="32" cy="32" r="26" fill="none" stroke="var(--border)" strokeWidth="7" />
+                      <circle
+                        cx="32" cy="32" r="26" fill="none"
+                        stroke={m.color} strokeWidth="7" strokeLinecap="round"
+                        pathLength={1}
+                        strokeDasharray={1}
+                        strokeDashoffset={isChartAnimated ? 1 - m.value / 100 : 1}
+                        transform="rotate(-90 32 32)"
+                        style={{ transition: 'stroke-dashoffset 0.9s cubic-bezier(0.16, 1, 0.3, 1)' }}
+                      />
+                    </svg>
+                    <span style={styles.metricRingVal}>{m.value}</span>
+                  </div>
+                  <strong style={styles.metricName}>{m.name}</strong>
+                  <span style={styles.metricSkill}>سطحِ استعداد: {skillLabelFor(m.value)}</span>
+                  <span style={styles.metricDesc}>{m.desc}</span>
+                </div>
+              ))}
+            </div>
+            {readingSummary && readingSummary.totalDays === 0 && readingSummary.totalPages === 0 && readingSummary.totalSeconds === 0 && (
+              <p style={styles.sectionDesc}>هنوز دادهٔ کافی ثبت نشده است؛ با مطالعهٔ بیشتر، این شاخص‌ها شکل می‌گیرند.</p>
+            )}
+          </>
+        ) : (
+          <p style={styles.sectionDesc}>در حال بارگذاریِ آمار…</p>
+        )}
+      </div>
+
+      {/* مرحلهٔ ۳۱ — نمودارِ گرافیکیِ عملکرد و استعداد با انیمیشنِ لود */}
+      <div style={styles.sectionCard}>
+        <div style={styles.sectionHeaderRow}>
+          <span style={{ color: 'var(--accent)', display: 'flex' }}>
+            <Icons.Eye size={18} />
+          </span>
+          <h4 style={styles.sectionTitle}>نمودارِ گرافیکیِ عملکرد و استعداد</h4>
+        </div>
+        <p style={styles.sectionDesc}>
+          روندِ دقیقه‌هایِ مطالعه در روزهایِ اخیر (ستون + منحنیِ مساحتی با گرادیانِ نئونی) و رادارِ پنج‌ضلعیِ شاخص‌هایِ استعداد؛ هر دو با انیمیشنِ نرمِ ۰٫۹ ثانیه‌ای، از صفر تا مقدارِ واقعی، هنگامِ باز شدنِ صفحه پر می‌شوند.
+        </p>
+        <div style={styles.chartToggleRow}>
+          <span style={styles.chartToggleLabel}>بازهٔ نمودار:</span>
+          <button type="button" onClick={() => setChartDays(7)} style={chartDays === 7 ? { ...styles.chartToggleBtn, ...styles.chartToggleBtnActive } : styles.chartToggleBtn}>۷ روز</button>
+          <button type="button" onClick={() => setChartDays(14)} style={chartDays === 14 ? { ...styles.chartToggleBtn, ...styles.chartToggleBtnActive } : styles.chartToggleBtn}>۱۴ روز</button>
+        </div>
+        <div style={styles.chartSvgWrap}>
+          <svg width="100%" viewBox={`0 0 ${chartW} ${chartH}`} role="img" aria-label="روندِ مطالعه">
+            <defs>
+              <linearGradient id="trendAreaGrad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0%" stopColor="#00f2fe" />
+                <stop offset="100%" stopColor="#7c3aed" />
+              </linearGradient>
+            </defs>
+            {[0.25, 0.5, 0.75, 1].map((f) => (
+              <line
+                key={f}
+                x1={chartPad.l} x2={chartW - chartPad.r}
+                y1={chartPad.t + (1 - f) * (chartH - chartPad.t - chartPad.b)}
+                y2={chartPad.t + (1 - f) * (chartH - chartPad.t - chartPad.b)}
+                stroke="var(--border)" strokeWidth="1" strokeDasharray="3 4"
+              />
+            ))}
+            {trendDays.map((d, i) => {
+              const x = chartPts[i] ? chartPts[i].x : 0;
+              const barTop = chartPts[i] ? chartPts[i].y : chartH - chartPad.b;
+              const barH = chartH - chartPad.b - barTop;
+              return (
+                <rect
+                  key={`bar-${d.key}`}
+                  x={x - chartBarW / 2}
+                  y={isChartAnimated ? barTop : chartH - chartPad.b}
+                  width={chartBarW}
+                  height={isChartAnimated ? barH : 0}
+                  rx={3}
+                  fill="rgba(124, 58, 237, 0.35)"
+                  style={{ transition: `height 0.9s cubic-bezier(0.16, 1, 0.3, 1) ${i * 40}ms, y 0.9s cubic-bezier(0.16, 1, 0.3, 1) ${i * 40}ms` }}
+                />
+              );
+            })}
+            {chartAreaPath && (
+              <path
+                d={chartAreaPath}
+                fill="url(#trendAreaGrad)"
+                opacity={isChartAnimated ? 0.28 : 0}
+                style={{ transition: 'opacity 0.9s cubic-bezier(0.16, 1, 0.3, 1)' }}
+              />
+            )}
+            {chartLinePath && (
+              <path
+                d={chartLinePath}
+                fill="none"
+                stroke="url(#trendAreaGrad)"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                pathLength={1}
+                strokeDasharray={1}
+                strokeDashoffset={isChartAnimated ? 0 : 1}
+                style={{ transition: 'stroke-dashoffset 0.9s cubic-bezier(0.16, 1, 0.3, 1)' }}
+              />
+            )}
+            {trendDays.map((d, i) => (
+              <g key={`dot-${d.key}`}>
+                <circle
+                  cx={chartPts[i] ? chartPts[i].x : 0}
+                  cy={chartPts[i] ? chartPts[i].y : 0}
+                  r={isChartAnimated ? 4.5 : 0}
+                  fill="#00f2fe"
+                  stroke="#0a0f13"
+                  strokeWidth="1.5"
+                  style={{ filter: 'drop-shadow(0 0 4px rgba(0, 242, 254, 0.8))', transition: 'r 0.9s cubic-bezier(0.16, 1, 0.3, 1)' }}
+                >
+                  <title>{`${d.label}: ${d.minutes} دقیقه مطالعه`}</title>
+                </circle>
+                <text
+                  x={chartPts[i] ? chartPts[i].x : 0}
+                  y={chartH - 8}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fill="var(--muted)"
+                >
+                  {d.label}
+                </text>
+              </g>
+            ))}
+          </svg>
+        </div>
+        {aptitudeMetrics && (
+          <div style={styles.radarWrap}>
+            <svg width="320" height="320" viewBox="0 0 320 320" role="img" aria-label="رادارِ شاخص‌هایِ استعداد">
+              {[0.25, 0.5, 0.75, 1].map((f) => {
+                const pts = aptitudeMetrics.map((_, i) => radarPoint(160, 150, 105, i, 5, f));
+                return (
+                  <polygon
+                    key={f}
+                    points={pts.map((pt) => pt.join(',')).join(' ')}
+                    fill="none"
+                    stroke="var(--border)"
+                    strokeWidth="1"
+                  />
+                );
+              })}
+              {aptitudeMetrics.map((_, i) => {
+                const [x2, y2] = radarPoint(160, 150, 105, i, 5, 1);
+                return <line key={`axis-${i}`} x1={160} y1={150} x2={x2} y2={y2} stroke="var(--border)" strokeWidth="1" />;
+              })}
+              <g
+                style={{
+                  transform: isChartAnimated ? 'scale(1)' : 'scale(0)',
+                  transformOrigin: '160px 150px',
+                  transition: 'transform 0.9s cubic-bezier(0.16, 1, 0.3, 1)',
+                }}
+              >
+                <polygon
+                  points={aptitudeMetrics.map((m, i) => radarPoint(160, 150, 105, i, 5, m.value / 100).join(',')).join(' ')}
+                  fill="rgba(0, 242, 254, 0.18)"
+                  stroke="#00f2fe"
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+                {aptitudeMetrics.map((m, i) => {
+                  const [vx, vy] = radarPoint(160, 150, 105, i, 5, m.value / 100);
+                  return (
+                    <g key={`rv-${m.id}`}>
+                      <circle cx={vx} cy={vy} r="4" fill="#00f2fe" stroke="#0a0f13" strokeWidth="1.5">
+                        <title>{`${m.name}: ${m.value}`}</title>
+                      </circle>
+                      <text x={vx} y={vy - 10} textAnchor="middle" fontSize="11" fontWeight="700" fill="var(--text)">{m.value}</text>
+                    </g>
+                  );
+                })}
+              </g>
+              {aptitudeMetrics.map((m, i) => {
+                const [lx, ly] = radarPoint(160, 150, 132, i, 5, 1);
+                return (
+                  <text key={`rl-${m.id}`} x={lx} y={ly} textAnchor="middle" fontSize="11" fill="var(--muted)">
+                    {m.short}
+                  </text>
+                );
+              })}
+            </svg>
+            <p style={styles.sectionDesc}>رادارِ پنج‌ضلعیِ هر ۵ شاخص؛ چندضلعی از مرکز به بیرون باز می‌شود و عددِ هر رأس، همان شاخص است.</p>
+          </div>
         )}
       </div>
 
@@ -816,5 +1179,102 @@ const styles = {
     alignItems: 'center',
     gap: '7px',
     boxShadow: '0 4px 14px rgba(34, 211, 238, 0.35)',
+  },
+  // مرحلهٔ ۳۱ — کارت‌هایِ شاخص و نمودارها
+  metricGrid: {
+    display: 'flex',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  metricCard: {
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    borderRadius: '14px',
+    padding: '14px 16px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '6px',
+    minWidth: '150px',
+    flex: '1 1 150px',
+  },
+  metricCardOverall: {
+    borderColor: 'rgba(236, 72, 153, 0.55)',
+    boxShadow: '0 0 0 1px rgba(236, 72, 153, 0.25)',
+  },
+  metricRingWrap: {
+    position: 'relative',
+    width: '64px',
+    height: '64px',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  metricRingVal: {
+    position: 'absolute',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '17px',
+    fontWeight: 800,
+    color: 'var(--text)',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  metricName: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    fontWeight: 800,
+    color: 'var(--text)',
+    textAlign: 'center',
+  },
+  metricSkill: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    fontWeight: 700,
+    color: 'var(--accent)',
+  },
+  metricDesc: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11px',
+    color: 'var(--muted)',
+    textAlign: 'center',
+    fontVariantNumeric: 'tabular-nums',
+  },
+  chartToggleRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  chartToggleLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    color: 'var(--muted)',
+  },
+  chartToggleBtn: {
+    padding: '6px 14px',
+    borderRadius: '999px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 700,
+    cursor: 'pointer',
+  },
+  chartToggleBtnActive: {
+    backgroundColor: 'var(--accent)',
+    color: '#0a0f13',
+    borderColor: 'var(--accent)',
+  },
+  chartSvgWrap: {
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    padding: '10px 8px 2px',
+    overflow: 'hidden',
+  },
+  radarWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '4px',
   },
 };

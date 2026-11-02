@@ -570,7 +570,11 @@ export default function TopBar({
   }, [protectedModal, isCreatingCopy, copyFileName]);
 
   // Stage 8 Part A: build the unlocked copy and switch to it.
-  const handleProtectedCopyConfirm = useCallback(async () => {
+  // مرحلهٔ ۳۱ — method: 'auto' (رفتارِ قبلی: qpdf اول، سپس
+  // بازسازی در صورتِ شکستِ رمزگشایی)، 'qpdf' (فقط کپیِ برداری؛
+  // در صورتِ شکست، مودال باز می‌ماند تا کاربر خودش بازسازی را
+  // انتخاب کند)، 'rebuild' (مستقیم، بازسازی از سندِ بازشده).
+  const handleProtectedCopyConfirm = useCallback(async (method = 'auto') => {
     if (!protectedModal || isCreatingCopy) return;
     const { filePath, preservedPage } = protectedModal;
     // مرحله ۱۱: نام/مسیرِ دلخواهِ کاربر برای کپی.
@@ -578,7 +582,16 @@ export default function TopBar({
       ? copyDesiredPath
       : undefined;
     const copyNaming = { desiredName: copyFileName || undefined, desiredPath: desiredPathForCopy };
-    if (protectedModal.rebuildRecommended && !protectedModal.qpdfAvailable) {
+    // مرحلهٔ ۳۱ — انتخابِ صریحِ qpdf وقتی موتور در دسترس نیست:
+    // به‌جای افتادنِ پنهانی به بازسازی، خطا می‌دهیم و مودال باز
+    // می‌ماند.
+    if (method === 'qpdf' && !protectedModal.qpdfAvailable) {
+      showToast('موتورِ qpdf در دسترس نیست؛ روشِ بازسازی را انتخاب کنید.', { type: 'error' });
+      return;
+    }
+    // مرحلهٔ ۳۱ — 'rebuild'، مستقیم به بازسازی می‌رود (حتی اگر
+    // qpdf در دسترس باشد)؛ 'auto'، رفتارِ قبلی را حفظ می‌کند.
+    if (method === 'rebuild' || (method === 'auto' && protectedModal.rebuildRecommended && !protectedModal.qpdfAvailable)) {
       // مرحله ۱۰/۱۱: qpdf در دسترس نیست و pdf-lib هم نمی‌تواند
       // این فایل را رمزگشایی کند؛ کپی، با «بازسازی از سندِ
       // بازشده در pdf.js» ساخته می‌شود. خودِ بازسازی در PdfViewer
@@ -621,6 +634,13 @@ export default function TopBar({
         // pdf.js پیشنهاد می‌شود — همان مسیری که کپیِ بی‌اتلاف،
         // جایگزینِ آن بود.
         if (result && (result.code === 'PDF_COPY_PASSWORD_REQUIRED' || result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
+          if (method === 'qpdf') {
+            // مرحلهٔ ۳۱ — انتخابِ صریحِ qpdf: شکستِ رمزگشایی، به
+            // بازسازیِ خودکار نمی‌افتد؛ مودال باز می‌ماند تا کاربر،
+            // خودش روشِ بازسازی را انتخاب کند.
+            showToast('باز کردنِ بی‌اتلاف با qpdf ممکن نشد (رمز یا روشِ رمزگذاری پشتیبانی نمی‌شود)؛ می‌توانید روشِ بازسازی را انتخاب کنید.', { type: 'error' });
+            return;
+          }
           const rebuildFilePath = protectedModal.filePath;
           const rebuildPage = protectedModal.preservedPage || 1;
           setProtectedModal(null);
@@ -1393,12 +1413,37 @@ export default function TopBar({
                 </div>
               </div>
             )}
+            <div
+              style={{
+                fontSize: '12px',
+                lineHeight: 1.9,
+                color: 'var(--muted)',
+                backgroundColor: 'var(--panel2)',
+                border: '1px solid var(--border)',
+                borderRadius: '10px',
+                padding: '10px 12px',
+                marginBottom: '14px',
+              }}
+            >
+              <div style={{ fontWeight: 800, color: 'var(--text)', marginBottom: '4px' }}>
+                سه روش در کنارِ هم — هیچ‌کدام حذف نشده است:
+              </div>
+              <div>
+                <b style={{ color: 'var(--text)' }}>۱) مطالعه در برنامه، بدونِ ساختِ فایلِ جدید:</b> حاشیه‌نویسی‌ها و بوک‌مارک‌ها در دیتابیسِ برنامه، متصل به همین فایل، ذخیره می‌شوند و با بستن و باز کردنِ برنامه باقی می‌مانند؛ فایلِ اصلی دست نمی‌خورد.
+              </div>
+              <div>
+                <b style={{ color: 'var(--text)' }}>۲) کپیِ برداری با qpdf:</b> نسخهٔ بازگشایی‌شده با حفظِ کاملِ متن‌ها، فونت‌ها و جستجو؛ زوم در آن مثلِ روزِ اول شفاف است.
+              </div>
+              <div>
+                <b style={{ color: 'var(--text)' }}>۳) کپیِ بازسازی‌شده (تصویری):</b> روشِ جایگزینِ فعلیِ پروژه؛ صفحه‌ها از سندِ بازشده بازسازی می‌شوند و لایهٔ متن در خودِ فایل حفظ نمی‌شود (جستجو در همین برنامه، از ایندکسِ کناری انجام می‌شود).
+              </div>
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               <button
                 type="button"
                 className="protected-modal-btn"
-                onClick={handleProtectedCopyConfirm}
-                disabled={isCreatingCopy}
+                onClick={() => handleProtectedCopyConfirm('qpdf')}
+                disabled={isCreatingCopy || !protectedModal.qpdfAvailable}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -1417,7 +1462,37 @@ export default function TopBar({
                 }}
               >
                 {isCreatingCopy ? <Icons.Loader size={16} /> : <Icons.Copy size={16} />}
-                <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : (protectedModal.rebuildRecommended ? 'ساخت نسخهٔ کپی با بازسازی و شروع ویرایش' : 'ساخت نسخهٔ کپی و شروع ویرایش')}</span>
+                <span>{isCreatingCopy ? 'در حالِ ساختِ نسخهٔ کپی…' : 'ساخت نسخهٔ کپیِ برداری (qpdf) و شروع ویرایش'}</span>
+              </button>
+              {!protectedModal.qpdfAvailable && !isCreatingCopy && (
+                <div style={{ fontSize: '11.5px', lineHeight: 1.8, color: '#f59e0b' }}>
+                  موتورِ qpdf در این سیستم در دسترس نیست؛ روشِ بازسازی را انتخاب کنید.
+                </div>
+              )}
+              <button
+                type="button"
+                className="protected-modal-btn"
+                onClick={() => handleProtectedCopyConfirm('rebuild')}
+                disabled={isCreatingCopy}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  border: '1px solid var(--border)',
+                  backgroundColor: 'var(--panel2)',
+                  color: 'var(--text)',
+                  fontFamily: 'var(--font-fa)',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: isCreatingCopy ? 'wait' : 'pointer',
+                  opacity: isCreatingCopy ? 0.75 : 1,
+                }}
+              >
+                <Icons.FileText size={16} />
+                <span>ساخت نسخهٔ کپیِ بازسازی‌شده و شروع ویرایش</span>
               </button>
               {isCreatingCopy && (
                 <button
