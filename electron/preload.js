@@ -39,6 +39,9 @@ contextBridge.exposeInMainWorld('api', {
 
   openFolder: () => ipcRenderer.invoke('open-folder'),
   openFile: () => ipcRenderer.invoke('open-file'),
+  // مرحلهٔ ۳۵ §۲: خواندنِ EPUB (متادیتا + فصلِ تنبل).
+  loadEpubBook: (filePath) => ipcRenderer.invoke('load-epub-book', { filePath: (typeof filePath === 'string' ? filePath.trim() : '') }),
+  loadEpubChapter: (filePath, chapterId) => ipcRenderer.invoke('load-epub-chapter', { filePath: (typeof filePath === 'string' ? filePath.trim() : ''), chapterId }),
 
   // انتخاب تصویر کاور سفارشی از سیستم و ذخیره دائمی برای کمیک یا PDF
   selectCustomCover: (comicFilePath = '') => {

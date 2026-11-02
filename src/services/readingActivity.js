@@ -78,6 +78,9 @@ function flushNow() {
     date: localDateKey(),
     pages: Math.min(MAX_PENDING_PAGES, pendingPages),
     seconds: Math.min(MAX_PENDING_SECONDS, pendingSeconds),
+    // مرحلهٔ ۳۵ §۱: کلیدِ کتابِ جلسهٔ جاری تا ورکر، آمار را به
+    // تفکیکِ کتاب هم در byBook بنویسد (بدونِ آن، فقط آمارِ کلی).
+    fileKey: currentFilePath || undefined,
   };
   pendingPages = 0;
   pendingSeconds = 0;
@@ -141,9 +144,12 @@ function onBeforeUnload() {
 export function beginReadingSession(filePath) {
   const key = normalizeKey(filePath);
   if (!key) return;
-  if (currentFilePath !== key) {
+  const changed = currentFilePath !== key;
+  if (changed) {
     currentFilePath = key;
     visitedPages = new Set();
+    // مرحلهٔ ۳۶ §۵: ثبتِ فوریِ کتاب در byBook، پیش از هر فلاشِ زمانی.
+    registerCurrentBook();
   }
   if (heartbeatTimer) return;
   // بازهٔ قابل‌مشاهده از همین لحظه شروع می‌شود، مگر اینکه صفحه از
@@ -166,6 +172,19 @@ export function beginReadingSession(filePath) {
   if (typeof window !== 'undefined' && window.addEventListener) {
     window.addEventListener('beforeunload', onBeforeUnload);
   }
+}
+
+// مرحلهٔ ۳۶ §۵: ثبتِ ۰/۰ برایِ کتابِ جاری — ورکر، با همین پیام،
+// ورودیِ byBook را می‌سازد (بدونِ آن، کتاب تا اولین فلاشِ ۴۵ ثانیه‌ای
+// در آماربندی‌هایِ سفارشی دیده نمی‌شد).
+export function registerCurrentBook() {
+  if (!currentFilePath) return;
+  try {
+    if (coreApi && typeof coreApi.recordReadingActivity === 'function') {
+      const r = coreApi.recordReadingActivity({ date: localDateKey(), pages: 0, seconds: 0, fileKey: currentFilePath });
+      if (r && typeof r.catch === 'function') r.catch(() => {});
+    }
+  } catch (_) {}
 }
 
 /** گزارشِ بازدیدِ یک صفحه؛ فقط اولین بازدیدِ هر صفحه در نشست شمرده می‌شود. */

@@ -23,6 +23,7 @@ import Icons from './components/common/Icons';
 // خواندن، چانکِ مربوطه خوانده می‌شود.
 const VerticalViewer = lazy(() => import('./components/reader/VerticalViewer'));
 const PdfViewer = lazy(() => import('./components/reader/PdfViewer'));
+const EpubViewer = lazy(() => import('./components/reader/EpubViewer'));
 import BottomControls from './components/reader/BottomControls';
 
 // ۴. لایه‌های تعاملی، مودال‌ها و ابزارهای شناور شیشه‌ای
@@ -341,6 +342,91 @@ export default function App() {
       setLoadingFileName(targetName);
       setIsLoading(true);
       setLoadingProgress(8);
+
+      // مرحلهٔ ۳۵ §۲: فایلِ EPUB پیش از مسیرِ handleDrop جدا می‌شود
+      // (EPUB آرشیوِ ZIP است ولی صفحهٔ تصویری ندارد و نباید واردِ
+      // استخراجِ کمیک شود).
+      if (filePaths[0].toLowerCase().endsWith('.epub')) {
+        try {
+          const epub = await coreApi.loadEpubBook(filePaths[0]);
+          if (!epub || !epub.success) {
+            throw new Error((epub && epub.message) || 'خواندنِ فایلِ EPUB ناموفق بود.');
+          }
+          const chapters = Array.isArray(epub.chapters) ? epub.chapters : [];
+          if (chapters.length === 0) throw new Error('در این فایلِ EPUB هیچ فصلی یافت نشد.');
+          let savedPage = 1;
+          try {
+            const normTarget = filePaths[0].trim().replace(/[\\/]+/g, '\\').toLowerCase();
+            const existingRecent = (useLibraryStore.getState().recentItems || []).find(
+              (r) =>
+                (r.path || r.filePath || '').trim().replace(/[\\/]+/g, '\\').toLowerCase() ===
+                normTarget
+            );
+            if (existingRecent && existingRecent.lastPage > 1) savedPage = Number(existingRecent.lastPage);
+            const timeoutGuard = new Promise((resolve) => setTimeout(() => resolve(null), 300));
+            const progRes = await Promise.race([
+              coreApi.dbAction({
+                action: 'GET_PROGRESS',
+                payload: { filePath: filePaths[0] },
+              }),
+              timeoutGuard,
+            ]);
+            if (progRes?.progress) {
+              const dbPage = Number(progRes.progress.currentPage) || 1;
+              savedPage = Math.max(1, Math.min(dbPage, chapters.length));
+            }
+          } catch (_) {}
+          const comicPayload = {
+            type: 'epub',
+            items: [],
+            fileName: epub.fileName || targetName,
+            fileSize: epub.fileSize || '',
+            filePath: filePaths[0],
+            cover: epub.coverUrl || null,
+            savedResumePage: savedPage,
+            savedTotalPages: chapters.length,
+            dirInfo: null,
+            nextComic: null,
+            prevComic: null,
+          };
+          setComicData(comicPayload);
+          useReaderStore.getState().setCurrentPage(savedPage);
+          setCurrentView('reader');
+          triggerAutoZen();
+          if (postLoadTimerRef.current) clearTimeout(postLoadTimerRef.current);
+          postLoadTimerRef.current = setTimeout(() => {
+            postLoadTimerRef.current = null;
+            const libState = useLibraryStore.getState();
+            if (epub.coverUrl && typeof libState.cacheCover === 'function') {
+              try {
+                libState.cacheCover(filePaths[0], epub.coverUrl);
+              } catch (_) {}
+            }
+            if (typeof libState.addToRecent === 'function') {
+              try {
+                libState.addToRecent({
+                  path: filePaths[0],
+                  name: epub.fileName || targetName,
+                  type: 'epub',
+                  fileSize: epub.fileSize || '',
+                  cover: epub.coverUrl || null,
+                  totalPages: chapters.length,
+                  lastPage: savedPage,
+                });
+              } catch (_) {}
+            }
+          }, 300);
+        } catch (epubErr) {
+          console.error('EPUB open error:', epubErr);
+          showToast(epubErr?.message || 'خطا در باز کردنِ فایلِ EPUB', { type: 'error' });
+        } finally {
+          setIsLoading(false);
+          setLoadingProgress(0);
+          setLoadingFileName('');
+          isProcessingRef.current = false;
+        }
+        return;
+      }
 
       try {
         const result = await coreApi.handleDrop(filePaths);
@@ -738,7 +824,9 @@ export default function App() {
     if (isReadingMode) {
       return (
         <div style={styles.readerInnerBox}>
-          {comicData.type === 'pdf' ? (
+          {comicData.type === 'epub' ? (
+            <EpubViewer filePath={resolveActiveBookKey(comicData, null)} />
+          ) : comicData.type === 'pdf' ? (
             <PdfViewer filePath={resolveActiveBookKey(comicData, null)} />
           ) : (
             <VerticalViewer />

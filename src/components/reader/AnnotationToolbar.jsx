@@ -216,6 +216,10 @@ export function AnnotationToolbar({
   const setAnnotationArrowStyle = useAppStore((s) => s.setAnnotationArrowStyle);
   // Refinement Step 2: شفافیت + پرچم‌های ماژولارِ فلش (پیش‌فرض: هر دو روشن).
   const annotationOpacity = useAppStore((s) => (typeof s.annotationOpacity === 'number' ? s.annotationOpacity : 0.85));
+  const zoomAdaptiveAnnotations = useAppStore((s) => s.zoomAdaptiveAnnotations !== false);
+  const stickyManualScale = useAppStore((s) => s.stickyManualScale || 1);
+  const setZoomAdaptiveAnnotations = useAppStore((s) => s.setZoomAdaptiveAnnotations);
+  const setStickyManualScale = useAppStore((s) => s.setStickyManualScale);
   const setAnnotationOpacity = useAppStore((s) => s.setAnnotationOpacity);
   const annotationHasStartDot = useAppStore((s) => (s.annotationHasStartDot ?? true));
   const setAnnotationHasStartDot = useAppStore((s) => s.setAnnotationHasStartDot);
@@ -744,7 +748,7 @@ export function AnnotationToolbar({
   //   قبلی فشرده شود، به‌عنوانِ تایپِ کلمه/جستجو تفسیر می‌شود و
   //   تعویضِ ابزار لغو می‌گردد (بدونِ مهارِ رویداد، تا کلید به
   //   فیلدِ متنی یا جستجو برسد).
-  //   ⚠️ بده‌بستانِ مشخصات: همین قانون، تعویضِ سریعِ پشتِ سرِ همِ
+  //    بده‌بستانِ مشخصات: همین قانون، تعویضِ سریعِ پشتِ سرِ همِ
   //   دو ابزار (مثلاً V و بلافاصله B در کمتر از ۱ ثانیه) را هم لغو
   //   می‌کند؛ تعویض با کلیک روی تولبار، از این قانون متأثر نمی‌شود.
   //   همچنین توجه: در سیم‌کشیِ فعلیِ برنامه، شنوندهٔ captureی
@@ -1357,7 +1361,7 @@ export function AnnotationToolbar({
                 outlineOffset: -1,
               }}
             >
-              {annotationHasEndArrow ? '➤ با فلش' : '— خط'}
+              {annotationHasEndArrow ? (<><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline-block', verticalAlign: 'middle', marginLeft: 5 }}><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg><span>با فلش</span></>) : '— خط'}
             </button>
           </div>
         </div>
@@ -1639,6 +1643,46 @@ export function AnnotationToolbar({
         >
           {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
         </span>
+      </div>
+      {/* مرحلهٔ ۳۵ §۵: تطبیقِ خودکارِ اندازهٔ استیکی‌نوت با زوم +
+          تنظیمِ دستیِ مقیاسِ استیکی. تاگل، مقیاسِ رندرِ معکوسِ زوم
+          را فعال می‌کند؛ دکمه‌های − و +، مقیاسِ دستیِ استیکیِ
+          انتخاب‌شده را (از همان رویدادِ annotation:update-selected)
+          عوض می‌کنند. برای متن، اندازه با کنترلِ فونتِ موجود و
+          تقسیمِ خودکارِ هنگامِ ساخت تنظیم می‌شود. */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px', flexWrap: 'wrap' }}>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={zoomAdaptiveAnnotations}
+            onChange={(e) => { if (typeof setZoomAdaptiveAnnotations === 'function') setZoomAdaptiveAnnotations(e.target.checked); }}
+            style={{ accentColor: '#22d3ee', cursor: 'pointer' }}
+          />
+          تطبیق خودکار با زوم
+        </label>
+        <button
+          type="button"
+          aria-label="کوچک‌تر کردن استیکی"
+          onClick={() => {
+            const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) - 0.25) * 100) / 100));
+            if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
+            broadcastSelectedPropertyPatch({ customScale: next });
+          }}
+          style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+        >−</button>
+        <span style={{ fontSize: 12, color: '#67e8f9', minWidth: 44, textAlign: 'center', background: 'rgba(34,211,238,0.12)', borderRadius: 7, padding: '2px 6px', whiteSpace: 'nowrap' }}>
+          {Math.round((Number(stickyManualScale) || 1) * 100)}٪
+        </span>
+        <button
+          type="button"
+          aria-label="بزرگ‌تر کردن استیکی"
+          onClick={() => {
+            const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) + 0.25) * 100) / 100));
+            if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
+            broadcastSelectedPropertyPatch({ customScale: next });
+          }}
+          style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+        >+</button>
       </div>
       {/* میکروانیمیشن‌ها §۳ — راهنمای ریزِ دوبار کلیک: در ستونِ
           عمودی، آخرین آیتمِ فلای‌اوت (پایینِ پنل) و در نوارِ افقی،

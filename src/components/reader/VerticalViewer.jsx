@@ -117,6 +117,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   onFrameRendered,
   onContextMenu,
   pageFilter,
+  frameZoomLevel,
 }) {
   const pageNum = index + 1;
   const rawPath = item?.path || item?.filePath || '';
@@ -159,6 +160,19 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   const useSwappedLayout = isSwappedRotation && frameWidth > 0;
 
   const isSeamlessMode = pageGap === 0 && !rotation;
+  // مرحلهٔ ۳۵ §۵: اگر صفحه، استیکیِ کاملاً بیرون از کاغذ دارد، قاب
+  // باید overflow: visible داشته باشد تا پینِ DOM لایه دیده شود
+  // (در چرخش، قاب بریده می‌ماند تا چیدمانِ چرخان به‌هم نریزد).
+  const frameHasOverflowSticky = normalizedRotation === 0 &&
+    Array.isArray(pageAnnotations) &&
+    pageAnnotations.some((a) => {
+      if (!a || a.tool !== 'sticky') return false;
+      const ax = Number(a.x ?? a.startX ?? 0);
+      const ay = Number(a.y ?? a.startY ?? 0);
+      const aw = Number(a.width) || 210;
+      const ah = Number(a.height) || 170;
+      return ax + aw <= 0 || ax >= 1000 || ay + ah <= 0 || ay >= 1000;
+    });
 
   return (
     <div
@@ -171,8 +185,8 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
         height: knownHeight ? `${knownHeight}px` : 'auto',
         minHeight: knownHeight ? `${knownHeight}px` : '450px',
         marginBottom: isLastItem ? '0px' : `${pageGap}px`,
-        contain: isSeamlessMode ? 'layout style' : 'layout paint',
-        overflow: isSeamlessMode ? 'visible' : 'hidden',
+        contain: (isSeamlessMode || frameHasOverflowSticky) ? 'layout style' : 'layout paint',
+        overflow: (isSeamlessMode || frameHasOverflowSticky) ? 'visible' : 'hidden',
       }}
       onContextMenu={(e) => {
         // مرحله ۱۳: مختصاتِ عمودیِ کلیک نسبت به بالایِ همین صفحه.
@@ -274,6 +288,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
           items={pageAnnotations}
           onCommitPageItems={onCommitPageAnnotations}
           isNearViewport={isNearViewport}
+          zoomLevel={frameZoomLevel || 1}
         />
       </div>
     </div>
@@ -1192,6 +1207,7 @@ export default function VerticalViewer() {
                 pageAnnotations={pageAnnots}
                 onCommitPageAnnotations={handleCommitPageAnnotations}
                 pageFilter={pageFilter}
+                frameZoomLevel={safeZoom}
                 onImageLoad={recordImageDimensions}
                 onFrameRendered={handleFrameRendered}
                 onContextMenu={handleFrameContextMenu}

@@ -73,6 +73,8 @@ const useReaderStore = create((set, get) => ({
   pdfOutline: [],
   pdfOutlineFile: '',
   pdfOutlineStatus: 'idle',
+  // مرحلهٔ ۳۵ §۲: فهرستِ فصل‌هایِ EPUBِ جاری (برای پنلِ راست).
+  epubChapters: [],
 
   initZoomSettings: async () => {
     try {
@@ -121,6 +123,8 @@ const useReaderStore = create((set, get) => ({
     }
   },
 
+  setEpubChapters: (chapters) => set({ epubChapters: Array.isArray(chapters) ? chapters : [] }),
+
   setComicData: (data) => {
     if (!data) {
       set({
@@ -136,6 +140,7 @@ const useReaderStore = create((set, get) => ({
         pdfOutline: [],
         pdfOutlineFile: '',
         pdfOutlineStatus: 'idle',
+        epubChapters: [],
       });
       return;
     }
@@ -165,6 +170,7 @@ const useReaderStore = create((set, get) => ({
       pdfOutline: [],
       pdfOutlineFile: '',
       pdfOutlineStatus: 'idle',
+      epubChapters: [],
     });
   },
 

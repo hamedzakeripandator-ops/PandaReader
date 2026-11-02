@@ -5,6 +5,12 @@ let toastTimerId = null;
 const useAppStore = create((set, get) => ({
   // ویوهای معتبر: 'home' | 'library' | 'recent' | 'favorites' | 'downloads' | 'settings' | 'profile' | 'reader'
   currentView: 'home',
+  // مرحلهٔ ۳۶ §۳: وضعیتِ مشترکِ انتخابِ کتاب برایِ ساخت/ویرایشِ آماربندی.
+  isStatsBookSelectionMode: false,
+  statsSelectedBookPaths: [],
+  editingStatCategoryId: null,
+  statsSelectionOrigin: null,
+  pendingStatViewAction: null,
   isLeftSidebarOpen: false,
   isRightSidebarOpen: false,
 
@@ -44,6 +50,10 @@ const useAppStore = create((set, get) => ({
   annotationColor: '#06b6d4',
   annotationStrokeWidth: 4,
   annotationOpacity: 0.85,
+  // مرحلهٔ ۳۵ §۵: تطبیقِ خودکارِ اندازهٔ استیکی‌نوت با زوم (پیش‌فرض
+  // روشن) و مقیاسِ دستیِ استیکی (پیش‌فرض ۱؛ بازهٔ ۰٫۲۵ تا ۳).
+  zoomAdaptiveAnnotations: true,
+  stickyManualScale: 1.0,
   // گام ۲ میانی: پیش‌فرضِ محلی (استعداد — مهم‌ترین فونتِ public/fonts).
   // وزیرمتن فونتِ باندل‌شده نیست (هیچ woff2 و @font-faceای ندارد)، پس
   // از پیش‌فرض حذف شد تا پیلِ استعداد از اول فعال باشد.
@@ -269,6 +279,14 @@ const useAppStore = create((set, get) => ({
     });
   },
 
+  setZoomAdaptiveAnnotations: (enabled) =>
+    set({ zoomAdaptiveAnnotations: Boolean(enabled) }),
+
+  setStickyManualScale: (scale) =>
+    set({
+      stickyManualScale: Math.max(0.25, Math.min(3, Number(scale) || 1)),
+    }),
+
   setAnnotationFontFamily: (family) =>
     set({ annotationFontFamily: family || "'Estedad', sans-serif" }),
 
@@ -388,6 +406,38 @@ const useAppStore = create((set, get) => ({
           }
         : {}),
     }),
+
+  // مرحلهٔ ۳۶ §۳: جریانِ انتخابِ کتاب از Recent برایِ آماربندی.
+  // start: هدایتِ فوری به Recent؛ finish: بازگشت به Profile با پنجرهٔ نهایی‌سازی.
+  startStatsSelectionInRecent: (initialPaths, editingId, origin) => {
+    const paths = Array.isArray(initialPaths) ? [...initialPaths] : [];
+    get().setCurrentView('recent');
+    set({ isStatsBookSelectionMode: true, statsSelectedBookPaths: paths, editingStatCategoryId: editingId || null, statsSelectionOrigin: origin || 'profile', pendingStatViewAction: null });
+  },
+  enterStatsSelectionFromRecent: () => {
+    set({ isStatsBookSelectionMode: true, statsSelectedBookPaths: [], editingStatCategoryId: null, statsSelectionOrigin: 'recent', pendingStatViewAction: null });
+  },
+  setStatsSelectedBookPaths: (paths) => set({ statsSelectedBookPaths: Array.isArray(paths) ? [...paths] : [] }),
+  toggleStatsSelectedBookPath: (path) => set((state) => {
+    const list = state.statsSelectedBookPaths || [];
+    return { statsSelectedBookPaths: list.includes(path) ? list.filter((p) => p !== path) : [...list, path] };
+  }),
+  cancelStatsSelection: () => {
+    const origin = get().statsSelectionOrigin;
+    set({ isStatsBookSelectionMode: false, statsSelectedBookPaths: [], editingStatCategoryId: null, statsSelectionOrigin: null });
+    if (origin === 'profile') get().setCurrentView('profile');
+  },
+  finishStatsSelectionToProfile: (selectedPaths) => {
+    const paths = Array.isArray(selectedPaths) ? [...selectedPaths] : (get().statsSelectedBookPaths || []);
+    const editingId = get().editingStatCategoryId;
+    set({ isStatsBookSelectionMode: false, statsSelectedBookPaths: paths, pendingStatViewAction: { type: 'edit', id: editingId, paths }, statsSelectionOrigin: null });
+    get().setCurrentView('profile');
+  },
+  finishWithSavedStatView: (viewId) => {
+    set({ isStatsBookSelectionMode: false, statsSelectedBookPaths: [], editingStatCategoryId: null, statsSelectionOrigin: null, pendingStatViewAction: { type: 'activate', viewId } });
+    get().setCurrentView('profile');
+  },
+  clearPendingStatViewAction: () => set({ pendingStatViewAction: null }),
 
   returnToReader: () =>
     set({

@@ -1035,6 +1035,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             onCommitPageItems={onCommitPageAnnotations}
             rotation={rotation}
             isNearViewport={distanceFromActive <= 1}
+            zoomLevel={renderZoomLevel || 1}
           />
         ) : null}
       </div>
@@ -1687,17 +1688,17 @@ export default function PdfViewer({ filePath }) {
           // main، خودکار در یک فایلِ کپی ذخیره کرد: همان مکانیزمِ
           // کپیِ بازسازی‌شده — باز کردنِ کپیِ جدید و فعال‌سازیِ
           // استودیو روی آن، با رویدادِ app:editable-copy-ready.
-          showSaveStatus('saved-as', '✓ نسخهٔ تصویری در یک فایلِ کپی ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-as', 'نسخهٔ تصویری در یک فایلِ کپی ذخیره شد!' + savedSuffix, 4500);
           showToast(`نسخهٔ تصویری در یک فایلِ کپی ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
           window.dispatchEvent(new CustomEvent('app:editable-copy-ready', {
             detail: { copyPath: result.outputPath, preservedPage: useReaderStore.getState().currentPage || 1, pageCount: rebuilt.pageCount },
           }));
         } else if (saveMode === 'in-place') {
           try { requestDeepRefresh?.(); } catch (_) {}
-          showSaveStatus('saved-inplace', '✓ نسخهٔ تصویری روی همین فایل ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-inplace', 'نسخهٔ تصویری روی همین فایل ذخیره شد!' + savedSuffix, 4500);
           showToast(`نسخهٔ تصویری روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
         } else {
-          showSaveStatus('saved-as', '✓ نسخهٔ تصویری ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-as', 'نسخهٔ تصویری ذخیره شد!' + savedSuffix, 4500);
           showToast(`نسخهٔ تصویری با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد. توجه: متنِ آن در خودِ فایل قابلِ جستجو نیست.`, { type: 'success' });
         }
       } else if (result && result.locked) {
@@ -1779,7 +1780,7 @@ export default function PdfViewer({ filePath }) {
         }
         const result = await coreApi.saveRebuiltPdf(rebuildCopyPayload);
         if (result && result.success) {
-          showSaveStatus('saved-as', '✓ نسخهٔ کپی تصویری ساخته شد و باز گردید', 4500);
+          showSaveStatus('saved-as', 'نسخهٔ کپی تصویری ساخته شد و باز گردید', 4500);
           window.dispatchEvent(new CustomEvent('app:editable-copy-ready', {
             detail: { copyPath: result.copyPath || result.outputPath, preservedPage: detail.preservedPage || 1, pageCount: rebuilt.pageCount },
           }));
@@ -1909,13 +1910,13 @@ export default function PdfViewer({ filePath }) {
           showToast('فایل به حالتِ بدونِ حاشیه‌نویسی برگشت.', { type: 'success' });
         } else if (saveMode === 'in-place') {
           try { requestDeepRefresh?.(); } catch (_) {}
-          showSaveStatus('saved-inplace', '✓ تغییرات روی همین فایل ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-inplace', 'تغییرات روی همین فایل ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `روی همین فایل ذخیره شد: ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه.`,
             { type: 'success' }
           );
         } else {
-          showSaveStatus('saved-as', '✓ فایل PDF جدید با موفقیت ذخیره شد!' + savedSuffix, 4500);
+          showSaveStatus('saved-as', 'فایل PDF جدید با موفقیت ذخیره شد!' + savedSuffix, 4500);
           showToast(
             `فایل با ${prepared.totalItems} حاشیه‌نویسی در ${prepared.annotatedPages} صفحه ذخیره شد.`,
             { type: 'success' }
@@ -3526,7 +3527,7 @@ export default function PdfViewer({ filePath }) {
                 fontWeight: 700,
               }}
             >
-              ✕ لغو عملیات
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline-block', verticalAlign: 'middle', marginLeft: 6 }}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg><span>لغو عملیات</span>
             </button>
           )}
         </div>

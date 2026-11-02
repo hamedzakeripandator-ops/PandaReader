@@ -61,7 +61,9 @@ const defaultDB = {
     defaultSide: 'right',
     savedPresets: []
   },
-  readingStats: { days: {}, totalAppSeconds: 0 },
+  readingStats: { days: {}, byBook: {}, totalAppSeconds: 0 },
+  customStatViews: [],
+  epubHighlights: {},
   profile: {
     username: 'Haamed',
     subtitle: 'توسعه‌دهنده و کمیک‌خوان حرفه‌ای',
@@ -231,8 +233,82 @@ function migrateSchema(parsed) {
       };
     }
   }
+  // مرحلهٔ ۳۵ §۱: آمار به تفکیکِ کتاب — فقط ورودی‌هایِ معتبر نگه
+  // داشته می‌شوند؛ اگر byBook خالی است و history کتاب دارد، از
+  // پیشرفتِ صفحاتِ history مقدارِ اولیه ساخته می‌شود (ثانیهٔ
+  // مطالعهٔ گذشته نامعلوم است و صفر می‌ماند — عددِ جعلی ساخته
+  // نمی‌شود). سقفِ ۱۰۹۵ روز، مثلِ روزهایِ کلی، اعمال می‌شود.
+  const readingStatsByBook = {};
+  {
+    const rawByBook =
+      parsed.readingStats && typeof parsed.readingStats === 'object' && parsed.readingStats.byBook && typeof parsed.readingStats.byBook === 'object'
+        ? parsed.readingStats.byBook
+        : {};
+    for (const [key, val] of Object.entries(rawByBook)) {
+      if (!key || !val || typeof val !== 'object') continue;
+      const days = {};
+      const rawDays = val.days && typeof val.days === 'object' ? val.days : {};
+      for (const dk of Object.keys(rawDays).filter((k) => /^\d{4}-\d{2}-\d{2}$/.test(k)).sort().slice(-1095)) {
+        const e = rawDays[dk] || {};
+        days[dk] = {
+          seconds: Math.max(0, Math.min(86400, Math.floor(Number(e.seconds) || 0))),
+          pages: Math.max(0, Math.min(10000, Math.floor(Number(e.pages) || 0))),
+        };
+      }
+      readingStatsByBook[key] = {
+        totalSeconds: Math.max(0, Math.floor(Number(val.totalSeconds) || 0)),
+        totalPages: Math.max(0, Math.floor(Number(val.totalPages) || 0)),
+        days,
+      };
+    }
+    if (Object.keys(readingStatsByBook).length === 0 && parsed.history && typeof parsed.history === 'object') {
+      for (const [normKey, h] of Object.entries(parsed.history)) {
+        if (!h) continue;
+        const cp = Math.max(0, Math.floor(Number(h.currentPage) || 0));
+        if (cp > 0) readingStatsByBook[normKey] = { totalSeconds: 0, totalPages: cp, days: {} };
+      }
+    }
+  }
+  // مرحلهٔ ۳۵ §۱/§۲: آماربندی‌هایِ سفارشی + هایلایت‌هایِ EPUB — فقط
+  // ورودی‌هایِ معتبر نگه داشته می‌شوند (سقف: ۵۰ آماربندی، ۵۰۰۰
+  // هایلایت برای هر کتاب).
+  const customStatViews = Array.isArray(parsed.customStatViews)
+    ? parsed.customStatViews
+        .filter((v) => v && typeof v === 'object' && typeof v.name === 'string' && v.name.trim())
+        .slice(0, 50)
+        .map((v) => ({
+          id: String(v.id || ''),
+          name: String(v.name).slice(0, 60),
+          color: typeof v.color === 'string' ? v.color : '#22d3ee',
+          bookKeys: Array.isArray(v.bookKeys) ? v.bookKeys.filter((k) => typeof k === 'string').slice(0, 500) : [],
+          metrics: Array.isArray(v.metrics) ? v.metrics.filter((m) => typeof m === 'string').slice(0, 10) : [],
+          goalHours: Math.max(0, Number(v.goalHours) || 0),
+          goalPages: Math.max(0, Number(v.goalPages) || 0),
+        }))
+    : [];
+  const epubHighlights = {};
+  {
+    const rawHl = parsed.epubHighlights && typeof parsed.epubHighlights === 'object' ? parsed.epubHighlights : {};
+    for (const [normKey, list] of Object.entries(rawHl)) {
+      if (!normKey || !Array.isArray(list)) continue;
+      epubHighlights[normKey] = list
+        .filter((h) => h && typeof h === 'object' && Number.isFinite(Number(h.chapterIndex)))
+        .slice(0, 5000)
+        .map((h) => ({
+          id: String(h.id || ''),
+          chapterIndex: Math.floor(Number(h.chapterIndex)),
+          color: typeof h.color === 'string' ? h.color : '#facc15',
+          text: String(h.text || '').slice(0, 2000),
+          note: String(h.note || '').slice(0, 2000),
+          startOffset: Math.max(0, Math.floor(Number(h.startOffset) || 0)),
+          endOffset: Math.max(0, Math.floor(Number(h.endOffset) || 0)),
+          createdAt: Number(h.createdAt) || Date.now(),
+        }));
+    }
+  }
   const readingStats = {
     days: readingStatsDays,
+    byBook: readingStatsByBook,
     totalAppSeconds: Math.max(0, Math.floor(Number((parsed.readingStats && parsed.readingStats.totalAppSeconds) || 0))),
   };
 
@@ -279,6 +355,8 @@ function migrateSchema(parsed) {
     bookmarks,
     bookmarkPreferences,
     readingStats,
+    customStatViews,
+    epubHighlights,
     profile: {
       ...defaultDB.profile,
       ...(parsed.profile && typeof parsed.profile === 'object' ? parsed.profile : {})
@@ -1689,7 +1767,7 @@ parentPort.on('message', (request) => {
       // نوشته می‌شود. سقف‌های محافظ، از دادهٔ خراب یا سوءاستفادهٔ
       // فراخوانِ مستقیم جلوگیری می‌کنند.
       case 'RECORD_READING_ACTIVITY': {
-        const { date, pages = 0, seconds = 0 } = payload || {};
+        const { date, pages = 0, seconds = 0, fileKey } = payload || {};
         if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
           sendReply({ type: 'error', action, message: 'تاریخِ فعالیت معتبر نیست.' });
           return;
@@ -1697,6 +1775,16 @@ parentPort.on('message', (request) => {
         const addPages = Math.max(0, Math.min(10000, Math.floor(Number(pages) || 0)));
         const addSeconds = Math.max(0, Math.min(86400, Math.floor(Number(seconds) || 0)));
         if (addPages === 0 && addSeconds === 0) {
+          // مرحلهٔ ۳۶ §۵: ثبتِ ۰/۰ هم ورودیِ byBook را می‌سازد تا کتاب،
+          // از همان لحظهٔ اول در آماربندی‌هایِ سفارشی دیده شود.
+          if (typeof fileKey === 'string' && fileKey.trim()) {
+            const normFile = normalizePath(fileKey);
+            if (normFile) {
+              if (!db.readingStats.byBook || typeof db.readingStats.byBook !== 'object') db.readingStats.byBook = {};
+              if (!db.readingStats.byBook[normFile]) db.readingStats.byBook[normFile] = { totalSeconds: 0, totalPages: 0, days: {} };
+              writeDB(db);
+            }
+          }
           sendReply({ type: 'done', action, success: true, days: db.readingStats?.days || {} });
           return;
         }
@@ -1719,6 +1807,32 @@ parentPort.on('message', (request) => {
         if (dayKeys.length > 1095) {
           for (const oldKey of dayKeys.slice(0, dayKeys.length - 1095)) {
             delete db.readingStats.days[oldKey];
+          }
+        }
+        // مرحلهٔ ۳۵ §۱: همان فلاش، آمارِ همان کتاب را هم در
+        // byBook به‌روز می‌کند (کلید، همان normalizePathِ ورکر است).
+        if (typeof fileKey === 'string' && fileKey.trim()) {
+          const normFile = normalizePath(fileKey);
+          if (normFile) {
+            if (!db.readingStats.byBook || typeof db.readingStats.byBook !== 'object') {
+              db.readingStats.byBook = {};
+            }
+            const prevB = db.readingStats.byBook[normFile] || { totalSeconds: 0, totalPages: 0, days: {} };
+            if (!prevB.days || typeof prevB.days !== 'object') prevB.days = {};
+            const prevBD = prevB.days[date] || { seconds: 0, pages: 0 };
+            prevB.days[date] = {
+              seconds: Math.min(86400, (Number(prevBD.seconds) || 0) + addSeconds),
+              pages: Math.min(10000, (Number(prevBD.pages) || 0) + addPages),
+            };
+            const bkKeys = Object.keys(prevB.days).sort();
+            if (bkKeys.length > 1095) {
+              for (const ok of bkKeys.slice(0, bkKeys.length - 1095)) delete prevB.days[ok];
+            }
+            db.readingStats.byBook[normFile] = {
+              totalSeconds: (Number(prevB.totalSeconds) || 0) + addSeconds,
+              totalPages: (Number(prevB.totalPages) || 0) + addPages,
+              days: prevB.days,
+            };
           }
         }
         writeDB(db);
@@ -1764,7 +1878,11 @@ parentPort.on('message', (request) => {
           db.readingStats && typeof db.readingStats === 'object' && db.readingStats.days && typeof db.readingStats.days === 'object'
             ? db.readingStats.days
             : {};
-        sendReply({ type: 'done', action, days, totalAppSeconds: Number(db.readingStats?.totalAppSeconds) || 0 });
+        const byBook =
+          db.readingStats && typeof db.readingStats === 'object' && db.readingStats.byBook && typeof db.readingStats.byBook === 'object'
+            ? db.readingStats.byBook
+            : {};
+        sendReply({ type: 'done', action, days, byBook, totalAppSeconds: Number(db.readingStats?.totalAppSeconds) || 0 });
         break;
       }
 
@@ -2144,6 +2262,87 @@ parentPort.on('message', (request) => {
           totalItems += docItems;
         }
         sendReply({ type: 'done', action, totalItems, annotatedPages, annotatedFiles });
+        break;
+      }
+
+      case 'GET_ANNOTATION_COUNTS': {
+        const allDocs = (db.annotations && typeof db.annotations === 'object') ? db.annotations : {};
+        const counts = {};
+        for (const docKey of Object.keys(allDocs)) {
+          const doc = allDocs[docKey] || {};
+          let n = 0;
+          for (const pageKey of Object.keys(doc)) {
+            const pageItems = Array.isArray(doc[pageKey]) ? doc[pageKey] : [];
+            n += pageItems.length;
+          }
+          if (n > 0) counts[docKey] = n;
+        }
+        sendReply({ type: 'done', action, counts });
+        break;
+      }
+
+      case 'GET_CUSTOM_STAT_VIEWS': {
+        const views = Array.isArray(db.customStatViews) ? db.customStatViews : [];
+        sendReply({ type: 'done', action, views });
+        break;
+      }
+
+      case 'SAVE_CUSTOM_STAT_VIEWS': {
+        const { views = [] } = payload || {};
+        if (!Array.isArray(views)) {
+          sendReply({ type: 'error', action, message: 'آماربندی‌ها معتبر نیستند.' });
+          return;
+        }
+        const clean = views
+          .slice(0, 50)
+          .filter((v) => v && typeof v === 'object' && typeof v.name === 'string' && v.name.trim())
+          .map((v) => ({
+            id: String(v.id || `cv-${Date.now()}`),
+            name: String(v.name).slice(0, 60),
+            color: typeof v.color === 'string' ? v.color : '#22d3ee',
+            bookKeys: Array.isArray(v.bookKeys) ? v.bookKeys.filter((k) => typeof k === 'string').slice(0, 500) : [],
+            metrics: Array.isArray(v.metrics) ? v.metrics.filter((m) => typeof m === 'string').slice(0, 10) : [],
+            goalHours: Math.max(0, Number(v.goalHours) || 0),
+            goalPages: Math.max(0, Number(v.goalPages) || 0),
+          }));
+        db.customStatViews = clean;
+        writeDB(db, true);
+        sendReply({ type: 'done', action, views: clean });
+        break;
+      }
+
+      case 'GET_EPUB_HIGHLIGHTS': {
+        const { filePath } = payload || {};
+        const norm = normalizePath(filePath);
+        const list = (db.epubHighlights && db.epubHighlights[norm]) || [];
+        sendReply({ type: 'done', action, highlights: Array.isArray(list) ? list : [] });
+        break;
+      }
+
+      case 'SAVE_EPUB_HIGHLIGHTS': {
+        const { filePath, highlights = [] } = payload || {};
+        const norm = normalizePath(filePath);
+        if (!norm || !Array.isArray(highlights)) {
+          sendReply({ type: 'error', action, message: 'هایلایت‌ها معتبر نیستند.' });
+          return;
+        }
+        const clean = highlights
+          .slice(0, 5000)
+          .filter((h) => h && typeof h === 'object' && Number.isFinite(Number(h.chapterIndex)))
+          .map((h) => ({
+            id: String(h.id || ''),
+            chapterIndex: Math.floor(Number(h.chapterIndex)),
+            color: typeof h.color === 'string' ? h.color : '#facc15',
+            text: String(h.text || '').slice(0, 2000),
+            note: String(h.note || '').slice(0, 2000),
+            startOffset: Math.max(0, Math.floor(Number(h.startOffset) || 0)),
+            endOffset: Math.max(0, Math.floor(Number(h.endOffset) || 0)),
+            createdAt: Number(h.createdAt) || Date.now(),
+          }));
+        if (!db.epubHighlights || typeof db.epubHighlights !== 'object') db.epubHighlights = {};
+        db.epubHighlights[norm] = clean;
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true });
         break;
       }
 

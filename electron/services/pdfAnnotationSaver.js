@@ -82,6 +82,17 @@ function clampOpacity(value, fallback = 0.9) {
   return Math.max(0.05, Math.min(1, n));
 }
 
+// مرحلهٔ ۳۵ §۳: نرمال‌سازِ واحدِ شفافیت — کپیِ محلیِ همان تابعِ انجین
+// (مرزِ CommonJS/ESM اجازهٔ ایمپورتِ مستقیم نمی‌دهد). مقادیرِ درصدی
+// (مثلِ ۵۰) به ۰٫۵ تبدیل می‌شوند، نه اینکه به ۱٫۰ کلمپ شوند.
+function normalizeOpacityValue(raw, fallback = 1.0) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  const normalized = num > 1 ? num / 100 : num;
+  return Math.min(1.0, Math.max(0.05, normalized));
+}
+
 /** خطای قفلِ فایل: فایلِ مقصد در لحظهٔ نوشتن، در دستِ خوانندهٔ دیگری است. */
 class FileLockedError extends Error {
   constructor(targetPath) {
@@ -1683,7 +1694,7 @@ function buildInkAnnotDict(pdfDoc, item) {
   const flat = normalized.map((stroke) => stroke.flat());
   const allPoints = normalized.flat();
   const rect = bboxOfPoints(allPoints, 4);
-  const opacity = clampOpacity(item.opacity, item.kind === 'ink' ? 0.95 : 0.9);
+  const opacity = normalizeOpacityValue(item.opacity, item.kind === 'ink' ? 0.95 : 0.9);
   const lineWidth = Math.max(0.25, Number(item.lineWidth) || 1);
   const annot = ctx.obj({
     Type: pdfLibName(pdfDoc, 'Annot'),
@@ -1725,7 +1736,7 @@ function buildLineAnnotDict(pdfDoc, item) {
     // همان هندسهٔ روی صفحه باشند؛ پس انتهای خط، بدونِ تزئین است.
     LE: ctx.obj([pdfLibName(pdfDoc, 'None'), pdfLibName(pdfDoc, 'None')]),
     C: pdfLibColorArray(pdfDoc, item.color),
-    CA: pdfLibNumber(pdfDoc, clampOpacity(item.opacity, 0.9)),
+    CA: pdfLibNumber(pdfDoc, normalizeOpacityValue(item.opacity, 0.9)),
     Border: pdfLibNumberArray(pdfDoc, [0, 0, lineWidth]),
   });
   return annot;
@@ -1747,7 +1758,7 @@ function buildSquareAnnotDict(pdfDoc, item) {
     Subtype: pdfLibName(pdfDoc, 'Square'),
     Rect: pdfLibNumberArray(pdfDoc, rect),
     C: pdfLibColorArray(pdfDoc, item.strokeColor || item.color),
-    CA: pdfLibNumber(pdfDoc, clampOpacity(item.opacity, 0.9)),
+    CA: pdfLibNumber(pdfDoc, normalizeOpacityValue(item.opacity, 0.9)),
     Border: pdfLibNumberArray(pdfDoc, [0, 0, Math.max(0.25, Number(item.lineWidth) || 1)]),
   };
   // پس‌زمینه: فقط وقتی آیتم fill دارد. شفافیتِ fill جدا (ca) گذاشته
@@ -1778,7 +1789,7 @@ function buildCircleAnnotDict(pdfDoc, item) {
     Rect: pdfLibNumberArray(pdfDoc, rect),
     C: pdfLibColorArray(pdfDoc, item.fillColor || item.color),
     IC: pdfLibColorArray(pdfDoc, item.fillColor || item.color),
-    CA: pdfLibNumber(pdfDoc, clampOpacity(item.opacity, 0.9)),
+    CA: pdfLibNumber(pdfDoc, normalizeOpacityValue(item.opacity, 0.9)),
     Border: pdfLibNumberArray(pdfDoc, [0, 0, 0]),
   });
   return annot;
@@ -2431,14 +2442,14 @@ async function applyAnnotationsToDocument(pdfDoc, pages, options = {}) {
         if (highlightBuffer) {
           const hlImage = await pdfDoc.embedPng(highlightBuffer);
           await drawOverlayImageWithRetry(pdfDoc, page, hlImage, {
-            x: 0, y: 0, width: rawW, height: rawH,
+            x: 0, y: 0, width: rawW, height: rawH, opacity: 1.0,
           });
           placed += 1;
         }
         if (pngBuffer) {
           const pngImage = await pdfDoc.embedPng(pngBuffer);
           await drawOverlayImageWithRetry(pdfDoc, page, pngImage, {
-            x: 0, y: 0, width: rawW, height: rawH,
+            x: 0, y: 0, width: rawW, height: rawH, opacity: 1.0,
           });
           placed += 1;
         }

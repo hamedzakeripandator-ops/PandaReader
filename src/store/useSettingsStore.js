@@ -434,6 +434,8 @@ export const DEFAULT_PREFERENCES = {
   // resetPreferences هم آن‌ها را برمی‌گرداند.
   homeRecentLimit: 12,
   homeRecentCustomPresets: [],
+  // مرحلهٔ ۳۵ §۶: تمپلیتِ کنترلِ اسلایدرِ هیرویِ کتابخانه (پیش‌فرض آینه).
+  heroSliderVariant: 'mirror',
 };
 
 export const DEFAULT_PROFILE = {
@@ -651,7 +653,19 @@ const buildInitialShortcuts = () => {
 
 const useSettingsStore = create((set, get) => ({
   shortcuts: buildInitialShortcuts(),
-  preferences: { ...DEFAULT_PREFERENCES, ...(saved?.preferences || {}) },
+  preferences: (() => {
+    const base = { ...DEFAULT_PREFERENCES, ...(saved?.preferences || {}) };
+    // مرحلهٔ ۳۵ §۶: اگر تنظیماتِ ذخیره‌شده، تمپلیت را ندارند، آینهٔ
+    // localStorage (کلیدِ comicReader.heroSliderVariant.v1) به‌عنوانِ
+    // fallback خوانده می‌شود؛ وگرنه پیش‌فرضِ 'mirror' می‌ماند.
+    if (!saved?.preferences?.heroSliderVariant) {
+      try {
+        const mirror = localStorage.getItem('comicReader.heroSliderVariant.v1');
+        if (['led', 'mirror', 'matrix', 'pendulum', 'firefly'].includes(mirror)) base.heroSliderVariant = mirror;
+      } catch (_) {}
+    }
+    return base;
+  })(),
   profile: { ...DEFAULT_PROFILE, ...(saved?.profile || {}) },
 
   // ۱. واکشی و ادغام تنظیمات و پروفایل از دیتابیس لوکال
@@ -873,6 +887,15 @@ const useSettingsStore = create((set, get) => ({
   },
 
   // ۳. تنظیمات برنامه و ریدر با ذخیره هماهنگ در دیتابیس
+  // مرحلهٔ ۳۵ §۶: انتخابِ تمپلیتِ اسلایدر — هم در استور و دیتابیس
+  // (از طریقِ updatePreferences) و هم در آینهٔ localStorage ماندگار
+  // می‌شود تا انتخابِ کاربر، حتی پیش از initSettings هم خوانا باشد.
+  setHeroSliderVariant: (variant) => {
+    const v = ['led', 'mirror', 'matrix', 'pendulum', 'firefly'].includes(variant) ? variant : 'mirror';
+    get().updatePreferences({ heroSliderVariant: v });
+    try { localStorage.setItem('comicReader.heroSliderVariant.v1', v); } catch (_) {}
+  },
+
   updatePreferences: (partialPrefs) => {
     const updated = { ...get().preferences, ...partialPrefs };
     set({ preferences: updated });

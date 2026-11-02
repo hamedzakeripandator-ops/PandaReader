@@ -5,6 +5,7 @@ import useAppStore from '../../store/useAppStore';
 import KeybindRecorder from './KeybindRecorder';
 import Icons from '../../components/common/Icons';
 import StorageSection from '../../components/common/StorageSection';
+import SliderControls from '../../components/library/SliderControls';
 import { coreApi } from '../../services/coreApi';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 
@@ -21,6 +22,7 @@ export default function SettingsView() {
     updateShortcut,
     resetShortcutsToDefault,
     updatePreference,
+    setHeroSliderVariant,
   } = useSettingsStore();
 
   const { setZoomLevel } = useReaderStore();
@@ -240,6 +242,7 @@ export default function SettingsView() {
 
       {/* تب دوم: تنظیمات ریدر و ظاهر */}
       {activeTab === 'reader' && (
+        <>
         <div style={styles.sectionCard}>
           <h3 style={styles.cardTitle}>تنظیمات بزرگ‌نمایی و محیط مطالعه</h3>
 
@@ -315,6 +318,84 @@ export default function SettingsView() {
             </div>
           </div>
         </div>
+
+        {/* مرحلهٔ ۳۵ §۶: انتخابِ سبکِ کنترلِ اسلایدرِ کتابخانه (موج صوتی) */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>سبک کنترل اسلایدر کتابخانه (موج صوتی)</h3>
+          <p style={styles.cardDesc}>
+            شکلِ دکمه‌هایِ اسلایدرِ هیرو در صفحهٔ کتابخانه را از بینِ ۵ تمپلیتِ موجِ صوتی انتخاب کن؛ تغییر، در لحظه اعمال می‌شود. پیش‌نمایشِ هر کارت، همان انیمیشنِ زندهٔ اسلایدر است.
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
+            {[
+              { id: 'led', name: 'ال‌ای‌دی متر', desc: 'ستون‌هایی از نقطه‌هایِ ریز' },
+              { id: 'mirror', name: 'آینه', desc: 'میله‌هایِ گردِ متقارن (پیش‌فرض)' },
+              { id: 'matrix', name: 'ماتریس پیکسلی', desc: 'مربع‌هایِ سوسوزنِ پیکسلی' },
+              { id: 'pendulum', name: 'آونگ‌ها', desc: 'وزنه‌هایِ آویزانِ نوسانی' },
+              { id: 'firefly', name: 'کرم شب‌تاب', desc: 'ذره‌هایِ شناورِ نورانی' },
+            ].map((v) => {
+              const isActive = (preferences?.heroSliderVariant || 'mirror') === v.id;
+              return (
+                <div
+                  key={v.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setHeroSliderVariant && setHeroSliderVariant(v.id)}
+                  onKeyDown={(e) => {
+                    if ((e.key === 'Enter' || e.key === ' ') && setHeroSliderVariant) {
+                      e.preventDefault();
+                      setHeroSliderVariant(v.id);
+                    }
+                  }}
+                  style={{
+                    border: isActive ? '2px solid #22d3ee' : '1px solid var(--border)',
+                    background: isActive ? 'rgba(34,211,238,0.08)' : 'rgba(255,255,255,0.03)',
+                    borderRadius: 14,
+                    padding: '16px 20px',
+                    cursor: 'pointer',
+                    width: '100%',
+                    boxSizing: 'border-box',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 16,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flex: '1 1 200px', minWidth: 200 }}>
+                    {isActive ? (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 }}>
+                        <circle cx="12" cy="12" r="9" />
+                        <polyline points="20 6 9 17 4 12" strokeWidth="2.5" />
+                      </svg>
+                    ) : (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 }}>
+                        <circle cx="12" cy="12" r="9" />
+                      </svg>
+                    )}
+                    <div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <strong style={{ fontSize: 13, color: isActive ? '#67e8f9' : 'var(--text)' }}>{v.name}</strong>
+                        {isActive && (<span style={{ fontSize: 11, color: '#67e8f9' }}>فعال</span>)}
+                      </div>
+                      <p style={{ fontSize: 11, color: 'var(--muted)', margin: '4px 0 0' }}>{v.desc}</p>
+                    </div>
+                  </div>
+                  <div style={{ flexShrink: 0, maxWidth: '100%', overflow: 'hidden', borderRadius: 10, padding: '4px 2px' }}>
+                    <SliderControls
+                      currentIndex={2}
+                      total={7}
+                      onPrev={() => {}}
+                      onNext={() => {}}
+                      onSelect={() => {}}
+                      variant={v.id}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        </>
       )}
 
       {/* مرحله ۱۰: تبِ «حافظه» — آمارِ دقیقِ حجم، پاک‌سازیِ کشِ کاورها و فایل‌هایِ حذف‌شده و انتخابِ درایوِ محلِ ذخیره. */}

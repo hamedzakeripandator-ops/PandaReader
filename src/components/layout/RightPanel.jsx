@@ -107,6 +107,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const pdfOutline = useReaderStore((state) => state.pdfOutline);
   const pdfOutlineFile = useReaderStore((state) => state.pdfOutlineFile);
   const pdfOutlineStatus = useReaderStore((state) => state.pdfOutlineStatus);
+  const epubChapters = useReaderStore((state) => state.epubChapters || []);
   const setComicData = useReaderStore((state) => state.setComicData);
 
   // استیت‌های تنظیم فاصله صفحات (Page Offset / Gap)
@@ -950,6 +951,39 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
         {/* ===================================================================
             ۲. کارت فهرست صفحات: ناوبری فصول + لیست اسکرول صفحات
         =================================================================== */}
+        {comicData?.type === 'epub' && epubChapters.length > 0 && (
+          <div style={{ background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: 12, padding: 12, marginBottom: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                <Icons.BookOpen size={15} />
+              </span>
+              <span style={{ fontSize: 14, fontWeight: 700 }}>فصل‌های کتاب</span>
+              <span style={{ fontSize: 11, color: 'var(--muted)' }}>{epubChapters.length} فصل</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+              {epubChapters.map((ch, idx) => {
+                const isActive = currentPage === idx + 1;
+                return (
+                  <button
+                    key={ch.id || idx}
+                    type="button"
+                    onClick={() => window.dispatchEvent(new CustomEvent('app:epub-jump', { detail: { chapterIndex: idx } }))}
+                    style={{
+                      display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
+                      background: isActive ? 'rgba(34,211,238,0.12)' : 'var(--panel2)',
+                      border: isActive ? '1px solid var(--accent)' : '1px solid transparent',
+                      borderRadius: 8, padding: '7px 10px', cursor: 'pointer', color: isActive ? 'var(--accent)' : 'var(--text)',
+                      fontFamily: 'inherit', fontSize: 13,
+                    }}
+                  >
+                    <span style={{ fontSize: 11, color: 'var(--muted)', minWidth: 22 }}>{idx + 1}</span>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.title || `فصل ${idx + 1}`}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div style={styles.pagesPanel}>
           <div style={styles.panelTitleRow}>
             <div style={styles.titleWithIcon}>

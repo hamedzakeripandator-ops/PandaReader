@@ -21,8 +21,63 @@ function formatRelativeTime(dateString) {
   }
 }
 
+// مرحلهٔ ۳۶ §۳: ابزارهایِ انتخابِ کتاب برایِ آماربندی (همان قاعدهٔ
+// نرمال‌سازیِ ورکرِ دیتابیس: trim + اسلش‌ها به بک‌اسلش + lowercase).
+function normalizeRecentBookKey(p) {
+  if (!p || typeof p !== 'string') return '';
+  return p.trim().replace(/\//g, '\\').toLowerCase();
+}
+function recentItemPath(item) {
+  return (item && (item.path || item.filePath)) || '';
+}
+function recentItemType(item) {
+  const raw = item && item.type;
+  if (raw === 'pdf' || raw === 'epub') return raw;
+  const p = String(recentItemPath(item)).toLowerCase();
+  if (p.endsWith('.pdf')) return 'pdf';
+  if (p.endsWith('.epub')) return 'epub';
+  return 'comic';
+}
+const STAT_VIEW_COLORS = ['#22d3ee', '#a855f7', '#f59e0b', '#10b981', '#ec4899', '#f97316'];
+const STAT_VIEW_METRICS = [
+  { id: 'hours', label: 'مجموعِ ساعتِ مطالعه' },
+  { id: 'pages', label: 'تعدادِ صفحاتِ خوانده‌شده' },
+  { id: 'progress', label: 'درصدِ پیشرفتِ کلِ دسته' },
+  { id: 'bookmarks', label: 'تعدادِ بوک‌مارک‌ها' },
+  { id: 'highlights', label: 'تعدادِ هایلایت‌ها و یادداشت‌ها' },
+  { id: 'speed', label: 'میانگینِ سرعتِ مطالعه' },
+  { id: 'goal', label: 'هدفِ ساعتی/صفحه‌ای با نوارِ پیشرفت' },
+];
+
+// مرحلهٔ ۳۶ §۳: چک‌باکسِ برداری — تیکِ استاندارد با دنبالهٔ کوتاه در
+// چپ و دنبالهٔ بلند در راست/بالا (polyline لوسید: 20 6 9 17 4 12).
+function StatsCheckBox({ checked, onToggle, label }) {
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={Boolean(checked)}
+      aria-label={label || 'انتخاب کتاب'}
+      onClick={(e) => { e.stopPropagation(); if (onToggle) onToggle(); }}
+      style={{
+        width: 24, height: 24, borderRadius: 7, flexShrink: 0, cursor: 'pointer',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0,
+        background: checked ? '#22d3ee' : 'transparent',
+        border: checked ? '2px solid #22d3ee' : '2px solid var(--border)',
+        color: '#ffffff',
+      }}
+    >
+      {checked && (
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 // ردیف اختصاصی نمایش فهرستی مجهز به خودترمیمی کاور و حذف تداخل استایل React
-function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
+function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, selectionMode, isSelected, onToggleSelect }) {
   const filePath = item?.path || item?.filePath || '';
   const title = item?.name || item?.fileName || filePath.split(/[\\/]/).pop() || 'Untitled';
 
@@ -75,15 +130,19 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
 
   return (
     <div
-      onClick={() => onOpenComic && onOpenComic(item)}
+      onClick={() => { if (selectionMode) { if (onToggleSelect) onToggleSelect(filePath); } else if (onOpenComic) onOpenComic(item); }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       style={{
         ...styles.listItem,
-        borderColor: isHovered ? 'var(--accent)' : 'var(--border)',
+        borderColor: isSelected ? '#22d3ee' : (isHovered ? 'var(--accent)' : 'var(--border)'),
+        backgroundColor: isSelected ? 'rgba(34,211,238,0.08)' : undefined,
         transform: isHovered ? 'translateY(-2px)' : 'translateY(0)',
       }}
     >
+      {selectionMode && (
+        <StatsCheckBox checked={Boolean(isSelected)} onToggle={() => onToggleSelect && onToggleSelect(filePath)} label={title} />
+      )}
       {/* کاور کوچک بندانگشتی با نسبت 3:4 */}
       <div style={styles.thumbBox}>
         {coverUrl ? (
@@ -152,7 +211,8 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem }) {
 
 export default function RecentView({ onOpenComic }) {
   const { recentItems, removeFromRecent, clearRecents, recentLimit, setRecentLimit } = useLibraryStore();
-  const { searchQuery, showToast } = useAppStore();
+  const { searchQuery, showToast, isStatsBookSelectionMode, statsSelectedBookPaths, editingStatCategoryId, statsSelectionOrigin, enterStatsSelectionFromRecent, setStatsSelectedBookPaths, toggleStatsSelectedBookPath, cancelStatsSelection, finishStatsSelectionToProfile, finishWithSavedStatView } = useAppStore();
+  const [statModal, setStatModal] = useState(null);
 
   const [viewMode, setViewMode] = useState('list'); // 'list' | 'grid'
   const [confirmClear, setConfirmClear] = useState(false);
@@ -174,6 +234,91 @@ export default function RecentView({ onOpenComic }) {
   // مرحلهٔ ۳۰ — برشِ نمایشی بر اساسِ حدِ انتخاب‌شده (پس از فیلترِ
   // جستجو)؛ شمارِ کل، برایِ خطِ شمارشِ بالایِ لیست نگه داشته می‌شود.
   const displayedRecents = useMemo(() => filteredRecents.slice(0, effectiveLimit), [filteredRecents, effectiveLimit]);
+
+  // مرحلهٔ ۳۶ §۳: ابزارهایِ انتخاب — «انتخاب همه» رویِ همهٔ مواردِ
+  // فیلترشده (نه فقط برشِ نمایشی) اعمال می‌شود.
+  const allFilteredPaths = useMemo(() => (filteredRecents || []).map((it) => recentItemPath(it)).filter(Boolean), [filteredRecents]);
+  const selectedCount = (statsSelectedBookPaths || []).length;
+  const handleSelectAllFiltered = () => setStatsSelectedBookPaths(allFilteredPaths);
+  const handleClearSelection = () => setStatsSelectedBookPaths([]);
+  const handleInvertSelection = () => {
+    const cur = new Set(statsSelectedBookPaths || []);
+    const inverted = allFilteredPaths.filter((p) => !cur.has(p));
+    const outside = (statsSelectedBookPaths || []).filter((p) => !allFilteredPaths.includes(p));
+    setStatsSelectedBookPaths([...inverted, ...outside]);
+  };
+  const handleSelectType = (kind) => {
+    setStatsSelectedBookPaths((filteredRecents || []).filter((it) => recentItemType(it) === kind).map((it) => recentItemPath(it)).filter(Boolean));
+  };
+  const openStatModalFromSelection = () => {
+    const paths = statsSelectedBookPaths || [];
+    if (paths.length === 0) {
+      showToast('برایِ ساختِ آماربندی، دست‌کم یک کتاب انتخاب کن', { type: 'warning' });
+      return;
+    }
+    const bookKeys = paths.map((p) => normalizeRecentBookKey(p)).filter(Boolean);
+    let existing = null;
+    if (editingStatCategoryId) {
+      try {
+        const raw = localStorage.getItem('comicReader.customStatViews.v1');
+        const list = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(list)) existing = list.find((v) => v.id === editingStatCategoryId) || null;
+      } catch (_) {}
+    }
+    setStatModal({
+      id: existing ? existing.id : null,
+      name: existing ? existing.name : '',
+      color: existing ? existing.color : '#22d3ee',
+      bookKeys,
+      metrics: existing && Array.isArray(existing.metrics) && existing.metrics.length ? [...existing.metrics] : ['hours', 'pages'],
+      goalHours: existing ? (Number(existing.goalHours) || 0) : 0,
+      goalPages: existing ? (Number(existing.goalPages) || 0) : 0,
+    });
+  };
+  const handleSaveStatModal = () => {
+    if (!statModal) return;
+    const name = (statModal.name || '').trim();
+    if (!name) {
+      showToast('نامِ آماربندی نمی‌تواند خالی باشد', { type: 'warning' });
+      return;
+    }
+    const view = {
+      id: statModal.id || `cv-${Date.now()}`,
+      name,
+      color: statModal.color || '#22d3ee',
+      bookKeys: statModal.bookKeys || [],
+      metrics: (statModal.metrics || []).length ? statModal.metrics : ['hours', 'pages'],
+      goalHours: Number(statModal.goalHours) || 0,
+      goalPages: Number(statModal.goalPages) || 0,
+    };
+    let list = [];
+    try {
+      const raw = localStorage.getItem('comicReader.customStatViews.v1');
+      const parsed = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (_) {}
+    const next = view.id && list.some((v) => v.id === view.id)
+      ? list.map((v) => (v.id === view.id ? view : v))
+      : [...list, view];
+    try { localStorage.setItem('comicReader.customStatViews.v1', JSON.stringify(next)); } catch (_) {}
+    if (coreApi.dbAction) coreApi.dbAction({ action: 'SAVE_CUSTOM_STAT_VIEWS', payload: { views: next } }).catch(() => {});
+    setStatModal(null);
+    showToast('آماربندیِ سفارشی ذخیره شد', { type: 'success' });
+    if (typeof finishWithSavedStatView === 'function') finishWithSavedStatView(view.id);
+  };
+  const handlePrimaryCreate = () => {
+    if (selectedCount === 0) {
+      showToast('برایِ ساختِ آماربندی، دست‌کم یک کتاب انتخاب کن', { type: 'warning' });
+      return;
+    }
+    // مبدا پروفایل: نهایی‌سازی (نام/رنگ/شاخص) در Profile باز می‌شود؛
+    // مبدا خودِ Recent: همان مودال، همین‌جا باز می‌شود.
+    if (statsSelectionOrigin === 'profile') {
+      if (typeof finishStatsSelectionToProfile === 'function') finishStatsSelectionToProfile(statsSelectedBookPaths);
+    } else {
+      openStatModalFromSelection();
+    }
+  };
 
   const handleSelectRecentLimit = (value) => {
     if (typeof setRecentLimit === 'function') setRecentLimit(value);
@@ -286,6 +431,16 @@ export default function RecentView({ onOpenComic }) {
             </div>
           </div>
 
+          <button
+            type="button"
+            onClick={() => { if (isStatsBookSelectionMode) { if (typeof cancelStatsSelection === 'function') cancelStatsSelection(); } else if (typeof enterStatsSelectionFromRecent === 'function') enterStatsSelectionFromRecent(); }}
+            style={isStatsBookSelectionMode ? { ...styles.statsModeBtn, backgroundColor: 'rgba(34,211,238,0.15)', borderColor: '#22d3ee' } : styles.statsModeBtn}
+            title="انتخاب کتاب‌ها از همین لیست برایِ ساختِ آماربندی"
+          >
+            <Icons.Check size={14} />
+            <span>{isStatsBookSelectionMode ? 'خروج از حالتِ انتخاب' : 'ساخت آماربندی و انتخاب کتاب‌ها'}</span>
+          </button>
+
           {/* دکمه پاک کردن کل تاریخچه */}
           {(recentItems || []).length > 0 &&
             (confirmClear ? (
@@ -314,6 +469,26 @@ export default function RecentView({ onOpenComic }) {
         </div>
       </div>
 
+      {isStatsBookSelectionMode && (
+        <div style={styles.statsBar}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button type="button" onClick={handleSelectAllFiltered} style={styles.statsBarBtn}>انتخاب همه</button>
+            <button type="button" onClick={handleClearSelection} style={styles.statsBarBtn}>لغو انتخاب همه</button>
+            <button type="button" onClick={handleInvertSelection} style={styles.statsBarBtn}>معکوس کردن انتخاب</button>
+            <button type="button" onClick={() => handleSelectType('pdf')} style={styles.statsBarBtn}>انتخاب همهٔ PDFها</button>
+            <button type="button" onClick={() => handleSelectType('epub')} style={styles.statsBarBtn}>انتخاب همهٔ EPUBها</button>
+            <button type="button" onClick={() => handleSelectType('comic')} style={styles.statsBarBtn}>انتخاب کمیک‌ها</button>
+            <span style={{ fontSize: 12, color: 'var(--text)', fontWeight: 700 }}>{selectedCount} کتاب انتخاب شده</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
+            <button type="button" onClick={handlePrimaryCreate} style={styles.statsPrimaryBtn}>
+              {editingStatCategoryId ? `ثبتِ انتخاب برایِ آماربندی (${selectedCount})` : `ساخت آماربندی جدید با کتاب‌های انتخاب‌شده (${selectedCount})`}
+            </button>
+            <button type="button" onClick={() => { if (typeof cancelStatsSelection === 'function') cancelStatsSelection(); }} style={styles.statsBarBtn}>انصراف</button>
+          </div>
+        </div>
+      )}
+
       {/* وضعیت خالی بودن تاریخچه */}
       {filteredRecents.length === 0 ? (
         <div style={styles.emptyBox}>
@@ -331,27 +506,86 @@ export default function RecentView({ onOpenComic }) {
         </div>
       ) : viewMode === 'grid' ? (
         <div style={styles.grid}>
-          {displayedRecents.map((item, idx) => (
-            <ComicCard
-              key={item.path || item.filePath || `recent-grid-${idx}`}
-              item={item}
-              onOpenComic={onOpenComic}
-              onRemove={(path) => removeFromRecent(path)}
-              showRemoveBtn={true}
-            />
-          ))}
+          {displayedRecents.map((item, idx) => {
+            const gp = recentItemPath(item);
+            const gSelected = isStatsBookSelectionMode && (statsSelectedBookPaths || []).includes(gp);
+            return (
+              <div key={item.path || item.filePath || `recent-grid-${idx}`} style={{ position: 'relative' }}>
+                {isStatsBookSelectionMode && (
+                  <div style={{ position: 'absolute', top: 10, right: 10, zIndex: 5 }}>
+                    <StatsCheckBox checked={gSelected} onToggle={() => toggleStatsSelectedBookPath(gp)} label={item.name || item.fileName || gp} />
+                  </div>
+                )}
+                <ComicCard
+                  item={item}
+                  onOpenComic={(it) => { if (isStatsBookSelectionMode) toggleStatsSelectedBookPath(recentItemPath(it)); else if (onOpenComic) onOpenComic(it); }}
+                  onRemove={(path) => removeFromRecent(path)}
+                  showRemoveBtn={true}
+                />
+              </div>
+            );
+          })}
         </div>
       ) : (
         <div style={styles.list}>
-          {displayedRecents.map((item, index) => (
-            <RecentListRow
-              key={item.path || item.filePath || `recent-list-${index}`}
-              item={item}
-              onOpenComic={onOpenComic}
-              onShowInFolder={handleShowInFolder}
-              onRemoveItem={handleRemoveItem}
+          {displayedRecents.map((item, index) => {
+            const lp = recentItemPath(item);
+            return (
+              <RecentListRow
+                key={item.path || item.filePath || `recent-list-${index}`}
+                item={item}
+                onOpenComic={onOpenComic}
+                onShowInFolder={handleShowInFolder}
+                onRemoveItem={handleRemoveItem}
+                selectionMode={isStatsBookSelectionMode}
+                isSelected={(statsSelectedBookPaths || []).includes(lp)}
+                onToggleSelect={(p) => toggleStatsSelectedBookPath(p)}
+              />
+            );
+          })}
+        </div>
+      )}
+      {statModal && (
+        <div style={styles.statsModalOverlay} onClick={() => setStatModal(null)}>
+          <div style={styles.statsModalCard} onClick={(e) => e.stopPropagation()}>
+            <h4 style={{ margin: '0 0 12px', fontSize: 15 }}>{statModal.id ? 'ویرایشِ آماربندی' : 'ساختِ آماربندی جدید'}</h4>
+            <input
+              type="text"
+              value={statModal.name}
+              onChange={(e) => setStatModal({ ...statModal, name: e.target.value })}
+              placeholder="نامِ آماربندی (مثلاً مطالعهٔ آناتومی)"
+              style={styles.statsField}
             />
-          ))}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '10px 0', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: 12, color: 'var(--muted)' }}>رنگ:</span>
+              {STAT_VIEW_COLORS.map((c) => (
+                <button key={c} type="button" onClick={() => setStatModal({ ...statModal, color: c })} title={c} style={{ width: 26, height: 26, borderRadius: '50%', background: c, border: statModal.color === c ? '2px solid #fff' : '2px solid transparent', cursor: 'pointer', padding: 0 }} />
+              ))}
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 8px' }}>{statModal.bookKeys.length} کتاب در این آماربندی عضو می‌شوند.</p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+              {STAT_VIEW_METRICS.map((m) => (
+                <label key={m.id} style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, cursor: 'pointer', padding: '5px 9px', borderRadius: 99, background: statModal.metrics.includes(m.id) ? 'rgba(34,211,238,0.15)' : 'rgba(255,255,255,0.05)' }}>
+                  <input type="checkbox" checked={statModal.metrics.includes(m.id)} onChange={() => setStatModal({ ...statModal, metrics: statModal.metrics.includes(m.id) ? statModal.metrics.filter((x) => x !== m.id) : [...statModal.metrics, m.id] })} style={{ accentColor: '#22d3ee', cursor: 'pointer' }} />
+                  {m.label}
+                </label>
+              ))}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+              <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
+                هدفِ ساعتی:
+                <input type="number" min={0} value={statModal.goalHours} onChange={(e) => setStatModal({ ...statModal, goalHours: Number(e.target.value) || 0 })} style={{ ...styles.statsField, width: 90 }} />
+              </label>
+              <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
+                هدفِ صفحه‌ای:
+                <input type="number" min={0} value={statModal.goalPages} onChange={(e) => setStatModal({ ...statModal, goalPages: Number(e.target.value) || 0 })} style={{ ...styles.statsField, width: 90 }} />
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" onClick={handleSaveStatModal} style={styles.statsPrimaryBtn}>ذخیرهٔ آماربندی</button>
+              <button type="button" onClick={() => setStatModal(null)} style={styles.statsBarBtn}>انصراف</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -709,5 +943,34 @@ const styles = {
     color: 'var(--muted)',
     maxWidth: '420px',
     lineHeight: 1.6,
+  },
+  statsModeBtn: {
+    display: 'flex', alignItems: 'center', gap: 6, padding: '8px 12px', borderRadius: 11,
+    backgroundColor: 'var(--panel)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--border)',
+    color: 'var(--text)', fontSize: 12, cursor: 'pointer', flexShrink: 0,
+  },
+  statsBar: {
+    backgroundColor: 'var(--panel)', borderWidth: '1px', borderStyle: 'solid', borderColor: 'rgba(34,211,238,0.35)',
+    borderRadius: 14, padding: '12px 14px',
+  },
+  statsBarBtn: {
+    padding: '7px 12px', borderRadius: 10, backgroundColor: 'var(--panel2)', borderWidth: '1px', borderStyle: 'solid',
+    borderColor: 'var(--border)', color: 'var(--text)', fontSize: 12, cursor: 'pointer',
+  },
+  statsPrimaryBtn: {
+    padding: '9px 16px', borderRadius: 10, backgroundColor: '#22d3ee', border: 'none', color: '#0d131a',
+    fontSize: 13, fontWeight: 700, cursor: 'pointer',
+  },
+  statsModalOverlay: {
+    position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.6)', display: 'flex',
+    alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16,
+  },
+  statsModalCard: {
+    width: '100%', maxWidth: 520, maxHeight: '85vh', overflowY: 'auto', backgroundColor: 'var(--panel)',
+    borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 16, padding: 18, color: 'var(--text)',
+  },
+  statsField: {
+    width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)',
+    borderRadius: 8, color: 'var(--text)', padding: '7px 10px', fontFamily: 'inherit', fontSize: 13,
   },
 };

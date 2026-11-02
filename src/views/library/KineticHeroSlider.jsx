@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
+import useSettingsStore from '../../store/useSettingsStore';
+import SliderControls from '../../components/library/SliderControls';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../../components/common/Icons';
 
@@ -21,6 +23,7 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
   const togglePin = useLibraryStore((state) => state.togglePin);
   const selectAndSetCustomCover = useLibraryStore((state) => state.selectAndSetCustomCover);
   const showToast = useAppStore((state) => state.showToast);
+  const heroSliderVariant = useSettingsStore((state) => state.preferences?.heroSliderVariant || 'mirror');
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -119,7 +122,7 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
   // مدیریت کشیدن اسلایدر با ماوس (Drag)
   const handleMouseDown = (e) => {
     if (totalSlides <= 1) return;
-    if (e.target.closest('button') || e.target.closest('.split-dot')) return;
+    if (e.target.closest('button') || e.target.closest('.eq-controls')) return;
     setIsDragging(true);
     hasDraggedRef.current = false;
     dragStartXRef.current = e.clientX;
@@ -181,7 +184,6 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
 
   if (totalSlides === 0) return null;
 
-  const fillPercentage = ((currentIndex + 1) / totalSlides) * 100;
 
   return (
     <>
@@ -465,91 +467,6 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
           height: 100%;
           object-fit: cover;
         }
-        .split-nav {
-          position: absolute;
-          bottom: 16px;
-          left: 50%;
-          transform: translateX(-50%);
-          display: flex;
-          align-items: center;
-          gap: 14px;
-          padding: 7px 18px;
-          background: rgba(10, 10, 15, 0.74);
-          backdrop-filter: blur(20px);
-          -webkit-backdrop-filter: blur(20px);
-          border: 1px solid rgba(247, 37, 133, 0.2);
-          border-radius: 24px;
-          z-index: 10;
-          box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
-        }
-        .split-nav-btn {
-          width: 32px;
-          height: 32px;
-          border-radius: 8px;
-          border: 1px solid rgba(247, 37, 133, 0.28);
-          background: rgba(247, 37, 133, 0.09);
-          color: #f72585;
-          cursor: pointer;
-          transition: all 0.25s ease;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 0;
-          outline: none;
-        }
-        .split-nav-btn:hover {
-          background: rgba(247, 37, 133, 0.22);
-          transform: scale(1.08);
-          box-shadow: 0 0 15px rgba(247, 37, 133, 0.25);
-        }
-        .split-nav-btn:active {
-          transform: scale(0.95);
-        }
-        .split-line-container {
-          display: flex;
-          align-items: center;
-          gap: 10px;
-        }
-        .split-line {
-          width: 54px;
-          height: 3px;
-          background: rgba(247, 37, 133, 0.16);
-          border-radius: 2px;
-          position: relative;
-          overflow: hidden;
-        }
-        .split-line-fill {
-          position: absolute;
-          top: 0;
-          left: 0;
-          height: 100%;
-          background: linear-gradient(90deg, #f72585, #b5179e);
-          border-radius: 2px;
-          transition: width 0.6s cubic-bezier(0.22, 1, 0.36, 1);
-          box-shadow: 0 0 8px rgba(247, 37, 133, 0.55);
-        }
-        .split-dots {
-          display: flex;
-          gap: 6px;
-          align-items: center;
-        }
-        .split-dot {
-          width: 7px;
-          height: 7px;
-          border-radius: 50%;
-          background: rgba(247, 37, 133, 0.26);
-          cursor: pointer;
-          transition: all 0.35s cubic-bezier(0.22, 1, 0.36, 1);
-        }
-        .split-dot:hover {
-          background: rgba(247, 37, 133, 0.55);
-          transform: scale(1.28);
-        }
-        .split-dot.active {
-          background: #f72585;
-          box-shadow: 0 0 10px rgba(247, 37, 133, 0.65);
-          transform: scale(1.22);
-        }
       `}</style>
 
       <div className="kinetic-slider-wrapper">
@@ -730,50 +647,22 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
             );
           })}
 
-          {/* ناوبری خطی و نقطه‌ای پایین (Split Navigation) */}
-          {totalSlides > 1 && (
-            <div className="split-nav" onClick={(e) => e.stopPropagation()}>
-              <button
-                type="button"
-                className="split-nav-btn"
-                onClick={() => moveSlider(1)}
-                title="اسلاید قبلی"
-              >
-                <Icons.ChevronRight size={15} />
-              </button>
-
-              <div className="split-line-container">
-                <div className="split-line">
-                  <div
-                    className="split-line-fill"
-                    style={{ width: `${fillPercentage}%` }}
-                  />
-                </div>
-                <div className="split-dots">
-                  {slides.map((_, dotIdx) => (
-                    <div
-                      key={dotIdx}
-                      className={`split-dot ${dotIdx === currentIndex ? 'active' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        goToSlide(dotIdx);
-                      }}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              <button
-                type="button"
-                className="split-nav-btn"
-                onClick={() => moveSlider(-1)}
-                title="اسلاید بعدی"
-              >
-                <Icons.ChevronLeft size={15} />
-              </button>
-            </div>
-          )}
         </div>
+        {/* مرحلهٔ ۳۶ §۲: نوارِ پایینیِ اختصاصیِ کنترل — بیرون از کانتینرِ
+            350px با overflow: hidden (که در مرحلهٔ ۳۵ کنترل را زیرِ
+            اسلایدها پنهان می‌کرد)؛ همیشه برای slides.length >= 1. */}
+        {totalSlides >= 1 && (
+          <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', zIndex: 30, display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '10px 0 6px', overflow: 'visible' }}>
+            <SliderControls
+              currentIndex={currentIndex}
+              total={totalSlides}
+              onPrev={() => moveSlider(1)}
+              onNext={() => moveSlider(-1)}
+              onSelect={goToSlide}
+              variant={heroSliderVariant}
+            />
+          </div>
+        )}
       </div>
     </>
   );

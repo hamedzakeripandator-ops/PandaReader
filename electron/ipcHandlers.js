@@ -1302,11 +1302,39 @@ module.exports = function(app) {
     }
   });
 
+  // مرحلهٔ ۳۵ §۲: کانال‌هایِ EPUB — پارس و کش در سرویسِ
+  // electron/services/epubService.js انجام می‌شود؛ اینجا فقط
+  // اعتبارسنجیِ ورودی و پوشهٔ داده را وصل می‌کند.
+  ipcMain.handle('load-epub-book', async (event, args) => {
+    try {
+      const filePath = typeof args?.filePath === 'string' ? args.filePath.trim() : '';
+      if (!filePath) return { success: false, message: 'مسیرِ فایل مشخص نیست.' };
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (app && app.getPath('userData'));
+      const epubService = require('./services/epubService');
+      return await epubService.loadEpubBook(filePath, dataDir);
+    } catch (err) {
+      return { success: false, message: `خطا در خواندنِ EPUB: ${err && err.message ? err.message : 'نامشخص'}` };
+    }
+  });
+
+  ipcMain.handle('load-epub-chapter', async (event, args) => {
+    try {
+      const filePath = typeof args?.filePath === 'string' ? args.filePath.trim() : '';
+      const chapterId = typeof args?.chapterId === 'string' ? args.chapterId.trim() : '';
+      if (!filePath || !chapterId) return { success: false, message: 'مسیرِ فایل یا شناسهٔ فصل مشخص نیست.' };
+      const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (app && app.getPath('userData'));
+      const epubService = require('./services/epubService');
+      return await epubService.loadEpubChapter(filePath, chapterId, dataDir);
+    } catch (err) {
+      return { success: false, message: `خطا در خواندنِ فصل: ${err && err.message ? err.message : 'نامشخص'}` };
+    }
+  });
+
   ipcMain.handle('open-file', async (event) => {
     const win = getWindowFromEvent(event);
     const dialogOptions = {
       properties: ['openFile'],
-      filters: [{ name: 'Comics & Documents', extensions: ['cbz', 'zip', 'cbr', 'pdf', 'rar', 'webp', 'jpg', 'png'] }]
+      filters: [{ name: 'Comics & Documents', extensions: ['cbz', 'zip', 'cbr', 'pdf', 'rar', 'epub', 'webp', 'jpg', 'png'] }]
       // NOTE: ‎'7z' تا فاز node-7z از فیلتر حذف شده چون استخراجش پشتیبانی نمی‌شود
     };
 

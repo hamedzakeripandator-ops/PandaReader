@@ -563,7 +563,7 @@ const MIME_TYPES = {
 // و اسنادِ متنی از همین‌جا مسدود می‌شوند.
 const ALLOWED_COMIC_EXTS = new Set([
   '.zip', '.cbz', '.cbr', '.rar', '.7z',
-  '.pdf',
+  '.pdf', '.epub',
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif', '.svg'
 ]);
 

@@ -59,6 +59,7 @@ import {
   marqueeRect,
   getUnionBounds,
   moveAnnotationByDelta,
+  normalizeOpacityValue,
 } from '../../utils/annotationEngine';
 import {
   detectCaretLineDirection,
@@ -925,7 +926,7 @@ function getStickyTheme(color) {
 // دارد (lucide-react، Pin).
 const LUCIDE_PIN_PATH = 'M12 17v5 M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4a1 1 0 0 1 1 1z';
 // ============================================================================
-const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onEdit, isEditing }) {
+const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onEdit, isEditing, contentScale = 1 }) {
   const x = Number(item.x ?? item.startX ?? 0);
   const y = Number(item.y ?? item.startY ?? 0);
   const w = Number(item.width) || 210;
@@ -950,6 +951,8 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
       x={Number.isFinite(x) ? x : 0}
       y={Number.isFinite(y) ? y : 0}
       opacity={item.opacity ?? 0.95}
+      scaleX={contentScale}
+      scaleY={contentScale}
       visible={!isEditing}
       onClick={handleClick}
       onTap={handleClick}
@@ -1217,7 +1220,9 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
               color: '#67e8f9',
             }}
           >
-            ✓
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}>
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
           </button>
           <button
             type="button"
@@ -1236,7 +1241,7 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
               color: 'rgba(255,255,255,0.6)',
             }}
           >
-            ✕
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
           </button>
         </div>
       </div>
@@ -1582,7 +1587,7 @@ function eraserCursor() {
 
 const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageNumber,
-  items = [],
+  items: rawItems = [],
   onCommitPageItems,
   // Refinement Final: زاویهٔ چرخشِ صفحه (۰/۹۰/۱۸۰/۲۷۰) که PdfViewer
   // از useReaderStore می‌خواند و به لایه می‌دهد. پیش‌فرض ۰ است تا
@@ -1592,12 +1597,18 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // VerticalViewer: |index - activePageIndex| <= 1.) پیش‌فرض true تا
   // هر فراخوانندهٔ قدیمی، دقیقاً رفتارِ قبل را ببیند.
   isNearViewport = true,
+  // مرحلهٔ ۳۵ §۵: ضریبِ زومِ فعلیِ صفحه (از PdfViewer/VerticalViewer)
+  // برای موتورِ تطبیقِ اندازهٔ استیکی‌نوت با زوم. پیش‌فرض ۱ یعنی
+  // رفتارِ قبلی (بدونِ تطبیق).
+  zoomLevel = 1,
 }) {
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
   const annotationColor = useAppStore((s) => s.annotationColor || '#22d3ee');
   const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
   const annotationOpacity = useAppStore((s) => s.annotationOpacity ?? 0.9);
+  const zoomAdaptiveAnnotations = useAppStore((s) => s.zoomAdaptiveAnnotations !== false);
+  const stickyManualScale = useAppStore((s) => s.stickyManualScale || 1);
   // فاز ۲: استیت‌های باکس
   const annotationBoxStyle = useAppStore((s) => s.annotationBoxStyle || 'cloud');
   const annotationHasFill = useAppStore((s) => Boolean(s.annotationHasFill));
@@ -1619,6 +1630,15 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // بود (ReferenceError و عدم batchDraw) — حالا تعریف و به <Layer> وصل است.
   const layerRef = useRef(null);
   const draftLayerRef = useRef(null);
+  // مرحلهٔ ۳۶ §۵: آزادسازیِ قطعیِ Stage در unmount — بدونِ این
+  // cleanup، نمونه‌هایِ مردهٔ Konva.Stage در اسکرول‌هایِ طولانیِ
+  // کتاب‌هایِ پرحاشیه در حافظهٔ GPU باقی می‌مانند.
+  useEffect(() => () => {
+    try { stageRef.current?.destroy(); } catch (_) {}
+    stageRef.current = null;
+    layerRef.current = null;
+    draftLayerRef.current = null;
+  }, []);
   // فاز ۱ بهینه‌سازی — رنگِ هر دو لایه با هم: هر جا آیتمِ داخلِ لایهٔ
   // ایستا عوض می‌شود (درگ، ترنسفورم، کامیت، ویرایشِ هندل)، هر دو لایه
   // رنگ می‌شوند — چون Adorner (درفت) هم ممکن است با آن عوض شده باشد.
@@ -1746,11 +1766,46 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const [aspect, setAspect] = useState(1);
   const [eraserVisible, setEraserVisible] = useState(false);
 
+  // مرحلهٔ ۳۵ §۳: نرمال‌سازیِ شفافیت در ورودیِ لایه — مقادیرِ
+  // درصدی یا خارج از بازه، پیش از هر رندر و کامیت به ۰٫۰۵ تا ۱٫۰
+  // تبدیل می‌شوند؛ پس Konva و دادهٔ ذخیره‌شده، همیشه مقدارِ معتبر
+  // می‌بینند و شفافیتِ ۱۰۰٪، در خروجیِ PDF هم دقیقاً ۱٫۰ می‌ماند.
+  const items = useMemo(
+    () =>
+      (rawItems || []).map((it) => {
+        if (!it || typeof it !== 'object') return it;
+        if (it.opacity === undefined || it.opacity === null || it.opacity === '') return it;
+        const normalized = normalizeOpacityValue(it.opacity, it.opacity);
+        return normalized === it.opacity ? it : { ...it, opacity: normalized };
+      }),
+    [rawItems],
+  );
   const itemsRef = useRef(items);
   const aspectRef = useRef(aspect);
   const pageRef = useRef(pageNumber);
   const commitFnRef = useRef(onCommitPageItems);
   itemsRef.current = items;
+  // مرحلهٔ ۳۵ §۵: refهای زوم و مقیاسِ دستی (هندلرها از ref
+  // می‌خوانند تا در ژستِ جاری، مقدارِ تازه را ببینند).
+  const zoomLevelRef = useRef(zoomLevel);
+  zoomLevelRef.current = zoomLevel;
+  const zoomAdaptiveRef = useRef(zoomAdaptiveAnnotations);
+  zoomAdaptiveRef.current = zoomAdaptiveAnnotations;
+  const stickyManualScaleRef = useRef(stickyManualScale);
+  stickyManualScaleRef.current = stickyManualScale;
+  // ضریبِ تطبیقیِ معکوسِ زوم: در زوم‌های بالای ۱، استیکی‌نوت
+  // نسبت به صفحه کوچک‌تر می‌شود تا روی تصویرِ زوم‌شده ظریف بماند.
+  const adaptiveZoomScale = useMemo(() => {
+    const z = Number(zoomLevel) || 1;
+    if (!zoomAdaptiveAnnotations || z <= 1.0) return 1.0;
+    return Math.max(0.28, 1 / Math.pow(z, 0.82));
+  }, [zoomLevel, zoomAdaptiveAnnotations]);
+  const stickyScaleFor = useCallback((it) => {
+    const manual = Number(it?.customScale) || 1;
+    return adaptiveZoomScale * manual;
+  }, [adaptiveZoomScale]);
+  const [overflowPinDrag, setOverflowPinDrag] = useState(null);
+  const overflowPinSuppressClickRef = useRef(null);
   aspectRef.current = aspect;
   pageRef.current = pageNumber;
   commitFnRef.current = onCommitPageItems;
@@ -3115,7 +3170,15 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         // شکلِ state دقیقاً طبقِ TASK، به‌علاوهٔ pillBackground
         // (از §۳ همان TASK: ذخیره با کپسول) که در snippetِ §۱
         // نیامده بود ولی §۳ آن را الزام کرده است.
-        fontSize: fontSizeRef.current || 22,
+        // مرحلهٔ ۳۵ §۵: در زومِ بالای ۱٫۱۵ با تطبیقِ خودکار، فونتِ
+        // پایه بر zoom^0.75 تقسیم می‌شود تا متنِ تازه، به اندازهٔ
+        // همان جزئیاتِ زوم‌شده ظریف و متناسب ثبت شود.
+        fontSize: (() => {
+          const base = fontSizeRef.current || 22;
+          const z = Number(zoomLevelRef.current) || 1;
+          if (zoomAdaptiveRef.current && z > 1.15) return Math.max(8, Math.round(base / Math.pow(z, 0.75)));
+          return base;
+        })(),
         fontFamily: fontFamilyRef.current || "'Estedad', sans-serif",
         color: colorRef.current || '#22d3ee',
         opacity: opacityRef.current ?? 1,
@@ -3154,6 +3217,14 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         opacity: opacityRef.current,
         fontFamily: fontFamilyRef.current,
         fontSize: fontSizeRef.current || 22,
+        // مرحلهٔ ۳۵ §۵: مقیاسِ دستیِ استیکی (پیش‌فرض ۱)؛ با تطبیقِ
+        // خودکار در زومِ بالای ۱٫۱۵، بر zoom^0.75 تقسیم می‌شود.
+        customScale: (() => {
+          const manual = Number(stickyManualScaleRef.current) || 1;
+          const z = Number(zoomLevelRef.current) || 1;
+          if (zoomAdaptiveRef.current && z > 1.15) return manual / Math.pow(z, 0.75);
+          return manual;
+        })(),
       };
       commit([...uniformItems, newSticky]);
       setActiveStickyEditorId(newSticky.id);
@@ -3958,6 +4029,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         if (patch.color !== undefined) itemPatch.color = patch.color;
         if (patch.strokeWidth !== undefined) itemPatch.strokeWidth = patch.strokeWidth;
         if (patch.opacity !== undefined) itemPatch.opacity = patch.opacity;
+        if (target.tool === 'sticky' && patch.customScale !== undefined) itemPatch.customScale = patch.customScale;
         if (Object.keys(itemPatch).length === 0) return target;
         if (!Object.keys(itemPatch).some((k) => target[k] !== itemPatch[k])) return target;
         changed = true;
@@ -4084,6 +4156,24 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       ? ['top-left', 'top-center', 'top-right', 'bottom-right', 'bottom-center', 'bottom-left']
       : ['top-left', 'top-center', 'top-right', 'middle-right', 'bottom-right', 'bottom-center', 'bottom-left', 'middle-left'];
 
+  // مرحلهٔ ۳۵ §۵: استیکی‌های کاملاً بیرون از کاغذ (نه آن‌هایی که
+  // فقط لبه‌شان بیرون است — آن‌ها در Konva می‌مانند تا بخشِ داخلِ
+  // صفحه‌شان دیده شود و رندرِ تکراری پیش نیاید) از بومِ Konva
+  // کنار گذاشته می‌شوند و پایین‌تر، به‌صورتِ پینِ DOM با
+  // overflow: visible رندر می‌شوند؛ چون بومِ Konva دقیقاً
+  // هم‌اندازهٔ کاغذ است و هرگز بیرون از آن رسم نمی‌کند.
+  const isFullyOutsidePage = (it) => {
+    if (!it || it.tool !== 'sticky') return false;
+    const ax = Number(it.x ?? it.startX ?? 0);
+    const ay = Number(it.y ?? it.startY ?? 0);
+    const aw = Number(it.width) || 210;
+    const ah = Number(it.height) || 170;
+    return ax + aw <= 0 || ax >= 1000 || ay + ah <= 0 || ay >= 1000;
+  };
+  const overlayStickies = (items || []).filter((it) => isFullyOutsidePage(it));
+  const overlayStickyIds = new Set(overlayStickies.map((it) => it.id));
+  const konvaItems = uniformItems.filter((it) => !overlayStickyIds.has(it.id));
+
   // فاز ۴: آیتمِ استیکیِ در حالِ ویرایش (برای ویرایشگرِ HTML).
   const stickyEditorItem = activeStickyEditorId
     ? uniformItems.find((it) => it.id === activeStickyEditorId) || null
@@ -4140,7 +4230,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           لایهٔ درفت، از طریقِ drawBothLayers). */}
         <Layer ref={layerRef}>
           <Group scaleX={scaleX} scaleY={scaleY}>
-            {uniformItems.map((item) => {
+            {konvaItems.map((item) => {
               // فاز ۵: هر آیتم در یک Groupِ پوششی قرار می‌گیرد تا
               // نودِ Konvaی آن در دسترس باشد (گزینهٔ Groupِ TASK،
               // به‌جای تبدیلِ Committed*ها به forwardRef — hitFuncها
@@ -4194,6 +4284,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                     onErase={handleEraseClick}
                     onEdit={openStickyEditor}
                     isEditing={activeStickyEditorId === item.id}
+                    contentScale={stickyScaleFor(item)}
                   />
                 ) : (
                   <CommittedStroke
@@ -4429,6 +4520,102 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           </Group>
         </Layer>
       </Stage>
+
+      {/* مرحلهٔ ۳۵ §۵: پین‌های DOM برای استیکی‌نوت‌های کاملاً بیرون از
+          صفحه — مثلِ بوک‌مارک‌ها، بیرون از کاغذ هم دیده می‌شوند.
+          کلیک، کارتِ ویرایشِ همان استیکی را باز می‌کند؛ درگ، آن را
+          با کلمپِ افقیِ [-۱۴۰، ۱۱۴۰] جابه‌جا می‌کند (و برگرداندن به
+          داخلِ صفحه، دوباره آن را به بومِ Konva برمی‌گرداند). وقتی
+          استودیو غیرفعال است، پین‌ها فقط دیده می‌شوند و کلیک
+          نمی‌گیرند. */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          overflow: 'visible',
+          pointerEvents: 'none',
+          zIndex: 5,
+        }}
+      >
+        {overlayStickies.map((it) => {
+          const sx = Number(it.x ?? it.startX ?? 0);
+          const sy = Number(it.y ?? it.startY ?? 0);
+          const sw = Number(it.width) || 210;
+          const sh = Number(it.height) || 170;
+          const px = sx + sw <= 0 ? sx + sw : (sx >= 1000 ? sx : Math.max(0, Math.min(1000, sx)));
+          const py = sy + sh <= 0 ? sy + sh : (sy >= 1000 ? sy : Math.max(0, Math.min(1000, sy)));
+          const scale = stickyScaleFor(it);
+          const pinPx = Math.max(18, Math.round(30 * scale));
+          const drag = overflowPinDrag && overflowPinDrag.id === it.id ? overflowPinDrag : null;
+          const theme = getStickyTheme(it.color);
+          return (
+            <button
+              key={it.id}
+              type="button"
+              title={it.text ? String(it.text).slice(0, 60) : 'استیکی‌نوت'}
+              onPointerDown={(e) => {
+                if (!isAnnotationActive) return;
+                try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+                setOverflowPinDrag({ id: it.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 });
+              }}
+              onPointerMove={(e) => {
+                if (!drag) return;
+                const dx = e.clientX - drag.startX;
+                const dy = e.clientY - drag.startY;
+                if (Math.abs(dx) + Math.abs(dy) > 3) overflowPinSuppressClickRef.current = it.id;
+                setOverflowPinDrag({ ...drag, dx, dy });
+              }}
+              onPointerUp={() => {
+                if (!drag) return;
+                const moved = Math.abs(drag.dx) + Math.abs(drag.dy);
+                const uniform = uniformItems.find((u) => u.id === it.id);
+                setOverflowPinDrag(null);
+                if (!uniform || moved < 1) return;
+                const dxU = (drag.dx * 1000) / (size.w > 0 ? size.w : 1000);
+                const dyU = (drag.dy * 1000 * aspect) / (size.h > 0 ? size.h : 1000);
+                const next = {
+                  ...uniform,
+                  x: Math.max(-140, Math.min(1140, Number(uniform.x ?? 0) + dxU)),
+                  y: Math.max(0, Math.min(1000 * aspect, Number(uniform.y ?? 0) + dyU)),
+                };
+                commit(uniformItems.map((u) => (u.id === it.id ? next : u)));
+              }}
+              onClick={() => {
+                if (overflowPinSuppressClickRef.current === it.id) {
+                  overflowPinSuppressClickRef.current = null;
+                  return;
+                }
+                if (!isAnnotationActive) return;
+                if (annotationTool === 'eraser') { handleEraseClick(it.id); return; }
+                openStickyEditor(it.id);
+              }}
+              style={{
+                position: 'absolute',
+                left: `${px / 10}%`,
+                top: `${py / (10 * aspect)}%`,
+                transform: `translate(-50%, -50%)${drag ? ` translate(${drag.dx}px, ${drag.dy}px)` : ''}`,
+                width: pinPx,
+                height: pinPx,
+                borderRadius: '50%',
+                border: '2px solid rgba(255,255,255,0.85)',
+                background: theme.headerFill,
+                color: '#ffffff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: isAnnotationActive ? 'grab' : 'default',
+                pointerEvents: isAnnotationActive ? 'auto' : 'none',
+                padding: 0,
+                boxShadow: '0 2px 8px rgba(0,0,0,0.45)',
+              }}
+            >
+              <svg width={Math.round(pinPx * 0.55)} height={Math.round(pinPx * 0.55)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d={LUCIDE_PIN_PATH} />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
 
       {/* فاز ۴: ویرایشگرهای موقتِ HTML — خواهرِ Stage داخلِ همان کانتینر */}
       <TextEditorOverlay

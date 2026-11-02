@@ -244,18 +244,92 @@ export function getCloudBulb(strokeW = 4) {
   return arcRadius * 0.76;
 }
 
+// مرحلهٔ ۳۵ §۳: نرمال‌سازِ واحدِ شفافیت (۰٫۰۵ تا ۱٫۰).
+// مقادیرِ درصدیِ ذخیره‌شده (مثلِ ۱۰۰) یا خارج از بازه، پیش از هر مصرف،
+// به مقیاسِ ۰ تا ۱ تبدیل می‌شوند تا ctx.globalAlpha (که مقدارِ خارج
+// از بازه را نادیده می‌گیرد و آلفای قبلی را نگه می‌دارد) و فیلدِ
+// opacityی pdf-lib، هرگز مقدارِ نامعتبر نبینند.
+export function normalizeOpacityValue(raw, fallback = 1.0) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  // اگر عدد بزرگ‌تر از 1 بود (مثلاً 100 برای 100%)، بر 100 تقسیم شود:
+  const normalized = num > 1 ? num / 100 : num;
+  return Math.min(1.0, Math.max(0.05, normalized));
+}
+
+// مرحلهٔ ۳۵ §۳: وقتی شفافیتِ آیتم دقیقاً ۱٫۰ است، کانالِ آلفای رنگ‌های
+// rgba را به ۱٫۰ برمی‌گرداند تا در PDFخوان‌های دیگر، هیچ شفافیتِ
+// پنهانی روی متن یا کپسولِ آن نماند. رنگ‌های غیرِ rgba دست نمی‌خورند.
+export function forceOpaqueRgba(color) {
+  if (typeof color !== 'string') return color;
+  const m = color.match(/^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*[\d.]+\s*\)$/);
+  if (!m) return color;
+  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, 1)`;
+}
+
+// مرحلهٔ ۳۵ §۴: هندسهٔ تطبیقیِ ابر — گامِ کمان، هرگز از یک‌سومِ ضلعِ
+// کوچک‌ترِ مستطیل بیشتر نمی‌شود و هر ضلع، دقیقاً به تعدادِ صحیحی
+// کمان تقسیم می‌شود تا در باکس‌های کوچک، ابرها در هم نروند.
+export function computeAdaptiveCloudGeometry(absWIn, absHIn, baseStep) {
+  const absW = Math.max(4, Math.abs(absWIn));
+  const absH = Math.max(4, Math.abs(absHIn));
+  const minSide = Math.min(absW, absH);
+  const rawStep = Math.min(baseStep || 18, minSide / 3.0);
+  const adaptiveStep = Math.max(4, rawStep);
+  const countX = Math.max(2, Math.round(absW / adaptiveStep));
+  const countY = Math.max(2, Math.round(absH / adaptiveStep));
+  const stepX = absW / countX;
+  const stepY = absH / countY;
+  const bulgeX = Math.min(stepX * 0.48, minSide * 0.22);
+  const bulgeY = Math.min(stepY * 0.48, minSide * 0.22);
+  return {
+    absW, absH, minSide, adaptiveStep,
+    countX, countY, stepX, stepY, bulgeX, bulgeY,
+    w: absW, h: absH,
+  };
+}
+
+// مرحلهٔ ۳۵ §۴: رسمِ مسیرِ باکسِ ابریِ تطبیقی روی Canvas 2D —
+// نامِ دقیقِ پرامپت. ساعت‌گرد: بالا، راست، پایین، چپ.
+export function drawAdaptiveCloudBoxPath(ctx, x, y, w, h, baseStep) {
+  const g = computeAdaptiveCloudGeometry(w, h, baseStep);
+  const ox = w < 0 ? x + w : x;
+  const oy = h < 0 ? y + h : y;
+  const { absW, absH, countX, countY, stepX, stepY, bulgeX, bulgeY } = g;
+  ctx.beginPath();
+  ctx.moveTo(ox, oy);
+  for (let i = 0; i < countX; i++) {
+    const sx = ox + i * stepX;
+    const ex = ox + (i + 1) * stepX;
+    ctx.quadraticCurveTo((sx + ex) / 2, oy - bulgeY, ex, oy);
+  }
+  for (let i = 0; i < countY; i++) {
+    const sy = oy + i * stepY;
+    const ey = oy + (i + 1) * stepY;
+    ctx.quadraticCurveTo(ox + absW + bulgeX, (sy + ey) / 2, ox + absW, ey);
+  }
+  for (let i = 0; i < countX; i++) {
+    const sx = ox + absW - i * stepX;
+    const ex = ox + absW - (i + 1) * stepX;
+    ctx.quadraticCurveTo((sx + ex) / 2, oy + absH + bulgeY, ex, oy + absH);
+  }
+  for (let i = 0; i < countY; i++) {
+    const sy = oy + absH - i * stepY;
+    const ey = oy + absH - (i + 1) * stepY;
+    ctx.quadraticCurveTo(ox - bulgeX, (sy + ey) / 2, ox, ey);
+  }
+  ctx.closePath();
+}
+
 export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
   const x = Math.min(x1, x2);
   const y = Math.min(y1, y2);
-  const w = Math.max(24, Math.abs(x2 - x1));
-  const h = Math.max(24, Math.abs(y2 - y1));
-
+  // مرحلهٔ ۳۵ §۴: همان هندسهٔ تطبیقیِ drawAdaptiveCloudBoxPath، با
+  // گامِ پایهٔ وابسته به ضخامت (حفظِ ظاهرِ قبلی برای باکس‌های معمولی).
   const arcRadius = Math.min(26, Math.max(13, strokeW * 3.5));
-  const nx = Math.max(2, Math.round(w / (arcRadius * 1.55)));
-  const ny = Math.max(2, Math.round(h / (arcRadius * 1.55)));
-  const stepX = w / nx;
-  const stepY = h / ny;
-  const bulb = getCloudBulb(strokeW);
+  const g = computeAdaptiveCloudGeometry(Math.abs(x2 - x1), Math.abs(y2 - y1), arcRadius * 1.55);
+  const { w, h, countX: nx, countY: ny, stepX, stepY, bulgeX, bulgeY } = g;
 
   let d = `M ${x.toFixed(1)} ${y.toFixed(1)}`;
 
@@ -264,7 +338,7 @@ export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
     const sx = x + i * stepX;
     const ex = x + (i + 1) * stepX;
     const mx = (sx + ex) / 2;
-    const my = y - bulb;
+    const my = y - bulgeY;
     d += ` Q ${mx.toFixed(1)} ${my.toFixed(1)} ${ex.toFixed(1)} ${y.toFixed(1)}`;
   }
 
@@ -272,7 +346,7 @@ export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
   for (let i = 0; i < ny; i++) {
     const sy = y + i * stepY;
     const ey = y + (i + 1) * stepY;
-    const mx = x + w + bulb;
+    const mx = x + w + bulgeX;
     const my = (sy + ey) / 2;
     d += ` Q ${mx.toFixed(1)} ${my.toFixed(1)} ${(x + w).toFixed(1)} ${ey.toFixed(1)}`;
   }
@@ -282,7 +356,7 @@ export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
     const sx = x + w - i * stepX;
     const ex = x + w - (i + 1) * stepX;
     const mx = (sx + ex) / 2;
-    const my = y + h + bulb;
+    const my = y + h + bulgeY;
     d += ` Q ${mx.toFixed(1)} ${my.toFixed(1)} ${ex.toFixed(1)} ${(y + h).toFixed(1)}`;
   }
 
@@ -290,7 +364,7 @@ export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
   for (let i = 0; i < ny; i++) {
     const sy = y + h - i * stepY;
     const ey = y + h - (i + 1) * stepY;
-    const mx = x - bulb;
+    const mx = x - bulgeX;
     const my = (sy + ey) / 2;
     d += ` Q ${mx.toFixed(1)} ${my.toFixed(1)} ${x.toFixed(1)} ${ey.toFixed(1)}`;
   }
@@ -304,42 +378,13 @@ export function generateCloudPath(x1, y1, x2, y2, strokeW = 4) {
  * همان الگوریتم generateCloudPath ولی با دستورات Canvas به‌جای رشته SVG
  */
 export function drawCloudPathCanvas(ctx, x1, y1, x2, y2, strokeW = 4) {
+  // مرحلهٔ ۳۵ §۴: همان هندسهٔ تطبیقیِ drawAdaptiveCloudBoxPath — هر دو
+  // مصرف‌کننده (لایه و خروجیِ PDF) از همین تابع می‌خوانند، پس هندسه،
+  // ذاتاً در هر دو یکی است و از هم منحرف نمی‌شود.
+  const arcRadius = Math.min(26, Math.max(13, strokeW * 3.5));
   const x = Math.min(x1, x2);
   const y = Math.min(y1, y2);
-  const w = Math.max(24, Math.abs(x2 - x1));
-  const h = Math.max(24, Math.abs(y2 - y1));
-
-  const arcRadius = Math.min(26, Math.max(13, strokeW * 3.5));
-  const nx = Math.max(2, Math.round(w / (arcRadius * 1.55)));
-  const ny = Math.max(2, Math.round(h / (arcRadius * 1.55)));
-  const stepX = w / nx;
-  const stepY = h / ny;
-  const bulb = getCloudBulb(strokeW);
-
-  ctx.beginPath();
-  ctx.moveTo(x, y);
-
-  for (let i = 0; i < nx; i++) {
-    const sx = x + i * stepX;
-    const ex = x + (i + 1) * stepX;
-    ctx.quadraticCurveTo((sx + ex) / 2, y - bulb, ex, y);
-  }
-  for (let i = 0; i < ny; i++) {
-    const sy = y + i * stepY;
-    const ey = y + (i + 1) * stepY;
-    ctx.quadraticCurveTo(x + w + bulb, (sy + ey) / 2, x + w, ey);
-  }
-  for (let i = 0; i < nx; i++) {
-    const sx = x + w - i * stepX;
-    const ex = x + w - (i + 1) * stepX;
-    ctx.quadraticCurveTo((sx + ex) / 2, y + h + bulb, ex, y + h);
-  }
-  for (let i = 0; i < ny; i++) {
-    const sy = y + h - i * stepY;
-    const ey = y + h - (i + 1) * stepY;
-    ctx.quadraticCurveTo(x - bulb, (sy + ey) / 2, x, ey);
-  }
-  ctx.closePath();
+  drawAdaptiveCloudBoxPath(ctx, x, y, Math.abs(x2 - x1), Math.abs(y2 - y1), arcRadius * 1.55);
 }
 
 /**

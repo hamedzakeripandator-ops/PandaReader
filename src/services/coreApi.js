@@ -533,15 +533,44 @@ export const coreApi = {
   // می‌گذرد (تایم‌اوتِ ۵٫۵ ثانیه‌ایِ استاندارد)؛ فراخواننده (سرویسِ
   // readingActivity) گزارش‌ها را دسته‌ای می‌فرستد، پس این فراخوان‌ها
   // کم‌تعداد و سبک‌اند.
-  recordReadingActivity: async ({ date, pages = 0, seconds = 0 } = {}) => {
+  recordReadingActivity: async ({ date, pages = 0, seconds = 0, fileKey } = {}) => {
     return await coreApi.dbAction({
       action: 'RECORD_READING_ACTIVITY',
-      payload: { date, pages, seconds },
+      payload: { date, pages, seconds, fileKey },
     });
   },
 
   getReadingStats: async () => {
     return await coreApi.dbAction({ action: 'GET_READING_STATS', payload: {} });
+  },
+
+  // مرحلهٔ ۳۵ §۲: خواندنِ EPUB + هایلایت‌هایِ آن.
+  loadEpubBook: async (filePath) => {
+    const api = getApi();
+    if (!api || typeof api.loadEpubBook !== 'function') return { success: false, message: 'سرویسِ EPUB در دسترس نیست.' };
+    return await api.loadEpubBook(filePath);
+  },
+
+  loadEpubChapter: async (filePath, chapterId) => {
+    const api = getApi();
+    if (!api || typeof api.loadEpubChapter !== 'function') return { success: false, message: 'سرویسِ EPUB در دسترس نیست.' };
+    return await api.loadEpubChapter(filePath, chapterId);
+  },
+
+  getEpubHighlights: async (filePath) => {
+    try {
+      const res = await coreApi.dbAction({ action: 'GET_EPUB_HIGHLIGHTS', payload: { filePath } });
+      if (res && res.type === 'done' && Array.isArray(res.highlights)) return res.highlights;
+    } catch (_) {}
+    return [];
+  },
+
+  saveEpubHighlights: async (filePath, highlights) => {
+    try {
+      return await coreApi.dbAction({ action: 'SAVE_EPUB_HIGHLIGHTS', payload: { filePath, highlights } });
+    } catch (_) {
+      return { success: false };
+    }
   },
 
   // مرحله ۱۴: ثبتِ زمانِ حضورِ سراسریِ برنامه.
