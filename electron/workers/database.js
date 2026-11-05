@@ -64,6 +64,7 @@ const defaultDB = {
   readingStats: { days: {}, byBook: {}, totalAppSeconds: 0 },
   customStatViews: [],
   epubHighlights: {},
+  customColorSystem: { favoriteColors: [], customColorTemplates: [], toolColors: {} },
   profile: {
     username: 'Haamed',
     subtitle: 'توسعه‌دهنده و کمیک‌خوان حرفه‌ای',
@@ -346,6 +347,18 @@ function migrateSchema(parsed) {
     });
   }
 
+  const rawColors = parsed.customColorSystem && typeof parsed.customColorSystem === 'object' ? parsed.customColorSystem : {};
+  const customColorSystem = {
+    favoriteColors: Array.isArray(rawColors.favoriteColors) ? rawColors.favoriteColors.filter((c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c)).slice(0, 48) : [],
+    customColorTemplates: Array.isArray(rawColors.customColorTemplates) ? rawColors.customColorTemplates.filter((t) => t && typeof t === 'object' && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.colors)).map((t) => ({ id: t.id, name: String(t.name).slice(0, 40), colors: t.colors.filter((c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c)).slice(0, 12) })).slice(0, 24) : [],
+    toolColors: {},
+  };
+  if (rawColors.toolColors && typeof rawColors.toolColors === 'object') {
+    for (const k of ['pen', 'highlighter', 'box', 'arrow', 'text', 'sticky']) {
+      if (typeof rawColors.toolColors[k] === 'string' && /^#[0-9a-fA-F]{6}$/.test(rawColors.toolColors[k])) customColorSystem.toolColors[k] = rawColors.toolColors[k];
+    }
+  }
+
   return {
     history,
     library: sortLibraryItems(library),
@@ -357,6 +370,7 @@ function migrateSchema(parsed) {
     readingStats,
     customStatViews,
     epubHighlights,
+    customColorSystem,
     profile: {
       ...defaultDB.profile,
       ...(parsed.profile && typeof parsed.profile === 'object' ? parsed.profile : {})
@@ -2694,6 +2708,42 @@ parentPort.on('message', (request) => {
         // نوشتنِ debounceدارِ ۹۰۰ میلی‌ثانیه‌ای برایِ این مسیر کافی نیست.
         writeDB(db, true);
         sendReply({ type: 'done', action, success: true, preferences: next });
+        break;
+      }
+
+      case 'GET_CUSTOM_COLOR_SYSTEM': {
+        db.customColorSystem = db.customColorSystem || { ...defaultDB.customColorSystem };
+        sendReply({ type: 'done', action, customColorSystem: db.customColorSystem });
+        break;
+      }
+
+      case 'SAVE_CUSTOM_COLOR_SYSTEM': {
+        const { customColorSystem = {} } = payload;
+        const next = { favoriteColors: [], customColorTemplates: [], toolColors: {} };
+        if (Array.isArray(customColorSystem.favoriteColors)) {
+          customColorSystem.favoriteColors.forEach((c) => {
+            if (typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c) && next.favoriteColors.length < 48) next.favoriteColors.push(c);
+          });
+        }
+        if (Array.isArray(customColorSystem.customColorTemplates)) {
+          customColorSystem.customColorTemplates.forEach((t) => {
+            if (!t || typeof t !== 'object' || typeof t.id !== 'string' || typeof t.name !== 'string' || !Array.isArray(t.colors)) return;
+            if (next.customColorTemplates.length >= 24) return;
+            next.customColorTemplates.push({
+              id: t.id,
+              name: String(t.name).slice(0, 40),
+              colors: t.colors.filter((c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c)).slice(0, 12),
+            });
+          });
+        }
+        if (customColorSystem.toolColors && typeof customColorSystem.toolColors === 'object') {
+          for (const k of ['pen', 'highlighter', 'box', 'arrow', 'text', 'sticky']) {
+            if (typeof customColorSystem.toolColors[k] === 'string' && /^#[0-9a-fA-F]{6}$/.test(customColorSystem.toolColors[k])) next.toolColors[k] = customColorSystem.toolColors[k];
+          }
+        }
+        db.customColorSystem = next;
+        writeDB(db, true);
+        sendReply({ type: 'done', action, success: true, customColorSystem: next });
         break;
       }
 

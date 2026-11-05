@@ -249,6 +249,47 @@ export function getCloudBulb(strokeW = 4) {
 // به مقیاسِ ۰ تا ۱ تبدیل می‌شوند تا ctx.globalAlpha (که مقدارِ خارج
 // از بازه را نادیده می‌گیرد و آلفای قبلی را نگه می‌دارد) و فیلدِ
 // opacityی pdf-lib، هرگز مقدارِ نامعتبر نبینند.
+// مرحلهٔ ۳۸ §۲: رنگِ خالص با آلفایِ دقیق — در Konva، گره‌هایِ Path و
+// Rect پراپِ جداگانهٔ fillOpacity ندارند (Konva آن را نادیده می‌گیرد و
+// fill را با opacityی کلیِ گره مات می‌کند)؛ پس تنها راهِ داشتنِ آلفایِ
+// دقیق برایِ fill و stroke، دادنِ رشتهٔ `rgba(r, g, b, alpha)` است.
+// آلفا دقیقاً همان مقدارِ داده‌شده است (بدونِ کفِ ۰٫۰۵)؛ NaN: null.
+export function toRgbaWithAlpha(colorStr, alpha) {
+  const pure = toPureRgbCss(colorStr);
+  if (!pure) return null;
+  const m = /^rgb\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*\)$/.exec(pure);
+  if (!m) return null;
+  const a = Number(alpha);
+  if (!Number.isFinite(a)) return null;
+  const clamped = Math.min(1, Math.max(0, a));
+  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${clamped})`;
+}
+
+// مرحلهٔ ۳۷ §۴(ج): تجزیه‌گرِ دقیقِ رنگ — هر رنگی (#rgb ،#rrggbb
+// ،#rrggbbaa ،rgb(...) ،rgba(...)) را به رشتهٔ ۱۰۰٪ ماتِ
+// `rgb(r, g, b)` بدونِ آلفا تبدیل می‌کند تا شفافیت فقط یک بار
+// (از opacityی آیتم) اعمال شود، نه دو بار (globalAlpha × آلفایِ رنگ).
+export function toPureRgbCss(colorStr) {
+  if (typeof colorStr !== 'string') return null;
+  const c = colorStr.trim();
+  let m;
+  if ((m = /^#([0-9a-fA-F]{3})$/.exec(c))) {
+    return `rgb(${parseInt(m[1][0] + m[1][0], 16)}, ${parseInt(m[1][1] + m[1][1], 16)}, ${parseInt(m[1][2] + m[1][2], 16)})`;
+  }
+  if ((m = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/.exec(c))) {
+    return `rgb(${parseInt(m[1].slice(0, 2), 16)}, ${parseInt(m[1].slice(2, 4), 16)}, ${parseInt(m[1].slice(4, 6), 16)})`;
+  }
+  if ((m = /^rgba?\(\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)/.exec(c))) {
+    const conv = (v, pct) => (pct ? (Number(v) * 255) / 100 : Number(v));
+    const r = Math.round(conv(m[1], m[2]));
+    const g = Math.round(conv(m[3], m[4]));
+    const b = Math.round(conv(m[5], m[6]));
+    if (![r, g, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) return null;
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  return null;
+}
+
 export function normalizeOpacityValue(raw, fallback = 1.0) {
   if (raw === undefined || raw === null || raw === '') return fallback;
   const num = Number(raw);
@@ -1078,10 +1119,12 @@ export function getColorLuminance(color) {
 
 export function getPillStyleForColor(textColor) {
   const lum = getColorLuminance(textColor || '#22d3ee');
+  // مرحلهٔ ۳۷ §۴(ج): کپسول همیشه ماتِ خالص است؛ شفافیت فقط یک بار از
+  // opacityی آیتم می‌آید (در لایه و در خروجی یکسان).
   if (lum !== null && lum < 0.5) {
-    return { background: 'rgba(248, 250, 252, 0.9)', border: 'rgba(15, 23, 42, 0.35)' };
+    return { background: 'rgb(248, 250, 252)', border: 'rgb(15, 23, 42)' };
   }
-  return { background: 'rgba(15, 23, 42, 0.85)', border: null };
+  return { background: 'rgb(15, 23, 42)', border: null };
 }
 
 export function resolvePillFill(item) {
@@ -1090,7 +1133,7 @@ export function resolvePillFill(item) {
   if (pb === null || pb === false || pb === '') return null;
   if (typeof pb === 'string' && pb.trim() !== '' && pb.trim() !== 'auto'
     && !LEGACY_DARK_PILL_FILLS.includes(pb.trim())) {
-    return { background: pb, border: null };
+    return { background: toPureRgbCss(pb) || pb, border: null };
   }
   return getPillStyleForColor(item.color);
 }
@@ -1531,7 +1574,10 @@ export function moveAnnotationByDelta(item, dx, dy) {
   };
 }
 
-export function simplifyPoints(points, minDist = 1.2) {
+// مرحلهٔ ۳۸ §۳: سقفِ ساده‌سازیِ پایانی ۰٫۲۵ — نقاطِ حیاتیِ پیچ‌ها
+// هرگز با آستانهٔ خشن حذف نمی‌شوند. (این اکسپورت فعلاً از هیچ مسیری
+// صدا زده نمی‌شود؛ نه commit قلم و نه اکسپورت، نقاط را کم نمی‌کنند.)
+export function simplifyPoints(points, minDist = 0.25) {
   if (!points || points.length < 3) return points || [];
   const out = [points[0]];
   for (let i = 1; i < points.length; i++) {

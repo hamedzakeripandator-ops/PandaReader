@@ -129,3 +129,190 @@ export function fuzzyScoreLibraryItem(query, fields) {
   }
   return total;
 }
+
+// ── مرحلهٔ ۳۹ §۶: موتورِ جستجویِ مرزیِ پیشرفته (MiniSearch + موتورِ بومی) ──
+
+// کاراکترهایِ «داخلِ کلمه»: لاتین + اعداد + فارسی/عربی + ZWNJ/ZWJ.
+// ZWNJ عمداً داخلِ کلمه حساب می‌شود تا «می‌شود» یک کلمه باشد و «شود»
+// به‌تنهایی، تطابقِ «کلمهٔ کامل» داخلِ آن نگیرد.
+export const WORD_CHAR_PATTERN = '[a-zA-Z0-9_\\u0600-\\u06FF\\uFB50-\\uFDFF\\uFE70-\\uFEFF\\u200C\\u200D]';
+const WORD_CHAR_RE = new RegExp(WORD_CHAR_PATTERN);
+function isWordChar(ch) {
+  return ch ? WORD_CHAR_RE.test(ch) : false;
+}
+
+// نرمال‌سازیِ ۱به۱ بدونِ کوچک‌کردنِ حروف (برایِ حالتِ حساس به بزرگیِ حروف).
+export function normalizeSearchTextCaseSensitive(input) {
+  return String(input || '')
+    .split('')
+    .map((ch) => CHAR_MAP_1TO1[ch] || ch)
+    .join('');
+}
+
+// بررسیِ مرزِ کلمه در متنِ نرمالِ فضادار و با آفست‌هایِ اصلی:
+// mode: 'whole' (پیش‌فرض) = هر دو همسایه حرف/عدد نباشند؛ 'prefix' =
+// فقط همسایهٔ قبل حرف/عدد نباشد (آغازِ کلمه)؛ 'substring' = همیشه معتبر.
+// با این قانون، جستجویِ ear فقط earِ مستقل را می‌گیرد و near/hear/
+// heart/early را رد می‌کند.
+export function isWordBoundaryMatch(text, matchStart, matchLength, mode = 'whole') {
+  if (mode === 'substring') return true;
+  const before = matchStart > 0 ? text[matchStart - 1] : '';
+  if (isWordChar(before)) return false;
+  if (mode === 'prefix') return true;
+  const after = matchStart + matchLength < text.length ? text[matchStart + matchLength] : '';
+  return !isWordChar(after);
+}
+
+// توکنایز با آفستِ اصلی: [{text, start, end}] رویِ متنِ نرمالِ فضادار.
+export function tokenizeWithOffsets(text) {
+  const re = new RegExp(WORD_CHAR_PATTERN + '+', 'g');
+  const out = [];
+  let m;
+  while ((m = re.exec(text || '')) !== null) {
+    out.push({ text: m[0], start: m.index, end: m.index + m[0].length });
+  }
+  return out;
+}
+
+// lower_bound رویِ strippedToOriginal: اولین ایندکسِ stripped که
+// آفستِ اصلیِ آن >= p است.
+export function originalIndexToStrippedIndex(strippedToOriginal, originalIndex) {
+  let lo = 0;
+  let hi = (strippedToOriginal || []).length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (strippedToOriginal[mid] < originalIndex) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// تطابق رویِ یک رشتهٔ معمولی (EPUB و تست‌ها): [{start, end}] در
+// مختصاتِ همان رشته. فاصله/ZWNJِ عبارت، عیناً حساب می‌شود.
+export function findTextMatchSpans(text, query, options = {}) {
+  const { wholeWord = true, caseSensitive = false, prefix = false } = options;
+  const normText = caseSensitive ? normalizeSearchTextCaseSensitive(text) : normalizeSearchText(text);
+  const normQuery = caseSensitive ? normalizeSearchTextCaseSensitive(query) : normalizeSearchText(query);
+  const q = normQuery.trim();
+  if (!q) return [];
+  const qStripped = q.replace(/[\s\u200C\u200D]+/g, '');
+  const out = [];
+  if (prefix) {
+    const maxDist = qStripped.length <= 4 ? 1 : 2;
+    for (const t of tokenizeWithOffsets(normText)) {
+      const tok = t.text.replace(/[\s\u200C\u200D]+/g, '');
+      const hit = tok.startsWith(qStripped) || (qStripped.length >= 4 && levenshteinBounded(tok, qStripped, maxDist) <= maxDist);
+      if (!hit) continue;
+      if (!isWordBoundaryMatch(normText, t.start, t.text.length, 'prefix')) continue;
+      out.push({ start: t.start, end: t.end });
+    }
+    return out;
+  }
+  let from = 0;
+  while (true) {
+    const idx = normText.indexOf(q, from);
+    if (idx === -1) break;
+    if (!wholeWord || isWordBoundaryMatch(normText, idx, q.length, 'whole')) {
+      out.push({ start: idx, end: idx + q.length });
+    }
+    from = idx + Math.max(1, q.length);
+  }
+  return out;
+}
+
+// تطابق رویِ ورودیِ صفحهٔ PDF (extractPageText): [{sStart, sEnd, start, end}].
+// بررسیِ مرز، رویِ متنِ نرمالِ فضادار با آفست‌هایِ اصلی انجام می‌شود؛
+// چون stripped همهٔ فاصله‌ها را حذف می‌کند، بررسیِ مرز رویِ stripped
+// «the ear» را اشتباهاً رد می‌کرد.
+export function findStrippedMatchSpans(entry, query, options = {}) {
+  const { wholeWord = true, caseSensitive = false, prefix = false } = options;
+  if (!entry || !query) return [];
+  const stripped = caseSensitive ? entry.strippedCase || entry.stripped : entry.stripped;
+  const normalized = caseSensitive ? entry.normalizedCase || entry.normalized : entry.normalized;
+  const map = entry.strippedToOriginal || [];
+  if (!stripped || !normalized || map.length === 0) return [];
+  const q = (caseSensitive ? normalizeSearchTextCaseSensitive(query) : normalizeSearchText(query)).replace(/[\s\u200C\u200D]+/g, '');
+  if (!q) return [];
+  const out = [];
+  if (prefix) {
+    const maxDist = q.length <= 4 ? 1 : 2;
+    for (const t of tokenizeWithOffsets(normalized)) {
+      const tok = t.text.replace(/[\s\u200C\u200D]+/g, '');
+      const hit = tok.startsWith(q) || (q.length >= 4 && levenshteinBounded(tok, q, maxDist) <= maxDist);
+      if (!hit) continue;
+      if (!isWordBoundaryMatch(normalized, t.start, t.text.length, 'prefix')) continue;
+      const sStart = originalIndexToStrippedIndex(map, t.start);
+      const sEnd = originalIndexToStrippedIndex(map, t.end);
+      if (sEnd > sStart) out.push({ sStart, sEnd, start: t.start, end: t.end });
+    }
+    return out;
+  }
+  let from = 0;
+  while (true) {
+    const idx = stripped.indexOf(q, from);
+    if (idx === -1) break;
+    const origStart = map[idx];
+    const origEnd = map[idx + q.length - 1] + 1;
+    if (!wholeWord || isWordBoundaryMatch(normalized, origStart, origEnd - origStart, 'whole')) {
+      out.push({ sStart: idx, sEnd: idx + q.length, start: origStart, end: origEnd });
+    }
+    from = idx + Math.max(1, q.length);
+  }
+  return out;
+}
+
+// ── MiniSearch (بارگذاریِ تنبل؛ نبودِ آن، موتورِ بومی را متوقف نمی‌کند) ──
+let miniSearchModulePromise = null;
+export function loadMiniSearch() {
+  if (!miniSearchModulePromise) {
+    miniSearchModulePromise = import('minisearch')
+      .then((m) => (m && m.default) || m || null)
+      .catch(() => null);
+  }
+  return miniSearchModulePromise;
+}
+
+// ایندکسِ سبکِ صفحه/فصل: شتاب‌دهندهٔ مرتب‌سازیِ نتایج است، نه جایگزینِ
+// موتورِ بومی — مکانِ دقیقِ تطابق و مستطیلِ هایلایت همیشه از موتورِ
+// بومی می‌آید. add تکراری، خطا نمی‌دهد.
+export function createMiniSearchIndex() {
+  return loadMiniSearch().then((MiniSearch) => {
+    if (!MiniSearch) return null;
+    let mini;
+    try {
+      mini = new MiniSearch({
+        fields: ['text'],
+        storeFields: ['label'],
+        searchOptions: { prefix: true, fuzzy: 0.2, combineWith: 'AND' },
+      });
+    } catch (_) {
+      return null;
+    }
+    return {
+      add(id, text, label) {
+        try {
+          mini.add({ id, text: text || '', label: label || String(id) });
+        } catch (_) {}
+      },
+      search(query, opts = {}) {
+        try {
+          const res = mini.search(query || '', {
+            prefix: opts.prefix !== false,
+            fuzzy: opts.fuzzy ? 0.2 : 0,
+            combineWith: 'AND',
+          });
+          return res.map((r) => r.id);
+        } catch (_) {
+          return [];
+        }
+      },
+      has(id) {
+        try {
+          return mini.has(id);
+        } catch (_) {
+          return false;
+        }
+      },
+    };
+  });
+}

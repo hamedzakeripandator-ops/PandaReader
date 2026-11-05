@@ -153,6 +153,7 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
 
   const handleTouchStart = (e) => {
     if (totalSlides <= 1) return;
+    if (e.target.closest && e.target.closest('.eq-controls')) return;
     touchStartXRef.current = e.changedTouches[0].screenX;
     touchCurrentXRef.current = touchStartXRef.current;
   };
@@ -216,7 +217,7 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          padding: 28px 38px 54px;
+          padding: 28px 38px 110px;
           gap: 28px;
           opacity: 0;
           pointer-events: none;
@@ -611,8 +612,14 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                         );
                       }}
                       title="پین کردن در صدر کتابخانه"
+                      style={isPinned ? {
+                        background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.32), rgba(5, 150, 105, 0.22))',
+                        border: '1px solid #10b981',
+                        color: '#34d399',
+                        boxShadow: '0 0 16px rgba(16, 185, 129, 0.35)',
+                      } : undefined}
                     >
-                      <Icons.Pin size={14} filled={isPinned} />
+                      <Icons.Pin size={14} filled={isPinned} fillColor="currentColor" />
                       <span>{isPinned ? 'پین‌شده' : 'پین'}</span>
                     </button>
 
@@ -647,22 +654,29 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
             );
           })}
 
+          {/* مرحلهٔ ۳۸ §۱: کنترلِ موجِ صوتی بالاتر، بلافاصله زیرِ
+              دکمه‌هایِ عملیات (ادامه مطالعه / علاقه‌مندی / پین /
+              تغییر کاور) — مطلق در پایینِ داخلِ کانتینر با bottom
+              22px (نه 12px مرحلهٔ ۳۷)؛ پدینگِ پایینیِ اسلاید 110px
+              است تا دکمه‌ها 18px بالایِ لبهٔ بالاییِ موج بنشینند و
+              موج کاملاً درونِ قاب دیده شود. */}
+          {totalSlides >= 1 && (
+            <div
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              style={{ position: 'absolute', bottom: '22px', left: '50%', transform: 'translateX(-50%)', zIndex: 35, pointerEvents: 'auto', overflow: 'visible', marginTop: '18px', marginBottom: '6px' }}
+            >
+              <SliderControls
+                currentIndex={currentIndex}
+                total={totalSlides}
+                onPrev={() => moveSlider(1)}
+                onNext={() => moveSlider(-1)}
+                onSelect={goToSlide}
+                variant={heroSliderVariant}
+              />
+            </div>
+          )}
         </div>
-        {/* مرحلهٔ ۳۶ §۲: نوارِ پایینیِ اختصاصیِ کنترل — بیرون از کانتینرِ
-            350px با overflow: hidden (که در مرحلهٔ ۳۵ کنترل را زیرِ
-            اسلایدها پنهان می‌کرد)؛ همیشه برای slides.length >= 1. */}
-        {totalSlides >= 1 && (
-          <div onClick={(e) => e.stopPropagation()} style={{ position: 'relative', zIndex: 30, display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '10px 0 6px', overflow: 'visible' }}>
-            <SliderControls
-              currentIndex={currentIndex}
-              total={totalSlides}
-              onPrev={() => moveSlider(1)}
-              onNext={() => moveSlider(-1)}
-              onSelect={goToSlide}
-              variant={heroSliderVariant}
-            />
-          </div>
-        )}
       </div>
     </>
   );

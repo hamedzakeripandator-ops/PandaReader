@@ -228,6 +228,8 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
                   <img
                     src={lastReadCover}
                     alt={lastReadTitle}
+                    loading="lazy"
+                    decoding="async"
                     style={styles.lastReadThumbImg}
                     onError={() => setLastReadCover(null)}
                   />

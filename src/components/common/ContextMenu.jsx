@@ -537,6 +537,19 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           onClick: () => onOpenFile?.(),
         },
         {
+          id: 'openFolder',
+          isSubItem: true,
+          section: 'view',
+          label: 'باز کردن پوشه',
+          icon: <Icons.Folder size={14} />,
+          onClick: async () => {
+            try {
+              const r = await coreApi.openFolder();
+              if (r && r.success && r.filePath) onOpenComic?.(r.filePath);
+            } catch (_) {}
+          },
+        },
+        {
           id: 'settings',
           isSubItem: true,
           section: 'view',

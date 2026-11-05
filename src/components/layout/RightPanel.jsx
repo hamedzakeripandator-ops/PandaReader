@@ -1194,6 +1194,42 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               <Icons.ChevronLeft size={14} />
             </button>
           </div>
+
+          {/* مرحلهٔ ۳۹ §۱: فهرستِ فایل‌هایِ پوشهٔ بازشده (به ترتیبِ پنلِ
+              راست) — کلیک روی هر فایل، همان فایل را باز می‌کند. */}
+          {Array.isArray(comicData?.folderFiles) && comicData.folderFiles.length > 0 && (
+            <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', marginBottom: 8 }}>
+                {`فایل‌هایِ این پوشه (${comicData.folderFiles.length})`}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                {comicData.folderFiles.map((f) => {
+                  const isCurrent = normalizeBookKey(f.path || '') === normalizeBookKey(comicData?.filePath || '');
+                  return (
+                    <button
+                      key={f.path}
+                      type="button"
+                      onClick={() => onLoadComic(f.path)}
+                      title={f.name}
+                      style={{
+                        display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
+                        background: isCurrent ? 'rgba(34, 211, 238, 0.12)' : 'transparent',
+                        border: isCurrent ? '1px solid var(--accent)' : '1px solid transparent',
+                        borderRadius: 8, padding: '6px 10px', cursor: 'pointer',
+                        color: isCurrent ? 'var(--accent)' : 'var(--text)',
+                        fontFamily: 'inherit', fontSize: 12,
+                      }}
+                    >
+                      <span style={{ color: 'var(--accent)', display: 'flex', flexShrink: 0 }}>
+                        {f.kind === 'pdf' ? <Icons.FileText size={13} /> : f.kind === 'epub' ? <Icons.BookOpen size={13} /> : f.kind === 'folder' ? <Icons.Folder size={13} /> : <Icons.FileArchive size={13} />}
+                      </span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ===================================================================

@@ -11,11 +11,11 @@ import { coreApi } from '../../services/coreApi';
 import { getPdfSessionPassword, setPdfSessionPassword } from '../../services/pdfPasswordSession';
 import { rebuildEditablePdfFromPdfJs, rebuildPdfBytesToBase64 } from '../../services/pdfRebuildService';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
-import thumbnailService from '../../services/thumbnailService';
+import thumbnailService, { downscaleThumbnailWithPica } from '../../services/thumbnailService';
 import renderQueue, { registerBasePngUrl, revokeBasePngUrl, registerDeepPngUrl, revokeDeepPngUrl, getBasePngUrl, clearFileCache } from '../../services/hiDpiRenderService';
 import { encodeCanvasToLightweightPngUrl, encodeCanvasToWebpUrl } from '../../utils/gpuImageEnhancer';
 import Icons from '../common/Icons';
-import { normalizeSearchText } from '../../utils/persianSearch';
+import { normalizeSearchText, normalizeSearchTextCaseSensitive, findStrippedMatchSpans, createMiniSearchIndex } from '../../utils/persianSearch';
 import { prepareAnnotatedPdfExport } from '../../utils/annotationPdfExport';
 import useSettingsStore from '../../store/useSettingsStore';
 import useBookmarkStore, { normalizeBookKey } from '../../store/useBookmarkStore';
@@ -597,7 +597,17 @@ const PdfPageItem = React.memo(function PdfPageItem({
           }
           // مرحلهٔ ۳۴ — مقیاسِ پایه = min(max(dpr × 1.15, 1.75), 2.0)
           // با سقفِ یکنواختِ ضلعِ ۱۹۲۰ پیکسل.
-          const dpr = Math.min(Math.max((window.devicePixelRatio || 1) * 1.15, 1.75), 2.0);
+          // مرحلهٔ ۳۸ §۴: صفحهٔ فعالِ اول (distance 0) با مقیاسِ
+          // بالاتر min(max(dpr × 1.25, 1.9), 2.2) رندر می‌شود تا باز
+          // شدنِ اولیهٔ PDF فوری و واضح باشد؛ بقیهٔ صفحه‌ها با فرمولِ
+          // مرحلهٔ ۳۴ می‌مانند. سقفِ ضلعِ ۱۹۲۰ پیکسل، در هر دو یکی است.
+          // (کلیدِ کشِ پایه، مقیاس ندارد — اولین رندر برنده است و بعد
+          // همان نشانی بازاستفاده می‌شود؛ پس این تفاوت فقط بارِ اول
+          // اثر می‌گذارد.)
+          const isFirstLoadPage = distance === 0;
+          const dpr = isFirstLoadPage
+            ? Math.min(Math.max((window.devicePixelRatio || 1) * 1.25, 1.9), 2.2)
+            : Math.min(Math.max((window.devicePixelRatio || 1) * 1.15, 1.75), 2.0);
           let scale = dpr;
           const maxSide = Math.max(baseViewport.width, baseViewport.height) * scale;
           if (maxSide > 1920) scale = 1920 / Math.max(baseViewport.width, baseViewport.height);
@@ -746,14 +756,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
         setDeepUrl(null);
       }
     }
-    // مرحلهٔ ۳۳ — سقفِ تطبیقیِ دیپ (طبقهٔ lightِ مرحلهٔ ۳۱، چون
-    // دیپ زیرِ ۱٫۲ اصلاً اجرا نمی‌شود، دست‌نیافتنی شد و حذف شد):
-    // ۱٫۲ تا ۱٫۲۵: سقفِ ۳۶۰۰ پیکسل / ۹ مگاپیکسل (lo)؛ بالاتر از
-    // ۱٫۲۵: سقفِ ۵۱۲۰ پیکسل / ۲۰ مگاپیکسل (hi). طبقه در امضاست.
-    const deepTier = (renderZoomLevel || 0) > 1.25 ? 'hi' : 'lo';
-    const deepSideCap = deepTier === 'hi' ? 5120 : 3600;
-    const deepAreaCap = deepTier === 'hi' ? 20000000 : 9000000;
-    const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|${deepTier}`;
+    // مرحلهٔ ۳۸ §۴: سقفِ واحدِ دیپ برایِ همهٔ زوم‌ها — ۳۶۰۰ پیکسل /
+    // ۸٫۵ مگاپیکسل (طبقهٔ hiی ۵۱۲۰/۲۰M حذف شد: بومِ ۲۰ مگاپیکسلیِ
+    // PNG در زومِ بالا، قفلِ VRAM و هنگِ کاملِ برنامه).
+    const deepSideCap = 3600;
+    const deepAreaCap = 8500000;
+    const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|std`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return undefined;
@@ -764,7 +772,9 @@ const PdfPageItem = React.memo(function PdfPageItem({
       filePath,
       kind: 'deep',
       priority,
-      delayMs: 0,
+      // مرحلهٔ ۳۸ §۴: دیبانسِ ۳۲۰ میلی‌ثانیه پس از تغییرِ زوم —
+      // enqueueی هم‌کلید، کارِ قبلی را لغو می‌کند.
+      delayMs: 320,
       run: async (hooks) => {
         try {
           let renderTask = null;
@@ -804,7 +814,20 @@ const PdfPageItem = React.memo(function PdfPageItem({
             tmp.height = 0;
             return;
           }
-          const url = await encodeCanvasToLightweightPngUrl(tmp);
+          // مرحلهٔ ۳۸ §۴: انکدِ دیپ با WebP بومیِ ۰٫۹۶ (سریع‌تر و
+          // سبک‌تر از PNG)؛ فقط اگر toBlob خالی برگرداند، انکدرِ
+          // Workerِ PNG پشتیبان است.
+          let url = null;
+          try {
+            const webpBlob = await new Promise((resolve) => {
+              try { tmp.toBlob((b) => resolve(b || null), 'image/webp', 0.96); }
+              catch (_) { resolve(null); }
+            });
+            if (webpBlob) {
+              try { url = URL.createObjectURL(webpBlob); } catch (_) { url = null; }
+            }
+          } catch (_) { url = null; }
+          if (!url) url = await encodeCanvasToLightweightPngUrl(tmp);
           tmp.width = 0;
           tmp.height = 0;
           if (hooks.isCancelled()) {
@@ -1201,10 +1224,20 @@ export default function PdfViewer({ filePath }) {
   const isSnippingActive = useAppStore((state) => state.isSnippingActive);
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
   const showToast = useAppStore((state) => state.showToast);
+  const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
   const updateReadingProgress = useLibraryStore((state) => state.updateReadingProgress);
   const { handleContextMenu } = useContextMenu();
 
   const [numPages, setNumPages] = useState(0);
+  // مرحلهٔ ۳۹ §۵: ویرایشِ مستقیمِ شمارهٔ صفحه از رویِ نشانگرِ پایین-راست.
+  const [isEditingPageHud, setIsEditingPageHud] = useState(false);
+  const [pageHudDraft, setPageHudDraft] = useState('');
+  const [pageHudHovered, setPageHudHovered] = useState(false);
+  const commitHudJump = useCallback(() => {
+    const n = Math.max(1, Math.min(numPages, Number(pageHudDraft) || 1));
+    setIsEditingPageHud(false);
+    jumpToPage(n);
+  }, [numPages, pageHudDraft, jumpToPage]);
   const [pdfDoc, setPdfDoc] = useState(null);
   // مرحله ۵ ـ بخش الف: وضعیتِ «در حالِ ساختِ خروجیِ PDF» برای غیرفعال
   // کردنِ دکمهٔ خروجیِ تولبار در طولِ پردازش.
@@ -1370,6 +1403,28 @@ export default function PdfViewer({ filePath }) {
   const [searchCurrentKey, setSearchCurrentKey] = useState(null);
   const [searchScanning, setSearchScanning] = useState(false);
   const [searchScannedCount, setSearchScannedCount] = useState(0);
+  // مرحلهٔ ۳۹ §۶: گزینه‌هایِ جستجویِ پیشرفته (کلمهٔ کامل، پیش‌فرض روشن)
+  // + رفرنسِ همگام برایِ کالبک‌هایِ جستجو و ایندکسِ تنبلِ MiniSearch.
+  const [searchOptions, setSearchOptions] = useState({ wholeWord: true, caseSensitive: false, prefix: false });
+  const searchOptionsRef = useRef(searchOptions);
+  useEffect(() => { searchOptionsRef.current = searchOptions; }, [searchOptions]);
+  const miniIndexRef = useRef(null);
+  const miniIndexPromiseRef = useRef(null);
+  const ensureMiniIndex = useCallback(() => {
+    if (!miniIndexPromiseRef.current) {
+      miniIndexPromiseRef.current = createMiniSearchIndex().then((idx) => {
+        if (idx) miniIndexRef.current = idx;
+        return idx;
+      });
+    }
+    return miniIndexPromiseRef.current;
+  }, []);
+  // مرحلهٔ ۳۹ §۶: با عوض شدنِ فایل، ایندکسِ MiniSearch ریست می‌شود تا
+  // شماره‌صفحه‌هایِ کتابِ قبلی، ترتیبِ اسکنِ کتابِ جدید را به‌هم نریزند.
+  useEffect(() => {
+    miniIndexRef.current = null;
+    miniIndexPromiseRef.current = null;
+  }, [filePath]);
 
   // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
   const safeZoom = Math.min(3.5, Math.max(0.1, Number(zoomLevel) || 1));
@@ -2261,7 +2316,11 @@ export default function PdfViewer({ filePath }) {
 
               await firstPageObj.render({ canvasContext: ctx, viewport: thumbVp }).promise;
               if (isMounted) {
-                const coverDataUrl = thumbCanvas.toDataURL('image/jpeg', 0.84);
+                // مرحلهٔ ۳۹ §۲: کاورِ صفحهٔ اول با pica به 220×310 و
+                // WebP فشرده می‌شود؛ اگر دان‌اسکیل شکست خورد، JPEGِ
+                // قبلی بدونِ هیچ تغییری برمی‌گردد.
+                const smallCover = await downscaleThumbnailWithPica(thumbCanvas);
+                const coverDataUrl = smallCover || thumbCanvas.toDataURL('image/jpeg', 0.84);
                 thumbnailService.seedCover?.(filePath, coverDataUrl);
               }
             } catch (_) {
@@ -2541,6 +2600,13 @@ export default function PdfViewer({ filePath }) {
       items.push({ start, end, rect, vertical, rtl: isRtlSearchItem(item, str) });
     }
     const normalized = normalizeSearchText(text);
+    const normalizedCase = normalizeSearchTextCaseSensitive(text);
+    const strippedCaseChars = [];
+    for (let i = 0; i < normalizedCase.length; i++) {
+      const ch = normalizedCase[i];
+      if (ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t' || ch === '\u200C' || ch === '\u200D') continue;
+      strippedCaseChars.push(ch);
+    }
     const strippedChars = [];
     const strippedToOriginal = [];
     for (let i = 0; i < normalized.length; i++) {
@@ -2552,7 +2618,9 @@ export default function PdfViewer({ filePath }) {
     let entry = {
       text,
       normalized,
+      normalizedCase,
       stripped: strippedChars.join(''),
+      strippedCase: strippedCaseChars.join(''),
       strippedToOriginal,
       items,
     };
@@ -2590,18 +2658,15 @@ export default function PdfViewer({ filePath }) {
   }, [pruneSearchTextCache]);
 
   // نگاشتِ یک تطابق روی آیتم‌ها به مستطیل‌های درصدی.
-  const findMatchesInPage = useCallback((entry, normQuery) => {
+  // مرحلهٔ ۳۹ §۶: یافتنِ تطابق‌ها به موتورِ مرزیِ persianSearch سپرده شد
+  // (کلمهٔ کاملِ پیش‌فرض + حساسیت به بزرگیِ حروف + پیشوندی/فازی)؛
+  // محاسبهٔ مستطیل‌ها از رویِ (start, end) بدونِ تغییر مانده است.
+  const findMatchesInPage = useCallback((entry, query, options) => {
     const out = [];
-    if (!entry || !entry.stripped || !normQuery) return out;
-    const sq = normQuery.replace(/[\s\u200C\u200D]+/g, '');
-    if (!sq) return out;
-    let from = 0;
-    while (true) {
-      const sStart = entry.stripped.indexOf(sq, from);
-      if (sStart === -1) break;
-      const sEnd = sStart + sq.length;
-      const start = entry.strippedToOriginal[sStart];
-      const end = entry.strippedToOriginal[sEnd - 1] + 1;
+    if (!entry || !query) return out;
+    const spans = findStrippedMatchSpans(entry, query, options || {});
+    for (const span of spans) {
+      const { start, end } = span;
       const rects = [];
       for (const item of entry.items) {
         if (item.end <= start || item.start >= end) continue;
@@ -2642,7 +2707,6 @@ export default function PdfViewer({ filePath }) {
         }
       }
       if (rects.length > 0) out.push({ start, end, rects });
-      from = sEnd;
     }
     return out;
   }, []);
@@ -2668,14 +2732,29 @@ export default function PdfViewer({ filePath }) {
       if (startPage + d <= total) order.push(startPage + d);
       if (d > 0 && startPage - d >= 1) order.push(startPage - d);
     }
+    // مرحلهٔ ۳۹ §۶: در حالتِ پیشوندی/فازی، اگر ایندکسِ MiniSearch از
+    // جستجوهایِ قبلی آماده بود، صفحه‌هایِ تطابق‌دار اول اسکن می‌شوند؛
+    // در غیرِ این صورت، همان ترتیبِ نزدیک‌ترین-اول حفظ می‌شود.
+    let searchOrder = order;
+    if (searchOptionsRef.current.prefix) {
+      const miniIdx = miniIndexRef.current;
+      if (miniIdx) {
+        try {
+          const hitPages = miniIdx.search(query, { prefix: true, fuzzy: true }) || [];
+          const hitSet = new Set(hitPages);
+          searchOrder = [...hitPages].sort((a, b) => a - b).concat(order.filter((p) => !hitSet.has(p)));
+        } catch (_) {}
+      }
+      ensureMiniIndex();
+    }
     setSearchScanning(true);
     setSearchScannedCount(0);
     const found = [];
     let scanned = 0;
     const CHUNK_PAGES = 4;
-    for (let i = 0; i < order.length; i += CHUNK_PAGES) {
+    for (let i = 0; i < searchOrder.length; i += CHUNK_PAGES) {
       if (searchRunIdRef.current !== runId) return;
-      const chunk = order.slice(i, i + CHUNK_PAGES);
+      const chunk = searchOrder.slice(i, i + CHUNK_PAGES);
       for (const pageNum of chunk) {
         if (searchRunIdRef.current !== runId) return;
         let entry;
@@ -2688,7 +2767,10 @@ export default function PdfViewer({ filePath }) {
         scanned += 1;
         setSearchScannedCount(scanned);
         if (!entry) continue;
-        const matches = findMatchesInPage(entry, normQuery);
+        if (searchOptionsRef.current.prefix) {
+          ensureMiniIndex().then((idx) => { if (idx) idx.add(pageNum, entry.normalized); }).catch(() => {});
+        }
+        const matches = findMatchesInPage(entry, query, searchOptionsRef.current);
         if (matches.length > 0) {
           for (const m of matches) found.push({ page: pageNum, ...m });
           found.sort((a, b) => a.page - b.page || a.start - b.start);
@@ -2847,7 +2929,7 @@ export default function PdfViewer({ filePath }) {
         searchDebounceRef.current = null;
       }
     };
-  }, [searchQuery, searchOpen, runSearch]);
+  }, [searchQuery, searchOpen, searchOptions, runSearch]);
 
   // مرحله ۹: درخواستِ «جستجو در فایلِ کنونی» از TopBar یا
   // ContextMenu — نوار باز می‌شود، عبارت گذاشته می‌شود و فوکوس
@@ -3703,6 +3785,35 @@ export default function PdfViewer({ filePath }) {
           {searchCounterText && (
             <span style={styles.searchCounter}>{searchCounterText}</span>
           )}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 2, marginInlineStart: 4 }} dir="ltr">
+            <button
+              type="button"
+              title="فقط کلمهٔ کامل (پیش‌فرض روشن) — ear را داخلِ near پیدا نمی‌کند"
+              aria-pressed={searchOptions.wholeWord}
+              onClick={() => setSearchOptions((o) => ({ ...o, wholeWord: !o.wholeWord }))}
+              style={{ ...styles.searchIconBtn, minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: searchOptions.wholeWord ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: searchOptions.wholeWord ? 'rgba(34,211,238,0.18)' : 'transparent', color: searchOptions.wholeWord ? '#67e8f9' : 'var(--muted)' }}
+            >
+              W
+            </button>
+            <button
+              type="button"
+              title="حساس به حروفِ بزرگ و کوچک"
+              aria-pressed={searchOptions.caseSensitive}
+              onClick={() => setSearchOptions((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}
+              style={{ ...styles.searchIconBtn, minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: searchOptions.caseSensitive ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: searchOptions.caseSensitive ? 'rgba(34,211,238,0.18)' : 'transparent', color: searchOptions.caseSensitive ? '#67e8f9' : 'var(--muted)' }}
+            >
+              Aa
+            </button>
+            <button
+              type="button"
+              title="جستجویِ هوشمندِ پیشوندی/فازی — وقتی املایِ دقیق را نمی‌دانید"
+              aria-pressed={searchOptions.prefix}
+              onClick={() => setSearchOptions((o) => ({ ...o, prefix: !o.prefix }))}
+              style={{ ...styles.searchIconBtn, minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: searchOptions.prefix ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: searchOptions.prefix ? 'rgba(34,211,238,0.18)' : 'transparent', color: searchOptions.prefix ? '#67e8f9' : 'var(--muted)' }}
+            >
+              {'≈'}
+            </button>
+          </span>
           <button
             type="button"
             title="نتیجهٔ قبلی (Shift+Enter)"
@@ -3809,6 +3920,54 @@ export default function PdfViewer({ filePath }) {
           <div style={{ height: `${paddingBottom}px`, width: '100%', flexShrink: 0 }} />
         </div>
       </div>
+      {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ
+          محیطِ مطالعه — بدونِ هیچ تغییری در RightPanel. */}
+      {numPages > 0 && (
+        <div
+          onClick={() => { if (!isEditingPageHud) { setPageHudDraft(String(activePage)); setIsEditingPageHud(true); } }}
+          onMouseEnter={() => setPageHudHovered(true)}
+          onMouseLeave={() => setPageHudHovered(false)}
+          title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+        >
+          {isEditingPageHud ? (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type="number"
+                min={1}
+                max={numPages}
+                value={pageHudDraft}
+                autoFocus
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setPageHudDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitHudJump();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setIsEditingPageHud(false);
+                  }
+                }}
+                onBlur={() => setIsEditingPageHud(false)}
+                style={{ width: 58, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(34,211,238,0.6)', borderRadius: 6, color: '#e2e8f0', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, padding: '2px 6px', textAlign: 'center', direction: 'ltr' }}
+              />
+              <span>{`از ${numPages}`}</span>
+              <button
+                type="button"
+                title="رفتن"
+                onMouseDown={(e) => { e.preventDefault(); commitHudJump(); }}
+                style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(34,211,238,0.18)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', pointerEvents: 'none' }}><polyline points="20 6 9 17 4 12" /></svg>
+              </button>
+            </span>
+          ) : (
+            `صفحه ${activePage} از ${numPages}`
+          )}
+        </div>
+      )}
       <RenderProgressHud
         total={zoomHud.total}
         done={zoomHud.done}

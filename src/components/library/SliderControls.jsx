@@ -5,9 +5,9 @@
 // canvas] [بعدی] با ۵ تمپلیتِ قابلِ انتخاب (led / mirror / matrix /
 // pendulum / firefly) و یک موتورِ فیزیکیِ مشترک.
 //
-// هندسهٔ مشترک (مو‌به‌مو از مشخصاتِ تسک): barsPerSlide = 5، PITCH = 8،
-// GAP = 9، PAD = 8، عرضِ بوم W = PAD*2 + B*PITCH + (N-1)*GAP (برایِ
-// N = 7 دقیقاً 350px)، HC = 64، MID = 32، MIN = 6، MAX = 44.
+// هندسهٔ مشترک (مرحلهٔ ۳۸ §۱): barsPerSlide = 8، PITCH = 8.5،
+// GAP = 10، PAD = 10، عرضِ بوم W = PAD*2 + B*PITCH + (N-1)*GAP (برایِ
+// N = 7 دقیقاً 556px)، HC = 64، MID = 32، MIN = 6، MAX = 44.
 // موتور: PRNGی mulberry32 که فقط با تغییرِ اسلاید عوض می‌شود (نه در
 // هاور)، منحنیِ زنگوله‌ای، نفس کشیدن، موجِ ورودِ ماوس، پاپِ تغییرِ
 // اسلاید و نرم‌سازی در useRef (بدونِ useState در هر فریم).
@@ -18,7 +18,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import './SliderControls.css';
 
 export const SLIDER_GEOMETRY = {
-  barsPerSlide: 5,
+  barsPerSlide: 8,
   pitch: 8,
   gap: 9,
   pad: 8,
@@ -28,10 +28,10 @@ export const SLIDER_GEOMETRY = {
   max: 44,
 };
 
-const G = 5;
-const PITCH = 8;
-const GAP = 9;
-const PAD = 8;
+const G = 8;
+const PITCH = 8.5;
+const GAP = 10;
+const PAD = 10;
 const HC = 64;
 const MID = 32;
 const MIN = 6;
@@ -40,8 +40,8 @@ const MAX = 44;
 const COLOR_ACTIVE = '#22d3ee';
 const COLOR_PEAK = '#ec4899';
 const COLOR_INACTIVE = 'rgba(255,255,255,0.28)';
-const COLOR_HOVER_GROUP = 'rgba(255,255,255,0.55)';
-const COLOR_HOVER_BAR = 'rgba(255,255,255,0.95)';
+const COLOR_HOVER_GROUP = 'rgba(255, 255, 255, 0.65)';
+const COLOR_HOVER_BAR = 'rgba(255, 255, 255, 0.98)';
 
 export function sliderStripWidth(totalSlides) {
   const n = Math.max(1, Number(totalSlides) || 1);
@@ -127,6 +127,18 @@ function rr(ctx, x, y, w, h, r) {
 function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBar, t) {
   const peakBar = active * G + 2;
   const bars = v.length;
+  // مرحلهٔ ۳۷ §۱: هالهٔ ظریفِ سایان پشتِ میلهٔ زیرِ ماوس (همهٔ تمپلیت‌ها).
+  if (hoverBar !== null && hoverBar !== undefined && hoverBar >= 0 && hoverBar < v.length) {
+    const hx = barX(hoverBar);
+    const hh = v[hoverBar];
+    ctx.save();
+    ctx.shadowColor = 'rgba(34, 211, 238, 0.55)';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = 'rgba(34, 211, 238, 0.10)';
+    rr(ctx, hx - 3, MID - hh / 2 - 4, 7, hh + 8, 3.5);
+    ctx.fill();
+    ctx.restore();
+  }
   if (variant === 'led') {
     for (let j = 0; j < bars; j++) {
       const x = barX(j);
@@ -234,6 +246,12 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
   const popRef = useRef(0);
   const variantRef = useRef(variant);
   variantRef.current = variant;
+  // مرحلهٔ ۳۷ §۱: مرکزِ منحنیِ زنگوله‌ای (به‌نرمی به سمتِ میلهٔ زیرِ
+  // ماوس می‌لغزد)، موجِ سینوسیِ ورود (سمتِ ورود + زمانِ ورود)، و
+  // دکمهٔ قبلی/بعدیِ زیرِ ماوس.
+  const bellRef = useRef(null);
+  const entryRef = useRef({ side: null, t0: 0 });
+  const [hoveredBtn, setHoveredBtn] = useState(null);
 
   const safeTotal = Math.max(1, Number(total ?? count) || 1);
   const safeIndex = clamp01(Math.floor(Number(currentIndex) || 0), 0, safeTotal - 1);
@@ -259,13 +277,14 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
     popRef.current = performance.now();
   }, [safeTotal, safeIndex]);
 
-  // حلقهٔ رندر (با احترام به prefers-reduced-motion و document.hidden).
+  // حلقهٔ رندر — مرحلهٔ ۳۷ §۱: همیشه فعال است (حتی اگر ویندوز رویِ
+  // کاهشِ انیمیشن باشد؛ انتخابِ صریحِ تسکِ مرحلهٔ ۳۷)؛ فقط وقتی تب
+  // پنهان است (document.hidden) فریم کشیده نمی‌شود.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const ctx = canvas.getContext('2d');
     if (!ctx) return undefined;
-    const reduced = Boolean(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
     let raf = 0;
     const draw = (t) => {
       const params = paramsRef.current;
@@ -279,28 +298,43 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, HC);
       const active = safeIndex;
-      const ref = active * G + 2;
+      const hover = hoverRef.current;
+      // مرکزِ منحنیِ زنگوله‌ای به‌نرمی به سمتِ میلهٔ زیرِ ماوس می‌لغزد
+      // و با رفتنِ ماوس، به میلهٔ مرکزیِ گروهِ فعال برمی‌گردد.
+      if (bellRef.current === null) bellRef.current = active * G + 2;
+      const hoverTarget = (hover.bar !== null && hover.bar !== undefined) ? hover.bar : active * G + 2;
+      bellRef.current += (hoverTarget - bellRef.current) * 0.12;
+      const ref = bellRef.current;
       const popAge = Math.max(0, t - popRef.current);
       const pop = 1 + 0.35 * Math.exp(-popAge / 250);
-      const hover = hoverRef.current;
       for (let j = 0; j < params.length; j++) {
         const p = params[j];
         const env = Math.exp(-Math.pow((j - ref) / 9, 2));
         const breath = 0.78 + 0.22 * Math.sin(t * 0.0016 + p.ph);
         const g = Math.floor(j / G);
-        let boost = 0;
-        if (hover.group === g) boost = 8 * (0.5 + 0.5 * Math.sin(t * 0.004 + p.ph));
-        let h = MIN + (MAX - MIN) * env * breath + boost;
+        let h = MIN + (MAX - MIN) * env * breath;
         if (g === active) h *= pop;
+        // تقویتِ ۲۵٪: میلهٔ زیرِ ماوس و هم‌گروهِ آن.
+        if (hover.group === g) h *= 1.25;
+        // موجِ سینوسیِ ورود: جبهه از سمتِ ورودِ ماوس در طولِ میله‌ها
+        // حرکت می‌کند و در ۴۵۰ms محو می‌شود.
+        const entry = entryRef.current;
+        if (entry.side) {
+          const progress = Math.min(1, Math.max(0, (t - entry.t0) / 450));
+          if (progress >= 1) {
+            entryRef.current = { side: null, t0: 0 };
+          } else {
+            const frontX = entry.side === 'left' ? progress * W : W - progress * W;
+            h += 9 * Math.exp(-Math.pow((barX(j) - frontX) / 26, 2)) * (1 - progress * 0.5);
+          }
+        }
         h = clamp01(h, MIN, MAX);
-        if (reduced) v[j] = h;
-        else v[j] += (h - v[j]) * (0.09 + p.spd);
+        v[j] += (h - v[j]) * (0.09 + p.spd);
       }
       drawVariant(ctx, variantRef.current, v, params, active, hover.group, hover.bar, t);
-      if (!reduced) raf = requestAnimationFrame(draw);
+      raf = requestAnimationFrame(draw);
     };
-    if (reduced) draw(performance.now());
-    else raf = requestAnimationFrame(draw);
+    raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
   }, [safeTotal, safeIndex, W]);
 
@@ -308,8 +342,9 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
     const canvas = canvasRef.current;
     if (!canvas) return -1;
     const rect = canvas.getBoundingClientRect();
-    if (!rect.width) return -1;
-    return ((e.clientX - rect.left) / rect.width) * W;
+    const scaleX = W / Math.max(1, rect.width);
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    return mouseX;
   };
 
   const handleCanvasClick = (e) => {
@@ -317,29 +352,46 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
     if (hit && typeof onSelect === 'function') onSelect(hit.group);
   };
 
-  const handleCanvasMouseMove = (e) => {
+  const handleCanvasPointerMove = (e) => {
     const hit = barAtX(canvasX(e), safeTotal);
     hoverRef.current = hit ? hit : { group: null, bar: null };
   };
 
-  const handleCanvasMouseLeave = () => {
+  const handleCanvasPointerEnter = (e) => {
+    const x = canvasX(e);
+    entryRef.current = { side: x < W / 2 ? 'left' : 'right', t0: performance.now() };
+  };
+
+  const handleCanvasPointerLeave = () => {
     hoverRef.current = { group: null, bar: null };
+    entryRef.current = { side: null, t0: 0 };
+  };
+
+  const handleCanvasMouseMove = (e) => {
+    handleCanvasPointerMove(e);
+  };
+
+  const handleCanvasMouseLeave = () => {
+    handleCanvasPointerLeave();
   };
 
   return (
-    <div className="eq-controls" dir="ltr" style={{ direction: 'ltr', display: 'inline-flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: '14px' }}>
-      <button type="button" className="eq-nav" onClick={onPrev} title="اسلاید قبلی" aria-label="اسلاید قبلی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, outline: 'none', flexShrink: 0 }}>
+    <div className="eq-controls" dir="ltr" style={{ direction: 'ltr', display: 'inline-flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: '14px', maxWidth: '100%' }}>
+      <button type="button" className="eq-nav" onClick={onPrev} onMouseEnter={() => setHoveredBtn('prev')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید قبلی" aria-label="اسلاید قبلی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'prev' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'prev' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, outline: 'none', flexShrink: 0, transform: hoveredBtn === 'prev' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'prev' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'none', display: 'block' }}>
           <polyline points="15 18 9 12 15 6" />
         </svg>
       </button>
-      <div className="eq-canvas-wrap" style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+      <div className="eq-canvas-wrap" style={{ display: 'flex', alignItems: 'center', flexShrink: 1, minWidth: 0 }}>
         <canvas
           ref={canvasRef}
-          style={{ width: W, height: HC, display: 'block', cursor: 'pointer' }}
+          style={{ width: W, maxWidth: '100%', height: 'auto', display: 'block', cursor: 'pointer' }}
           onClick={handleCanvasClick}
           onMouseMove={handleCanvasMouseMove}
           onMouseLeave={handleCanvasMouseLeave}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerEnter={handleCanvasPointerEnter}
+          onPointerLeave={handleCanvasPointerLeave}
         />
         {Array.from({ length: safeTotal }).map((_, i) => (
           <button
@@ -353,7 +405,7 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
           </button>
         ))}
       </div>
-      <button type="button" className="eq-nav" onClick={onNext} title="اسلاید بعدی" aria-label="اسلاید بعدی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, outline: 'none', flexShrink: 0 }}>
+      <button type="button" className="eq-nav" onClick={onNext} onMouseEnter={() => setHoveredBtn('next')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید بعدی" aria-label="اسلاید بعدی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'next' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'next' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, outline: 'none', flexShrink: 0, transform: hoveredBtn === 'next' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'next' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'none', display: 'block' }}>
           <polyline points="9 18 15 12 9 6" />
         </svg>

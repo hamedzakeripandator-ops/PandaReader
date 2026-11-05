@@ -35,8 +35,8 @@ const path = require('path');
 const nodeCrypto = (() => { try { return require('crypto'); } catch (_) { return null; } })();
 
 // مرحله ۷ ـ بخش ب: ریشه‌کنیِ خطای PDFDict روی فایل‌های واقعی و
-// وفاداریِ رنگ (گروهِ شفافیتِ DeviceRGB + گذرِ جداگانهٔ Multiply
-// برای هایلایتر). کالبدشکافیِ بخش ب (۲۳ فایلِ دست‌سازِ تازه +
+// وفاداریِ رنگ (گروهِ شفافیتِ DeviceRGBِ مرحلهٔ ۳۷ + گذرِ جداگانهٔ
+// source-over برای هایلایتر، بدونِ BlendMode). کالبدشکافیِ بخش ب (۲۳ فایلِ دست‌سازِ تازه +
 // ۳۳ فایلِ بخش الف، با pdf-lib 1.17.1) نشان داد: قلابِ سراسریِ
 // روی PDFContext.prototype.lookup لازم نیست و خطرناک است (Kidsِ
 // خراب را با آرایهٔ خالی «ترمیم» می‌کند و صفحه‌ها بی‌صدا گم
@@ -92,6 +92,41 @@ function normalizeOpacityValue(raw, fallback = 1.0) {
   const normalized = num > 1 ? num / 100 : num;
   return Math.min(1.0, Math.max(0.05, normalized));
 }
+
+// مرحلهٔ ۳۷ §۴(ج): کپیِ محلیِ toPureRgbCssی انجین (مرزِ CommonJS/ESM
+// اجازهٔ ایمپورتِ مستقیم نمی‌دهد) + تبدیلِ رنگ به [r,g,b]ی ۰-۱ برایِ
+// pdf-lib — رشته‌هایِ rgb()/rgba() هم پذیرفته می‌شوند، نه فقط #hex
+// (قبلاً rgba بی‌صدا به فیروزه‌ایِ پیش‌فرض می‌افتاد).
+function toPureRgbCss(colorStr) {
+  if (typeof colorStr !== 'string') return null;
+  const c = colorStr.trim();
+  let m;
+  if ((m = /^#([0-9a-fA-F]{3})$/.exec(c))) {
+    return `rgb(${parseInt(m[1][0] + m[1][0], 16)}, ${parseInt(m[1][1] + m[1][1], 16)}, ${parseInt(m[1][2] + m[1][2], 16)})`;
+  }
+  if ((m = /^#([0-9a-fA-F]{6})([0-9a-fA-F]{2})?$/.exec(c))) {
+    return `rgb(${parseInt(m[1].slice(0, 2), 16)}, ${parseInt(m[1].slice(2, 4), 16)}, ${parseInt(m[1].slice(4, 6), 16)})`;
+  }
+  if ((m = /^rgba?\(\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)\s*,\s*([0-9.]+)(%?)/.exec(c))) {
+    const conv = (v, pct) => (pct ? (Number(v) * 255) / 100 : Number(v));
+    const r = Math.round(conv(m[1], m[2]));
+    const g = Math.round(conv(m[3], m[4]));
+    const b = Math.round(conv(m[5], m[6]));
+    if (![r, g, b].every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) return null;
+    return `rgb(${r}, ${g}, ${b})`;
+  }
+  return null;
+}
+
+function colorToRgb01(color) {
+  const pure = toPureRgbCss(color);
+  if (pure) {
+    const m = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/.exec(pure);
+    if (m) return [Number(m[1]) / 255, Number(m[2]) / 255, Number(m[3]) / 255];
+  }
+  return hexToRgb01(color);
+}
+
 
 /** خطای قفلِ فایل: فایلِ مقصد در لحظهٔ نوشتن، در دستِ خوانندهٔ دیگری است. */
 class FileLockedError extends Error {
@@ -1655,7 +1690,7 @@ function pdfLibNumberArray(pdfDoc, values) {
 }
 function pdfLibColorArray(pdfDoc, hex) {
   const ctx = pdfDoc.context;
-  const [r, g, b] = hexToRgb01(hex);
+  const [r, g, b] = colorToRgb01(hex);
   return ctx.obj([pdfLibNumber(pdfDoc, r), pdfLibNumber(pdfDoc, g), pdfLibNumber(pdfDoc, b)]);
 }
 
@@ -1765,7 +1800,9 @@ function buildSquareAnnotDict(pdfDoc, item) {
   // می‌شود تا خطِ دور، با شفافیتِ خودش بماند.
   if (item.fillColor) {
     fields.IC = pdfLibColorArray(pdfDoc, item.fillColor);
-    fields.ca = pdfLibNumber(pdfDoc, clampOpacity(item.fillOpacity, 0.15));
+    // مرحلهٔ ۳۸ §۲: آلفایِ fill دقیقاً userOp است — دیگر در ۰٫۱۵ ضرب
+    // نمی‌شود (convertBoxItem هم fillOpacity را ۱٫۰ می‌فرستد).
+    fields.ca = pdfLibNumber(pdfDoc, clampOpacity((Number(item.fillOpacity) || 1) * normalizeOpacityValue(item.opacity, 0.9), 0.9));
   }
   const annot = ctx.obj(fields);
   return annot;
@@ -1790,6 +1827,7 @@ function buildCircleAnnotDict(pdfDoc, item) {
     C: pdfLibColorArray(pdfDoc, item.fillColor || item.color),
     IC: pdfLibColorArray(pdfDoc, item.fillColor || item.color),
     CA: pdfLibNumber(pdfDoc, normalizeOpacityValue(item.opacity, 0.9)),
+    ca: pdfLibNumber(pdfDoc, normalizeOpacityValue(item.opacity, 0.9)),
     Border: pdfLibNumberArray(pdfDoc, [0, 0, 0]),
   });
   return annot;
@@ -2409,6 +2447,21 @@ async function applyAnnotationsToDocument(pdfDoc, pages, options = {}) {
 
     // مرحله ۷ ـ بخش ب: ترمیمِ Parent/Contents، پیش از هر عملیاتِ pdf-lib.
     sanitizePageDictionaries(pdfDoc, page);
+
+    // مرحلهٔ ۳۷ §۴(ج): گروهِ شفافیتِ استانداردِ sRGB رویِ هر صفحه‌ای که
+    // حاشیه‌نویسی می‌گیرد — بدونِ آن، Acrobat/Foxit شفافیت را در فضایِ
+    // چاپیِ DeviceCMYK محاسبه می‌کنند و رنگ‌ها به‌هم می‌ریزند و
+    // کم‌رنگ می‌شوند (ISO 32000).
+    try {
+      const { PDFName } = getPdfLib();
+      const groupDict = pdfDoc.context.obj({
+        S: PDFName.of('Transparency'),
+        CS: PDFName.of('DeviceRGB'),
+        I: true,
+        K: false,
+      });
+      page.node.set(PDFName.of('Group'), groupDict);
+    } catch (_e) {}
 
     const hasPng = Boolean(pngBuffer || highlightBuffer);
     // وقتی هیچ تصویری نیست، بردار استفاده می‌شود؛ وقتی تصویر هست

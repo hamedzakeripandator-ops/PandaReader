@@ -336,6 +336,150 @@ export function resolveCoverUrl(cover) {
   return `comic://media/?path=${encodeURIComponent(sanitized)}`;
 }
 
+// ============================================================================
+// مرحلهٔ ۳۹ §۲: دان‌اسکیلِ فوق‌سبکِ تامبنیل با pica
+//  - pica به صورتِ تنبل (dynamic import) بارگذاری می‌شود تا بوتِ
+//    برنامه سنگین نشود؛ اگر pica نصب نباشد (یا لودش شکست بخورد)،
+//    بومِ دومرحله‌ایِ بومی جایگزین می‌شود — هیچ‌وقت کرش نمی‌کند.
+//  - ورودی: بوم، تصویر، یا data URL؛ خروجی: data URL با فرمتِ
+//    image/webp و کیفیتِ 0.78 (حداکثر 220×310 با حفظِ نسبتِ ابعاد)،
+//    یا null در صورتِ هر خطایی.
+// ============================================================================
+let picaPromise = null;
+
+function getPicaInstance() {
+  if (!picaPromise) {
+    picaPromise = import('pica')
+      .then((m) => {
+        const factory = (m && m.default) || m;
+        if (typeof factory !== 'function') return null;
+        try {
+          return factory();
+        } catch (_) {
+          return null;
+        }
+      })
+      .catch(() => null);
+  }
+  return picaPromise;
+}
+
+function canvasToWebpDataUrl(canvas, quality = 0.78) {
+  try {
+    const url = canvas.toDataURL('image/webp', quality);
+    if (url && url.startsWith('data:image/webp')) return url;
+  } catch (_) {}
+  try {
+    const url = canvas.toDataURL('image/jpeg', quality);
+    if (url && url.startsWith('data:image/')) return url;
+  } catch (_) {}
+  return null;
+}
+
+function drawImageTwoStage(srcCanvas, destCanvas) {
+  const dw = destCanvas.width;
+  const dh = destCanvas.height;
+  const mid = document.createElement('canvas');
+  const midW = Math.max(dw, Math.min(srcCanvas.width, dw * 2));
+  const midH = Math.max(dh, Math.min(srcCanvas.height, dh * 2));
+  mid.width = Math.max(1, Math.floor(midW));
+  mid.height = Math.max(1, Math.floor(midH));
+  const midCtx = mid.getContext('2d', { alpha: false });
+  midCtx.fillStyle = '#ffffff';
+  midCtx.fillRect(0, 0, mid.width, mid.height);
+  midCtx.drawImage(srcCanvas, 0, 0, mid.width, mid.height);
+  const destCtx = destCanvas.getContext('2d', { alpha: false });
+  destCtx.fillStyle = '#ffffff';
+  destCtx.fillRect(0, 0, dw, dh);
+  destCtx.drawImage(mid, 0, 0, dw, dh);
+  mid.width = 0;
+  mid.height = 0;
+}
+
+export function dataUrlByteSize(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string') return 0;
+  const comma = dataUrl.indexOf(',');
+  if (comma === -1) return 0;
+  return Math.floor((dataUrl.length - comma - 1) * 0.75);
+}
+
+export async function downscaleThumbnailWithPica(sourceImageOrCanvas, targetMaxWidth = 220, targetMaxHeight = 310) {
+  try {
+    if (typeof document === 'undefined') return null;
+    let srcCanvas = null;
+    let srcW = 0;
+    let srcH = 0;
+    if (sourceImageOrCanvas && typeof sourceImageOrCanvas.getContext === 'function' && sourceImageOrCanvas.tagName === 'CANVAS') {
+      srcCanvas = sourceImageOrCanvas;
+      srcW = sourceImageOrCanvas.width || 0;
+      srcH = sourceImageOrCanvas.height || 0;
+    } else {
+      let img = null;
+      if (typeof sourceImageOrCanvas === 'string') {
+        img = new Image();
+        img.decoding = 'async';
+        const loaded = new Promise((resolve, reject) => {
+          img.onload = () => resolve(true);
+          img.onerror = () => reject(new Error('image load failed'));
+        });
+        img.src = sourceImageOrCanvas;
+        await loaded;
+      } else if (sourceImageOrCanvas && sourceImageOrCanvas.tagName === 'IMG') {
+        img = sourceImageOrCanvas;
+        if (!img.complete || !img.naturalWidth) {
+          await new Promise((resolve, reject) => {
+            img.onload = () => resolve(true);
+            img.onerror = () => reject(new Error('image load failed'));
+          });
+        }
+      } else {
+        return null;
+      }
+      srcW = img.naturalWidth || img.width || 0;
+      srcH = img.naturalHeight || img.height || 0;
+      if (!srcW || !srcH) return null;
+      srcCanvas = document.createElement('canvas');
+      srcCanvas.width = srcW;
+      srcCanvas.height = srcH;
+      const srcCtx = srcCanvas.getContext('2d', { alpha: false });
+      srcCtx.fillStyle = '#ffffff';
+      srcCtx.fillRect(0, 0, srcW, srcH);
+      srcCtx.drawImage(img, 0, 0, srcW, srcH);
+    }
+    if (!srcCanvas || !srcW || !srcH) return null;
+    const maxW = Math.max(1, Number(targetMaxWidth) || 220);
+    const maxH = Math.max(1, Number(targetMaxHeight) || 310);
+    const scale = Math.min(1, maxW / srcW, maxH / srcH);
+    const destW = Math.max(1, Math.round(srcW * scale));
+    const destH = Math.max(1, Math.round(srcH * scale));
+    const destCanvas = document.createElement('canvas');
+    destCanvas.width = destW;
+    destCanvas.height = destH;
+    let usedPica = false;
+    try {
+      const picaInstance = await getPicaInstance();
+      if (picaInstance && typeof picaInstance.resize === 'function') {
+        await picaInstance.resize(srcCanvas, destCanvas, {
+          quality: 3,
+          alpha: false,
+          unsharpAmount: 60,
+          unsharpRadius: 0.6,
+          unsharpThreshold: 2,
+        });
+        usedPica = true;
+      }
+    } catch (_) {
+      usedPica = false;
+    }
+    if (!usedPica) {
+      drawImageTwoStage(srcCanvas, destCanvas);
+    }
+    return canvasToWebpDataUrl(destCanvas, 0.78);
+  } catch (_) {
+    return null;
+  }
+}
+
 export const thumbnailService = {
   // تزریق مستقیم کاور ساخته‌شده (توسط PdfViewer یا ورکر) برای جلوگیری از پردازش دوبل
   seedCover: (filePath, dataUrl) => {
@@ -510,7 +654,11 @@ export const thumbnailService = {
               ctx.fillRect(0, 0, canvas.width, canvas.height);
 
               await page.render({ canvasContext: ctx, viewport }).promise;
-              const dataUrl = canvas.toDataURL('image/jpeg', 0.84);
+              // مرحلهٔ ۳۹ §۲: کاورِ PDF با pica به 220×310 و WebP
+              // فشرده می‌شود؛ اگر دان‌اسکیل شکست خورد، JPEGِ قبلی
+              // بدونِ هیچ تغییری برمی‌گردد.
+              const smallCover = await downscaleThumbnailWithPica(canvas);
+              const dataUrl = smallCover || canvas.toDataURL('image/jpeg', 0.84);
 
               // ذخیره فوری کاور قبل از اجرای متدهای پاک‌سازی
               if (dataUrl && dataUrl.startsWith('data:image/')) {

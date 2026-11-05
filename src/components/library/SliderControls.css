@@ -28,13 +28,15 @@
   outline: none;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  transition: background 0.2s ease, transform 0.2s ease;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
   flex-shrink: 0;
 }
 
 .eq-nav:hover {
   background: rgba(255, 255, 255, 0.16);
-  transform: scale(1.06);
+  border-color: #22d3ee;
+  transform: scale(1.12) translateY(-1px);
+  box-shadow: 0 0 14px rgba(34, 211, 238, 0.45);
 }
 
 .eq-nav:active {
@@ -78,3 +80,6 @@
   transform: none !important;
   display: block;
 }
+
+/* مرحلهٔ ۳۷ §۱: انیمیشنِ هاورِ دکمه‌ها (هم‌ارزِ استیتِ hoveredBtn در
+   JSX) و هالهٔ سایانِ میلهٔ زیرِ ماوس که در drawVariant رسم می‌شود. */

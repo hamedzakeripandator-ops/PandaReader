@@ -60,6 +60,8 @@ import {
   getUnionBounds,
   moveAnnotationByDelta,
   normalizeOpacityValue,
+  toPureRgbCss,
+  toRgbaWithAlpha,
 } from '../../utils/annotationEngine';
 import {
   detectCaretLineDirection,
@@ -70,8 +72,12 @@ import {
 // بخش ۱: ریاضیات
 // ============================================================================
 
-const MIN_POINT_DIST = 1.5;
-const STREAMLINE_FACTOR = 0.25;
+// مرحلهٔ ۳۸ §۳: نقطه‌ها متراکم‌تر (۱٫۲) و نرم‌سازی قوی‌تر (۰٫۳۵) —
+// streamline() حالا prev*0.35 + raw*0.65 برمی‌گرداند تا پیچ‌ها و
+// حلقه‌ها نرم شوند؛ منحنیِ درجه‌دومِ نقطهٔ میانی (drawSmoothStroke)
+// از قبل روی هر دو سمت (پیش‌نمایش و ثبت‌شده) پیاده بود.
+const MIN_POINT_DIST = 1.2;
+const STREAMLINE_FACTOR = 0.35;
 
 function dist2(ax, ay, bx, by) {
   const dx = bx - ax;
@@ -178,12 +184,18 @@ function getStrokeWidth(tool, baseWidth) {
 }
 
 function getStrokeOpacity(tool, baseOpacity) {
-  if (tool === 'highlighter') return 0.35;
+  // مرحلهٔ ۳۷ §۴(الف): هایلایتر هم مثلِ بقیهٔ ابزارها به اسلایدرِ
+  // شفافیت وصل است؛ ۰٫۳۵ی ثابت حذف شد (پیش‌فرض ۰٫۴۵).
+  if (tool === 'highlighter') return normalizeOpacityValue(baseOpacity, 0.45);
   return baseOpacity;
 }
 
 function getCompositeOp(tool) {
-  return tool === 'highlighter' ? 'multiply' : 'source-over';
+  // مرحلهٔ ۳۷ §۴(ج): همهٔ ابزارها source-over — هایلایتر دیگر multiply
+  // نیست تا داخلِ برنامه و خروجیِ PDF بایت‌به‌بایت یکی باشند (رویِ
+  // صفحهٔ سفید، هر دو ترکیب یک نتیجه می‌دادند؛ رویِ محتوایِ تیره،
+  // multiply متن را سیاهِ خالص نگه می‌داشت و خروجی رنگی می‌شد).
+  return 'source-over';
 }
 
 // ============================================================================
@@ -252,7 +264,7 @@ const CommittedStroke = React.memo(function CommittedStroke({ item, onErase }) {
 
   const sceneFunc = useCallback((ctx) => {
     drawSmoothStroke(ctx, item.points, {
-      color: item.color || '#22d3ee',
+      color: toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee',
       width: getStrokeWidth(item.tool, item.strokeWidth),
       opacity: getStrokeOpacity(item.tool, item.opacity ?? 0.95),
       compositeOp: getCompositeOp(item.tool),
@@ -335,9 +347,11 @@ const BoxLiveDraft = React.forwardRef(function BoxLiveDraft(
       if (style === 'cloud') {
         // کادر ابری
         drawCloudPathCanvas(ctx, x, y, x + w, y + h, sw);
+        // مرحلهٔ ۳۸ §۲: آلفایِ داخلِ باکس = همان userOp (نه userOp ×
+        // ۰٫۱۵) — دقیقاً برابرِ حالتِ ثبت‌شده و خروجیِ PDF.
         if (hasFill) {
-          ctx.globalAlpha = opacity * 0.15;
-          ctx.fillStyle = color;
+          ctx.globalAlpha = opacity;
+          ctx.fillStyle = toPureRgbCss(color) || color;
           ctx.fill();
           ctx.globalAlpha = opacity;
         }
@@ -351,9 +365,11 @@ const BoxLiveDraft = React.forwardRef(function BoxLiveDraft(
         } else {
           ctx.rect(x, y, w, h);
         }
+        // مرحلهٔ ۳۸ §۲: آلفایِ داخلِ باکس = همان userOp (نه userOp ×
+        // ۰٫۱۵) — دقیقاً برابرِ حالتِ ثبت‌شده و خروجیِ PDF.
         if (hasFill) {
-          ctx.globalAlpha = opacity * 0.15;
-          ctx.fillStyle = color;
+          ctx.globalAlpha = opacity;
+          ctx.fillStyle = toPureRgbCss(color) || color;
           ctx.fill();
           ctx.globalAlpha = opacity;
         }
@@ -445,8 +461,11 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
   const sw = Number(item.strokeWidth) || 4;
   const opacity = Number(item.opacity ?? 0.9);
 
+  // مرحلهٔ ۳۸ §۲: آلفایِ fill، داخلِ خودِ رنگ پخته می‌شود
+  // (toRgbaWithAlpha) چون Konva پراپِ fillOpacity را رویِ Path/Rect
+  // نادیده می‌گیرد؛ opacityی گره ۱ است تا آلفا دو بار اعمال نشود.
   const fillProps = hasFill
-    ? { fill: color, fillOpacity: 0.15 }
+    ? { fill: toRgbaWithAlpha(color, opacity) || toPureRgbCss(color) || color }
     : { fillEnabled: false };
 
   const handleClick = useCallback(() => {
@@ -454,9 +473,9 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
   }, [onErase, item.id]);
 
   const commonProps = {
-    stroke: color,
+    stroke: toRgbaWithAlpha(color, opacity) || toPureRgbCss(color) || color,
     strokeWidth: sw,
-    opacity: opacity,
+    opacity: 1,
     onClick: handleClick,
     onTap: handleClick,
     perfectDrawEnabled: false,
@@ -542,11 +561,10 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
       sceneFunc={cloudSceneFunc}
       hitFunc={cloudHitFunc}
       selfRectFunc={cloudSelfRectFunc}
-      stroke={color}
+      stroke={toRgbaWithAlpha(color, opacity) || color}
       strokeWidth={sw}
-      opacity={opacity}
-      fill={hasFill ? color : undefined}
-      fillOpacity={hasFill ? 0.15 : 0}
+      opacity={1}
+      fill={hasFill ? (toRgbaWithAlpha(color, opacity) || toPureRgbCss(color) || color) : undefined}
       onClick={handleClick}
       onTap={handleClick}
       perfectDrawEnabled={false}
@@ -787,8 +805,8 @@ const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit,
           width={pill.width}
           height={pill.height}
           cornerRadius={pill.cornerRadius}
-          fill={pillFill ? pillFill.background : item.pillBackground}
-          stroke={pillFill && pillFill.border ? pillFill.border : undefined}
+          fill={toPureRgbCss(pillFill ? pillFill.background : item.pillBackground) || (pillFill ? pillFill.background : item.pillBackground)}
+          stroke={pillFill && pillFill.border ? toPureRgbCss(pillFill.border) || pillFill.border : undefined}
           strokeWidth={pillFill && pillFill.border ? 1 : 0}
           opacity={item.opacity ?? 0.9}
           perfectDrawEnabled={false}
@@ -804,7 +822,7 @@ const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit,
         text={normalizeMixedBidiText(item.text || '')}
         fontSize={fontSize}
         fontFamily={fontFamily}
-        fill={item.color || '#22d3ee'}
+        fill={toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee'}
         opacity={item.opacity ?? 0.9}
         fontStyle="bold"
         lineHeight={1.3}
@@ -897,24 +915,24 @@ function getStickyTheme(color) {
   const c = color || '#22d3ee';
   const lum = getColorLuminance(c);
   const isLight = lum !== null && lum >= 0.5;
-  const border = colorWithAlpha(c, 0.55) || (isLight ? 'rgba(15, 23, 42, 0.35)' : 'rgba(248, 250, 252, 0.35)');
+  const border = toPureRgbCss(colorWithAlpha(c, 0.55)) || (isLight ? 'rgb(15, 23, 42)' : 'rgb(248, 250, 252)');
   if (isLight) {
     return {
       isLight: true,
-      bodyBase: 'rgba(248, 250, 252, 0.92)',
-      tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+      bodyBase: 'rgb(248, 250, 252)',
+      tint: toPureRgbCss(colorWithAlpha(c, 0.16)) || 'rgb(34, 211, 238)',
       text: '#0f172a',
       border,
-      headerFill: c,
+      headerFill: toPureRgbCss(c) || c,
     };
   }
   return {
     isLight: false,
-    bodyBase: 'rgba(13, 18, 24, 0.85)',
-    tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+    bodyBase: 'rgb(13, 18, 24)',
+    tint: toPureRgbCss(colorWithAlpha(c, 0.16)) || 'rgb(34, 211, 238)',
     text: '#f8fafc',
     border,
-    headerFill: c,
+    headerFill: toPureRgbCss(c) || c,
   };
 }
 // ============================================================================
@@ -1335,7 +1353,10 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
 //    (قبلاً ۲۵ بود؛ داخلِ کانتینر، هر دو بالای بوم‌اند، ولی عددِ
 //    یکسان، تقدمِ لایه‌ها را قابلِ پیش‌بینی نگه می‌دارد).
 // ============================================================================
-function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCancel }) {
+// مرحلهٔ ۳۸ §۷: contentScale همان ضریبِ CommittedSticky است
+// (adaptiveZoomScale × customScale) — کادر و فونتِ ویرایشگر،
+// دقیقاً هم‌اندازهٔ حالتِ ثبت‌شده می‌شوند.
+function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCancel, contentScale = 1 }) {
   const [textDir, setTextDir] = useState(() => detectTextDirection(item ? item.text || '' : ''));
   if (!item) return null;
   const theme = getStickyTheme(item.color);
@@ -1354,8 +1375,8 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
         zIndex: 999999,
         pointerEvents: 'auto',
         visibility: 'visible',
-        width: Math.max(100, itemW * scaleX),
-        height: Math.max(60, itemH * scaleY),
+        width: Math.max(100, itemW * scaleX * contentScale),
+        height: Math.max(60, itemH * scaleY * contentScale),
         backgroundColor: theme.bodyBase,
         border: `1px solid ${theme.border}`,
         borderRadius: 14,
@@ -1437,7 +1458,7 @@ function StickyEditorOverlay({ item, scaleX, scaleY, size, onBlurCommit, onCance
           resize: 'none',
           padding: '10px 12px',
           fontFamily: item.fontFamily || "'Estedad', sans-serif",
-          fontSize: Math.max(11, (Number(item.fontSize) || 13) * scaleY),
+          fontSize: Math.max(11, (Number(item.fontSize) || 13) * scaleY * contentScale),
           lineHeight: 1.5,
           color: theme.text,
           direction: textDir,
@@ -1725,6 +1746,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // بدونِ setState در هر حرکت، به آن‌ها دسترسی داشته باشند.
   const isMarqueeRef = useRef(null); // { startPt } یا null
   const manualMoveRef = useRef(null); // { startPt, lastPt, originals: Map<id, item> } یا null
+  // مرحلهٔ ۳۸ §۶: نشستِ pan در حالتِ select — { container,
+  // startClientX/Y, startScrollLeft/Top, onMove, onEnd } یا null.
+  const panSessionRef = useRef(null);
   // محافظِ کامیتِ مضاعفِ ترنسفورم: چون onTransformEnd هم روی
   // Transformer و هم روی Groupهای پوششی می‌تواند آتش شود، اولین
   // هندلری که اجرا می‌شود، همهٔ نودها را پردازش و کامیت می‌کند و
@@ -1932,14 +1956,16 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // فاز ۱ بهینه‌سازی — سقفِ داینامیکِ pixelRatio (گزارشِ ممیزی، §۱):
   // بدون سقف، Stage در زوم ۳٫۵ با dpr=2 بومِ ۸۴۰۰×۱۱۸۴۴ می‌سازد
   // (~۴۰۰ مگابایت صحنه + ~۴۰۰ مگابایت هیت به‌ازای هر صفحه). این ضریب،
-  // بزرگ‌ترین ضلعِ بومِ واقعی را تا ۳۸۴۰ پیکسل سقف می‌کند؛ کفِ ۰٫۷۵
-  // طبقِ فرمولِ تسک حفظ شده — یعنی برای صفحه‌های بزرگ‌تر از ۵۱۲۰
-  // پیکسلِ CSS، کفِ کیفی بر سقفِ ۳۸۴۰ غلبه می‌کند (در جدولِ گزارش
+  // بزرگ‌ترین ضلعِ بومِ واقعی را تا ۲۲۰۰ پیکسل سقف می‌کند؛ کفِ ۰٫۷۵
+  // طبقِ فرمولِ تسک حفظ شده — یعنی برای صفحه‌های بزرگ‌تر از ۲۹۳۳
+  // پیکسلِ CSS، کفِ کیفی بر سقفِ ۲۲۰۰ غلبه می‌کند (در جدولِ گزارش
   // آمده است). هیت‌گراف هم حداکثر ۱ می‌گیرد تا در HiDPI یک‌چهارم شود
   // (دقتِ کلیک کم نمی‌شود، چون هیت‌تست به وضوحِ کامل نیاز ندارد).
   const rawDpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
   const maxDim = Math.max(size.w || 1, size.h || 1);
-  const maxBackingStorePx = 3840;
+  // مرحلهٔ ۳۸ §۴: سقفِ بافرِ Konva از ۳۸۴۰ به ۲۲۰۰ پیکسل — در زومِ
+  // ۳۵۰٪، حافظهٔ گرافیکیِ Stage حدودِ ۷۰٪ کمتر است.
+  const maxBackingStorePx = 2200;
   const effectivePixelRatio = Math.max(0.75, Math.min(rawDpr, maxBackingStorePx / maxDim));
   // فاز ۳: صفحاتِ دورِ آیتم‌دار، با نیم‌کیفیت (۰٫۵) رندر می‌شوند تا
   // VRAM پس‌زمینه تقریباً صفر شود؛ با نزدیک شدن یا بیداری، افکتِ
@@ -2220,7 +2246,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       case 'eraser': return eraserCursor();
       case 'box':
       case 'arrow': return 'crosshair';
-      case 'select': return 'default';
+      case 'select': return 'grab';
       default: return 'default';
     }
   }, [isAnnotationActive, annotationTool, annotationColor]);
@@ -2240,6 +2266,22 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const restoreStageCursor = useCallback(() => {
     const c = stageRef.current?.container();
     if (c) c.style.cursor = baseCursorRef.current || 'default';
+  }, []);
+  // مرحلهٔ ۳۸ §۶: کانتینرِ اسکرولِ والدِ صفحه (برای pan در حالتِ
+  // select) — اول از نزدیک‌ترین جدِ Stage، بعد سراسری.
+  const findReaderScrollContainer = useCallback(() => {
+    try {
+      const stage = stageRef.current;
+      const el = stage && typeof stage.container === 'function' ? stage.container() : null;
+      if (el && typeof el.closest === 'function') {
+        const found = el.closest('[data-reader-scroll-container="true"]');
+        if (found) return found;
+      }
+    } catch (_) { /* ignore */ }
+    if (typeof document !== 'undefined') {
+      return document.querySelector('[data-reader-scroll-container="true"]');
+    }
+    return null;
   }, []);
   // طبقه‌بندیِ هندلِ فلش در یک نقطهٔ یکنواخت — همان ریاضیِ handleDown
   // (نزدیک‌ترین هندلِ درونِ شعاعِ ۱۸/scaleX؛ ترتیبِ بررسی: mid، بعد
@@ -3107,14 +3149,55 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           return;
         }
       }
-      // در غیر این صورت: شروعِ مارکیِ موقت.
-      isMarqueeRef.current = { startPt: pt };
-      notifyGestureStart();
-      marqueeBoxRef.current = { x: pt.x, y: pt.y, width: 0, height: 0 };
-      // نودِ مارکی، از قبل visible={false} است و ۰×۰ هم طبقِ قانونِ
-      // «بزرگ‌تر از ۴×۴» پنهان می‌ماند؛ پس در شروع، draw لازم نیست.
-      if (marqueeRectRef.current) {
-        marqueeRectRef.current.setAttrs({ x: pt.x, y: pt.y, width: 0, height: 0, visible: false });
+      // مرحلهٔ ۳۸ §۶: درگِ روی فضایِ خالی، به‌جای مارکی، پیمایشِ
+      // صفحه (pan) است — Shift+درگ، مارکیِ قدیمی را حفظ می‌کند.
+      if (isShift) {
+        // Shift+درگ روی خالی: مارکیِ موقتِ قدیمی.
+        isMarqueeRef.current = { startPt: pt };
+        notifyGestureStart();
+        marqueeBoxRef.current = { x: pt.x, y: pt.y, width: 0, height: 0 };
+        // نودِ مارکی، از قبل visible={false} است و ۰×۰ هم طبقِ قانونِ
+        // «بزرگ‌تر از ۴×۴» پنهان می‌ماند؛ پس در شروع، draw لازم نیست.
+        if (marqueeRectRef.current) {
+          marqueeRectRef.current.setAttrs({ x: pt.x, y: pt.y, width: 0, height: 0, visible: false });
+        }
+        return;
+      }
+      // درگِ ساده روی فضای خالی: پاک کردنِ انتخاب + شروعِ نشستِ pan.
+      // listenerها روی window با capture وصل می‌شوند تا اشاره‌گر،
+      // حتی بیرونِ کادرِ Stage هم دنبال شود؛ ارجاعِ همان توابع، در
+      // خودِ نشست ذخیره می‌شود تا حذفشان دقیق باشد (ری‌رندرِ وسطِ
+      // ژست، ارجاعِ تازه نسازد).
+      if (typeof clearSelection === 'function') clearSelection();
+      const scrollContainer = findReaderScrollContainer();
+      if (scrollContainer) {
+        const session = {
+          container: scrollContainer,
+          startClientX: native.clientX,
+          startClientY: native.clientY,
+          startScrollLeft: scrollContainer.scrollLeft,
+          startScrollTop: scrollContainer.scrollTop,
+        };
+        session.onMove = (ev) => {
+          const dx = ev.clientX - session.startClientX;
+          const dy = ev.clientY - session.startClientY;
+          session.container.scrollLeft = session.startScrollLeft - dx;
+          session.container.scrollTop = session.startScrollTop - dy;
+        };
+        session.onEnd = () => {
+          if (panSessionRef.current !== session) return;
+          panSessionRef.current = null;
+          window.removeEventListener('pointermove', session.onMove, true);
+          window.removeEventListener('pointerup', session.onEnd, true);
+          window.removeEventListener('pointercancel', session.onEnd, true);
+          restoreStageCursor();
+        };
+        panSessionRef.current = session;
+        setStageCursor('grabbing');
+        notifyGestureStart();
+        window.addEventListener('pointermove', session.onMove, true);
+        window.addEventListener('pointerup', session.onEnd, true);
+        window.addEventListener('pointercancel', session.onEnd, true);
       }
       return;
     }
@@ -3396,6 +3479,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     if (isAnnotationActive) {
       if (pts0.length > 0) {
         const cur = pts0[pts0.length - 1];
+        // مرحلهٔ ۳۸ §۶: حینِ pan، handleMove کاری نمی‌کند — اسکرول
+        // را نشستِ pan (روی window) جلو می‌برد و کرسرِ grabbing
+        // هم همان‌جا تنظیم شده است.
+        if (panSessionRef.current) return;
         if (isMarqueeRef.current) {
           const box = marqueeRect(isMarqueeRef.current.startPt, cur);
           marqueeBoxRef.current = box;
@@ -3435,7 +3522,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         }
         // کرسرِ هاور در حالتِ select — نوشتنِ مستقیم روی DOM (بدون
         // setState) تا هر pointermove، ری‌رندرِ کامل نسازد. روی هندلِ
-        // فلش crosshair، روی آیتم move، روی فضای خالی default.
+        // فلش crosshair، روی آیتم move، روی فضای خالی grab.
         // (مارکی و manualMove بالاتر return می‌کنند و درگِ هندل هم
         // بالاتر return می‌کند، پس این‌جا فقط هاورِ آزاد است.)
         if (toolRef.current === 'select') {
@@ -3454,7 +3541,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               } catch (_) { /* ignore */ }
               n = typeof n.getParent === 'function' ? n.getParent() : null;
             }
-            setStageCursor(overItem ? 'move' : 'default');
+            setStageCursor(overItem ? 'move' : 'grab');
           }
         }
       }
@@ -3526,6 +3613,17 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [isAnnotationActive, getNative, shouldProcessEvent, extractPoints, pushFilteredPoints, redrawDraft]);
 
   const handleUpInner = useCallback((e) => {
+    // مرحلهٔ ۳۸ §۶: پایانِ نشستِ pan در حالتِ select (معمولاً
+    // listenerِ pointerupی window زودتر تمامش کرده است؛ این‌جا
+    // فقط برایِ وقتی است که آن listener جا مانده باشد).
+    if (panSessionRef.current) {
+      const session = panSessionRef.current;
+      panSessionRef.current = null;
+      window.removeEventListener('pointermove', session.onMove, true);
+      window.removeEventListener('pointerup', session.onEnd, true);
+      window.removeEventListener('pointercancel', session.onEnd, true);
+      restoreStageCursor();
+    }
     // ماشینِ وضعیتِ یکپارچه (§۴ تسک): ثبتِ نهاییِ درگِ هندل با
     // یک تراکنشِ واحد. کلیکِ بدونِ حرکت (moved=false) و فلشِ
     // ناپدیدشده حینِ درگ، هیچ کامیتی نمی‌سازند. چون handleUp روی
@@ -3833,7 +3931,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       tool,
       color: colorRef.current,
       strokeWidth: widthRef.current,
-      opacity: tool === 'highlighter' ? 0.35 : opacityRef.current,
+      opacity: tool === 'highlighter' ? normalizeOpacityValue(opacityRef.current, 0.45) : opacityRef.current,
       points: pts.map((p) => ({ x: p.x, y: p.y })),
     };
 
@@ -4635,6 +4733,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         scaleX={scaleX}
         scaleY={scaleY}
         size={size}
+        contentScale={stickyEditorItem ? stickyScaleFor(stickyEditorItem) : 1}
         onBlurCommit={commitStickyText}
         onCancel={() => {
           activeStickyEditorRef.current = null;

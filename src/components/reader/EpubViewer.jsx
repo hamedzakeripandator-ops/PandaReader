@@ -24,6 +24,7 @@ import AnnotationLayer from './AnnotationLayer';
 import AnnotationToolbar from './AnnotationToolbar';
 import BookmarkMarker from './BookmarkMarker';
 import { resolveBookmarkImage, clampYRatio } from './bookmarkTemplates';
+import { normalizeSearchTextLoose, findTextMatchSpans } from '../../utils/persianSearch';
 
 const HL_COLORS = [
   { id: 'yellow', label: 'زرد', bg: '#facc15' },
@@ -36,7 +37,21 @@ const HL_COLORS = [
 const THEMES = {
   light: { name: 'روشن', paper: '#ffffff', text: '#111827', muted: '#6b7280' },
   sepia: { name: 'سپیا', paper: '#f5eeda', text: '#3a2f1d', muted: '#7a6a4d' },
-  dark: { name: 'تاریک', paper: '#0d131a', text: '#e5e7eb', muted: '#9ca3af' },
+  gray: { name: 'خاکستریِ ملایم', paper: '#e8eaed', text: '#1f2937', muted: '#6b7280' },
+  dark: { name: 'تاریکِ شب', paper: '#0d131a', text: '#e5e7eb', muted: '#9ca3af' },
+  amoled: { name: 'سیاهِ مطلق', paper: '#000000', text: '#e5e7eb', muted: '#9ca3af' },
+};
+
+// مرحلهٔ ۳۹ §۴: عرضِ ستونِ صفحهٔ EPUB + ترازبندیِ متن.
+const COLUMN_WIDTHS = {
+  narrow: { label: 'باریک', maxWidth: 560 },
+  standard: { label: 'استاندارد', maxWidth: 720 },
+  wide: { label: 'پهن', maxWidth: 880 },
+  full: { label: 'تمام‌صفحه', maxWidth: '100%' },
+};
+const TEXT_ALIGNS = {
+  right: { label: 'راست‌چین' },
+  justify: { label: 'ترازِ دوطرفه' },
 };
 
 const FONT_OPTIONS = [
@@ -45,7 +60,7 @@ const FONT_OPTIONS = [
   { id: 'sans', label: 'سنس', family: "Tahoma, 'Segoe UI', sans-serif" },
 ];
 
-const LINE_HEIGHTS = [1.6, 1.9, 2.2];
+const LINE_HEIGHTS = [1.5, 1.7, 1.9, 2.1, 2.4];
 
 function readLs(key, fallback) {
   try {
@@ -160,11 +175,64 @@ function applyHighlightToEl(root, hl) {
   }
 }
 
+// مرحلهٔ ۳۹ §۶: مارک‌هایِ جستجویِ EPUB (جدا از هایلایت‌هایِ دائمی:
+// unwrapMarks فقط mark[data-hl-id] را برمی‌دارد، پس این دو با هم
+// تداخل ندارند).
+function unwrapSearchMarks(root) {
+  const marks = root.querySelectorAll('mark[data-search-mark]');
+  marks.forEach((m) => {
+    const parent = m.parentNode;
+    if (!parent) return;
+    while (m.firstChild) parent.insertBefore(m.firstChild, m);
+    parent.removeChild(m);
+  });
+  try { root.normalize(); } catch (_) {}
+}
+
+// اعمالِ مارکِ جستجو رویِ فصل: تطابق، فقط درونِ هر گرهٔ متنی پیدا
+// می‌شود (تطابقی که از مرزِ دو المنت بگذرد، مارک نمی‌گیرد — همان
+// محدودیتِ الگویِ TreeWalkerِ مرحلهٔ ۳۶). سقفِ ۲۰۰ مارک در هر فصل.
+function applySearchMarksToEl(root, query, options) {
+  const nodes = collectTextNodes(root);
+  for (const node of nodes) {
+    const spans = findTextMatchSpans(node.textContent, query, options).slice(0, 200);
+    if (spans.length === 0) continue;
+    let current = node;
+    for (let i = spans.length - 1; i >= 0; i--) {
+      const { start, end } = spans[i];
+      if (end > current.textContent.length) continue;
+      current.splitText(end);
+      const mid = current.splitText(start);
+      const mark = document.createElement('mark');
+      mark.setAttribute('data-search-mark', '1');
+      mark.style.backgroundColor = 'rgba(34, 211, 238, 0.35)';
+      mark.style.color = 'inherit';
+      mark.style.borderRadius = '3px';
+      mark.style.padding = '0 1px';
+      mark.style.outline = '1px solid rgba(34, 211, 238, 0.7)';
+      if (mid.parentNode) {
+        mid.parentNode.replaceChild(mark, mid);
+        mark.appendChild(mid);
+      }
+      // current حالا همان گرهٔ چپِ [0,start) است و حلقه، به سراغِ spanِ قبلی می‌رود.
+    }
+  }
+}
+
+
 export default function EpubViewer({ filePath }) {
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
   const setEpubChapters = useReaderStore((state) => state.setEpubChapters);
   const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const showToast = useAppStore((state) => state.showToast);
+  const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
+  // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه در منوهایِ هایلایت.
+  const favoriteColors = useAppStore((s) => s.favoriteColors || []);
+  // مرحلهٔ ۳۸ §۸: زومِ امن برای لایهٔ حاشیه‌نویسی (در EPUB امروز ۱
+  // می‌ماند، چون زومِ EPUB اندازهٔ فونت است؛ سیم‌کشی برای سازگاری
+  // و آینده است).
+  const zoomLevel = useReaderStore((state) => state.zoomLevel);
+  const safeZoom = Math.min(3.5, Math.max(0.1, Number(zoomLevel) || 1));
   const setCurrentView = useAppStore((state) => state.setCurrentView);
   const updateReadingProgress = useLibraryStore((state) => state.updateReadingProgress);
 
@@ -186,18 +254,48 @@ export default function EpubViewer({ filePath }) {
   });
   const [themeId, setThemeId] = useState(() => readLs('comicReader.epubTheme.v1', 'light'));
   const [tocOpen, setTocOpen] = useState(false);
+  const [tocQuery, setTocQuery] = useState('');
+  // مرحلهٔ ۳۹ §۴: عرضِ ستون + ترازِ متن + داکِ عمودیِ تاشو (وضعیتِ
+  // باز/بسته در localStorage می‌ماند).
+  const [columnWidthId, setColumnWidthId] = useState(() => {
+    const v = readLs('comicReader.epubColumnWidth.v1', 'standard');
+    return COLUMN_WIDTHS[v] ? v : 'standard';
+  });
+  const [textAlignId, setTextAlignId] = useState(() => {
+    const v = readLs('comicReader.epubTextAlign.v1', 'right');
+    return TEXT_ALIGNS[v] ? v : 'right';
+  });
+  const [dockOpen, setDockOpen] = useState(() => readLs('comicReader.epubDockOpen.v1', false) === true);
+  const [dockMounted, setDockMounted] = useState(() => readLs('comicReader.epubDockOpen.v1', false) === true);
+  const dockCloseTimerRef = useRef(null);
 
   const [highlights, setHighlights] = useState([]);
   const [selMenu, setSelMenu] = useState(null);
   const [markMenu, setMarkMenu] = useState(null);
   const [annotationsByPage, setAnnotationsByPage] = useState({});
+  // مرحلهٔ ۳۸ §۸: پشته‌های Undo/Redo به‌ازای هر فصل (کلید = شمارهٔ فصل).
+  const [undoStacks, setUndoStacks] = useState({});
+  const [redoStacks, setRedoStacks] = useState({});
 
   const contentRef = useRef(null);
   const chapterElRef = useRef(null);
   const pendingBookmarkScrollRef = useRef(null);
+  // آینهٔ refی annotationsByPage — تا کامیت/Undo، prevItems را بدونِ
+  // stale closure بخوانند (آینهٔ الگوی PdfViewer).
+  const annotationsByPageRef = useRef({});
 
   const chapters = useMemo(() => (book && Array.isArray(book.chapters) ? book.chapters : []), [book]);
   const theme = THEMES[themeId] || THEMES.light;
+  const columnWidth = COLUMN_WIDTHS[columnWidthId] || COLUMN_WIDTHS.standard;
+  const chapterHighlightCount = useMemo(
+    () => (highlights || []).filter((h) => h.chapterIndex === chapterIndex).length,
+    [highlights, chapterIndex],
+  );
+  const tocFilteredChapters = useMemo(() => {
+    const q = normalizeSearchTextLoose(tocQuery || '');
+    if (!q) return chapters;
+    return chapters.filter((ch) => normalizeSearchTextLoose(ch.title || '').includes(q));
+  }, [chapters, tocQuery]);
   const fontFamily = (FONT_OPTIONS.find((f) => f.id === fontId) || FONT_OPTIONS[0]).family;
 
   const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(filePath)] || []);
@@ -219,6 +317,37 @@ export default function EpubViewer({ filePath }) {
   useEffect(() => { writeLs('comicReader.epubFont.v1', fontId); }, [fontId]);
   useEffect(() => { writeLs('comicReader.epubLineHeight.v1', lineHeight); }, [lineHeight]);
   useEffect(() => { writeLs('comicReader.epubTheme.v1', themeId); }, [themeId]);
+  useEffect(() => { writeLs('comicReader.epubColumnWidth.v1', columnWidthId); }, [columnWidthId]);
+  useEffect(() => { writeLs('comicReader.epubTextAlign.v1', textAlignId); }, [textAlignId]);
+  useEffect(() => { writeLs('comicReader.epubDockOpen.v1', dockOpen); }, [dockOpen]);
+  // مرحلهٔ ۳۹ §۴: باز/بسته کردنِ داک با انیمیشن — بستن، اول opacity و
+  // transform را به صفر می‌برد و بعد از ۳۲۰ میلی‌ثانیه آنمانت می‌کند؛
+  // باز کردن، اول مانت می‌کند و در فریمِ بعد، انیمیشنِ ورود را می‌زند.
+  const openDock = useCallback(() => {
+    if (dockCloseTimerRef.current) {
+      clearTimeout(dockCloseTimerRef.current);
+      dockCloseTimerRef.current = null;
+    }
+    setDockMounted(true);
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => setDockOpen(true));
+      });
+    } else {
+      setDockOpen(true);
+    }
+  }, []);
+  const closeDock = useCallback(() => {
+    setDockOpen(false);
+    if (dockCloseTimerRef.current) clearTimeout(dockCloseTimerRef.current);
+    dockCloseTimerRef.current = setTimeout(() => {
+      setDockMounted(false);
+      dockCloseTimerRef.current = null;
+    }, 320);
+  }, []);
+  useEffect(() => () => {
+    if (dockCloseTimerRef.current) clearTimeout(dockCloseTimerRef.current);
+  }, []);
 
   // بارگذاریِ کتاب + شروعِ جلسهٔ مطالعه.
   useEffect(() => {
@@ -296,6 +425,132 @@ export default function EpubViewer({ filePath }) {
     if (typeof scrollRatio === 'number') pendingBookmarkScrollRef.current = scrollRatio;
     setChapterIndex(next);
   }, [chapters.length]);
+  // مرحلهٔ ۳۹ §۵: ویرایشِ مستقیمِ شمارهٔ فصل از رویِ نشانگرِ پایین-راست.
+  const [isEditingPageHud, setIsEditingPageHud] = useState(false);
+  const [pageHudDraft, setPageHudDraft] = useState('');
+  const [pageHudHovered, setPageHudHovered] = useState(false);
+  const commitHudJump = useCallback(() => {
+    const n = Math.max(1, Math.min(chapters.length, Number(pageHudDraft) || 1));
+    setIsEditingPageHud(false);
+    goToChapter(n - 1);
+  }, [chapters.length, pageHudDraft, goToChapter]);
+
+  // مرحلهٔ ۳۹ §۶: جستجویِ درون‌متنِ EPUB — همهٔ فصل‌ها، با همان
+  // گزینه‌هایِ PdfViewer (کلمهٔ کامل، پیش‌فرض روشن).
+  const [epubSearchOpen, setEpubSearchOpen] = useState(false);
+  const [epubSearchQuery, setEpubSearchQuery] = useState('');
+  const [epubSearchOptions, setEpubSearchOptions] = useState({ wholeWord: true, caseSensitive: false, prefix: false });
+  const [epubSearchResults, setEpubSearchResults] = useState([]);
+  const [epubSearchScanning, setEpubSearchScanning] = useState(false);
+  const [epubSearchMarkedChapter, setEpubSearchMarkedChapter] = useState(null);
+  const epubSearchRunIdRef = useRef(0);
+  const epubSearchInputRef = useRef(null);
+  const scrollToSearchMarkRef = useRef(false);
+
+  // Ctrl+F در نمایِ EPUB، نوارِ جستجو را باز می‌کند.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setEpubSearchOpen(true);
+        setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const runEpubSearch = useCallback(async (query, options) => {
+    const runId = ++epubSearchRunIdRef.current;
+    const q = (query || '').trim();
+    if (!q || !filePath || chapters.length === 0) {
+      setEpubSearchResults([]);
+      setEpubSearchScanning(false);
+      return;
+    }
+    setEpubSearchScanning(true);
+    const found = [];
+    const CHUNK = 2;
+    for (let ci = 0; ci < chapters.length; ci += CHUNK) {
+      if (epubSearchRunIdRef.current !== runId) return;
+      for (let k = ci; k < Math.min(chapters.length, ci + CHUNK); k++) {
+        if (epubSearchRunIdRef.current !== runId) return;
+        const ch = chapters[k];
+        let html = '';
+        try {
+          const res = await coreApi.loadEpubChapter(filePath, ch.id);
+          html = res && res.success ? (res.html || '') : '';
+        } catch (_) { html = ''; }
+        if (epubSearchRunIdRef.current !== runId) return;
+        const text = html
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/&nbsp;/g, ' ')
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;|&apos;/g, "'");
+        const spans = findTextMatchSpans(text, q, options);
+        if (spans.length > 0) {
+          const first = spans[0];
+          const snippet = text.slice(Math.max(0, first.start - 40), Math.min(text.length, first.end + 40)).replace(/\s+/g, ' ').trim();
+          found.push({ chapterIndex: k, title: ch.title || ('فصل ' + (k + 1)), count: spans.length, snippet });
+        }
+      }
+      if (ci + CHUNK < chapters.length) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+    }
+    if (epubSearchRunIdRef.current === runId) {
+      setEpubSearchResults(found);
+      setEpubSearchScanning(false);
+    }
+  }, [filePath, chapters]);
+
+  // دیبانسِ ۲۵۰ میلی‌ثانیه‌ایِ تایپ.
+  useEffect(() => {
+    if (!epubSearchOpen) return;
+    if (!epubSearchQuery.trim()) {
+      epubSearchRunIdRef.current += 1;
+      setEpubSearchResults([]);
+      setEpubSearchScanning(false);
+      return;
+    }
+    const t = setTimeout(() => { runEpubSearch(epubSearchQuery, epubSearchOptions); }, 250);
+    return () => clearTimeout(t);
+  }, [epubSearchOpen, epubSearchQuery, epubSearchOptions, runEpubSearch]);
+
+  // بستنِ نوار: نتایج و مارک‌ها پاک می‌شوند.
+  useEffect(() => {
+    if (epubSearchOpen) return;
+    epubSearchRunIdRef.current += 1;
+    setEpubSearchResults([]);
+    setEpubSearchMarkedChapter(null);
+    const el = chapterElRef.current;
+    if (el) unwrapSearchMarks(el);
+  }, [epubSearchOpen]);
+
+  const jumpToEpubSearchResult = useCallback((res) => {
+    if (!res) return;
+    scrollToSearchMarkRef.current = true;
+    setEpubSearchMarkedChapter(res.chapterIndex);
+    goToChapter(res.chapterIndex);
+  }, [goToChapter]);
+
+  // اعمالِ مارک‌هایِ جستجو رویِ فصلِ جاری (پس از رندرِ فصل).
+  useEffect(() => {
+    const el = chapterElRef.current;
+    if (!el) return;
+    unwrapSearchMarks(el);
+    if (epubSearchMarkedChapter === chapterIndex && epubSearchQuery.trim()) {
+      applySearchMarksToEl(el, epubSearchQuery, epubSearchOptions);
+      if (scrollToSearchMarkRef.current) {
+        scrollToSearchMarkRef.current = false;
+        const first = el.querySelector('mark[data-search-mark]');
+        if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }
+  }, [chapterHtml, chapterIndex, epubSearchQuery, epubSearchOptions, epubSearchMarkedChapter]);
   // پرش از پنلِ راست (فصل‌ها).
   useEffect(() => {
     const onJump = (e) => {
@@ -319,6 +574,7 @@ export default function EpubViewer({ filePath }) {
       const dbPages = res?.annotations && typeof res.annotations === 'object' ? res.annotations : {};
       const merged = annotationLocalBackup.mergeBackupsIntoPages(filePath, dbPages);
       setAnnotationsByPage(merged.pages);
+      annotationsByPageRef.current = merged.pages;
       if (coreApi.isAvailable()) {
         merged.healed.forEach(({ pageNum, items }) => {
           coreApi.savePageAnnotations(filePath, pageNum, items).catch(() => {});
@@ -359,10 +615,47 @@ export default function EpubViewer({ filePath }) {
 
   const handleCommitPageAnnotations = useCallback((pageNum, nextPageItems) => {
     const pageKey = String(pageNum);
+    // مرحلهٔ ۳۸ §۸: ورودیِ Undo (آینهٔ PdfViewer) — سقفِ ۳۰، و
+    // با هر کامیت، Redoی همان فصل پاک می‌شود.
+    const prevItems = annotationsByPageRef.current[pageKey] || [];
+    annotationsByPageRef.current = { ...annotationsByPageRef.current, [pageKey]: nextPageItems };
+    setUndoStacks((prev) => {
+      const stack = prev[pageKey] || [];
+      return { ...prev, [pageKey]: [...stack.slice(-29), { pageNum, prevItems, nextItems: nextPageItems }] };
+    });
+    setRedoStacks((prev) => ({ ...prev, [pageKey]: [] }));
     setAnnotationsByPage((prev) => ({ ...prev, [pageKey]: nextPageItems }));
     if (coreApi.isAvailable()) coreApi.savePageAnnotations(filePath, pageNum, nextPageItems).catch(() => {});
     annotationLocalBackup.writePageBackup(filePath, pageNum, nextPageItems);
   }, [filePath]);
+
+  // مرحلهٔ ۳۸ §۸: Undo/Redoی فصلِ جاری — آینهٔ الگوی PdfViewer
+  // (همان شکلِ اکشن؛ همان ذخیره‌سازیِ DB + آینهٔ محلی).
+  const handleUndoAnnotation = useCallback(() => {
+    const pageKey = String(chapterIndex + 1);
+    const stack = undoStacks[pageKey] || [];
+    if (stack.length === 0) return;
+    const lastAction = stack[stack.length - 1];
+    annotationsByPageRef.current = { ...annotationsByPageRef.current, [pageKey]: lastAction.prevItems };
+    setAnnotationsByPage((prevMap) => ({ ...prevMap, [pageKey]: lastAction.prevItems }));
+    setRedoStacks((prev) => ({ ...prev, [pageKey]: [...(prev[pageKey] || []), lastAction] }));
+    setUndoStacks((prev) => ({ ...prev, [pageKey]: stack.slice(0, -1) }));
+    if (coreApi.isAvailable()) coreApi.savePageAnnotations(filePath, lastAction.pageNum, lastAction.prevItems).catch(() => {});
+    annotationLocalBackup.writePageBackup(filePath, lastAction.pageNum, lastAction.prevItems);
+  }, [chapterIndex, filePath, undoStacks]);
+
+  const handleRedoAnnotation = useCallback(() => {
+    const pageKey = String(chapterIndex + 1);
+    const stack = redoStacks[pageKey] || [];
+    if (stack.length === 0) return;
+    const nextAction = stack[stack.length - 1];
+    annotationsByPageRef.current = { ...annotationsByPageRef.current, [pageKey]: nextAction.nextItems };
+    setAnnotationsByPage((prevMap) => ({ ...prevMap, [pageKey]: nextAction.nextItems }));
+    setUndoStacks((prev) => ({ ...prev, [pageKey]: [...(prev[pageKey] || []), nextAction] }));
+    setRedoStacks((prev) => ({ ...prev, [pageKey]: stack.slice(0, -1) }));
+    if (coreApi.isAvailable()) coreApi.savePageAnnotations(filePath, nextAction.pageNum, nextAction.nextItems).catch(() => {});
+    annotationLocalBackup.writePageBackup(filePath, nextAction.pageNum, nextAction.nextItems);
+  }, [chapterIndex, filePath, redoStacks]);
 
   const handleClearChapterAnnotations = useCallback(() => {
     handleCommitPageAnnotations(chapterIndex + 1, []);
@@ -510,7 +803,7 @@ export default function EpubViewer({ filePath }) {
   const chapter = chapters[chapterIndex];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative', paddingTop: 64 }}>
       <style>{`
         .epub-chapter-content img { max-width: 100%; height: auto; }
         .epub-chapter-content p { margin: 0 0 1em; }
@@ -522,105 +815,319 @@ export default function EpubViewer({ filePath }) {
       <AnnotationToolbar
         activePage={chapterIndex + 1}
         pageItemCount={currentChapterAnnotations.length}
-        canUndo={false}
-        canRedo={false}
-        onUndo={() => {}}
-        onRedo={() => {}}
+        canUndo={(undoStacks[String(chapterIndex + 1)] || []).length > 0}
+        canRedo={(redoStacks[String(chapterIndex + 1)] || []).length > 0}
+        onUndo={handleUndoAnnotation}
+        onRedo={handleRedoAnnotation}
         onClearPage={handleClearChapterAnnotations}
         isExportingPdf={false}
         pdfSaveState="idle"
       />
 
-      {/* نوارِ ابزارِ فصل */}
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--panel)' }}>
-        <button type="button" onClick={() => goToChapter(chapterIndex - 1)} disabled={chapterIndex <= 0} title="فصلِ قبلی" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, opacity: chapterIndex <= 0 ? 0.4 : 1 }}>
-          <Icons.ChevronRight size={14} />
+      {/* مرحلهٔ ۳۹ §۴: داکِ عمودیِ تاشو و شناورِ EPUB — در حالتِ بسته،
+          کلِ پنل در یک دکمهٔ کوچکِ ۴۲ پیکسلی خلاصه می‌شود تا تمرکزِ
+          مطالعه حفظ شود. */}
+      {!dockMounted && (
+        <button
+          type="button"
+          onClick={openDock}
+          title="تنظیماتِ مطالعه و فهرستِ فصل‌ها"
+          style={{
+            position: 'absolute', top: 82, left: 18, zIndex: 45,
+            width: 42, height: 42, borderRadius: 12,
+            background: 'rgba(13, 19, 26, 0.82)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
+            border: '1px solid rgba(34, 211, 238, 0.35)',
+            color: '#e2e8f0', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontFamily: "'Estedad', sans-serif", fontSize: 17, fontWeight: 700,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.45)',
+          }}
+        >
+          Aa
+          <span style={{ position: 'absolute', top: -6, left: -6, minWidth: 18, height: 18, borderRadius: 9, background: '#22d3ee', color: '#0b1220', fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px', direction: 'ltr' }}>
+            {chapterIndex + 1}
+          </span>
         </button>
-        <button type="button" onClick={() => goToChapter(chapterIndex + 1)} disabled={chapterIndex >= chapters.length - 1} title="فصلِ بعدی" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, opacity: chapterIndex >= chapters.length - 1 ? 0.4 : 1 }}>
-          <Icons.ChevronLeft size={14} />
-        </button>
-        <button type="button" onClick={() => setTocOpen((v) => !v)} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 12px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13 }}>
-          فهرستِ فصل‌ها
-        </button>
-        <span style={{ fontSize: 13, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 120 }}>
-          {chapter ? chapter.title : ''} · فصلِ {chapterIndex + 1} از {chapters.length}
-        </span>
-        <button type="button" onClick={handleAddBookmark} title="افزودن بوک‌مارک در همین‌جا" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
-          <Icons.Bookmark size={14} />
-          بوک‌مارک
-        </button>
-        <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
-          فونت:
-          <select value={fontId} onChange={(e) => setFontId(e.target.value)} style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '5px 8px', fontFamily: 'inherit', fontSize: 12 }}>
-            {FONT_OPTIONS.map((f) => (<option key={f.id} value={f.id}>{f.label}</option>))}
-          </select>
-        </label>
-        <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
-          اندازه:
-          <button type="button" onClick={() => setFontSize((v) => Math.max(14, v - 2))} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, width: 26, height: 26, cursor: 'pointer' }}>−</button>
-          <span style={{ minWidth: 30, textAlign: 'center', color: 'var(--text)', fontSize: 12 }}>{fontSize}</span>
-          <button type="button" onClick={() => setFontSize((v) => Math.min(28, v + 2))} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, width: 26, height: 26, cursor: 'pointer' }}>+</button>
-        </label>
-        <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
-          فاصلهٔ خطوط:
-          <select value={lineHeight} onChange={(e) => setLineHeight(Number(e.target.value))} style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '5px 8px', fontFamily: 'inherit', fontSize: 12 }}>
-            {LINE_HEIGHTS.map((lh) => (<option key={lh} value={lh}>{lh}</option>))}
-          </select>
-        </label>
-        <label style={{ fontSize: 12, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
-          تمِ کاغذ:
-          <select value={themeId} onChange={(e) => setThemeId(e.target.value)} style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '5px 8px', fontFamily: 'inherit', fontSize: 12 }}>
-            {Object.entries(THEMES).map(([id, t]) => (<option key={id} value={id}>{t.name}</option>))}
-          </select>
-        </label>
-      </div>
+      )}
+      {dockMounted && (
+        <div
+          dir="rtl"
+          style={{
+            position: 'absolute', top: 82, left: 18, zIndex: 45,
+            width: 264, maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 12,
+            padding: 14, borderRadius: 16,
+            background: 'rgba(13, 19, 26, 0.94)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
+            border: '1px solid rgba(34, 211, 238, 0.3)',
+            boxShadow: '0 12px 36px rgba(0,0,0,0.55)',
+            opacity: dockOpen ? 1 : 0,
+            transform: dockOpen ? 'scale(1) translateY(0)' : 'scale(0.94) translateY(-8px)',
+            transformOrigin: 'top left',
+            transition: 'all 0.32s cubic-bezier(0.16, 1, 0.3, 1)',
+            pointerEvents: dockOpen ? 'auto' : 'none',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>تنظیماتِ مطالعه</span>
+            <button
+              type="button"
+              onClick={closeDock}
+              title="جمع کردنِ پنل"
+              style={{ width: 26, height: 26, borderRadius: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block' }}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
+          </div>
 
-      {/* فهرستِ فصل‌ها */}
-      {tocOpen && (
-        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--panel2)', maxHeight: 220, overflowY: 'auto' }}>
-          {book.coverUrl && (
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 10 }}>
-              <img src={book.coverUrl} alt="" style={{ width: 44, height: 64, objectFit: 'cover', borderRadius: 6 }} />
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>{book.title || 'بدونِ عنوان'}</div>
-                {book.creator && (<div style={{ fontSize: 12, color: 'var(--muted)' }}>{book.creator}</div>)}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <button type="button" onClick={() => goToChapter(chapterIndex - 1)} disabled={chapterIndex <= 0} title="فصلِ قبلی" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, opacity: chapterIndex <= 0 ? 0.4 : 1 }}>
+                <Icons.ChevronRight size={14} />
+              </button>
+              <button type="button" onClick={() => goToChapter(chapterIndex + 1)} disabled={chapterIndex >= chapters.length - 1} title="فصلِ بعدی" style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, opacity: chapterIndex >= chapters.length - 1 ? 0.4 : 1 }}>
+                <Icons.ChevronLeft size={14} />
+              </button>
+              <button type="button" onClick={() => setTocOpen((v) => !v)} style={{ flex: 1, background: tocOpen ? 'rgba(34,211,238,0.16)' : 'rgba(255,255,255,0.06)', border: tocOpen ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>
+                فهرستِ فصل‌ها
+              </button>
+            </div>
+            <span style={{ fontSize: 12, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {chapter ? chapter.title : ''} · فصلِ {chapterIndex + 1} از {chapters.length}
+            </span>
+            <div style={{ height: 6, borderRadius: 3, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+              <div style={{ height: '100%', width: `${chapters.length > 0 ? ((chapterIndex + 1) / chapters.length) * 100 : 0}%`, background: '#22d3ee', borderRadius: 3, transition: 'width 0.3s ease' }} />
+            </div>
+          </div>
+
+          {tocOpen && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <input
+                type="text"
+                value={tocQuery}
+                onChange={(e) => setTocQuery(e.target.value)}
+                placeholder="جستجو در فصل‌ها…"
+                style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, padding: '7px 10px' }}
+              />
+              {book.coverUrl && (
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                  <img src={book.coverUrl} alt="" style={{ width: 44, height: 64, objectFit: 'cover', borderRadius: 6 }} />
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{book.title || 'بدونِ عنوان'}</div>
+                    {book.creator && (<div style={{ fontSize: 11, color: 'var(--muted)' }}>{book.creator}</div>)}
+                  </div>
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                {tocFilteredChapters.map((ch) => {
+                  const idx = chapters.indexOf(ch);
+                  return (
+                    <button
+                      key={ch.id}
+                      type="button"
+                      onClick={() => { goToChapter(idx); setTocOpen(false); }}
+                      style={{
+                        display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
+                        background: idx === chapterIndex ? 'rgba(34,211,238,0.12)' : 'transparent',
+                        border: idx === chapterIndex ? '1px solid var(--accent)' : '1px solid transparent',
+                        borderRadius: 8, padding: '6px 10px', cursor: 'pointer', color: idx === chapterIndex ? 'var(--accent)' : 'var(--text)',
+                        fontFamily: 'inherit', fontSize: 12,
+                      }}
+                    >
+                      <span style={{ fontSize: 11, color: 'var(--muted)', minWidth: 22 }}>{idx + 1}</span>
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.title}</span>
+                    </button>
+                  );
+                })}
+                {tocFilteredChapters.length === 0 && (
+                  <div style={{ fontSize: 12, color: 'var(--muted)', padding: '6px 4px' }}>فصلی با این نام پیدا نشد.</div>
+                )}
               </div>
             </div>
           )}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {chapters.map((ch, idx) => (
-              <button
-                key={ch.id}
-                type="button"
-                onClick={() => { goToChapter(idx); setTocOpen(false); }}
-                style={{
-                  display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
-                  background: idx === chapterIndex ? 'rgba(34,211,238,0.12)' : 'transparent',
-                  border: idx === chapterIndex ? '1px solid var(--accent)' : '1px solid transparent',
-                  borderRadius: 8, padding: '6px 10px', cursor: 'pointer', color: idx === chapterIndex ? 'var(--accent)' : 'var(--text)',
-                  fontFamily: 'inherit', fontSize: 13,
-                }}
-              >
-                <span style={{ fontSize: 11, color: 'var(--muted)', minWidth: 22 }}>{idx + 1}</span>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ch.title}</span>
-              </button>
-            ))}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>اندازهٔ فونت</span>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <button type="button" onClick={() => setFontSize((v) => Math.max(14, v - 2))} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, width: 30, height: 30, cursor: 'pointer', fontSize: 16 }}>−</button>
+              <span style={{ flex: 1, textAlign: 'center', color: 'var(--text)', fontSize: 13 }}>{fontSize}</span>
+              <button type="button" onClick={() => setFontSize((v) => Math.min(28, v + 2))} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, width: 30, height: 30, cursor: 'pointer', fontSize: 16 }}>+</button>
+              <select value={fontId} onChange={(e) => setFontId(e.target.value)} style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 8px', fontFamily: 'inherit', fontSize: 12 }}>
+                {FONT_OPTIONS.map((f) => (<option key={f.id} value={f.id}>{f.label}</option>))}
+              </select>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>عرضِ ستونِ صفحه</span>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {Object.entries(COLUMN_WIDTHS).map(([id, w]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setColumnWidthId(id)}
+                  style={{ flex: 1, background: columnWidthId === id ? 'rgba(34,211,238,0.16)' : 'rgba(255,255,255,0.06)', border: columnWidthId === id ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11 }}
+                >
+                  {w.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>ترازبندیِ متن</span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {Object.entries(TEXT_ALIGNS).map(([id, a]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setTextAlignId(id)}
+                  style={{ flex: 1, background: textAlignId === id ? 'rgba(34,211,238,0.16)' : 'rgba(255,255,255,0.06)', border: textAlignId === id ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11 }}
+                >
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>فاصلهٔ خطوط</span>
+            <select value={lineHeight} onChange={(e) => setLineHeight(Number(e.target.value))} style={{ background: 'var(--panel2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 8, padding: '6px 8px', fontFamily: 'inherit', fontSize: 12 }}>
+              {LINE_HEIGHTS.map((lh) => (<option key={lh} value={lh}>{lh}</option>))}
+            </select>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>تمِ کاغذ</span>
+            <div style={{ display: 'flex', gap: 6 }}>
+              {Object.entries(THEMES).map(([id, t]) => (
+                <button
+                  key={id}
+                  type="button"
+                  title={t.name}
+                  onClick={() => setThemeId(id)}
+                  style={{ flex: 1, height: 28, borderRadius: 8, background: t.paper, border: themeId === id ? '2px solid #22d3ee' : '1px solid rgba(255,255,255,0.3)', cursor: 'pointer', padding: 0 }}
+                />
+              ))}
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>{(THEMES[themeId] || THEMES.light).name}</span>
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <button type="button" onClick={handleAddBookmark} title="افزودن بوک‌مارک در همین‌جا" style={{ flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '7px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
+              <Icons.Bookmark size={14} />
+              بوک‌مارک
+            </button>
+            <button type="button" onClick={() => { setEpubSearchOpen(true); setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0); }} title="جستجویِ درون‌متنِ کتاب (Ctrl+F)" style={{ flex: 1, background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(34,211,238,0.4)', color: '#67e8f9', borderRadius: 8, padding: '7px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
+              <Icons.Search size={14} />
+              جستجو در کتاب
+            </button>
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+              {`هایلایت‌هایِ این فصل: ${chapterHighlightCount}`}
+            </span>
           </div>
         </div>
       )}
 
+      {/* مرحلهٔ ۳۹ §۶: نوارِ شناورِ جستجویِ درون‌متنِ EPUB (Ctrl+F) — فصلِ جاری + همهٔ فصل‌ها. */}
+      {epubSearchOpen && (
+        <div style={{ position: 'absolute', top: isAnnotationActive ? 132 : 64, left: '50%', transform: 'translateX(-50%)', zIndex: 60, display: 'flex', flexDirection: 'column', gap: 6, width: 460, maxWidth: 'calc(100vw - 32px)', background: 'rgba(13,19,26,0.95)', border: '1px solid rgba(34,211,238,0.35)', borderRadius: 12, padding: '8px 10px', boxShadow: '0 8px 32px rgba(0,0,0,0.5)' }} dir="rtl">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ color: 'var(--muted)', display: 'flex' }}>
+              <Icons.Search size={16} />
+            </span>
+            <input
+              ref={epubSearchInputRef}
+              type="text"
+              value={epubSearchQuery}
+              onChange={(e) => setEpubSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (epubSearchResults.length > 0) jumpToEpubSearchResult(epubSearchResults[0]);
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setEpubSearchOpen(false);
+                }
+              }}
+              placeholder="جستجو در این کتاب…"
+              dir="auto"
+              style={{ flex: 1, background: 'transparent', border: 'none', outline: 'none', color: 'var(--text)', fontSize: 13.5, fontFamily: 'inherit', padding: '4px 2px' }}
+            />
+            <span style={{ display: 'flex', alignItems: 'center', gap: 2 }} dir="ltr">
+              <button
+                type="button"
+                title="فقط کلمهٔ کامل (پیش‌فرض روشن) — ear را داخلِ near پیدا نمی‌کند"
+                aria-pressed={epubSearchOptions.wholeWord}
+                onClick={() => setEpubSearchOptions((o) => ({ ...o, wholeWord: !o.wholeWord }))}
+                style={{ minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: epubSearchOptions.wholeWord ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: epubSearchOptions.wholeWord ? 'rgba(34,211,238,0.18)' : 'transparent', color: epubSearchOptions.wholeWord ? '#67e8f9' : 'var(--muted)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8 }}
+              >
+                W
+              </button>
+              <button
+                type="button"
+                title="حساس به حروفِ بزرگ و کوچک"
+                aria-pressed={epubSearchOptions.caseSensitive}
+                onClick={() => setEpubSearchOptions((o) => ({ ...o, caseSensitive: !o.caseSensitive }))}
+                style={{ minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: epubSearchOptions.caseSensitive ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: epubSearchOptions.caseSensitive ? 'rgba(34,211,238,0.18)' : 'transparent', color: epubSearchOptions.caseSensitive ? '#67e8f9' : 'var(--muted)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8 }}
+              >
+                Aa
+              </button>
+              <button
+                type="button"
+                title="جستجویِ هوشمندِ پیشوندی/فازی — وقتی املایِ دقیق را نمی‌دانید"
+                aria-pressed={epubSearchOptions.prefix}
+                onClick={() => setEpubSearchOptions((o) => ({ ...o, prefix: !o.prefix }))}
+                style={{ minWidth: 26, fontSize: 12, fontWeight: 800, fontFamily: 'inherit', border: epubSearchOptions.prefix ? '1px solid rgba(34,211,238,0.6)' : '1px solid transparent', backgroundColor: epubSearchOptions.prefix ? 'rgba(34,211,238,0.18)' : 'transparent', color: epubSearchOptions.prefix ? '#67e8f9' : 'var(--muted)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8 }}
+              >
+                {'\u2248'}
+              </button>
+            </span>
+            <button
+              type="button"
+              title="بستن (Escape)"
+              onClick={() => setEpubSearchOpen(false)}
+              style={{ backgroundColor: 'transparent', border: 'none', color: 'var(--muted)', cursor: 'pointer', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8 }}
+            >
+              <Icons.X size={16} />
+            </button>
+          </div>
+          {epubSearchScanning && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', padding: '2px 4px' }}>در حالِ جستجو در فصل‌ها…</div>
+          )}
+          {epubSearchResults.length > 0 && (
+            <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {epubSearchResults.map((r) => (
+                <button
+                  key={r.chapterIndex}
+                  type="button"
+                  onClick={() => jumpToEpubSearchResult(r)}
+                  style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 2, background: 'rgba(255,255,255,0.04)', border: '1px solid transparent', borderRadius: 8, padding: '6px 8px', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'right', color: 'var(--text)' }}
+                >
+                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{`${r.title} — ${r.count} نتیجه`}</span>
+                  <span style={{ fontSize: 11.5, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>{r.snippet}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {epubSearchQuery.trim() && !epubSearchScanning && epubSearchResults.length === 0 && (
+            <div style={{ fontSize: 12, color: 'var(--muted)', padding: '2px 4px' }}>یافت نشد</div>
+          )}
+        </div>
+      )}
+
       {/* برگهٔ فصل */}
-      <div ref={contentRef} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 80px', direction: 'rtl' }}>
+      <div ref={contentRef} data-reader-scroll-container="true" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 80px', direction: 'rtl' }}>
         {chapterLoading ? (
           <div style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
         ) : (
-          <div style={{ position: 'relative', maxWidth: 720, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)' }}>
+          <div style={{ position: 'relative', maxWidth: columnWidth.maxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)' }}>
             <div
               ref={chapterElRef}
               className="epub-chapter-content"
               onMouseUp={handleContentMouseUp}
               onClick={handleContentClick}
-              style={{ fontSize, fontFamily, lineHeight, wordBreak: 'break-word' }}
+              style={{ fontSize, fontFamily, lineHeight, wordBreak: 'break-word', textAlign: textAlignId === 'justify' ? 'justify' : 'right' }}
               dangerouslySetInnerHTML={{ __html: chapterHtml }}
             />
             {shouldMountAnnotationLayer && (
@@ -630,7 +1137,7 @@ export default function EpubViewer({ filePath }) {
                 onCommitPageItems={handleCommitPageAnnotations}
                 rotation={0}
                 isNearViewport
-                zoomLevel={1}
+                zoomLevel={safeZoom}
               />
             )}
             {chapterBookmarks.map((bm) => (
@@ -658,6 +1165,54 @@ export default function EpubViewer({ filePath }) {
         )}
       </div>
 
+      {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ
+          محیطِ مطالعه — بدونِ هیچ تغییری در RightPanel. */}
+      {chapters.length > 0 && (
+        <div
+          onClick={() => { if (!isEditingPageHud) { setPageHudDraft(String(chapterIndex + 1)); setIsEditingPageHud(true); } }}
+          onMouseEnter={() => setPageHudHovered(true)}
+          onMouseLeave={() => setPageHudHovered(false)}
+          title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+        >
+          {isEditingPageHud ? (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type="number"
+                min={1}
+                max={chapters.length}
+                value={pageHudDraft}
+                autoFocus
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setPageHudDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitHudJump();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setIsEditingPageHud(false);
+                  }
+                }}
+                onBlur={() => setIsEditingPageHud(false)}
+                style={{ width: 58, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(34,211,238,0.6)', borderRadius: 6, color: '#e2e8f0', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, padding: '2px 6px', textAlign: 'center', direction: 'ltr' }}
+              />
+              <span>{`از ${chapters.length}`}</span>
+              <button
+                type="button"
+                title="رفتن"
+                onMouseDown={(e) => { e.preventDefault(); commitHudJump(); }}
+                style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(34,211,238,0.18)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', pointerEvents: 'none' }}><polyline points="20 6 9 17 4 12" /></svg>
+              </button>
+            </span>
+          ) : (
+            `فصل ${chapterIndex + 1} از ${chapters.length}`
+          )}
+        </div>
+      )}
       {/* منویِ شناورِ انتخابِ متن */}
       {selMenu && (
         <div
@@ -675,6 +1230,18 @@ export default function EpubViewer({ filePath }) {
               title={`هایلایت ${c.label}`}
               onClick={() => addHighlight(c.bg)}
               style={{ width: 22, height: 22, borderRadius: '50%', background: c.bg, border: '2px solid rgba(255,255,255,0.7)', cursor: 'pointer', padding: 0 }}
+            />
+          ))}
+          {favoriteColors.length > 0 && (
+            <span style={{ width: 1, alignSelf: 'stretch', background: 'rgba(255,255,255,0.15)', margin: '0 2px' }} />
+          )}
+          {favoriteColors.slice(0, 6).map((hex) => (
+            <button
+              key={hex}
+              type="button"
+              title={`هایلایت با رنگِ موردِ علاقه ${hex}`}
+              onClick={() => addHighlight(hex)}
+              style={{ width: 18, height: 18, borderRadius: '50%', background: hex, border: '2px solid rgba(255,255,255,0.7)', cursor: 'pointer', padding: 0, flexShrink: 0 }}
             />
           ))}
           <button
@@ -716,16 +1283,48 @@ export default function EpubViewer({ filePath }) {
           }}
         >
           <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            {HL_COLORS.map((c) => (
-              <button
-                key={c.id}
-                type="button"
-                title={`تغییر به ${c.label}`}
-                onClick={() => { updateHighlight(markMenu.id, { color: c.bg }); setMarkMenu(null); }}
-                style={{ width: 22, height: 22, borderRadius: '50%', background: c.bg, border: '2px solid rgba(255,255,255,0.7)', cursor: 'pointer', padding: 0 }}
-              />
-            ))}
+            {HL_COLORS.map((c) => {
+              // مرحلهٔ ۳۸ §۵: رنگِ فعلیِ همین هایلایت تیره + تیک می‌گیرد.
+              const isCurrent = (highlights.find((h) => h.id === markMenu.id) || {}).color === c.bg;
+              return (
+                <button
+                  key={c.id}
+                  type="button"
+                  title={`تغییر به ${c.label}`}
+                  onClick={() => { updateHighlight(markMenu.id, { color: c.bg }); setMarkMenu(null); }}
+                  style={{ width: 22, height: 22, borderRadius: '50%', background: c.bg, border: '2px solid rgba(255,255,255,0.7)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: isCurrent ? 'inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ' + c.bg : 'none' }}
+                >
+                  {isCurrent && (
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </button>
+              );
+            })}
           </div>
+          {favoriteColors.length > 0 && (
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+              {favoriteColors.slice(0, 8).map((hex) => {
+                const isCurrentFav = (highlights.find((h) => h.id === markMenu.id) || {}).color === hex;
+                return (
+                  <button
+                    key={hex}
+                    type="button"
+                    title={`تغییر به رنگِ موردِ علاقه ${hex}`}
+                    onClick={() => { updateHighlight(markMenu.id, { color: hex }); setMarkMenu(null); }}
+                    style={{ width: 22, height: 22, borderRadius: '50%', background: hex, border: '2px solid rgba(255,255,255,0.7)', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: isCurrentFav ? 'inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ' + hex : 'none' }}
+                  >
+                    {isCurrentFav && (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <input
             type="text"
             value={markMenu.note}

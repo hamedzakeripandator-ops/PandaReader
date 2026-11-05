@@ -181,6 +181,10 @@ export default function App() {
   const rightCloseTimerRef = useRef(null);
   const isCanceledRef = useRef(false);
   const isProcessingRef = useRef(false);
+  // مرحلهٔ ۳۹ §۱: فهرستِ فایل‌هایِ پوشهٔ بازشده (برایِ نمایش در پنلِ
+  // راست و ناوبریِ قبلی/بعدی در همان پوشه)؛ تا وقتی فایلی خارج از
+  // همین پوشه باز نشود، زنده می‌ماند.
+  const folderFilesRef = useRef(null);
   const transitionTimerRef = useRef(null);
   const postLoadTimerRef = useRef(null);
   const isDraggingRef = useRef(false);
@@ -312,6 +316,39 @@ export default function App() {
   }, [handleCloseCurrentComic]);
 
   // ۵. پردازش باز کردن فایل‌ها (کمیک، پوشه مانهوا و PDF)
+  // مرحلهٔ ۳۹ §۱: اگر فایلِ بازشده داخلِ پوشهٔ فعال است، فهرستِ
+  // پوشه + قبلی/بعدیِ همان فهرست + موقعیتِ «X از N» را رویِ بارِ
+  // فایل سوار می‌کند؛ اگر خارج از پوشه است، فهرستِ پوشه پاک می‌شود.
+  const attachFolderFiles = (payload, filePath) => {
+    const folder = folderFilesRef.current;
+    if (!folder || !Array.isArray(folder.files) || folder.files.length === 0) return payload;
+    const norm = (p) => String(p || '').trim().replace(/[\\/]+/g, '\\').toLowerCase();
+    const normFile = norm(filePath);
+    const normFolder = norm(folder.folderPath);
+    if (!normFile || !normFolder || !normFile.startsWith(normFolder + '\\')) {
+      folderFilesRef.current = null;
+      return payload;
+    }
+    const idx = folder.files.findIndex((f) => norm(f.path) === normFile);
+    if (idx === -1) {
+      folderFilesRef.current = null;
+      return payload;
+    }
+    return {
+      ...payload,
+      folderFiles: folder.files,
+      folderPath: folder.folderPath,
+      nextComic: folder.files[idx + 1] || null,
+      prevComic: folder.files[idx - 1] || null,
+      dirInfo: {
+        name: String(folder.folderPath || '').split(/[\\/]/).filter(Boolean).pop() || '',
+        current: idx + 1,
+        total: folder.files.length,
+        sortBy: 'name_asc',
+      },
+    };
+  };
+
   const processFiles = useCallback(
     async (inputFiles) => {
       if (!inputFiles) return;
@@ -376,7 +413,7 @@ export default function App() {
               savedPage = Math.max(1, Math.min(dbPage, chapters.length));
             }
           } catch (_) {}
-          const comicPayload = {
+          const comicPayload = attachFolderFiles({
             type: 'epub',
             items: [],
             fileName: epub.fileName || targetName,
@@ -388,7 +425,7 @@ export default function App() {
             dirInfo: null,
             nextComic: null,
             prevComic: null,
-          };
+          }, filePaths[0]);
           setComicData(comicPayload);
           useReaderStore.getState().setCurrentPage(savedPage);
           setCurrentView('reader');
@@ -436,6 +473,25 @@ export default function App() {
           setLoadingProgress(0);
           setLoadingFileName('');
           isProcessingRef.current = false;
+          return;
+        }
+
+        // مرحلهٔ ۳۹ §۱: پوشهٔ دارایِ فایل‌هایِ قابلِ مطالعه — فهرست را
+        // نگه دار و اولین فایلِ لیست (به ترتیبِ پنلِ راست) را خودبه‌خود
+        // باز کن (PDF در PdfViewer، EPUB در EpubViewer، آرشیو/پوشه در
+        // VerticalViewer).
+        if (result && result.success && result.type === 'folder-files') {
+          const files = Array.isArray(result.files) ? result.files : [];
+          if (files.length === 0) {
+            setIsLoading(false);
+            setLoadingProgress(0);
+            setLoadingFileName('');
+            isProcessingRef.current = false;
+            showToast('در این پوشه فایلِ قابلِ مطالعه‌ای یافت نشد.', { type: 'error' });
+            return;
+          }
+          folderFilesRef.current = { folderPath: result.filePath, files };
+          await processFiles([files[0].path]);
           return;
         }
 
@@ -497,7 +553,7 @@ export default function App() {
             try {
               if (isCanceledRef.current) return;
 
-              const comicPayload = {
+              const comicPayload = attachFolderFiles({
                 type: result.type,
                 items: result.items || [],
                 fileName: result.fileName,
@@ -509,7 +565,7 @@ export default function App() {
                 dirInfo: result.dirInfo,
                 nextComic: result.nextComic,
                 prevComic: result.prevComic,
-              };
+              }, result.filePath);
 
               setComicData(comicPayload);
               useReaderStore.getState().setCurrentPage(savedPage);
@@ -596,6 +652,8 @@ export default function App() {
     useReaderStore.getState().initZoomSettings?.();
     useLibraryStore.getState().initLibrary?.();
     useSettingsStore.getState().initSettings?.();
+    // مرحلهٔ ۳۹ §۳: اگر localStorage خالی است، سیستمِ رنگ را از دیتابیس بخوان.
+    useAppStore.getState().loadCustomColorSystemFromDb?.();
     // مرحله ۱۶: هیدراتِ بوک‌مارک در بوت، تا سایدبار و منو از همان
     // اول پریست‌ها را داشته باشند و هیچ ذخیره‌ای پیش از بارگذاری
     // رخ ندهد.

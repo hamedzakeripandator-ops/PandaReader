@@ -55,6 +55,44 @@ const COLORS = [
 
 const SIZES = [1, 2, 4, 7, 11];
 
+// مرحلهٔ ۳۹ §۳: تبدیلِ هگز ↔ HSL برایِ اسلایدرهایِ انتخابگرِ پیشرفته.
+function hexToHsl(hex) {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(String(hex || ''));
+  if (!m) return { h: 190, s: 80, l: 55 };
+  const r = parseInt(m[1].slice(0, 2), 16) / 255;
+  const g = parseInt(m[1].slice(2, 4), 16) / 255;
+  const b = parseInt(m[1].slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l: Math.round(l * 100) };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+  else if (max === g) h = ((b - r) / d + 2) * 60;
+  else h = ((r - g) / d + 4) * 60;
+  return { h: Math.round(h), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+function hslToHex(h, s, l) {
+  const hh = ((((Number(h) || 0) % 360) + 360) % 360) / 360;
+  const ss = Math.max(0, Math.min(100, Number(s) || 0)) / 100;
+  const ll = Math.max(0, Math.min(100, Number(l) || 0)) / 100;
+  const q = ll < 0.5 ? ll * (1 + ss) : ll + ss - ll * ss;
+  const p = 2 * ll - q;
+  const f = (t) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  const to = (v) => Math.round(v * 255).toString(16).padStart(2, '0');
+  return `#${to(f(hh + 1 / 3))}${to(f(hh))}${to(f(hh - 1 / 3))}`;
+}
+
 // فاز ۳ پالت — دسته‌بندی‌های تخصصیِ دراور (دقیقاً همان ۲۵ رنگِ
 // فهرست‌شده در تسک: پزشکی ۸ + نئون ۵ + سایبرپانک ۶ + پاستلی ۶.
 // توجهِ صادقانه: عنوانِ تسک «پالت ۳۰ رنگ» می‌گوید، ولی فهرستِ
@@ -204,6 +242,13 @@ export function AnnotationToolbar({
   const setAnnotationTool = useAppStore((s) => s.setAnnotationTool);
   const annotationColor = useAppStore((s) => s.annotationColor || '#22d3ee');
   const setAnnotationColor = useAppStore((s) => s.setAnnotationColor);
+  // مرحلهٔ ۳۹ §۳: سیستمِ رنگِ سفارشیِ استور.
+  const favoriteColors = useAppStore((s) => s.favoriteColors || []);
+  const addFavoriteColor = useAppStore((s) => s.addFavoriteColor);
+  const removeFavoriteColor = useAppStore((s) => s.removeFavoriteColor);
+  const customColorTemplates = useAppStore((s) => s.customColorTemplates || []);
+  const createCustomColorTemplate = useAppStore((s) => s.createCustomColorTemplate);
+  const deleteCustomColorTemplate = useAppStore((s) => s.deleteCustomColorTemplate);
   const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
   const setAnnotationStrokeWidth = useAppStore((s) => s.setAnnotationStrokeWidth);
   // فاز ۲: استیت‌های باکس
@@ -301,6 +346,12 @@ export function AnnotationToolbar({
   // ثابتِ دراور (با اندازه‌گیریِ دکمه در لحظهٔ باز شدن)، پالتِ شخصی،
   // و refهای دکمه/پنل/ورودیِ رنگ برای بستن با کلیکِ بیرونی.
   const [colorDrawerOpen, setColorDrawerOpen] = useState(false);
+  // مرحلهٔ ۳۹ §۳: تمپلیتِ فعال در نوارِ سریع + ساختِ تمپلیتِ تازه +
+  // پیش‌نویسِ کدِ هگزِ انتخابگرِ پیشرفته.
+  const [activeTemplateId, setActiveTemplateId] = useState(null);
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [isCreatingTemplate, setIsCreatingTemplate] = useState(false);
+  const [hexDraft, setHexDraft] = useState('');
   // فازِ عبورِ ژست از زیرِ تولبار + بستنِ خودکارِ دراور:
   // لایه، شروعِ هر ژستِ واقعیِ درگ (قلم، هایلایتر، باکس، فلش،
   // پاک‌کن، مارکی، جابه‌جاییِ دستی، درگِ هندل، درگِ Konva) را با
@@ -331,28 +382,36 @@ export function AnnotationToolbar({
   // حینِ ژستِ فعالِ ترسیم none هستند؛ کانتینرهای بیرونی، همیشه none.
   const shellPointerEvents = isGesturePassThrough ? 'none' : 'auto';
   const [colorDrawerPos, setColorDrawerPos] = useState(null);
-  const [userPalette, setUserPalette] = useState(() => {
-    try {
-      const rawPalette = window.localStorage.getItem('annotationUserPalette');
-      if (!rawPalette) return [];
-      const arr = JSON.parse(rawPalette);
-      if (!Array.isArray(arr)) return [];
-      return arr.filter((c) => typeof c === 'string').slice(0, 4);
-    } catch (_) {
-      return [];
-    }
-  });
   const paletteBtnRef = useRef(null);
   const colorDrawerRef = useRef(null);
   const colorInputRef = useRef(null);
-  // فاز ۳ پالت — پایداریِ پالتِ شخصی در localStorage.
+  // مرحلهٔ ۳۹ §۳: مهاجرتِ یک‌بارهٔ پالتِ ۴ رنگیِ قدیمی (کلیدِ
+  // annotationUserPalette) به سیستمِ رنگِ v2 استور (حداکثر ۴۸ رنگ +
+  // پشتیبانِ دیتابیس)؛ بعد از مهاجرت، کلیدِ قدیمی پاک می‌شود.
   useEffect(() => {
     try {
-      window.localStorage.setItem('annotationUserPalette', JSON.stringify(userPalette));
-    } catch (_) {
-      // حافظهٔ محلی در دسترس نیست؛ پالت فقط تا رفرش می‌ماند.
-    }
-  }, [userPalette]);
+      const raw = window.localStorage.getItem('annotationUserPalette');
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        arr.filter((c) => typeof c === 'string').forEach((c) => {
+          try { useAppStore.getState().addFavoriteColor?.(c); } catch (_) {}
+        });
+      }
+      window.localStorage.removeItem('annotationUserPalette');
+    } catch (_) {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // مرحلهٔ ۳۹ §۳: همگام‌سازیِ پیش‌نویسِ هگز با رنگِ فعال.
+  useEffect(() => {
+    setHexDraft(annotationColor || '#06b6d4');
+  }, [annotationColor]);
+  // مرحلهٔ ۳۹ §۳: رنگ‌هایِ نوارِ سریع — اگر تمپلیتی فعال است، رنگ‌هایِ
+  // همان تمپلیت؛ وگرنه پالتِ پیش‌فرض.
+  const activeTemplate = customColorTemplates.find((t) => t.id === activeTemplateId) || null;
+  const quickColors = activeTemplate
+    ? activeTemplate.colors.map((hex) => ({ hex, label: hex }))
+    : COLORS;
   // فاز ۳ پالت — بستنِ خودکار با کلیکِ بیرونی (تسک §۴): هر mousedownی
   // که نه روی دکمهٔ پالت باشد و نه روی پنلِ دراور، دراور را می‌بندد.
   // دکمه، خودش toggle می‌کند، پس از این بررسی مستثناست؛ و چون این
@@ -1152,9 +1211,15 @@ export function AnnotationToolbar({
   };
   const addUserColor = (hex) => {
     if (!hex || typeof hex !== 'string') return;
-    const h = hex.toLowerCase();
-    // تازه‌ترین، اول؛ تکراری، جابه‌جا می‌شود (نه دو بار)؛ سقف ۴ رنگ.
-    setUserPalette((prev) => [h, ...prev.filter((c) => c.toLowerCase() !== h)].slice(0, 4));
+    // مرحلهٔ ۳۹ §۳: رنگِ تازه به «رنگ‌هایِ موردِ علاقه»ی استور می‌رود
+    // (localStorage + دیتابیس)؛ سقف ۴۸ رنگ.
+    addFavoriteColor(hex.toLowerCase());
+  };
+  // مرحلهٔ ۳۹ §۳: اعمالِ رنگ بدونِ بستنِ دراور (برایِ انتخابگرِ پیشرفته).
+  const applyPickerColor = (hex) => {
+    if (!hex || typeof hex !== 'string') return;
+    setAnnotationColor(hex);
+    broadcastSelectedPropertyPatch({ color: hex });
   };
   const toggleColorDrawer = () => {
     if (colorDrawerOpen) {
@@ -1450,7 +1515,17 @@ export function AnnotationToolbar({
 
       {/* رنگ‌ها */}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
-        {COLORS.map((c) => {
+        {activeTemplate && (
+          <button
+            type="button"
+            title="بازگشت به پالتِ پیش‌فرض"
+            onClick={() => setActiveTemplateId(null)}
+            style={{ ...btnBase, height: 28, padding: '0 8px', borderRadius: 14, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+          >
+            {activeTemplate.name} ×
+          </button>
+        )}
+        {quickColors.map((c) => {
           const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
           return (
             <button
@@ -1488,7 +1563,7 @@ export function AnnotationToolbar({
                 pointerEvents خنثی است تا Hitbox هرگز تکان نخورد. */}
               <span
                 style={{
-                  display: 'block',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
                   width: 20,
                   height: 20,
                   borderRadius: '50%',
@@ -1498,14 +1573,21 @@ export function AnnotationToolbar({
                     ? '1.5px solid rgba(255,255,255,0.85)'
                     : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
                   boxShadow: active
-                    ? `0 0 8px ${c.hex}`
+                    // مرحلهٔ ۳۸ §۵: رنگِ انتخاب‌شده تیره + حلقهٔ سفید + تیک.
+                    ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${c.hex}`
                     : hoverSwatch === `q:${c.hex}`
                       ? `0 6px 14px ${c.hex}`
                       : '0 0 0 1px rgba(255,255,255,0.2)',
                   transform: hoverSwatch === `q:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
                   transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                 }}
-              />
+              >
+                {active && (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                )}
+              </span>
             </button>
           );
         })}
@@ -2211,7 +2293,7 @@ export function AnnotationToolbar({
                     {/* فاز ۴ — Fixed Hitbox (مانند نوار اصلی). */}
                     <span
                       style={{
-                        display: 'block',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
                         width: 26,
                         height: 26,
                         borderRadius: '50%',
@@ -2220,11 +2302,17 @@ export function AnnotationToolbar({
                         border: active
                           ? '1.5px solid rgba(255,255,255,0.85)'
                           : '1px solid rgba(255,255,255,0.25)',
-                        boxShadow: active ? `0 0 8px ${c.hex}` : hoverSwatch === `d:${cat.id}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
+                        boxShadow: active ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${c.hex}` : hoverSwatch === `d:${cat.id}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
                         transform: hoverSwatch === `d:${cat.id}:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
                         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                       }}
-                    />
+                    >
+                      {active && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </span>
                   </button>
                 );
               })}
@@ -2236,7 +2324,7 @@ export function AnnotationToolbar({
             رنگ‌های من
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-            {userPalette.map((hex) => {
+            {favoriteColors.map((hex) => {
               const active = annotationColor.toLowerCase() === hex.toLowerCase();
               const hovered = hoverUserHex === hex;
               return (
@@ -2244,6 +2332,7 @@ export function AnnotationToolbar({
                   <button
                     title={hex}
                     onClick={() => applyDrawerColor(hex)}
+                    onContextMenu={(e) => { e.preventDefault(); removeFavoriteColor(hex); }}
                     onMouseEnter={() => { setHoverUserHex(hex); setHoverSwatch(`u:${hex}`); }}
                     onMouseLeave={() => { setHoverUserHex(null); setHoverSwatch(null); }}
                     style={{
@@ -2264,7 +2353,7 @@ export function AnnotationToolbar({
                     {/* فاز ۴ — Fixed Hitbox (مانند نوار اصلی). */}
                     <span
                       style={{
-                        display: 'block',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
                         width: 26,
                         height: 26,
                         borderRadius: '50%',
@@ -2273,11 +2362,17 @@ export function AnnotationToolbar({
                         border: active
                           ? '1.5px solid rgba(255,255,255,0.85)'
                           : '1px solid rgba(255,255,255,0.25)',
-                        boxShadow: active ? `0 0 8px ${hex}` : hoverSwatch === `u:${hex}` ? `0 6px 14px ${hex}` : hovered ? `0 0 10px ${hex}` : 'none',
+                        boxShadow: active ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${hex}` : hoverSwatch === `u:${hex}` ? `0 6px 14px ${hex}` : hovered ? `0 0 10px ${hex}` : 'none',
                         transform: hoverSwatch === `u:${hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
                         transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
                       }}
-                    />
+                    >
+                      {active && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </span>
                   </button>
                   <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono', monospace", color: hovered ? '#ffffff' : 'rgba(255,255,255,0.5)', direction: 'ltr' }}>
                     {hex}
@@ -2312,12 +2407,162 @@ export function AnnotationToolbar({
               aria-hidden="true"
               tabIndex={-1}
             />
+            <button
+              type="button"
+              title="ذخیرهٔ رنگِ فعلی در رنگ‌هایِ موردِ علاقه"
+              onClick={() => addFavoriteColor(annotationColor)}
+              style={{ ...btnBase, height: 26, padding: '0 10px', borderRadius: 13, background: 'rgba(34,211,238,0.14)', border: '1px solid rgba(34,211,238,0.45)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+            >
+              + ذخیرهٔ رنگِ فعلی
+            </button>
           </div>
-          {userPalette.length === 0 && (
+          {favoriteColors.length === 0 && (
             <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginTop: 6 }}>
-              هنوز رنگی ذخیره نشده؛ با + یک رنگِ دلخواه اضافه کنید (حداکثر ۴ رنگِ اخیر نگه داشته می‌شود).
+              هنوز رنگی ذخیره نشده؛ با + یک رنگِ دلخواه اضافه کنید یا رنگِ فعلی را ذخیره کنید (حداکثر ۴۸ رنگ، با پشتیبانِ دیتابیس). برایِ حذفِ یک رنگ، رویِ آن کلیکِ راست کنید.
             </div>
           )}
+        </div>
+
+        {/* مرحلهٔ ۳۹ §۳: تمپلیت‌هایِ رنگیِ من (پالت‌هایِ سفارشی) */}
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
+            تمپلیت‌هایِ رنگیِ من
+          </div>
+          {customColorTemplates.length === 0 && (
+            <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)', marginBottom: 6 }}>
+              هنوز تمپلیتی نساخته‌اید؛ رنگ‌هایِ موردِ علاقه‌تان را در یک تمپلیت با نامِ دلخواه ذخیره کنید.
+            </div>
+          )}
+          {customColorTemplates.map((t) => (
+            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+              <button
+                type="button"
+                title="اعمالِ این تمپلیت در نوارِ سریع"
+                onClick={() => { setActiveTemplateId(t.id); setColorDrawerOpen(false); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, background: activeTemplateId === t.id ? 'rgba(34,211,238,0.14)' : 'transparent', border: activeTemplateId === t.id ? '1px solid rgba(34,211,238,0.5)' : '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, textAlign: 'right' }}
+              >
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
+                <span style={{ display: 'flex', gap: 3, marginRight: 'auto', flexShrink: 0 }}>
+                  {t.colors.slice(0, 6).map((hex) => (
+                    <span key={hex} style={{ width: 14, height: 14, borderRadius: '50%', background: hex, border: '1px solid rgba(255,255,255,0.3)' }} />
+                  ))}
+                </span>
+              </button>
+              <button
+                type="button"
+                title="حذفِ تمپلیت"
+                onClick={() => { deleteCustomColorTemplate(t.id); if (activeTemplateId === t.id) setActiveTemplateId(null); }}
+                style={{ ...btnBase, width: 24, height: 24, borderRadius: '50%', background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.7)', fontSize: 13, flexShrink: 0, cursor: 'pointer' }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          {isCreatingTemplate ? (
+            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+              <input
+                type="text"
+                value={newTemplateName}
+                onChange={(e) => setNewTemplateName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    createCustomColorTemplate(newTemplateName.trim() || 'تمپلیتِ جدید', favoriteColors.length > 0 ? favoriteColors : [annotationColor]);
+                    setNewTemplateName('');
+                    setIsCreatingTemplate(false);
+                  } else if (e.key === 'Escape') {
+                    setIsCreatingTemplate(false);
+                  }
+                }}
+                placeholder="نامِ تمپلیت…"
+                autoFocus
+                style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, padding: '6px 8px' }}
+              />
+              <button
+                type="button"
+                onClick={() => { createCustomColorTemplate(newTemplateName.trim() || 'تمپلیتِ جدید', favoriteColors.length > 0 ? favoriteColors : [annotationColor]); setNewTemplateName(''); setIsCreatingTemplate(false); }}
+                style={{ ...btnBase, height: 30, padding: '0 10px', borderRadius: 8, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}
+              >
+                ساخت
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setIsCreatingTemplate(true)}
+              style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'transparent', border: '1px dashed rgba(255,255,255,0.35)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+            >
+              + ساخت تمپلیتِ رنگیِ جدید
+            </button>
+          )}
+        </div>
+
+        {/* مرحلهٔ ۳۹ §۳: انتخابگرِ پیشرفتهٔ رنگ (چرخِ رنگ + هگز + HSL + قطره‌چکان) */}
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
+            انتخابگرِ پیشرفته
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <input
+              type="color"
+              value={/^#[0-9a-fA-F]{6}$/.test(annotationColor) ? annotationColor : '#06b6d4'}
+              onChange={(e) => applyPickerColor(e.target.value)}
+              style={{ width: 34, height: 34, padding: 0, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 8, background: 'transparent', cursor: 'pointer', flexShrink: 0 }}
+            />
+            <input
+              type="text"
+              value={hexDraft}
+              onChange={(e) => setHexDraft(e.target.value)}
+              onBlur={() => { if (/^#[0-9a-fA-F]{6}$/.test(hexDraft.trim())) applyPickerColor(hexDraft.trim().toLowerCase()); else setHexDraft(annotationColor); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  if (/^#[0-9a-fA-F]{6}$/.test(hexDraft.trim())) applyPickerColor(hexDraft.trim().toLowerCase());
+                  e.target.blur();
+                }
+              }}
+              placeholder="#RRGGBB"
+              dir="ltr"
+              style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '7px 8px', textAlign: 'left' }}
+            />
+            {typeof window !== 'undefined' && window.EyeDropper && (
+              <button
+                type="button"
+                title="قطره‌چکان (انتخابِ رنگ از صفحه)"
+                onClick={async () => {
+                  try {
+                    const eye = new window.EyeDropper();
+                    const r = await eye.open();
+                    if (r && r.sRGBHex) applyPickerColor(r.sRGBHex.toLowerCase());
+                  } catch (_) {}
+                }}
+                style={{ ...btnBase, height: 34, padding: '0 10px', borderRadius: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.85)', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+              >
+                قطره‌چکان
+              </button>
+            )}
+          </div>
+          {(() => {
+            const hsl = hexToHsl(annotationColor);
+            const setHsl = (nextPatch) => {
+              const next = { ...hsl, ...nextPatch };
+              applyPickerColor(hslToHex(next.h, next.s, next.l));
+            };
+            const sliderRow = (label, value, min, max, onChange) => (
+              <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>
+                <span style={{ width: 14, flexShrink: 0 }}>{label}</span>
+                <input type="range" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} style={{ flex: 1, accentColor: '#22d3ee' }} />
+                <span style={{ width: 28, textAlign: 'left', color: 'var(--text)', direction: 'ltr' }}>{value}</span>
+              </label>
+            );
+            return (
+              <div>
+                {sliderRow('H', hsl.h, 0, 360, (v) => setHsl({ h: v }))}
+                {sliderRow('S', hsl.s, 0, 100, (v) => setHsl({ s: v }))}
+                {sliderRow('L', hsl.l, 0, 100, (v) => setHsl({ l: v }))}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>

@@ -1,9 +1,9 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import ComicCard from '../library/ComicCard';
 import { coreApi } from '../../services/coreApi';
-import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
+import thumbnailService, { resolveCoverUrl, downscaleThumbnailWithPica, dataUrlByteSize } from '../../services/thumbnailService';
 import Icons from '../../components/common/Icons';
 
 // تبدیل تاریخ ISO به زمان نسبی فارسی
@@ -85,6 +85,32 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, select
     return resolveCoverUrl(item?.cover) || thumbnailService.peekCover(filePath);
   });
   const [isHovered, setIsHovered] = useState(false);
+  const recompressedForRef = useRef(null);
+
+  // مرحلهٔ ۳۹ §۲: اگر تامبنیلِ ذخیره‌شده بزرگ است (بالایِ ۴۸KB)، یک
+  // بار در پس‌زمینه با pica کوچکش کن و نسخهٔ کوچک را در کش بنویس تا
+  // بارِ بعد از اول کوچک لود شود. غیرمسدودکننده و فقط یک بار به‌ازای
+  // هر فایل.
+  useEffect(() => {
+    if (!filePath || !coverUrl || typeof coverUrl !== 'string') return;
+    if (!coverUrl.startsWith('data:image/')) return;
+    if (recompressedForRef.current === filePath) return;
+    if (dataUrlByteSize(coverUrl) <= 48 * 1024) return;
+    recompressedForRef.current = filePath;
+    const run = () => {
+      downscaleThumbnailWithPica(coverUrl)
+        .then((small) => {
+          if (!small || dataUrlByteSize(small) >= dataUrlByteSize(coverUrl)) return;
+          setCoverUrl(small);
+          try {
+            useLibraryStore.getState().cacheCover?.(filePath, small);
+          } catch (_) {}
+        })
+        .catch(() => {});
+    };
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 2000 });
+    else setTimeout(run, 0);
+  }, [coverUrl, filePath]);
 
   useEffect(() => {
     let isMounted = true;
@@ -149,6 +175,8 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, select
           <img
             src={coverUrl}
             alt={title}
+            loading="lazy"
+            decoding="async"
             style={styles.thumbImg}
             onError={handleImageError}
           />

@@ -320,6 +320,7 @@ export default function VerticalViewer() {
   const isAreaZoomActive = useAppStore((state) => Boolean(state.isAreaZoomActive));
   const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const showToast = useAppStore((state) => state.showToast);
+  const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
   const updateReadingProgress = useLibraryStore((state) => state.updateReadingProgress);
   const { handleContextMenu } = useContextMenu();
 
@@ -392,6 +393,16 @@ export default function VerticalViewer() {
 
   const items = comicData?.items || [];
   const itemsCount = items.length;
+  const jumpToPage = useReaderStore((state) => state.jumpToPage);
+  // مرحلهٔ ۳۹ §۵: ویرایشِ مستقیمِ شمارهٔ صفحه از رویِ نشانگرِ پایین-راست.
+  const [isEditingPageHud, setIsEditingPageHud] = useState(false);
+  const [pageHudDraft, setPageHudDraft] = useState('');
+  const [pageHudHovered, setPageHudHovered] = useState(false);
+  const commitHudJump = useCallback(() => {
+    const n = Math.max(1, Math.min(itemsCount, Number(pageHudDraft) || 1));
+    setIsEditingPageHud(false);
+    jumpToPage(n);
+  }, [itemsCount, pageHudDraft, jumpToPage]);
   const currentFilePath = resolveActiveBookKey(comicData, null);
 
   // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
@@ -1242,6 +1253,54 @@ export default function VerticalViewer() {
           />
         </div>
       </div>
+      {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ
+          محیطِ مطالعه — بدونِ هیچ تغییری در RightPanel. */}
+      {itemsCount > 0 && (
+        <div
+          onClick={() => { if (!isEditingPageHud) { setPageHudDraft(String(activePageIndex + 1)); setIsEditingPageHud(true); } }}
+          onMouseEnter={() => setPageHudHovered(true)}
+          onMouseLeave={() => setPageHudHovered(false)}
+          title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+        >
+          {isEditingPageHud ? (
+            <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type="number"
+                min={1}
+                max={itemsCount}
+                value={pageHudDraft}
+                autoFocus
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setPageHudDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    commitHudJump();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    setIsEditingPageHud(false);
+                  }
+                }}
+                onBlur={() => setIsEditingPageHud(false)}
+                style={{ width: 58, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(34,211,238,0.6)', borderRadius: 6, color: '#e2e8f0', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 700, padding: '2px 6px', textAlign: 'center', direction: 'ltr' }}
+              />
+              <span>{`از ${itemsCount}`}</span>
+              <button
+                type="button"
+                title="رفتن"
+                onMouseDown={(e) => { e.preventDefault(); commitHudJump(); }}
+                style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(34,211,238,0.18)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', pointerEvents: 'none' }}><polyline points="20 6 9 17 4 12" /></svg>
+              </button>
+            </span>
+          ) : (
+            `صفحه ${activePageIndex + 1} از ${itemsCount}`
+          )}
+        </div>
+      )}
       <RenderProgressHud
         total={zoomHud.total}
         done={zoomHud.done}

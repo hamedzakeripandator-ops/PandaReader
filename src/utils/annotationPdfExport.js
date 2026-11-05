@@ -25,6 +25,9 @@ import {
   detectTextDirection,
   getColorLuminance,
   drawCloudPathCanvas,
+  normalizeOpacityValue,
+  forceOpaqueRgba,
+  toPureRgbCss,
   getChevronGeometry,
   getOriginDotRadius,
   quadraticPoint,
@@ -120,24 +123,24 @@ function getStickyTheme(color) {
   const c = color || '#22d3ee';
   const lum = getColorLuminance(c);
   const isLight = lum !== null && lum >= 0.5;
-  const border = colorWithAlpha(c, 0.55) || (isLight ? 'rgba(15, 23, 42, 0.35)' : 'rgba(248, 250, 252, 0.35)');
+  const border = toPureRgbCss(colorWithAlpha(c, 0.55)) || (isLight ? 'rgb(15, 23, 42)' : 'rgb(248, 250, 252)');
   if (isLight) {
     return {
       isLight: true,
-      bodyBase: 'rgba(248, 250, 252, 0.92)',
-      tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+      bodyBase: 'rgb(248, 250, 252)',
+      tint: toPureRgbCss(colorWithAlpha(c, 0.16)) || 'rgb(34, 211, 238)',
       text: '#0f172a',
       border,
-      headerFill: c,
+      headerFill: toPureRgbCss(c) || c,
     };
   }
   return {
     isLight: false,
-    bodyBase: 'rgba(13, 18, 24, 0.85)',
-    tint: colorWithAlpha(c, 0.16) || 'rgba(34, 211, 238, 0.16)',
+    bodyBase: 'rgb(13, 18, 24)',
+    tint: toPureRgbCss(colorWithAlpha(c, 0.16)) || 'rgb(34, 211, 238)',
     text: '#f8fafc',
     border,
-    headerFill: c,
+    headerFill: toPureRgbCss(c) || c,
   };
 }
 
@@ -219,12 +222,10 @@ function displayedFractionsToPdf(fx, fy, geometry) {
 // رسم می‌شود (نه `sw*2.2`ی انجین). پس پختِ ۱۰۰٪ باید همان الگوریتمِ
 // لایه را در فضای بوم تکرار کند؛ outlineی perfect-freehand، شکلی
 // متفاوت (کانتورِ پرشده) می‌ساخت. هایلایتر، در گذرِ جداگانه‌ای
-// (highlightPng) با همان آلفای ۰٫۳۵ و source-over رسم می‌شود و
-// main آن را با BlendMode.Multiply روی صفحه می‌نشاند — دقیقاً همان
-// ترکیبِ multiplyی لایه روی متنِ زیرین (مرحله ۷ ـ بخش ب). داخلِ
-// خودِ بومِ هایلایتر، هم‌پوشانیِ دو استروک با source-over ترکیب
-// می‌شود (کمی روشن‌تر از multiplyِ دوباره در لایه)؛ این تفاوتِ
-// مرتبهٔ دوم، آگاهانه پذیرفته شده است.
+// (highlightPng) با همان شفافیتِ اسلایدر (پیش‌فرض ۰٫۴۵) و source-over
+// رسم می‌شود و main، آن گذر را زیرِ بقیه می‌نشاند — بدونِ هیچ
+// BlendModeای (ترکیبِ Multiplyِ مرحلهٔ ۷ ـ بخش ب مدت‌هاست حذف شده؛
+ // main با opacityی ۱٫۰ می‌نشیند).
 
 /** نقطهٔ فضای یکنواخت (ux, uy) → پیکسلِ بومِ جهتِ خام. */
 function uniformToCanvasPoint(ux, uy, geometry, canvasW, canvasH) {
@@ -247,19 +248,21 @@ function midpointPt(a, b) {
 /** همان drawSmoothStrokeی لایه، ولی در فضای پیکسلِ بوم. */
 function drawSmoothStrokeCanvas(ctx, canvasPoints, color, widthPx, opacity) {
   if (!canvasPoints || canvasPoints.length === 0) return;
+  // مرحلهٔ ۳۷ §۴(ج): رنگِ خالصِ مات؛ شفافیت فقط از globalAlpha می‌آید.
+  const pureColor = toPureRgbCss(color) || color;
   ctx.save();
   ctx.globalAlpha = opacity;
   ctx.globalCompositeOperation = 'source-over';
   if (canvasPoints.length === 1) {
     ctx.beginPath();
-    ctx.fillStyle = color;
+    ctx.fillStyle = pureColor;
     ctx.arc(canvasPoints[0][0], canvasPoints[0][1], widthPx / 2, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
   }
   ctx.beginPath();
-  ctx.strokeStyle = color;
+  ctx.strokeStyle = pureColor;
   ctx.lineWidth = widthPx;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
@@ -294,7 +297,7 @@ function drawPenItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
   const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
   // پهنای لایه (نه انجین): قلم sw*2.4، هایلایتر sw*5.5.
   const widthPx = (item.tool === 'highlighter' ? sw * 5.5 : sw * 2.4) * unitScale;
-  const opacity = item.tool === 'highlighter' ? 0.35 : finiteNumber(item.opacity, 0.95);
+  const opacity = item.tool === 'highlighter' ? normalizeOpacityValue(item.opacity, 0.45) : normalizeOpacityValue(item.opacity, 0.95);
   drawSmoothStrokeCanvas(ctx, canvasPoints, item.color || '#22d3ee', widthPx, opacity);
 }
 
@@ -312,15 +315,16 @@ function drawBoxItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
   if (pw <= 0 || ph <= 0) return;
   const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
   const swPx = sw * unitScale;
-  const opacity = finiteNumber(item.opacity, 0.9);
-  const color = item.color || '#22d3ee';
+  const opacity = normalizeOpacityValue(item.opacity, 0.9);
+  const color = toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee';
   const hasFill = item.hasFill ?? true;
   const style = item.boxStyle || 'rect';
   ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
   if (style === 'cloud') {
     drawCloudPathCanvas(ctx, px, py, px + pw, py + ph, swPx);
     if (hasFill) {
-      ctx.globalAlpha = opacity * 0.15;
+      ctx.globalAlpha = opacity;
       ctx.fillStyle = color;
       ctx.fill();
     }
@@ -340,7 +344,7 @@ function drawBoxItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
     ctx.rect(px, py, pw, ph);
   }
   if (hasFill) {
-    ctx.globalAlpha = opacity * 0.15;
+    ctx.globalAlpha = opacity;
     ctx.fillStyle = color;
     ctx.fill();
     ctx.globalAlpha = opacity;
@@ -355,8 +359,8 @@ function drawBoxItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
 function drawArrowItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
   const aspect = geometry.aspect || 1;
   const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
-  const opacity = finiteNumber(item.opacity, 0.9);
-  const color = item.color || '#22d3ee';
+  const opacity = normalizeOpacityValue(item.opacity, 0.9);
+  const color = toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee';
   // هندسه در فضای یکنواخت حل می‌شود (همان resolveArrowGeometryی
   // انجین که drawArrowCanvas هم از آن استفاده می‌کند)، بعد نقاطِ
   // هندسه، یکی‌یکی به فضای بوم نگاشت می‌شوند.
@@ -384,6 +388,7 @@ function drawArrowItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
     : null;
   const swPx = sw * unitScale;
   ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = opacity;
   ctx.strokeStyle = color;
   ctx.fillStyle = color;
@@ -428,10 +433,10 @@ function strokeLineWidthPoints(tool, strokeWidth, geometry) {
 }
 
 function strokeOpacity(tool, item) {
-  // دقیقاً منطقِ getStrokeOpacity در لایه: هایلایتر همیشه ۰٫۳۵.
-  if (tool === 'highlighter') return 0.35;
-  const n = Number(item.opacity);
-  return Number.isFinite(n) ? Math.max(0.05, Math.min(1, n)) : 0.95;
+  // مرحلهٔ ۳۷ §۴(الف): دقیقاً منطقِ getStrokeOpacity در لایه — هایلایتر
+  // هم به اسلایدر وصل است (پیش‌فرض ۰٫۴۵)؛ ۰٫۳۵ی ثابت حذف شد.
+  if (tool === 'highlighter') return normalizeOpacityValue(item.opacity, 0.45);
+  return normalizeOpacityValue(item.opacity, 0.95);
 }
 
 function convertPenItem(item, geometry) {
@@ -469,9 +474,11 @@ function convertBoxItem(item, geometry) {
     rect: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
     strokeColor: item.color || '#22d3ee',
     fillColor: hasFill ? item.color || '#22d3ee' : null,
-    fillOpacity: 0.15,
+    // مرحلهٔ ۳۸ §۲: ضریبِ ۰٫۱۵ حذف شد — آلفایِ fill دقیقاً
+    // opacityی آیتم است (سیور هم دیگر آن را در ۰٫۱۵ ضرب نمی‌کند).
+    fillOpacity: 1.0,
     lineWidth: (Math.max(1, finiteNumber(item.strokeWidth, 4)) / 1000) * geometry.viewport.width / geometry.pdfScale,
-    opacity: finiteNumber(item.opacity, 0.9),
+    opacity: normalizeOpacityValue(item.opacity, 0.9),
   };
 }
 
@@ -479,8 +486,8 @@ function convertArrowItem(item, geometry) {
   const out = [];
   const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
   const lineWidth = (sw / 1000) * geometry.viewport.width / geometry.pdfScale;
-  const opacity = finiteNumber(item.opacity, 0.9);
-  const color = item.color || '#22d3ee';
+  const opacity = normalizeOpacityValue(item.opacity, 0.9);
+  const color = toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee';
   const isCurved =
     item.arrowStyle === 'curved' && Number.isFinite(item.cx) && Number.isFinite(item.cy);
   const sx = finiteNumber(item.startX) / 1000;
@@ -623,7 +630,7 @@ function wrapTextLines(ctx, text, maxWidth) {
 function drawTextItem(ctx, item, px, py, unitScale) {
   const fontSize = (Number(item.fontSize) || 22) * unitScale;
   const fontFamily = item.fontFamily || "'Estedad', sans-serif";
-  const opacity = finiteNumber(item.opacity, 0.9);
+  const opacity = normalizeOpacityValue(item.opacity, 0.9);
   const text = String(item.text || '');
   if (!text) return;
   // کپسول (pill) — اندازه‌گیریِ محلی با همان فرمول‌های
@@ -634,6 +641,7 @@ function drawTextItem(ctx, item, px, py, unitScale) {
   const pillBackground = item.pillBackground;
   if (typeof pillBackground === 'string' && pillBackground && text) {
     ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
     ctx.font = `bold ${fontSize}px ${fontFamily}`;
     ctx.direction = detectTextDirection(text) === 'rtl' ? 'rtl' : 'ltr';
     // مرحله ۱۴: خط‌ها نرمال‌شده اندازه‌گیری می‌شوند تا عرضِ
@@ -658,10 +666,11 @@ function drawTextItem(ctx, item, px, py, unitScale) {
     ctx.globalAlpha = opacity;
     ctx.beginPath();
     ctx.roundRect(pill.x, pill.y, pill.width, pill.height, pill.cornerRadius);
-    ctx.fillStyle = fill ? fill.background : pillBackground;
+    const pillFill = fill ? fill.background : pillBackground;
+    ctx.fillStyle = toPureRgbCss(pillFill) || pillFill;
     ctx.fill();
     if (fill && fill.border) {
-      ctx.strokeStyle = fill.border;
+      ctx.strokeStyle = toPureRgbCss(fill.border) || fill.border;
       ctx.lineWidth = Math.max(1, unitScale);
       ctx.stroke();
     }
@@ -669,6 +678,7 @@ function drawTextItem(ctx, item, px, py, unitScale) {
   }
   const dir = detectTextDirection(text);
   ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = opacity;
   ctx.font = `bold ${fontSize}px ${fontFamily}`;
   ctx.direction = dir === 'rtl' ? 'rtl' : 'ltr';
@@ -677,7 +687,8 @@ function drawTextItem(ctx, item, px, py, unitScale) {
   // دقیقاً همان‌جایی می‌نشیند که Konva می‌نشاند (بلوک، لنگرِ بالا-چپ).
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
-  ctx.fillStyle = item.color || '#22d3ee';
+  const textColor = item.color || '#22d3ee';
+  ctx.fillStyle = toPureRgbCss(textColor) || textColor;
   // مرحله ۱۴: خط‌هایِ ترکیبی، نرمال‌شده کشیده می‌شوند؛
   // ctx.direction و ترازِ دستیِ lx دست نمی‌خورند تا هندسهٔ
   // بلوک، دقیقاً مثلِ قبل بماند.
@@ -702,9 +713,10 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
   const pad = 12 * unitScale;
   const radius = 14 * unitScale;
   const theme = getStickyTheme(item.color);
-  const opacity = finiteNumber(item.opacity, 0.95);
+  const opacity = normalizeOpacityValue(item.opacity, 0.95);
   const text = String(item.text || '');
   ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = opacity;
   // زیره + سایه. مرحله ۷ ـ بخش ب: سایهٔ لایه، shadowOpacityی
   // ۰٫۲۲ دارد (Konva)؛ رنگِ سایهٔ کاملاً مات ('#000000')، در PDF
@@ -804,13 +816,13 @@ function drawCloudBoxItem(ctx, item, geometry, canvasW, canvasH, unitScaleArg) {
   const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
   const unitScale = Number.isFinite(unitScaleArg) ? unitScaleArg : canvasW / 1000;
   const swPx = sw * unitScale;
-  const opacity = finiteNumber(item.opacity, 0.9);
-  const color = item.color || '#22d3ee';
+  const opacity = normalizeOpacityValue(item.opacity, 0.9);
+  const color = toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee';
   const hasFill = item.hasFill ?? true;
   ctx.save();
   drawCloudPathCanvas(ctx, x1, y1, x2, y2, swPx);
   if (hasFill) {
-    ctx.globalAlpha = opacity * 0.15;
+    ctx.globalAlpha = opacity;
     ctx.fillStyle = color;
     ctx.fill();
   }
@@ -827,8 +839,8 @@ function drawCloudBoxItem(ctx, item, geometry, canvasW, canvasH, unitScaleArg) {
  * متن، استیکی) روی بومِ Canvas 2D در جهتِ خامِ صفحه — پختِ کاملِ
  * لایهٔ شفاف. برمی‌گرداند: { overlayPng, highlightPng } یا null
  * (اگر آیتمی نیست). overlayPng، همهٔ آیتم‌ها به‌جز هایلایترهاست
- * و highlightPng فقط هایلایترهاست تا main، گذرِ هایلایتر را با
- * BlendMode.Multiply بنشاند (مرحله ۷ ـ بخش ب). وقتی overlay ساخته
+ * و highlightPng فقط هایلایترهاست تا main، گذرِ هایلایتر را زیرِ
+ * بقیه بنشاند (source-over، بدونِ BlendMode). وقتی overlay ساخته
  * شد، main دیگر /Annotِ تکراری نمی‌سازد.
  */
 export async function renderPageOverlay(items, geometry) {
@@ -857,7 +869,7 @@ export async function renderPageOverlay(items, geometry) {
     const c = document.createElement('canvas');
     c.width = canvasW;
     c.height = canvasH;
-    const c2d = c.getContext('2d');
+    const c2d = c.getContext('2d', { colorSpace: 'srgb' });
     if (c2d) c2d.clearRect(0, 0, canvasW, canvasH);
     return [c, c2d];
   };
@@ -882,9 +894,17 @@ export async function renderPageOverlay(items, geometry) {
     const fx = finiteNumber(item.x ?? item.startX) / 1000;
     const fy = finiteNumber(item.y ?? item.startY) / 1000;
     const [rx, ry] = displayedFractionsToRaw(fx, fy, geometry);
-    const px = rx * canvasW;
-    const py = ry * canvasH;
-    // هایلایترها روی بومِ جداگانه (گذرِ Multiply)؛ بقیه روی بومِ اصلی.
+    let px = rx * canvasW;
+    let py = ry * canvasH;
+    // مرحلهٔ ۳۵ §۵: استیکیِ بیرون از کاغذ، در نزدیک‌ترین لبهٔ داخلِ
+    // کاغذ پخته می‌شود تا در فایلِ خروجی نیفتد.
+    if (item.tool === 'sticky') {
+      const wPx = (Number(item.width) || 210) * unitScale;
+      const hPx = (Number(item.height) || 170) * unitScale;
+      px = Math.max(0, Math.min(px, Math.max(0, canvasW - wPx)));
+      py = Math.max(0, Math.min(py, Math.max(0, canvasH - hPx)));
+    }
+    // هایلایترها روی بومِ جداگانه (تا در PDF زیرِ بقیه بنشینند)؛ بقیه روی بومِ اصلی. هر دو source-over با فضایِ رنگیِ srgb.
     const targetCtx = item.tool === 'highlighter' ? hlCtx : ctx;
     if (item.tool === 'text') {
       drawTextItem(targetCtx, item, px, py, unitScale);

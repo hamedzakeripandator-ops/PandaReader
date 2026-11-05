@@ -11,7 +11,7 @@ function formatBytes(bytes) {
 
 class DirectoryService {
   constructor() {
-    this.supportedArchiveExtensions = new Set(['.cbz', '.zip', '.cbr', '.pdf', '.rar']); // NOTE: ‎'.7z' تا فاز node-7z
+    this.supportedArchiveExtensions = new Set(['.cbz', '.zip', '.cbr', '.pdf', '.rar', '.epub']); // NOTE: ‎'.7z' تا فاز node-7z
     this.collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
   }
 
@@ -180,6 +180,72 @@ class DirectoryService {
     } catch (error) {
       console.error('DirectoryService Scan Error:', error);
       return this._getEmptyResult();
+    }
+  }
+
+  // ۵. مرحلهٔ ۳۹ §۱: اسکنِ فایل‌هایِ قابلِ مطالعهٔ داخلِ یک پوشه
+  // (ریشه + یک سطح زیرپوشه): PDF، EPUB، آرشیو (CBZ/ZIP/CBR/RAR) و
+  // پوشه‌هایِ دارایِ عکس. مرتب‌سازی با همان ترتیبِ طبیعیِ فارسی که
+  // پنلِ راست نمایش می‌دهد (Intl.Collator('fa')).
+  scanFolderForReadableFiles(folderPath) {
+    const out = [];
+    try {
+      if (!folderPath || typeof folderPath !== 'string') return out;
+      const collatorFa = new Intl.Collator('fa', { numeric: true, sensitivity: 'base' });
+      const kindOf = (entryName) => {
+        const ext = path.extname(entryName).toLowerCase();
+        if (ext === '.pdf') return 'pdf';
+        if (ext === '.epub') return 'epub';
+        if (ext === '.cbz' || ext === '.zip' || ext === '.cbr' || ext === '.rar') return 'archive';
+        return null;
+      };
+      const collect = (dir, prefix) => {
+        let entries = [];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch (_) {
+          return;
+        }
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            if (!prefix && this.hasImagesRecursively(fullPath)) {
+              let stat = { mtimeMs: 0, size: 0 };
+              try { stat = fs.statSync(fullPath); } catch (_) {}
+              out.push({
+                name: entry.name,
+                path: fullPath,
+                isDir: true,
+                kind: 'folder',
+                sizeBytes: stat.size,
+                size: formatBytes(stat.size),
+                mtime: stat.mtimeMs,
+              });
+            }
+            if (!prefix) collect(fullPath, entry.name);
+          } else if (entry.isFile()) {
+            const kind = kindOf(entry.name);
+            if (!kind) continue;
+            let stat = { mtimeMs: 0, size: 0 };
+            try { stat = fs.statSync(fullPath); } catch (_) {}
+            out.push({
+              name: prefix ? `${prefix} / ${entry.name}` : entry.name,
+              path: fullPath,
+              isDir: false,
+              kind,
+              sizeBytes: stat.size,
+              size: formatBytes(stat.size),
+              mtime: stat.mtimeMs,
+            });
+          }
+        }
+      };
+      collect(folderPath, '');
+      out.sort((a, b) => collatorFa.compare(a.name, b.name));
+      return out;
+    } catch (err) {
+      console.error('DirectoryService Readable Files Scan Error:', err);
+      return out;
     }
   }
 

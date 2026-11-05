@@ -2,6 +2,78 @@ import { create } from 'zustand';
 
 let toastTimerId = null;
 
+// =========================================================================
+// مرحلهٔ ۳۹ §۳: سیستمِ رنگِ سفارشی — رنگ‌هایِ موردِ علاقه، تمپلیت‌هایِ
+// رنگیِ شخصی و رنگِ آخرینِ هر ابزار. مرجعِ اول localStorage است
+// (کلیدِ comicReader.customColorSystem.v2) و دیتابیس، پشتیبانِ دوم.
+// =========================================================================
+const CUSTOM_COLOR_SYSTEM_KEY = 'comicReader.customColorSystem.v2';
+const TOOL_COLOR_KEYS = ['pen', 'highlighter', 'box', 'arrow', 'text', 'sticky'];
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+function sanitizeColorHex(c) {
+  return typeof c === 'string' && HEX6_RE.test(c) ? c : null;
+}
+
+function readCustomColorSystem() {
+  const fallback = { favoriteColors: [], customColorTemplates: [], toolColors: {} };
+  try {
+    if (typeof localStorage === 'undefined') return fallback;
+    const raw = localStorage.getItem(CUSTOM_COLOR_SYSTEM_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return fallback;
+    const favoriteColors = Array.isArray(parsed.favoriteColors)
+      ? parsed.favoriteColors.map(sanitizeColorHex).filter(Boolean).slice(0, 48)
+      : [];
+    const customColorTemplates = Array.isArray(parsed.customColorTemplates)
+      ? parsed.customColorTemplates
+        .filter((t) => t && typeof t === 'object' && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.colors))
+        .map((t) => ({
+          id: t.id,
+          name: String(t.name).slice(0, 40),
+          colors: t.colors.map(sanitizeColorHex).filter(Boolean).slice(0, 12),
+        }))
+        .slice(0, 24)
+      : [];
+    const toolColors = {};
+    if (parsed.toolColors && typeof parsed.toolColors === 'object') {
+      for (const k of TOOL_COLOR_KEYS) {
+        const c = sanitizeColorHex(parsed.toolColors[k]);
+        if (c) toolColors[k] = c;
+      }
+    }
+    return { favoriteColors, customColorTemplates, toolColors };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function persistCustomColorSystem(state) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(CUSTOM_COLOR_SYSTEM_KEY, JSON.stringify({
+      favoriteColors: state.favoriteColors || [],
+      customColorTemplates: state.customColorTemplates || [],
+      toolColors: state.toolColors || {},
+    }));
+  } catch (_) {}
+}
+
+let colorDbSyncTimer = null;
+function scheduleColorDbSync() {
+  try {
+    if (typeof setTimeout === 'undefined') return;
+    if (colorDbSyncTimer) clearTimeout(colorDbSyncTimer);
+    colorDbSyncTimer = setTimeout(() => {
+      colorDbSyncTimer = null;
+      try {
+        useAppStore.getState().syncCustomColorSystemToDb?.();
+      } catch (_) {}
+    }, 800);
+  } catch (_) {}
+}
+
 const useAppStore = create((set, get) => ({
   // ویوهای معتبر: 'home' | 'library' | 'recent' | 'favorites' | 'downloads' | 'settings' | 'profile' | 'reader'
   currentView: 'home',
@@ -50,6 +122,9 @@ const useAppStore = create((set, get) => ({
   annotationColor: '#06b6d4',
   annotationStrokeWidth: 4,
   annotationOpacity: 0.85,
+  // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه + تمپلیت‌هایِ رنگیِ شخصی + رنگِ
+  // آخرینِ هر ابزار (خواندنِ اولیه از localStorage).
+  ...readCustomColorSystem(),
   // مرحلهٔ ۳۵ §۵: تطبیقِ خودکارِ اندازهٔ استیکی‌نوت با زوم (پیش‌فرض
   // روشن) و مقیاسِ دستیِ استیکی (پیش‌فرض ۱؛ بازهٔ ۰٫۲۵ تا ۳).
   zoomAdaptiveAnnotations: true,
@@ -248,7 +323,11 @@ const useAppStore = create((set, get) => ({
   selectAnnotationTool: (tool, color = null) =>
     set((state) => ({
       annotationTool: tool || state.annotationTool,
-      ...(color ? { annotationColor: color } : {}),
+      ...(color
+        ? { annotationColor: color }
+        : tool && state.toolColors && state.toolColors[tool]
+          ? { annotationColor: state.toolColors[tool] }
+          : {}),
       ...(tool !== 'select'
         ? { selectedAnnotationId: null, selectedAnnotationPage: null }
         : {}),
@@ -264,7 +343,150 @@ const useAppStore = create((set, get) => ({
   toggleAnnotationFill: () =>
     set((state) => ({ annotationHasFill: !state.annotationHasFill })),
 
-  setAnnotationColor: (color) => set({ annotationColor: color || '#06b6d4' }),
+  // مرحلهٔ ۳۹ §۳: رنگِ تازه، رنگِ آخرینِ ابزارِ فعلی هم می‌شود و در
+  // localStorage (و با تأخیر، در دیتابیس) می‌ماند.
+  setAnnotationColor: (color) =>
+    set((state) => {
+      const c = color || '#06b6d4';
+      const next = { ...state, annotationColor: c };
+      const tool = state.annotationTool;
+      if (TOOL_COLOR_KEYS.includes(tool)) {
+        next.toolColors = { ...(state.toolColors || {}), [tool]: c };
+      }
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه (سقف ۴۸ رنگ).
+  addFavoriteColor: (color) =>
+    set((state) => {
+      const c = sanitizeColorHex(typeof color === 'string' ? color.trim() : '');
+      if (!c) return state;
+      if ((state.favoriteColors || []).some((x) => x.toLowerCase() === c.toLowerCase())) return state;
+      const next = { ...state, favoriteColors: [...(state.favoriteColors || []), c].slice(0, 48) };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  removeFavoriteColor: (color) =>
+    set((state) => {
+      const next = {
+        ...state,
+        favoriteColors: (state.favoriteColors || []).filter((x) => x.toLowerCase() !== String(color || '').toLowerCase()),
+      };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  // مرحلهٔ ۳۹ §۳: تمپلیت‌هایِ رنگیِ شخصی (سقف ۲۴ تمپلیت، هر کدام تا ۱۲ رنگ).
+  createCustomColorTemplate: (name, colors) =>
+    set((state) => {
+      const clean = (Array.isArray(colors) ? colors : []).map(sanitizeColorHex).filter(Boolean).slice(0, 12);
+      if (clean.length === 0) return state;
+      const id = `tpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      const next = {
+        ...state,
+        customColorTemplates: [
+          ...(state.customColorTemplates || []),
+          { id, name: String(name || 'تمپلیتِ جدید').slice(0, 40), colors: clean },
+        ].slice(0, 24),
+      };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  deleteCustomColorTemplate: (id) =>
+    set((state) => {
+      const next = {
+        ...state,
+        customColorTemplates: (state.customColorTemplates || []).filter((t) => t.id !== id),
+      };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  updateCustomColorTemplate: (id, patch) =>
+    set((state) => {
+      const next = {
+        ...state,
+        customColorTemplates: (state.customColorTemplates || []).map((t) => {
+          if (t.id !== id) return t;
+          const out = { ...t };
+          if (patch && typeof patch.name === 'string') out.name = patch.name.slice(0, 40);
+          if (patch && Array.isArray(patch.colors)) {
+            out.colors = patch.colors.map(sanitizeColorHex).filter(Boolean).slice(0, 12);
+          }
+          return out;
+        }),
+      };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  setToolColor: (tool, color) =>
+    set((state) => {
+      if (!TOOL_COLOR_KEYS.includes(tool)) return state;
+      const c = sanitizeColorHex(color);
+      if (!c) return state;
+      const next = { ...state, toolColors: { ...(state.toolColors || {}), [tool]: c } };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  // مرحلهٔ ۳۹ §۳: همگام‌سازی با دیتابیس (LS مرجعِ اول است؛ DB فقط
+  // پشتیبانِ دوم — اگر LS چیزی دارد، DB خوانده نمی‌شود).
+  loadCustomColorSystemFromDb: async () => {
+    try {
+      const { coreApi } = await import('../services/coreApi.js');
+      const res = await coreApi.dbAction({ action: 'GET_CUSTOM_COLOR_SYSTEM', payload: {} });
+      const saved = res?.customColorSystem;
+      if (!saved || typeof saved !== 'object') return false;
+      const current = get();
+      if (((current.favoriteColors || []).length > 0) || ((current.customColorTemplates || []).length > 0)) return false;
+      const next = { ...current, ...readCustomColorSystem() };
+      const fav = Array.isArray(saved.favoriteColors) ? saved.favoriteColors.map(sanitizeColorHex).filter(Boolean).slice(0, 48) : [];
+      const tpl = Array.isArray(saved.customColorTemplates) ? saved.customColorTemplates.filter((t) => t && typeof t.id === 'string' && typeof t.name === 'string' && Array.isArray(t.colors)).map((t) => ({ id: t.id, name: String(t.name).slice(0, 40), colors: t.colors.map(sanitizeColorHex).filter(Boolean).slice(0, 12) })).slice(0, 24) : [];
+      const tc = {};
+      if (saved.toolColors && typeof saved.toolColors === 'object') {
+        for (const k of TOOL_COLOR_KEYS) {
+          const c = sanitizeColorHex(saved.toolColors[k]);
+          if (c) tc[k] = c;
+        }
+      }
+      next.favoriteColors = fav;
+      next.customColorTemplates = tpl;
+      next.toolColors = tc;
+      persistCustomColorSystem(next);
+      set(next);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  },
+
+  syncCustomColorSystemToDb: async () => {
+    try {
+      const { coreApi } = await import('../services/coreApi.js');
+      const s = get();
+      await coreApi.dbAction({
+        action: 'SAVE_CUSTOM_COLOR_SYSTEM',
+        payload: {
+          customColorSystem: {
+            favoriteColors: s.favoriteColors || [],
+            customColorTemplates: s.customColorTemplates || [],
+            toolColors: s.toolColors || {},
+          },
+        },
+      });
+    } catch (_) {}
+  },
 
   setAnnotationStrokeWidth: (width) =>
     set({

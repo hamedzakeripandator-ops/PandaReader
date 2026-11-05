@@ -57,6 +57,9 @@ export default function TopBar({
   const toggleAreaZoom = useAppStore((state) => state.toggleAreaZoom);
 
   const hasComic = useReaderStore((state) => Boolean(state.comicData));
+  // مرحلهٔ ۳۸ §۸: نوعِ فایلِ جاری — زومِ باکسی فقط برای PDF/کمیک است،
+  // نه EPUB (AreaZoomOverlay روی فصلِ EPUB کار نمی‌کند).
+  const comicType = useReaderStore((state) => state.comicData?.type || '');
   const currentFilePath = useReaderStore((state) => state.comicData?.filePath || '');
   const totalPages = useReaderStore(
     (state) => state.comicData?.items?.length || state.comicData?.savedTotalPages || 0
@@ -1160,7 +1163,7 @@ export default function TopBar({
             <span>فایل جدید</span>
           </button>
 
-          {hasComic && (
+          {hasComic && comicType !== 'epub' && (
             <button
               type="button"
               onClick={handleToggleAreaZoom}
