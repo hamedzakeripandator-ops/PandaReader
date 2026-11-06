@@ -95,7 +95,13 @@ function focalToObjectPosition(focalPoint) {
   return 'center';
 }
 
-export default function BookmarkMarker({ bookmark, imageUrl, onOpen, onDelete, onRename, onMove }) {
+// مرحلهٔ ۴۰ §۳: محاسبهٔ خالصِ نسبتِ عمودیِ درگ — همان فرمولِ پرامپت
+// (کلمپِ 0.02 تا 0.92)؛ برایِ تستِ واحد، export شده است.
+export function computeBookmarkDragRatio(clientY, rectTop, rectHeight, grabOffsetY) {
+  return Math.min(0.92, Math.max(0.02, (clientY - rectTop - grabOffsetY) / Math.max(1, rectHeight)));
+}
+
+export default function BookmarkMarker({ bookmark, imageUrl, onOpen, onDelete, onRename, onMove, onMoveBookmark }) {
   useEffect(() => {
     ensureBookmarkStyles();
   }, []);
@@ -105,13 +111,12 @@ export default function BookmarkMarker({ bookmark, imageUrl, onOpen, onDelete, o
   const [draftName, setDraftName] = useState('');
   const skipBlurCommitRef = useRef(false);
   const inputRef = useRef(null);
-  // مرحله ۱۸ — درگِ جابه‌جاییِ بوک‌مارک: همهٔ هوک‌ها، پیش از returnِ
-  // زودهنگام‌اند (قانونِ همیشگی). dragVisual، جابه‌جاییِ دیداریِ
-  // حینِ درگ است (فقط transform رویِ همین مارکر)؛ ذخیره، فقط در
-  // pointerup انجام می‌شود.
+  // مرحلهٔ ۴۰ §۳ — درگِ ۶۰ فریمِ بوک‌مارک: همهٔ هوک‌ها، پیش از returnِ
+  // زودهنگام‌اند (قانونِ همیشگی). جابه‌جاییِ دیداری، مستقیم رویِ
+  // style.topِ کادرِ والد با requestAnimationFrame انجام می‌شود
+  // (بدونِ ری‌رندرِ React در هر پیکسل)؛ ذخیره، فقط در pointerup.
   const dragRef = useRef(null);
   const suppressClickRef = useRef(false);
-  const [dragVisual, setDragVisual] = useState(null);
   useEffect(() => {
     if (isEditing && inputRef.current) {
       inputRef.current.focus();
@@ -229,97 +234,104 @@ export default function BookmarkMarker({ bookmark, imageUrl, onOpen, onDelete, o
     setIsEditing(true);
   };
 
-  // مرحله ۱۸ — درگِ بوک‌مارک رویِ لبهٔ کاغذ با ۶ محافظِ ضدِ پرش:
-  // ۱) grabOffsetY: نقطهٔ گرفتن تا بالایِ مارکر، تا در فریمِ اول نپرد؛
-  // ۲) کلمپِ بالا/پایین با ارتفاعِ واقعیِ مارکر + سقفِ yRatio رویِ
-  // 0.92؛ ۳) هیسترزیسِ ۴۰ پیکسلی دورِ مرکزِ صفحه برایِ تغییرِ سمت؛
-  // ۴) setPointerCapture + شنونده‌هایِ window تا درگ با حرکتِ سریع
-  // بیرون از مارکر قطع نشود؛ ۵) حینِ حرکت فقط stateِ محلی (بدونِ
-  // IPC) و stopPropagation در برابرِ useDragPan؛ ۶) آستانهٔ ۵ پیکسل
-  // برایِ تشخیصِ کلیک از درگ (پس از درگ، استودیو باز نمی‌شود).
-  // توجه: دکمهٔ حذفِ .bm-x در بالایِ مارکر، ۹ پیکسل بیرون می‌زند؛
-  // پس رویِ ریشه overflow:hidden گذاشته نشده (دکمه را می‌بُرید) و
-  // گردیِ گوشه‌ها، رویِ فرزندها (.bm-img و .bm-name) اعمال شده است.
+  // مرحلهٔ ۴۰ §۳ — موتورِ درگِ ۶۰ فریم با آپدیتِ مستقیمِ DOM:
+  // به‌جایِ setState در هر پیکسل (ری‌رندرِ React)، موقعیتِ کادرِ
+  // والدِ مارکر (که top آن، همان فرمولِ calc(yRatio*100% - 12px)
+  // است) مستقیم با requestAnimationFrame به‌روز می‌شود. صفحه، با
+  // زنجیرهٔ [data-page-number] / [data-bookmark-page] /
+  // .comic-page-item / .pdf-page-wrapper / .comic-page-frame پیدا
+  // می‌شود (دو کلاسِ آخر در این کدبیس نیستند، ولی برایِ سازگاری در
+  // زنجیره مانده‌اند). نسبت، همان فرمولِ پرامپت است
+  // (کلمپِ 0.02 تا 0.92) و ذخیره، فقط در pointerup با (id, ratio).
+  // تغییرِ سمت (چپ/راست) در این موتور نیست؛ سمت، از استودیو عوض می‌شود.
   const handleMarkerPointerDown = (e) => {
-    if (!onMove || isEditing) return;
+    // توقفِ فوریِ رویداد پیش از هر گارد، تا useDragPan یا لایهٔ
+    // صفحه آن را نگیرد.
+    e.stopPropagation();
+    const moveFn = onMoveBookmark || onMove;
+    if (!moveFn || isEditing) return;
     if (e.button !== 0) return;
     const tgt = e.target;
     if (tgt && typeof tgt.closest === 'function' && tgt.closest('.bm-name, .bm-name-input, .bm-x')) return;
     const markerEl = e.currentTarget;
-    const pageEl = markerEl.closest('.comic-page-item');
+    const pageEl = markerEl.closest('[data-page-number]')
+      || markerEl.closest('[data-bookmark-page]')
+      || markerEl.closest('.comic-page-item')
+      || markerEl.closest('.pdf-page-wrapper')
+      || markerEl.closest('.comic-page-frame')
+      || markerEl.parentElement;
     if (!pageEl) return;
-    e.stopPropagation();
     e.preventDefault();
     suppressClickRef.current = false;
     const markerRect = markerEl.getBoundingClientRect();
-    const pageRect = pageEl.getBoundingClientRect();
-    if (!pageRect.width || !pageRect.height || !markerRect.height) return;
-    const startSide = bookmark.side === 'left' ? 'left' : 'right';
-    dragRef.current = {
+    const grabOffsetY = e.clientY - markerRect.top;
+    // عنصرِ موقعیت‌دار، کادرِ والدِ مارکر است؛ style.top رویِ خودِ
+    // مارکر (position:relative) درصد را نسبت به کادرِ ۲۷۰ پیکسلی
+    // حساب می‌کرد، نه نسبت به صفحه.
+    const posEl = markerEl.parentElement;
+    if (!posEl) return;
+    const dragState = {
       startX: e.clientX,
       startY: e.clientY,
-      grabOffsetY: e.clientY - markerRect.top,
-      pageRect,
-      markerWidth: markerRect.width,
-      markerHeight: markerRect.height,
-      startTopPx: markerRect.top - pageRect.top,
-      startLeftEdge: markerRect.left,
-      side: startSide,
+      grabOffsetY,
       hasMoved: false,
-      lastYRatio: bookmark.yRatio,
-      lastSide: startSide,
+      movedPx: 0,
+      lastRatio: typeof bookmark.yRatio === 'number' ? bookmark.yRatio : 0,
+      rafId: 0,
+      pendingRatio: null,
     };
+    dragRef.current = dragState;
     try { markerEl.setPointerCapture(e.pointerId); } catch (_) {}
-    setDragVisual({ x: 0, y: 0, side: startSide });
+    markerEl.style.cursor = 'grabbing';
+    const applyRatio = (ratio) => {
+      posEl.style.top = `calc(${ratio * 100}% - 12px)`;
+    };
+    const scheduleApply = (ratio) => {
+      dragState.pendingRatio = ratio;
+      if (dragState.rafId) return;
+      dragState.rafId = requestAnimationFrame(() => {
+        dragState.rafId = 0;
+        if (dragState.pendingRatio !== null) applyRatio(dragState.pendingRatio);
+      });
+    };
     const handleMove = (ev) => {
       const d = dragRef.current;
       if (!d) return;
       const dx = ev.clientX - d.startX;
       const dy = ev.clientY - d.startY;
-      if (!d.hasMoved && Math.max(Math.abs(dx), Math.abs(dy)) > 5) d.hasMoved = true;
-      const newTopPx = (ev.clientY - d.grabOffsetY) - d.pageRect.top;
-      const maxTopPx = Math.max(0, d.pageRect.height - d.markerHeight);
-      const clampedTopPx = Math.min(Math.max(0, newTopPx), maxTopPx);
-      let yRatio = clampedTopPx / d.pageRect.height;
-      yRatio = Math.min(Math.max(0, yRatio), 0.92);
-      d.lastYRatio = yRatio;
-      const centerX = d.pageRect.left + d.pageRect.width / 2;
-      let nextSide = d.side;
-      if (nextSide === 'right' && ev.clientX < centerX - 40) nextSide = 'left';
-      else if (nextSide === 'left' && ev.clientX > centerX + 40) nextSide = 'right';
-      d.side = nextSide;
-      d.lastSide = nextSide;
-      const targetLeftEdge = nextSide === 'left'
-        ? d.pageRect.left - d.markerWidth + 2
-        : d.pageRect.right - 2;
-      const tx = nextSide === startSide ? 0 : targetLeftEdge - d.startLeftEdge;
-      const ty = clampedTopPx - d.startTopPx;
-      setDragVisual({ x: tx, y: ty, side: nextSide });
+      const dist = Math.max(Math.abs(dx), Math.abs(dy));
+      if (dist > d.movedPx) d.movedPx = dist;
+      if (!d.hasMoved && d.movedPx > 3) d.hasMoved = true;
+      const rect = pageEl.getBoundingClientRect();
+      if (!rect.height) return;
+      const nextRatio = computeBookmarkDragRatio(ev.clientY, rect.top, rect.height, d.grabOffsetY);
+      d.lastRatio = nextRatio;
+      scheduleApply(nextRatio);
     };
     const cleanupDragListeners = () => {
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
       window.removeEventListener('pointercancel', handleCancel);
     };
-    const handleUp = () => {
+    const finishDrag = (commit) => {
       cleanupDragListeners();
       const d = dragRef.current;
       dragRef.current = null;
-      setDragVisual(null);
+      if (dragState.rafId) cancelAnimationFrame(dragState.rafId);
+      markerEl.style.cursor = '';
       if (!d) return;
-      if (d.hasMoved) {
+      if (commit && d.hasMoved) {
         suppressClickRef.current = true;
-        const curSide = bookmark.side === 'left' ? 'left' : 'right';
-        if (onMove && (d.lastYRatio !== bookmark.yRatio || d.lastSide !== curSide)) {
-          onMove(bookmark, { yRatio: d.lastYRatio, side: d.lastSide });
-        }
+        // topِ مستقیم، همان مقدارِ نهایی است؛ React با همان فرمولِ
+        // calc دوباره رندر می‌کند، پس نیازی به پاک کردن نیست.
+        const fn = onMoveBookmark || onMove;
+        if (fn) fn(bookmark.id, d.lastRatio);
+      } else {
+        posEl.style.top = '';
       }
     };
-    const handleCancel = () => {
-      cleanupDragListeners();
-      dragRef.current = null;
-      setDragVisual(null);
-    };
+    const handleUp = () => { finishDrag(true); };
+    const handleCancel = () => { finishDrag(false); };
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
     window.addEventListener('pointercancel', handleCancel);
@@ -329,12 +341,8 @@ export default function BookmarkMarker({ bookmark, imageUrl, onOpen, onDelete, o
     <div
       className={`bm-marker bm--${template} bm--side-${bookmark.side === 'left' ? 'left' : 'right'}`}
       title={label}
-      style={{
-        transform: dragVisual ? `translate(${dragVisual.x}px, ${dragVisual.y}px)` : undefined,
-        transition: dragVisual ? 'none' : undefined,
-        cursor: dragVisual ? 'grabbing' : undefined,
-      }}
       onPointerDown={handleMarkerPointerDown}
+      onMouseDown={(e) => { e.stopPropagation(); }}
       onClick={(e) => {
         e.stopPropagation();
         if (suppressClickRef.current) {

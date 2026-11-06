@@ -325,6 +325,23 @@ export default function App() {
     const norm = (p) => String(p || '').trim().replace(/[\\/]+/g, '\\').toLowerCase();
     const normFile = norm(filePath);
     const normFolder = norm(folder.folderPath);
+    // مرحلهٔ ۴۰ §۵: خودِ پوشه باز شده (نه فایلی داخلِ آن) — فهرست،
+    // همان فایل‌هایِ پوشه است و موقعیت، ۱ از N.
+    if (normFile && normFolder && normFile === normFolder) {
+      return {
+        ...payload,
+        folderFiles: folder.files,
+        folderPath: folder.folderPath,
+        nextComic: folder.files[1] || null,
+        prevComic: null,
+        dirInfo: {
+          name: String(folder.folderPath || '').split(/[\\/]/).filter(Boolean).pop() || '',
+          current: 1,
+          total: folder.files.length,
+          sortBy: 'name_asc',
+        },
+      };
+    }
     if (!normFile || !normFolder || !normFile.startsWith(normFolder + '\\')) {
       folderFilesRef.current = null;
       return payload;
@@ -553,6 +570,26 @@ export default function App() {
             try {
               if (isCanceledRef.current) return;
 
+              // مرحلهٔ ۴۰ §۵: ورود به زیرپوشه از داخلِ لیستِ پوشه —
+              // فهرستِ پنلِ راست را با محتوایِ آن زیرپوشه به روز کن
+              // (تصویرهایِ آن، با pageIndex برایِ پرشِ مستقیم).
+              const openFolder = folderFilesRef.current;
+              if (openFolder && Array.isArray(openFolder.files) && result.type === 'folder' && Array.isArray(result.items) && result.items.length > 0) {
+                const normKey = (p) => String(p || '').trim().replace(/[\\/]+/g, '\\').toLowerCase();
+                const subEntry = openFolder.files.find((f) => f.kind === 'folder' && normKey(f.path) === normKey(result.filePath));
+                if (subEntry) {
+                  folderFilesRef.current = {
+                    folderPath: result.filePath,
+                    files: result.items.map((it, i) => ({
+                      name: it.name || String(it.path || '').split(/[\\/]/).filter(Boolean).pop() || '',
+                      path: it.path,
+                      kind: 'image',
+                      isDir: false,
+                      pageIndex: i + 1,
+                    })),
+                  };
+                }
+              }
               const comicPayload = attachFolderFiles({
                 type: result.type,
                 items: result.items || [],
@@ -654,6 +691,19 @@ export default function App() {
     useSettingsStore.getState().initSettings?.();
     // مرحلهٔ ۳۹ §۳: اگر localStorage خالی است، سیستمِ رنگ را از دیتابیس بخوان.
     useAppStore.getState().loadCustomColorSystemFromDb?.();
+    // مرحلهٔ ۴۰ §۵: پیش بارگذاریِ تنبلِ pica و minisearch پس از بوت،
+    // تا اولین جستجو/کاور، بی‌معطلی انجام شود.
+    try {
+      const preloadHeavySearchDeps = () => {
+        import('pica').catch(() => {});
+        import('minisearch').catch(() => {});
+      };
+      if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+        window.requestIdleCallback(preloadHeavySearchDeps, { timeout: 5000 });
+      } else {
+        setTimeout(preloadHeavySearchDeps, 2000);
+      }
+    } catch (_) {}
     // مرحله ۱۶: هیدراتِ بوک‌مارک در بوت، تا سایدبار و منو از همان
     // اول پریست‌ها را داشته باشند و هیچ ذخیره‌ای پیش از بارگذاری
     // رخ ندهد.

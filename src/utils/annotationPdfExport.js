@@ -802,38 +802,6 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
   ctx.restore();
 }
 
-function drawCloudBoxItem(ctx, item, geometry, canvasW, canvasH, unitScaleArg) {
-  const fx1 = finiteNumber(item.x) / 1000;
-  const fy1 = finiteNumber(item.y) / 1000;
-  const fx2 = (finiteNumber(item.x) + finiteNumber(item.width)) / 1000;
-  const fy2 = (finiteNumber(item.y) + finiteNumber(item.height)) / 1000;
-  const [rx1, ry1] = displayedFractionsToRaw(fx1, fy1, geometry);
-  const [rx2, ry2] = displayedFractionsToRaw(fx2, fy2, geometry);
-  const x1 = Math.min(rx1, rx2) * canvasW;
-  const y1 = Math.min(ry1, ry2) * canvasH;
-  const x2 = Math.max(rx1, rx2) * canvasW;
-  const y2 = Math.max(ry1, ry2) * canvasH;
-  const sw = Math.max(1, finiteNumber(item.strokeWidth, 4));
-  const unitScale = Number.isFinite(unitScaleArg) ? unitScaleArg : canvasW / 1000;
-  const swPx = sw * unitScale;
-  const opacity = normalizeOpacityValue(item.opacity, 0.9);
-  const color = toPureRgbCss(item.color || '#22d3ee') || item.color || '#22d3ee';
-  const hasFill = item.hasFill ?? true;
-  ctx.save();
-  drawCloudPathCanvas(ctx, x1, y1, x2, y2, swPx);
-  if (hasFill) {
-    ctx.globalAlpha = opacity;
-    ctx.fillStyle = color;
-    ctx.fill();
-  }
-  ctx.globalAlpha = opacity;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = swPx;
-  ctx.lineJoin = 'round';
-  ctx.stroke();
-  ctx.restore();
-}
-
 /**
  * رندرِ overlayِ یک صفحه (همهٔ آیتم‌ها: قلم، هایلایتر، باکس، فلش،
  * متن، استیکی) روی بومِ Canvas 2D در جهتِ خامِ صفحه — پختِ کاملِ

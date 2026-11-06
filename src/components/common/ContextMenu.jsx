@@ -405,7 +405,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
       {
         id: 'favorite',
         label: isFav ? 'حذف از علاقه‌مندی‌ها' : 'افزودن به علاقه‌مندی‌ها',
-        shortcut: isFav ? '❤️' : '🤍',
+        shortcut: '',
         icon: <Icons.Heart size={15} filled={isFav} />,
         disabled: !hasComic,
         onClick: () => {
@@ -441,7 +441,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           isSubItem: true,
           section: 'library',
           label: isPinned ? 'برداشتن پین از صدر کتابخانه' : 'پین کردن در صدر کتابخانه',
-          shortcut: isPinned ? '📌' : '',
+          shortcut: '',
           icon: <Icons.Pin size={14} filled={isPinned} />,
           onClick: async () => {
             const pinnedNow = await togglePin(targetComicObj);

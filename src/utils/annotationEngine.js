@@ -1574,25 +1574,6 @@ export function moveAnnotationByDelta(item, dx, dy) {
   };
 }
 
-// مرحلهٔ ۳۸ §۳: سقفِ ساده‌سازیِ پایانی ۰٫۲۵ — نقاطِ حیاتیِ پیچ‌ها
-// هرگز با آستانهٔ خشن حذف نمی‌شوند. (این اکسپورت فعلاً از هیچ مسیری
-// صدا زده نمی‌شود؛ نه commit قلم و نه اکسپورت، نقاط را کم نمی‌کنند.)
-export function simplifyPoints(points, minDist = 0.25) {
-  if (!points || points.length < 3) return points || [];
-  const out = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const prev = out[out.length - 1];
-    const cur = points[i];
-    if (Math.hypot(cur.x - prev.x, cur.y - prev.y) >= minDist) {
-      out.push(cur);
-    }
-  }
-  // آخرین نقطه همیشه حفظ شود
-  const last = points[points.length - 1];
-  if (out[out.length - 1] !== last) out.push(last);
-  return out;
-}
-
 /** شناسه یکتا */
 export function uid(prefix = 'stroke') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;

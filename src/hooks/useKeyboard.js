@@ -705,7 +705,7 @@ export default function useKeyboard(callbacks = {}) {
       // بودند و کلیدِ جدیدِ ابزار، به جستجو می‌رفت.
       const isStudioToolKey = resolveStudioToolId(settingsState, e) !== null;
       if (
-        !isInputFocused &&
+        !isTextInputFocused &&
         !isControlOrNavKey &&
         !appState.isAnnotationActive &&
         !appState.isAreaZoomActive &&

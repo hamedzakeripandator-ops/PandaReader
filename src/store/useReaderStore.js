@@ -75,6 +75,12 @@ const useReaderStore = create((set, get) => ({
   pdfOutlineStatus: 'idle',
   // مرحلهٔ ۳۵ §۲: فهرستِ فصل‌هایِ EPUBِ جاری (برای پنلِ راست).
   epubChapters: [],
+  // مرحلهٔ ۴۰ §۴: حالتِ نمایشِ کمیک — عمودی (طوماری) یا افقیِ صفحه‌ای
+  // (مخصوصِ CBZ/مانگایِ landscape).
+  comicViewMode: 'vertical',
+  // مرحلهٔ ۴۰ §۵: سیگنالِ جستجویِ EPUB از TopBar (آینهٔ PDF).
+  epubSearchRequestId: 0,
+  epubSearchQuery: '',
 
   initZoomSettings: async () => {
     try {
@@ -141,6 +147,9 @@ const useReaderStore = create((set, get) => ({
         pdfOutlineFile: '',
         pdfOutlineStatus: 'idle',
         epubChapters: [],
+        comicViewMode: 'vertical',
+        epubSearchRequestId: 0,
+        epubSearchQuery: '',
       });
       return;
     }
@@ -160,6 +169,11 @@ const useReaderStore = create((set, get) => ({
         ? data.savedResumePage
         : 1;
 
+    // مرحلهٔ ۴۰ §۴: فایلِ .cbz، خودکار افقیِ صفحه‌ای با زومِ ۱۶۵٪
+    // باز می‌شود؛ بقیهٔ فایل‌ها، عمودی می‌مانند.
+    const openedPath = data?.filePath || data?.path || '';
+    const isCbzFile = typeof openedPath === 'string' && /\.cbz$/i.test(openedPath);
+
     set({
       comicData: data,
       currentPage: resumePage,
@@ -171,6 +185,10 @@ const useReaderStore = create((set, get) => ({
       pdfOutlineFile: '',
       pdfOutlineStatus: 'idle',
       epubChapters: [],
+      comicViewMode: isCbzFile ? 'horizontal-paged' : 'vertical',
+      ...(isCbzFile ? { zoomLevel: 1.65 } : {}),
+      epubSearchRequestId: 0,
+      epubSearchQuery: '',
     });
   },
 
@@ -413,6 +431,17 @@ const useReaderStore = create((set, get) => ({
       pdfSearchRequestId: (state.pdfSearchRequestId || 0) + 1,
     })),
 
+  // مرحلهٔ ۴۰ §۴: سوییچِ حالتِ نمایشِ کمیک (عمودی/افقیِ صفحه‌ای).
+  setComicViewMode: (mode) =>
+    set({ comicViewMode: mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical' }),
+
+  // مرحلهٔ ۴۰ §۵: آغازِ جستجو در EPUBِ فعلی از TopBar (آینهٔ PDF).
+  triggerEpubSearch: (query) =>
+    set((state) => ({
+      epubSearchQuery: typeof query === 'string' ? query : '',
+      epubSearchRequestId: (state.epubSearchRequestId || 0) + 1,
+    })),
+
   setIsLoading: (status) => set({ isLoading: Boolean(status) }),
   setLoadingProgress: (progress) =>
     set({ loadingProgress: typeof progress === 'number' ? progress : 0 }),
@@ -436,6 +465,9 @@ const useReaderStore = create((set, get) => ({
       pdfSearchOpen: false,
       pdfSearchQuery: '',
       pdfSearchRequestId: 0,
+      comicViewMode: 'vertical',
+      epubSearchRequestId: 0,
+      epubSearchQuery: '',
     });
   },
 }));

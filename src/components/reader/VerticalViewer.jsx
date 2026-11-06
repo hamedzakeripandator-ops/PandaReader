@@ -361,11 +361,29 @@ export default function VerticalViewer() {
 
   const containerRef = useRef(null);
 
+  // مرحلهٔ ۴۰ §۴: حالتِ افقیِ صفحه‌ای (CBZ/مانگا) — کانتینرِ جدا،
+  // صفحهٔ جاریِ جدا، و جهتِ ورق برایِ انیمیشن.
+  const hContainerRef = useRef(null);
+  const hPageIndexRef = useRef(0);
+  const hFlipDirRef = useRef(1);
+  const hWheelAtRef = useRef(0);
+  const hSyncKeyRef = useRef('');
+  const isHorizontalPagedRef = useRef(false);
+  const [hPageIndex, setHPageIndex] = useState(0);
+  const [hEntering, setHEntering] = useState(false);
+
   // مرحله ۱۵ — درگِ چهارجهته با ماوس (دکمهٔ چپ در مطالعهٔ عادی،
   // دکمهٔ وسط در هر حالتی؛ جزئیاتِ کامل در useDragPan). این فراخوان،
   // عمداً پس از اعلانِ containerRef است تا TDZ نگیرد.
   const { handlePanMouseDown, isPanning } = useDragPan({
     containerRef,
+    isAnnotationActive,
+    isAreaZoomActive,
+  });
+  // مرحلهٔ ۴۰ §۴: درگِ چهارجهته برایِ کانتینرِ افقی (نمونهٔ دومِ هوک —
+  // هر دو نمونه، همیشه و بدونِ شرط صدا زده می‌شوند).
+  const { handlePanMouseDown: handleHPanMouseDown, isPanning: isHPanning } = useDragPan({
+    containerRef: hContainerRef,
     isAnnotationActive,
     isAreaZoomActive,
   });
@@ -377,7 +395,7 @@ export default function VerticalViewer() {
   // بیرون می‌زند. نگهبانِ ۲ پیکسلی، از رندرِ بیهوده جلوگیری می‌کند.
   useEffect(() => {
     const measure = () => {
-      const c = containerRef.current;
+      const c = containerRef.current || hContainerRef.current;
       if (!c) return;
       const w = Math.round(c.clientWidth || 0);
       setContainerWidth((prev) => (Math.abs(w - prev) > 2 ? w : prev));
@@ -404,6 +422,130 @@ export default function VerticalViewer() {
     jumpToPage(n);
   }, [itemsCount, pageHudDraft, jumpToPage]);
   const currentFilePath = resolveActiveBookKey(comicData, null);
+
+  // مرحلهٔ ۴۰ §۴: حالتِ نمایش (عمودی/افقیِ صفحه‌ای).
+  const comicViewMode = useReaderStore((state) => state.comicViewMode || 'vertical');
+  const isHorizontalPaged = comicViewMode === 'horizontal-paged';
+  // همگام‌سازیِ ref با جدیدترین مقدار (برایِ افکتِ resume که
+  // isHorizontalPaged را در deps ندارد تا با تغییرِ حالت، دوباره اجرا نشود).
+  useEffect(() => {
+    isHorizontalPagedRef.current = isHorizontalPaged;
+  });
+
+  // مرحلهٔ ۴۰ §۴: رفتن به صفحهٔ N در حالتِ افقی — با انیمیشنِ ورود،
+  // ریستِ اسکرولِ صحنه، و همگام‌سازیِ استور/آمار (آینهٔ افکتِ ۷).
+  const goToHorizontalPage = useCallback((nextIndex) => {
+    if (itemsCount === 0) return;
+    const clamped = Math.max(0, Math.min(itemsCount - 1, nextIndex));
+    const prev = hPageIndexRef.current;
+    hPageIndexRef.current = clamped;
+    setHPageIndex(clamped);
+    hFlipDirRef.current = clamped >= prev ? 1 : -1;
+    setHEntering(true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => setHEntering(false));
+    });
+    if (hContainerRef.current) {
+      hContainerRef.current.scrollLeft = 0;
+      hContainerRef.current.scrollTop = 0;
+    }
+    setCurrentPage(clamped + 1);
+    try { readingActivity.visitPage(clamped + 1); } catch (_) {}
+    try { updateReadingProgress(currentFilePath, clamped + 1, itemsCount); } catch (_) {}
+  }, [itemsCount, currentFilePath, setCurrentPage, updateReadingProgress]);
+
+  const flipHorizontalPage = useCallback((dir) => {
+    goToHorizontalPage(hPageIndexRef.current + dir);
+  }, [goToHorizontalPage]);
+
+  // مرحلهٔ ۴۰ §۴: ورود به حالتِ افقی (یا عوض شدنِ فایل) — صفحهٔ
+  // افقی از صفحهٔ جاریِ استور شروع می‌شود.
+  useEffect(() => {
+    if (!isHorizontalPaged) return;
+    const key = `${currentFilePath}::${itemsCount}`;
+    if (hSyncKeyRef.current === key) return;
+    hSyncKeyRef.current = key;
+    const p = Math.max(0, Math.min(itemsCount - 1, (useReaderStore.getState().currentPage || 1) - 1));
+    hPageIndexRef.current = p;
+    setHPageIndex(p);
+  }, [isHorizontalPaged, currentFilePath, itemsCount]);
+
+  // مرحلهٔ ۴۰ §۴: پیش‌دیکدِ صفحاتِ همسایه در VRAM (GPU Image Pre-Decoding).
+  useEffect(() => {
+    if (!isHorizontalPaged) return;
+    const keepUrls = new Set();
+    for (const ni of [hPageIndex - 1, hPageIndex, hPageIndex + 1]) {
+      if (ni < 0 || ni >= itemsCount) continue;
+      const raw = items[ni]?.path || items[ni]?.filePath || '';
+      if (!raw) continue;
+      const url = buildComicImageUrl(raw);
+      if (!url) continue;
+      keepUrls.add(url);
+      if (predecodedMapRef.current.has(url)) continue;
+      try {
+        const img = new Image();
+        img.src = url;
+        if (typeof img.decode === 'function') img.decode().catch(() => {});
+        predecodedMapRef.current.set(url, img);
+      } catch (_) {}
+    }
+    for (const key of Array.from(predecodedMapRef.current.keys())) {
+      if (!keepUrls.has(key)) predecodedMapRef.current.delete(key);
+    }
+  }, [isHorizontalPaged, hPageIndex, items, itemsCount]);
+
+  // مرحلهٔ ۴۰ §۴: ورق زدن با ArrowLeft/ArrowRight (فازِ capture تا
+  // useKeyboardِ سراسری، آن را به‌عنوانِ صفحهٔ بعدی/قبلی نخواند).
+  useEffect(() => {
+    if (!isHorizontalPaged) return undefined;
+    const onKey = (e) => {
+      const t = e.target;
+      if (t && (t.closest?.('input, textarea, select') || t.isContentEditable)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        e.stopPropagation();
+        flipHorizontalPage(1);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        e.stopPropagation();
+        flipHorizontalPage(-1);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [isHorizontalPaged, flipHorizontalPage]);
+
+  // مرحلهٔ ۴۰ §۴: چرخِ ماوس در لبه‌هایِ اسکرول، صفحه را ورق می‌زند
+  // (فقط وقتی در آن جهت، دیگر جایی برایِ اسکرول نیست).
+  useEffect(() => {
+    if (!isHorizontalPaged) return undefined;
+    const el = hContainerRef.current;
+    if (!el) return undefined;
+    const onWheel = (e) => {
+      const now = Date.now();
+      if (now - hWheelAtRef.current < 400) return;
+      const canScrollRight = el.scrollWidth > el.clientWidth + 2;
+      const canScrollDown = el.scrollHeight > el.clientHeight + 2;
+      const atRightEdge = !canScrollRight || el.scrollLeft >= el.scrollWidth - el.clientWidth - 2;
+      const atBottomEdge = !canScrollDown || el.scrollTop >= el.scrollHeight - el.clientHeight - 2;
+      const atLeftEdge = !canScrollRight || el.scrollLeft <= 2;
+      const atTopEdge = !canScrollDown || el.scrollTop <= 2;
+      const forward = e.deltaY > 0 || e.deltaX > 0;
+      const backward = e.deltaY < 0 || e.deltaX < 0;
+      if (forward && atRightEdge && atBottomEdge) {
+        e.preventDefault();
+        hWheelAtRef.current = now;
+        flipHorizontalPage(1);
+      } else if (backward && atLeftEdge && atTopEdge) {
+        e.preventDefault();
+        hWheelAtRef.current = now;
+        flipHorizontalPage(-1);
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [isHorizontalPaged, flipHorizontalPage]);
 
   // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
   const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(currentFilePath)] || EMPTY_PAGE_BOOKMARKS);
@@ -995,13 +1137,17 @@ export default function VerticalViewer() {
         if (targetToJump && targetToJump > 1 && targetToJump <= itemsCount) {
           requestAnimationFrame(() => {
             if (isMounted) {
-              scrollToIndex(targetToJump - 1, 'auto');
+              if (isHorizontalPagedRef.current) {
+                goToHorizontalPage(targetToJump - 1);
+              } else {
+                scrollToIndex(targetToJump - 1, 'auto');
+              }
               setCurrentPage(targetToJump);
               readingActivity.visitPage(targetToJump);
 
               setTimeout(() => {
                 if (isMounted) {
-                  scrollToIndex(targetToJump - 1, 'auto');
+                  if (!isHorizontalPagedRef.current) scrollToIndex(targetToJump - 1, 'auto');
                   hasResumedRef.current = true;
                   isResumingRef.current = false;
                 }
@@ -1032,15 +1178,20 @@ export default function VerticalViewer() {
     comicData?.savedResumePage,
     scrollToIndex,
     setCurrentPage,
+    goToHorizontalPage,
   ]);
 
   // ۶. پرش دستی به صفحه هدف انتخاب‌شده توسط کاربر
   useEffect(() => {
     if (targetPage !== null && targetPage >= 1 && targetPage <= itemsCount) {
-      scrollToIndex(targetPage - 1, 'smooth');
+      if (isHorizontalPaged) {
+        goToHorizontalPage(targetPage - 1);
+      } else {
+        scrollToIndex(targetPage - 1, 'smooth');
+      }
       clearTargetPage();
     }
-  }, [targetPage, itemsCount, clearTargetPage, scrollToIndex]);
+  }, [targetPage, itemsCount, clearTargetPage, scrollToIndex, isHorizontalPaged, goToHorizontalPage]);
 
   // مرحله ۱۳: پرشِ نقطه‌ای به بوک‌مارک — اول scrollToIndex تا صفحه
   // در پنجرهٔ مجازی بیاید، بعد اسکرولِ دقیقِ DOM به همان نقطه.
@@ -1050,6 +1201,22 @@ export default function VerticalViewer() {
     if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== currentFilePath) return;
     const page = bookmarkJumpTarget.page;
     if (page < 1 || page > itemsCount) { clearBookmarkJumpTarget(); return; }
+    if (isHorizontalPaged) {
+      goToHorizontalPage(page - 1);
+      clearBookmarkJumpTarget();
+      const t1 = setTimeout(() => {
+        const container = hContainerRef.current;
+        const el = document.getElementById(`comic-page-${page}`);
+        if (!container || !el) return;
+        const cRect = container.getBoundingClientRect();
+        const eRect = el.getBoundingClientRect();
+        container.scrollTo({
+          top: container.scrollTop + (eRect.top - cRect.top) + eRect.height * yRatio,
+          behavior: 'auto',
+        });
+      }, 250);
+      return () => clearTimeout(t1);
+    }
     scrollToIndex(page - 1, 'auto');
     setCurrentPage(page);
     const yRatio = bookmarkJumpTarget.yRatio;
@@ -1070,10 +1237,11 @@ export default function VerticalViewer() {
       if (!doPreciseScroll()) setTimeout(doPreciseScroll, 600);
     }, 250);
     return () => clearTimeout(t1);
-  }, [bookmarkJumpTarget, currentFilePath, itemsCount, scrollToIndex, setCurrentPage, clearBookmarkJumpTarget]);
+  }, [bookmarkJumpTarget, currentFilePath, itemsCount, scrollToIndex, setCurrentPage, clearBookmarkJumpTarget, isHorizontalPaged, goToHorizontalPage]);
 
   // ۷. همگام‌سازی شماره صفحه بدون سابسکرایب رندرر به currentPage
   useEffect(() => {
+    if (isHorizontalPaged) return;
     if (isJumping.current || isResumingRef.current || !hasResumedRef.current) return;
 
     const calculatedPage = activePageIndex + 1;
@@ -1098,6 +1266,7 @@ export default function VerticalViewer() {
     currentFilePath,
     setCurrentPage,
     updateReadingProgress,
+    isHorizontalPaged,
   ]);
 
   const handleFrameContextMenu = useCallback(
@@ -1114,9 +1283,10 @@ export default function VerticalViewer() {
 
   if (!comicData || !comicData.items) return null;
 
-  const activePageNum = activePageIndex + 1;
+  const activePageNum = (isHorizontalPaged ? hPageIndex : activePageIndex) + 1;
   const currentActivePageAnnotations =
     annotationsByPage[String(activePageNum)] || [];
+  const hFrameBookmarks = pageBookmarkMap[activePageNum] || EMPTY_PAGE_BOOKMARKS;
   const enableHiDpiCrispPass = isScrollIdle && safeZoom > 1.12;
 
   return (
@@ -1149,6 +1319,85 @@ export default function VerticalViewer() {
         onClearPage={handleClearCurrentPageAnnotations}
       />
 
+      {isHorizontalPaged && itemsCount > 0 ? (
+        <div
+          ref={hContainerRef}
+          data-reader-scroll-container="true"
+          style={{
+            ...styles.scrollContainer,
+            pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
+            cursor: isHPanning ? 'grabbing' : undefined,
+            userSelect: isHPanning ? 'none' : undefined,
+          }}
+          onMouseDown={handleHPanMouseDown}
+          onContextMenu={(e) => {
+            if (!e.target.closest('.comic-page-item')) {
+              handleContextMenu(e, {
+                pageIndex: hPageIndex,
+                imagePath: items[hPageIndex]?.path,
+                comic: comicData,
+              });
+            }
+          }}
+        >
+          <div
+            style={{
+              position: 'relative',
+              width: frameWidth || '100%',
+              margin: '0 auto',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              opacity: hEntering ? 0 : 1,
+              transform: hEntering ? `translateX(${hFlipDirRef.current >= 0 ? 48 : -48}px)` : 'translateX(0)',
+              transition: 'opacity 0.26s ease, transform 0.26s ease',
+              willChange: 'transform, opacity',
+            }}
+          >
+            <ComicPageFrame
+              item={items[hPageIndex]}
+              index={hPageIndex}
+              isLastItem={hPageIndex === itemsCount - 1}
+              knownHeight={(heights || [])[hPageIndex] ?? null}
+              frameWidth={frameWidth}
+              pageGap={safePageGap}
+              rotation={rotation}
+              isHiDpiPassActive={enableHiDpiCrispPass}
+              isNearViewport
+              isSharpenFilterActive={enableHiDpiCrispPass && safeZoom <= 1.5 && !isAnnotationActive}
+              pageAnnotations={currentActivePageAnnotations}
+              onCommitPageAnnotations={handleCommitPageAnnotations}
+              pageFilter={pageFilter}
+              frameZoomLevel={safeZoom}
+              onImageLoad={recordImageDimensions}
+              onFrameRendered={handleFrameRendered}
+              onContextMenu={handleFrameContextMenu}
+            />
+            {hFrameBookmarks.map((bm) => (
+              <div
+                key={bm.id}
+                style={{
+                  position: 'absolute',
+                  top: bm.yRatio <= 0 ? '0px' : `calc(${bm.yRatio * 100}% - 12px)`,
+                  left: bm.side === 'left' ? undefined : 'calc(100% + 10px)',
+                  right: bm.side === 'left' ? 'calc(100% + 10px)' : undefined,
+                  zIndex: 50,
+                }}
+              >
+                <BookmarkMarker
+                  bookmark={bm}
+                  imageUrl={resolveBookmarkImage(bm, bookmarkPreferences)}
+                  onOpen={handleOpenBookmark}
+                  onDelete={handleDeleteBookmark}
+                  onRename={handleRenameBookmark}
+                  onMove={handleMoveBookmark}
+                  onMoveBookmark={handleMoveBookmark}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
       <div
         ref={containerRef}
         data-reader-scroll-container="true"
@@ -1253,11 +1502,37 @@ export default function VerticalViewer() {
           />
         </div>
       </div>
+      )}
+      {isHorizontalPaged && itemsCount > 1 && (
+        <>
+          <button
+            type="button"
+            title="صفحه قبلی"
+            aria-label="صفحه قبلی"
+            disabled={hPageIndex <= 0}
+            onClick={() => flipHorizontalPage(-1)}
+            style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', zIndex: 40, width: 44, height: 44, borderRadius: '50%', background: 'rgba(13,19,26,0.7)', border: '1px solid rgba(34,211,238,0.35)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: hPageIndex <= 0 ? 0.35 : 1 }}
+          >
+            <Icons.ChevronLeft size={20} />
+          </button>
+          <button
+            type="button"
+            title="صفحه بعدی"
+            aria-label="صفحه بعدی"
+            disabled={hPageIndex >= itemsCount - 1}
+            onClick={() => flipHorizontalPage(1)}
+            style={{ position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)', zIndex: 40, width: 44, height: 44, borderRadius: '50%', background: 'rgba(13,19,26,0.7)', border: '1px solid rgba(34,211,238,0.35)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: hPageIndex >= itemsCount - 1 ? 0.35 : 1 }}
+          >
+            <Icons.ChevronRight size={20} />
+          </button>
+        </>
+      )}
+
       {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ
           محیطِ مطالعه — بدونِ هیچ تغییری در RightPanel. */}
       {itemsCount > 0 && (
         <div
-          onClick={() => { if (!isEditingPageHud) { setPageHudDraft(String(activePageIndex + 1)); setIsEditingPageHud(true); } }}
+          onClick={() => { if (!isEditingPageHud) { setPageHudDraft(String((isHorizontalPaged ? hPageIndex : activePageIndex) + 1)); setIsEditingPageHud(true); } }}
           onMouseEnter={() => setPageHudHovered(true)}
           onMouseLeave={() => setPageHudHovered(false)}
           title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
@@ -1297,7 +1572,7 @@ export default function VerticalViewer() {
               </button>
             </span>
           ) : (
-            `صفحه ${activePageIndex + 1} از ${itemsCount}`
+            `صفحه ${(isHorizontalPaged ? hPageIndex : activePageIndex) + 1} از ${itemsCount}`
           )}
         </div>
       )}

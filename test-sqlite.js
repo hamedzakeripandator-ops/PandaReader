@@ -1,0 +1,10 @@
+const Database = require('better-sqlite3');
+console.log('require ok');
+const db = new Database('test-check.sqlite');
+console.log('open ok');
+db.exec('CREATE TABLE IF NOT EXISTS t (x TEXT)');
+db.prepare('INSERT INTO t VALUES (?)').run('hello');
+console.log('write ok', JSON.stringify(db.prepare('SELECT * FROM t').all()));
+db.close();
+console.log('ALL OK');
+process.exit(0);

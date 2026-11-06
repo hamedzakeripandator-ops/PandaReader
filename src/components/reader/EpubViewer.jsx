@@ -26,6 +26,20 @@ import BookmarkMarker from './BookmarkMarker';
 import { resolveBookmarkImage, clampYRatio } from './bookmarkTemplates';
 import { normalizeSearchTextLoose, findTextMatchSpans } from '../../utils/persianSearch';
 
+// مرحلهٔ ۴۰ §۵: تبدیلِ HTML فصل به متنِ خالص برایِ جستجو و کشِ SQLite —
+// همان زنجیرهٔ runEpubSearch، این‌بار در سطحِ ماژول تا هم جستجو و هم
+// کشِ نمایشِ فصل از آن استفاده کنند.
+export function stripEpubHtmlToPlainText(html) {
+  return (html || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'");
+}
+
 const HL_COLORS = [
   { id: 'yellow', label: 'زرد', bg: '#facc15' },
   { id: 'green', label: 'سبز', bg: '#4ade80' },
@@ -226,6 +240,9 @@ export default function EpubViewer({ filePath }) {
   const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const showToast = useAppStore((state) => state.showToast);
   const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
+  // مرحلهٔ ۴۰ §۵: سیگنالِ جستجویِ EPUB از TopBar.
+  const epubSearchRequestId = useReaderStore((state) => state.epubSearchRequestId || 0);
+  const epubSearchQueryFromStore = useReaderStore((state) => state.epubSearchQuery || '');
   // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه در منوهایِ هایلایت.
   const favoriteColors = useAppStore((s) => s.favoriteColors || []);
   // مرحلهٔ ۳۸ §۸: زومِ امن برای لایهٔ حاشیه‌نویسی (در EPUB امروز ۱
@@ -366,6 +383,8 @@ export default function EpubViewer({ filePath }) {
       const list = Array.isArray(res.chapters) ? res.chapters : [];
       setBook({ title: res.title || '', creator: res.creator || '', coverUrl: res.coverUrl || null, chapters: list });
       setEpubChapters(list.map((c) => ({ id: c.id, title: c.title })));
+      epubFileMtimeRef.current = Number(res.sourceMtimeMs) || 0;
+      epubChapterTextMemCacheRef.current.clear();
       const startPage = useReaderStore.getState().currentPage || 1;
       setChapterIndex(Math.max(0, Math.min(startPage - 1, list.length - 1)));
       setBookLoading(false);
@@ -398,6 +417,15 @@ export default function EpubViewer({ filePath }) {
       if (!isMounted) return;
       if (res && res.success) {
         setChapterHtml(sanitizeEpubHtmlClient(res.html || ''));
+        // مرحلهٔ ۴۰ §۵: متنِ خالصِ همین فصل را در حافظه و SQLite کش کن
+        // تا جستجوهایِ بعدی، بی‌خواندنِ دوبارهٔ فایل انجام شوند.
+        try {
+          const plain = stripEpubHtmlToPlainText(res.html || '');
+          if (plain.trim()) {
+            epubChapterTextMemCacheRef.current.set(chapterIndex, plain);
+            coreApi.saveEpubChapterText(filePath, chapterIndex, epubFileMtimeRef.current, plain).catch(() => {});
+          }
+        } catch (_) {}
         // پیش‌بارگذاریِ فصل‌هایِ همسایه (بی‌صدا).
         for (const nb of [chapterIndex - 1, chapterIndex + 1]) {
           const nCh = chapters[nb];
@@ -439,13 +467,30 @@ export default function EpubViewer({ filePath }) {
   // گزینه‌هایِ PdfViewer (کلمهٔ کامل، پیش‌فرض روشن).
   const [epubSearchOpen, setEpubSearchOpen] = useState(false);
   const [epubSearchQuery, setEpubSearchQuery] = useState('');
-  const [epubSearchOptions, setEpubSearchOptions] = useState({ wholeWord: true, caseSensitive: false, prefix: false });
+  // مرحلهٔ ۴۰ §۵: ماندگاریِ تاگل‌هایِ جستجو در localStorage.
+  const [epubSearchOptions, setEpubSearchOptions] = useState(() => {
+    try {
+      const raw = localStorage.getItem('comicReader.epubSearchOptions.v1');
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object') {
+        return {
+          wholeWord: typeof parsed.wholeWord === 'boolean' ? parsed.wholeWord : true,
+          caseSensitive: typeof parsed.caseSensitive === 'boolean' ? parsed.caseSensitive : false,
+          prefix: typeof parsed.prefix === 'boolean' ? parsed.prefix : false,
+        };
+      }
+    } catch (_) {}
+    return { wholeWord: true, caseSensitive: false, prefix: false };
+  });
   const [epubSearchResults, setEpubSearchResults] = useState([]);
   const [epubSearchScanning, setEpubSearchScanning] = useState(false);
   const [epubSearchMarkedChapter, setEpubSearchMarkedChapter] = useState(null);
   const epubSearchRunIdRef = useRef(0);
   const epubSearchInputRef = useRef(null);
   const scrollToSearchMarkRef = useRef(false);
+  // مرحلهٔ ۴۰ §۵: کشِ متنِ خالصِ فصل‌ها — حافظه (per-book) + SQLite.
+  const epubChapterTextMemCacheRef = useRef(new Map());
+  const epubFileMtimeRef = useRef(0);
 
   // Ctrl+F در نمایِ EPUB، نوارِ جستجو را باز می‌کند.
   useEffect(() => {
@@ -459,6 +504,47 @@ export default function EpubViewer({ filePath }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // مرحلهٔ ۴۰ §۵: ماندگاریِ تاگل‌هایِ جستجو.
+  useEffect(() => {
+    try { localStorage.setItem('comicReader.epubSearchOptions.v1', JSON.stringify(epubSearchOptions)); } catch (_) {}
+  }, [epubSearchOptions]);
+
+  // مرحلهٔ ۴۰ §۵: سیگنالِ جستجو از TopBar — نوارِ جستجویِ EPUB را باز
+  // و فوکوس کن (آینهٔ PdfViewer).
+  useEffect(() => {
+    if (!epubSearchRequestId) return;
+    setEpubSearchOpen(true);
+    setEpubSearchQuery(epubSearchQueryFromStore || '');
+    setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0);
+  }, [epubSearchRequestId, epubSearchQueryFromStore]);
+
+  // مرحلهٔ ۴۰ §۵: متنِ خالصِ یک فصل — اول حافظه، بعد SQLite، بعد
+  // خواندنِ فصل از EPUB. در صورتِ نبودنِ موتورِ SQLite یا عوض شدنِ
+  // mtime، بی‌صدا به خواندنِ فصل برمی‌گردد.
+  const getEpubChapterPlainText = useCallback(async (chapterIdx) => {
+    const mem = epubChapterTextMemCacheRef.current.get(chapterIdx);
+    if (typeof mem === 'string') return mem;
+    try {
+      const cached = await coreApi.getEpubChapterText(filePath, chapterIdx, epubFileMtimeRef.current);
+      if (cached && cached.found && typeof cached.plainText === 'string') {
+        epubChapterTextMemCacheRef.current.set(chapterIdx, cached.plainText);
+        return cached.plainText;
+      }
+    } catch (_) {}
+    const ch = chapters[chapterIdx];
+    if (!ch) return '';
+    try {
+      const res = await coreApi.loadEpubChapter(filePath, ch.id);
+      const html = res && res.success ? (res.html || '') : '';
+      const text = stripEpubHtmlToPlainText(html);
+      epubChapterTextMemCacheRef.current.set(chapterIdx, text);
+      if (text.trim()) coreApi.saveEpubChapterText(filePath, chapterIdx, epubFileMtimeRef.current, text).catch(() => {});
+      return text;
+    } catch (_) {
+      return '';
+    }
+  }, [filePath, chapters]);
 
   const runEpubSearch = useCallback(async (query, options) => {
     const runId = ++epubSearchRunIdRef.current;
@@ -482,14 +568,8 @@ export default function EpubViewer({ filePath }) {
           html = res && res.success ? (res.html || '') : '';
         } catch (_) { html = ''; }
         if (epubSearchRunIdRef.current !== runId) return;
-        const text = html
-          .replace(/<[^>]*>/g, ' ')
-          .replace(/&nbsp;/g, ' ')
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#39;|&apos;/g, "'");
+        const text = await getEpubChapterPlainText(k);
+        if (epubSearchRunIdRef.current !== runId) return;
         const spans = findTextMatchSpans(text, q, options);
         if (spans.length > 0) {
           const first = spans[0];
@@ -505,7 +585,7 @@ export default function EpubViewer({ filePath }) {
       setEpubSearchResults(found);
       setEpubSearchScanning(false);
     }
-  }, [filePath, chapters]);
+  }, [filePath, chapters, getEpubChapterPlainText]);
 
   // دیبانسِ ۲۵۰ میلی‌ثانیه‌ایِ تایپ.
   useEffect(() => {
@@ -772,9 +852,10 @@ export default function EpubViewer({ filePath }) {
     updateBookmark(filePath, bm.id, { name: newName });
   }, [updateBookmark, filePath]);
 
-  const handleMoveBookmark = useCallback((bm, patch) => {
-    if (!bm || !patch) return;
-    updateBookmark(filePath, bm.id, patch);
+  // مرحلهٔ ۴۰ §۳: درگِ ۶۰ فریم — امضایِ جدید (id, ratio).
+  const handleMoveBookmark = useCallback((id, ratio) => {
+    if (!id || typeof ratio !== 'number') return;
+    updateBookmark(filePath, id, { yRatio: ratio });
   }, [updateBookmark, filePath]);
 
   if (bookLoading) {
@@ -1012,19 +1093,19 @@ export default function EpubViewer({ filePath }) {
             <span style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>{(THEMES[themeId] || THEMES.light).name}</span>
           </div>
 
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <button type="button" onClick={handleAddBookmark} title="افزودن بوک‌مارک در همین‌جا" style={{ flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '7px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            <button type="button" onClick={handleAddBookmark} title="افزودن بوک‌مارک در همین‌جا" style={{ height: '38px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '0 10px', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>
               <Icons.Bookmark size={14} />
               بوک‌مارک
             </button>
-            <button type="button" onClick={() => { setEpubSearchOpen(true); setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0); }} title="جستجویِ درون‌متنِ کتاب (Ctrl+F)" style={{ flex: 1, background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(34,211,238,0.4)', color: '#67e8f9', borderRadius: 8, padding: '7px 10px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, display: 'flex', gap: 6, alignItems: 'center', justifyContent: 'center' }}>
+            <button type="button" onClick={() => { setEpubSearchOpen(true); setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0); }} title="جستجویِ درون‌متنِ کتاب (Ctrl+F)" style={{ height: '38px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '0 10px', background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(34,211,238,0.4)', color: '#67e8f9', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>
               <Icons.Search size={14} />
-              جستجو در کتاب
+              جستجو
             </button>
-            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>
               {`هایلایت‌هایِ این فصل: ${chapterHighlightCount}`}
             </span>
-          </div>
         </div>
       )}
 
@@ -1121,7 +1202,7 @@ export default function EpubViewer({ filePath }) {
         {chapterLoading ? (
           <div style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
         ) : (
-          <div style={{ position: 'relative', maxWidth: columnWidth.maxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)' }}>
+          <div data-bookmark-page={chapterIndex + 1} style={{ position: 'relative', maxWidth: columnWidth.maxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)' }}>
             <div
               ref={chapterElRef}
               className="epub-chapter-content"
@@ -1158,6 +1239,7 @@ export default function EpubViewer({ filePath }) {
                   onDelete={handleDeleteBookmark}
                   onRename={handleRenameBookmark}
                   onMove={handleMoveBookmark}
+                  onMoveBookmark={handleMoveBookmark}
                 />
               </div>
             ))}
@@ -1173,7 +1255,7 @@ export default function EpubViewer({ filePath }) {
           onMouseEnter={() => setPageHudHovered(true)}
           onMouseLeave={() => setPageHudHovered(false)}
           title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
-          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '342px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
         >
           {isEditingPageHud ? (
             <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>

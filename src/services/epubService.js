@@ -294,6 +294,7 @@ async function loadEpubBook(filePath, dataDir) {
         chapters: meta.chapters,
         fileName: path.basename(filePath),
         fileSize: stat.size,
+        sourceMtimeMs: meta.sourceMtimeMs,
         totalChapters: meta.chapters.length,
       };
     }
@@ -404,6 +405,7 @@ async function loadEpubBook(filePath, dataDir) {
       chapters,
       fileName: path.basename(filePath),
       fileSize: stat.size,
+      sourceMtimeMs: stat.mtimeMs,
       totalChapters: chapters.length,
     };
   } catch (err) {

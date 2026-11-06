@@ -60,6 +60,10 @@ export default function TopBar({
   // مرحلهٔ ۳۸ §۸: نوعِ فایلِ جاری — زومِ باکسی فقط برای PDF/کمیک است،
   // نه EPUB (AreaZoomOverlay روی فصلِ EPUB کار نمی‌کند).
   const comicType = useReaderStore((state) => state.comicData?.type || '');
+  // مرحلهٔ ۴۰ §۴: حالتِ نمایشِ کمیک + سوییچِ آن.
+  const comicViewMode = useReaderStore((state) => state.comicViewMode || 'vertical');
+  const isHorizontalPaged = comicViewMode === 'horizontal-paged';
+  const setComicViewMode = useReaderStore((state) => state.setComicViewMode);
   const currentFilePath = useReaderStore((state) => state.comicData?.filePath || '');
   const totalPages = useReaderStore(
     (state) => state.comicData?.items?.length || state.comicData?.savedTotalPages || 0
@@ -815,15 +819,24 @@ export default function TopBar({
     effectiveReaderMode &&
     typeof currentFilePath === 'string' &&
     /\.pdf$/i.test(currentFilePath);
-  const showSearchInCurrentFile = Boolean(isCurrentPdf && searchQuery.trim().length > 0);
+  // مرحلهٔ ۴۰ §۵: جستجویِ TopBar برایِ EPUB هم کار می‌کند.
+  const isCurrentEpub =
+    effectiveReaderMode &&
+    typeof currentFilePath === 'string' &&
+    /\.epub$/i.test(currentFilePath);
+  const showSearchInCurrentFile = Boolean((isCurrentPdf || isCurrentEpub) && searchQuery.trim().length > 0);
 
   const handleSearchInCurrentFile = useCallback(() => {
     const q = (searchQuery || '').trim();
     setIsSearchFocused(false);
     setSelectedIndex(-1);
     inputRef.current?.blur();
-    useReaderStore.getState().triggerPdfSearch?.(q);
-  }, [searchQuery, setIsSearchFocused]);
+    if (isCurrentEpub) {
+      useReaderStore.getState().triggerEpubSearch?.(q);
+    } else {
+      useReaderStore.getState().triggerPdfSearch?.(q);
+    }
+  }, [searchQuery, setIsSearchFocused, isCurrentEpub]);
 
   const handleKeyDown = (e) => {
     const totalItems = (pageJumpNumber ? 1 : 0) + matchedResults.length;
@@ -1179,6 +1192,25 @@ export default function TopBar({
             >
               {Icons.ScanSearch ? <Icons.ScanSearch size={14} /> : <Icons.ZoomIn size={14} />}
               <span>زوم باکسی</span>
+            </button>
+          )}
+
+          {hasComic && comicType !== 'pdf' && comicType !== 'epub' && (
+            <button
+              type="button"
+              onClick={() => setComicViewMode(isHorizontalPaged ? 'vertical' : 'horizontal-paged')}
+              style={{
+                ...styles.toolChipBtn,
+                backgroundColor: isHorizontalPaged
+                  ? 'rgba(34, 211, 238, 0.2)'
+                  : 'var(--panel2)',
+                borderColor: isHorizontalPaged ? 'var(--accent)' : 'var(--border)',
+                color: isHorizontalPaged ? 'var(--accent)' : 'var(--text)',
+              }}
+              title="جابه‌جایی بینِ نمایِ افقیِ صفحه‌ای و نمایِ عمودیِ طوماری"
+            >
+              {isHorizontalPaged ? <Icons.ArrowUpDown size={14} /> : <Icons.MoveHorizontal size={14} />}
+              <span>{isHorizontalPaged ? 'نمای عمودی' : 'نمای افقی (صفحه‌ای)'}</span>
             </button>
           )}
 

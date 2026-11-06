@@ -1085,6 +1085,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             onDelete={onDeleteBookmark}
             onRename={onRenameBookmark}
             onMove={onMoveBookmark}
+            onMoveBookmark={onMoveBookmark}
           />
         </div>
       ))}
@@ -1177,9 +1178,10 @@ export default function PdfViewer({ filePath }) {
 
   // مرحله ۱۸ — ثبتِ مکانِ تازهٔ بوک‌مارک پس از پایانِ درگ (فقط یک
   // ذخیره در pointerup؛ در حینِ حرکت، هیچ IPCای صدا زده نمی‌شود).
-  const handleMoveBookmark = useCallback((bm, patch) => {
-    if (!bm || !patch) return;
-    updateBookmark(filePath, bm.id, patch);
+  // مرحلهٔ ۴۰ §۳: درگِ ۶۰ فریم — امضایِ جدید (id, ratio).
+  const handleMoveBookmark = useCallback((id, ratio) => {
+    if (!id || typeof ratio !== 'number') return;
+    updateBookmark(filePath, id, { yRatio: ratio });
   }, [updateBookmark, filePath]);
 
   // پرشِ نقطه‌ای به بوک‌مارک: اول jumpToPage تا پنجرهٔ مجازی رویِ
@@ -1405,9 +1407,26 @@ export default function PdfViewer({ filePath }) {
   const [searchScannedCount, setSearchScannedCount] = useState(0);
   // مرحلهٔ ۳۹ §۶: گزینه‌هایِ جستجویِ پیشرفته (کلمهٔ کامل، پیش‌فرض روشن)
   // + رفرنسِ همگام برایِ کالبک‌هایِ جستجو و ایندکسِ تنبلِ MiniSearch.
-  const [searchOptions, setSearchOptions] = useState({ wholeWord: true, caseSensitive: false, prefix: false });
+  // مرحلهٔ ۴۰ §۵: ماندگاریِ تاگل‌هایِ جستجو در localStorage.
+  const [searchOptions, setSearchOptions] = useState(() => {
+    try {
+      const raw = localStorage.getItem('comicReader.pdfSearchOptions.v1');
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object') {
+        return {
+          wholeWord: typeof parsed.wholeWord === 'boolean' ? parsed.wholeWord : true,
+          caseSensitive: typeof parsed.caseSensitive === 'boolean' ? parsed.caseSensitive : false,
+          prefix: typeof parsed.prefix === 'boolean' ? parsed.prefix : false,
+        };
+      }
+    } catch (_) {}
+    return { wholeWord: true, caseSensitive: false, prefix: false };
+  });
   const searchOptionsRef = useRef(searchOptions);
   useEffect(() => { searchOptionsRef.current = searchOptions; }, [searchOptions]);
+  useEffect(() => {
+    try { localStorage.setItem('comicReader.pdfSearchOptions.v1', JSON.stringify(searchOptions)); } catch (_) {}
+  }, [searchOptions]);
   const miniIndexRef = useRef(null);
   const miniIndexPromiseRef = useRef(null);
   const ensureMiniIndex = useCallback(() => {
@@ -3928,7 +3947,7 @@ export default function PdfViewer({ filePath }) {
           onMouseEnter={() => setPageHudHovered(true)}
           onMouseLeave={() => setPageHudHovered(false)}
           title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
-          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '342px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
         >
           {isEditingPageHud ? (
             <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>

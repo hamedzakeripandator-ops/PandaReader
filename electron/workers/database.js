@@ -44,6 +44,15 @@ const DB_TMP_FILE = DB_FILE + '.tmp';
 const DB_PRE_RESTORE_FILE = DB_FILE + '.pre-restore.bak';
 const COVERS_PRE_RESTORE_DIR = path.join(DB_DIR, 'covers.pre-restore');
 const COVERS_STAGING_DIR = path.join(DB_DIR, 'covers.restore-staging');
+const SQLITE_FILE = path.join(DB_DIR, 'library.sqlite');
+const SQLITE_MIGRATED_BAK = DB_FILE + '.migrated.bak';
+const SQLITE_MIGRATION_KEY = 'migration_from_json_v1_done';
+// مرحلهٔ ۴۰ §۱: بارگذاریِ ایمنِ better-sqlite3 — اگر نصب نباشد،
+let BetterSqlite3 = null;
+try { BetterSqlite3 = require('better-sqlite3'); } catch (_) { BetterSqlite3 = null; }
+let sqliteDb = null;
+let sqliteReady = false;
+let sqliteStmts = {};
 
 const MAX_COVER_CACHE_ENTRIES = 300;
 
@@ -1341,6 +1350,7 @@ async function applyRestoreFromZip(zipBuffer) {
 
 initDB();
 readDB();
+initSQLite();
 
 // مرحله ۱۰: ابزارهای هرس و پاک‌سازیِ کاور.
 // پیشوندِ نامِ فایلِ کاور از هشِ مسیرِ نرمال‌شده (همان قراردادِ
@@ -1668,6 +1678,1091 @@ function getCoverStats(db) {
 // مرحله ۱۳: clearAllCovers با clearOnlyCovers(db, true) جایگزین شد (رفتارِ یکسان).
 
 
+// ============================================================================
+// مرحلهٔ ۴۰ §۱ — موتورِ SQLite (better-sqlite3 + WAL) با Fallbackِ JSON.
+//
+// طراحی:
+// - اگر better-sqlite3 نصب و بارگذاری شد، دیتابیسِ رابطه‌ای در
+//   <dataDir>/library.sqlite باز می‌شود (WAL + synchronous=NORMAL).
+// - اگر نصب نشده یا باز شدن ناموفق بود، ورکر بدونِ کرش رویِ همان
+//   موتورِ db.json کار می‌کند (sqliteReady=false)؛ برنامه در هیچ
+//   شرایطی متوقف نمی‌شود.
+// - اکشن‌هایِ داغ (پیشرفت، حاشیه‌نویسی، بوک‌مارک، آمارِ مطالعه،
+//   هایلایتِ EPUB، تنظیماتِ بوک‌مارک/رنگ/آماربندی) از SQLite پاسخ
+//   می‌گیرند و هم‌زمان آینهٔ درون‌حافظه‌ایِ db.json را هم به‌روز
+//   می‌کنند تا FLUSH_SYNC هنگامِ خروج، یک عکسِ تازه از db.json
+//   بنویسد و مسیرِ JSON (کتابخانه، کاورها، بکاپ، تنظیمات) بی‌تغییر
+//   بماند. اکشن‌هایِ دیگر (کتابخانه، کاور، بکاپ، پروفایل، تنظیماتِ
+//   عمومی) رویِ همان مسیرِ JSON می‌مانند.
+// - مهاجرت، یک‌باره و اتمیک است: اگر کلیدِ migration_from_json_v1_done
+//   در kv_store نبود و db.json رویِ دیسک بود، همهٔ داده‌ها در یک
+//   تراکنشِ واحد منتقل می‌شوند و پیش از آن، یک کپیِ پشتیبان
+//   db.json.migrated.bak ساخته می‌شود.
+// ============================================================================
+
+const SQLITE_ROUTED_ACTIONS = new Set([
+  'SAVE_PROGRESS',
+  'GET_PROGRESS',
+  'RECORD_READING_ACTIVITY',
+  'RECORD_APP_ACTIVITY',
+  'GET_READING_STATS',
+  'GET_RECENTS',
+  'REMOVE_FROM_RECENTS',
+  'CLEAR_RECENTS',
+  'GET_ANNOTATIONS',
+  'SAVE_ANNOTATIONS',
+  'CLEAR_ANNOTATIONS',
+  'GET_ANNOTATION_COUNTS',
+  'GET_ANNOTATION_TOTALS',
+  'GET_BOOKMARKS',
+  'SAVE_BOOKMARKS',
+  'GET_ALL_BOOKMARKS',
+  'GET_EPUB_HIGHLIGHTS',
+  'SAVE_EPUB_HIGHLIGHTS',
+  'GET_CUSTOM_STAT_VIEWS',
+  'SAVE_CUSTOM_STAT_VIEWS',
+  'GET_BOOKMARK_PREFERENCES',
+  'SAVE_BOOKMARK_PREFERENCES',
+  'GET_CUSTOM_COLOR_SYSTEM',
+  'SAVE_CUSTOM_COLOR_SYSTEM',
+  'GET_EPUB_CHAPTER_TEXT',
+  'SAVE_EPUB_CHAPTER_TEXT',
+]);
+
+// آینه را «کثیف» علامت بزن تا FLUSH_SYNC هنگامِ خروج، عکسِ تازهٔ
+// db.json را بنویسد. عمداً writeDB صدا نمی‌شود تا نوشتنِ
+// debounceدارِ ۹۰۰ میلی‌ثانیه‌ای، مزیتِ SQLite (عدمِ بازنویسیِ کلِ
+// فایل در هر تغییر) را خنثی نکند.
+function sqliteTouchMirror() {
+  dbDirty = true;
+}
+
+// خواندنِ یک مقدارِ متنی از kv_store؛ در صورتِ نبودن یا خطا، null.
+function sqliteGetKv(key) {
+  if (!sqliteDb || !sqliteStmts.getKv) return null;
+  try {
+    const row = sqliteStmts.getKv.get(key);
+    return row ? row.value_json : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// نوشتنِ یک مقدارِ متنی در kv_store (همراه با زمانِ به‌روزرسانی).
+function sqliteSetKv(key, value) {
+  sqliteStmts.setKv.run(key, value, Date.now());
+}
+
+// شمارشِ ردیف‌هایِ هر جدول، برایِ GET_DATABASE_INFO.
+function sqliteGetCounts() {
+  const countOf = (stmt) => {
+    try {
+      const row = stmt.get();
+      return row ? Number(row.n) || 0 : 0;
+    } catch (_) {
+      return 0;
+    }
+  };
+  return {
+    history: countOf(sqliteStmts.countHistory),
+    annotations: countOf(sqliteStmts.countAnnotations),
+    bookmarks: countOf(sqliteStmts.countBookmarks),
+    readingDays: countOf(sqliteStmts.countDays),
+    byBook: countOf(sqliteStmts.countByBook),
+    textCache: countOf(sqliteStmts.countTextCache),
+  };
+}
+
+// تبدیلِ ردیفِ history به همان شیءِ ورودیِ تاریخچهٔ JSON.
+// extra_json، مرجعِ کامل است؛ اگر خراب بود، از ستون‌ها بازسازی می‌شود.
+function sqliteHistoryRowToEntry(row) {
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.extra_json || 'null');
+    if (parsed && typeof parsed === 'object') return parsed;
+  } catch (_) {}
+  return {
+    filePath: row.path || '',
+    normPath: row.file_key,
+    fileName: row.name || '',
+    cover: row.cover || null,
+    currentPage: Number(row.current_page) || 1,
+    totalPages: Number(row.total_pages) || 1,
+    percentage: Number(row.progress) || 0,
+    updatedAt: row.last_read ? new Date(row.last_read).toISOString() : null,
+  };
+}
+
+// تبدیلِ ردیفِ bookmarks به رکوردِ بوک‌مارکِ پاک‌سازی‌شده.
+// extra_json، مرجعِ کامل است؛ اگر خراب بود، از ستون‌ها بازسازی می‌شود.
+function sqliteBookmarkRowToRecord(row) {
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.extra_json || 'null');
+    if (parsed && typeof parsed === 'object') {
+      const clean = sanitizeBookmarkRecord(parsed);
+      if (clean) return clean;
+    }
+  } catch (_) {}
+  const fallback = {
+    id: row.id,
+    page: Number(row.page_num) || 1,
+    yRatio: Number(row.y_ratio) || 0,
+    side: 'right',
+    template: row.template_id || 'MARGIN',
+    image: null,
+    focalPoint: 'center',
+    name: row.label || '',
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+  };
+  return sanitizeBookmarkRecord(fallback);
+}
+
+// پاک‌سازیِ آماربندی‌هایِ سفارشی — دقیقاً همان منطقِ کیسِ JSONِ
+// SAVE_CUSTOM_STAT_VIEWS (تکثیرِ عمدی؛ کیسِ JSON دست‌نخورده می‌ماند).
+function sqliteCleanStatViews(views) {
+  if (!Array.isArray(views)) return null;
+  return views
+    .slice(0, 50)
+    .filter((v) => v && typeof v === 'object' && typeof v.name === 'string' && v.name.trim())
+    .map((v) => ({
+      id: String(v.id || `cv-${Date.now()}`),
+      name: String(v.name).slice(0, 60),
+      color: typeof v.color === 'string' ? v.color : '#22d3ee',
+      bookKeys: Array.isArray(v.bookKeys) ? v.bookKeys.filter((k) => typeof k === 'string').slice(0, 500) : [],
+      metrics: Array.isArray(v.metrics) ? v.metrics.filter((m) => typeof m === 'string').slice(0, 10) : [],
+      goalHours: Math.max(0, Number(v.goalHours) || 0),
+      goalPages: Math.max(0, Number(v.goalPages) || 0),
+    }));
+}
+
+// پاک‌سازیِ هایلایت‌هایِ EPUB — دقیقاً همان منطقِ کیسِ JSONِ
+// SAVE_EPUB_HIGHLIGHTS (تکثیرِ عمدی؛ کیسِ JSON دست‌نخورده می‌ماند).
+function sqliteCleanEpubHighlights(highlights) {
+  if (!Array.isArray(highlights)) return null;
+  return highlights
+    .slice(0, 5000)
+    .filter((h) => h && typeof h === 'object' && Number.isFinite(Number(h.chapterIndex)))
+    .map((h) => ({
+      id: String(h.id || ''),
+      chapterIndex: Math.floor(Number(h.chapterIndex)),
+      color: typeof h.color === 'string' ? h.color : '#facc15',
+      text: String(h.text || '').slice(0, 2000),
+      note: String(h.note || '').slice(0, 2000),
+      startOffset: Math.max(0, Math.floor(Number(h.startOffset) || 0)),
+      endOffset: Math.max(0, Math.floor(Number(h.endOffset) || 0)),
+      createdAt: Number(h.createdAt) || Date.now(),
+    }));
+}
+
+// پاک‌سازیِ تنظیماتِ بوک‌مارک — دقیقاً همان منطقِ کیسِ JSONِ
+// SAVE_BOOKMARK_PREFERENCES (تکثیرِ عمدی؛ کیسِ JSON دست‌نخورده می‌ماند).
+// prev، تنظیماتِ قبلیِ آینه است و برایِ حفظِ savedPresets در ذخیرهٔ
+// جزئی استفاده می‌شود.
+function sqliteCleanBookmarkPreferences(preferences, prev) {
+  const prefs = (preferences && typeof preferences === 'object') ? preferences : {};
+  const next = { ...defaultDB.bookmarkPreferences, templateImages: {} };
+  if (BOOKMARK_TEMPLATE_IDS.includes(prefs.defaultTemplate)) next.defaultTemplate = prefs.defaultTemplate;
+  if (typeof prefs.globalImage === 'string') next.globalImage = prefs.globalImage;
+  else if (prefs.globalImage === null) next.globalImage = null;
+  if (prefs.templateImages && typeof prefs.templateImages === 'object') {
+    Object.entries(prefs.templateImages).forEach(([id, url]) => {
+      if (BOOKMARK_TEMPLATE_IDS.includes(id) && typeof url === 'string' && url) next.templateImages[id] = url;
+    });
+  }
+  if (prefs.defaultSide === 'left' || prefs.defaultSide === 'right') next.defaultSide = prefs.defaultSide;
+  if (Array.isArray(prefs.savedPresets)) {
+    next.savedPresets = [];
+    prefs.savedPresets.forEach((p) => {
+      const clean = sanitizeBookmarkPreset(p);
+      if (clean && next.savedPresets.length < 100) next.savedPresets.push(clean);
+    });
+  } else if (prev && Array.isArray(prev.savedPresets)) {
+    next.savedPresets = prev.savedPresets;
+  }
+  return next;
+}
+
+// پاک‌سازیِ سیستمِ رنگِ سفارشی — دقیقاً همان منطقِ کیسِ JSONِ
+// SAVE_CUSTOM_COLOR_SYSTEM (تکثیرِ عمدی؛ کیسِ JSON دست‌نخورده می‌ماند).
+function sqliteCleanColorSystem(customColorSystem) {
+  const src = (customColorSystem && typeof customColorSystem === 'object') ? customColorSystem : {};
+  const next = { favoriteColors: [], customColorTemplates: [], toolColors: {} };
+  if (Array.isArray(src.favoriteColors)) {
+    src.favoriteColors.forEach((c) => {
+      if (typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c) && next.favoriteColors.length < 48) next.favoriteColors.push(c);
+    });
+  }
+  if (Array.isArray(src.customColorTemplates)) {
+    src.customColorTemplates.forEach((t) => {
+      if (!t || typeof t !== 'object' || typeof t.id !== 'string' || typeof t.name !== 'string' || !Array.isArray(t.colors)) return;
+      if (next.customColorTemplates.length >= 24) return;
+      next.customColorTemplates.push({
+        id: t.id,
+        name: String(t.name).slice(0, 40),
+        colors: t.colors.filter((c) => typeof c === 'string' && /^#[0-9a-fA-F]{6}$/.test(c)).slice(0, 12),
+      });
+    });
+  }
+  if (src.toolColors && typeof src.toolColors === 'object') {
+    for (const k of ['pen', 'highlighter', 'box', 'arrow', 'text', 'sticky']) {
+      if (typeof src.toolColors[k] === 'string' && /^#[0-9a-fA-F]{6}$/.test(src.toolColors[k])) next.toolColors[k] = src.toolColors[k];
+    }
+  }
+  return next;
+}
+
+// راه‌اندازیِ موتورِ SQLite: باز کردنِ فایل، تنظیمِ PRAGMAها، ساختِ
+// جداول و ایندکس‌ها، آماده‌سازیِ Prepared Statementها، مهاجرتِ
+// یک‌باره از db.json و همگام‌سازیِ آینهٔ درون‌حافظه‌ای. هر خطایی،
+// فقط موتور را به JSON برمی‌گرداند؛ هیچ‌وقت ورکر را کرش نمی‌کند.
+function initSQLite() {
+  if (!BetterSqlite3) {
+    console.info('[database] better-sqlite3 نصب نشده است؛ موتورِ JSON فعال است. راهنما: SQLITE_MIGRATION_GUIDE.md');
+    return false;
+  }
+  try {
+    sqliteDb = new BetterSqlite3(SQLITE_FILE);
+    sqliteDb.pragma('journal_mode = WAL');
+    sqliteDb.pragma('synchronous = NORMAL');
+    sqliteDb.pragma('temp_store = MEMORY');
+    sqliteDb.pragma('cache_size = -16000');
+    sqliteDb.pragma('foreign_keys = ON');
+    sqliteDb.exec(`
+CREATE TABLE IF NOT EXISTS history (
+  file_key TEXT PRIMARY KEY,
+  name TEXT,
+  path TEXT,
+  type TEXT,
+  current_page INTEGER,
+  total_pages INTEGER,
+  progress REAL,
+  cover TEXT,
+  last_read INTEGER,
+  pinned INTEGER,
+  favorite INTEGER,
+  extra_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_history_last_read ON history (last_read DESC);
+CREATE TABLE IF NOT EXISTS annotations (
+  file_key TEXT,
+  page_num TEXT,
+  items_json TEXT,
+  updated_at INTEGER,
+  PRIMARY KEY (file_key, page_num)
+);
+CREATE TABLE IF NOT EXISTS bookmarks (
+  id TEXT PRIMARY KEY,
+  file_key TEXT,
+  page_num INTEGER,
+  y_ratio REAL,
+  label TEXT,
+  color TEXT,
+  template_id TEXT,
+  created_at INTEGER,
+  extra_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_file ON bookmarks (file_key);
+CREATE TABLE IF NOT EXISTS epub_highlights (
+  file_key TEXT PRIMARY KEY,
+  highlights_json TEXT,
+  updated_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS epub_text_cache (
+  file_key TEXT,
+  chapter_index INTEGER,
+  mtime INTEGER,
+  plain_text TEXT,
+  PRIMARY KEY (file_key, chapter_index)
+);
+CREATE TABLE IF NOT EXISTS reading_days (
+  date_key TEXT PRIMARY KEY,
+  pages INTEGER,
+  seconds INTEGER,
+  app_seconds INTEGER
+);
+CREATE TABLE IF NOT EXISTS reading_by_book (
+  file_key TEXT PRIMARY KEY,
+  total_seconds INTEGER,
+  total_pages INTEGER,
+  days_json TEXT
+);
+CREATE TABLE IF NOT EXISTS kv_store (
+  key TEXT PRIMARY KEY,
+  value_json TEXT,
+  updated_at INTEGER
+);
+`);
+    sqliteStmts = {
+      upsertHistory: sqliteDb.prepare('INSERT OR REPLACE INTO history (file_key, name, path, type, current_page, total_pages, progress, cover, last_read, pinned, favorite, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+      getHistory: sqliteDb.prepare('SELECT * FROM history WHERE file_key = ?'),
+      deleteHistory: sqliteDb.prepare('DELETE FROM history WHERE file_key = ?'),
+      clearHistory: sqliteDb.prepare('DELETE FROM history'),
+      listHistoryRecent: sqliteDb.prepare('SELECT * FROM history ORDER BY last_read DESC LIMIT 500'),
+      listAllHistory: sqliteDb.prepare('SELECT * FROM history'),
+      countHistory: sqliteDb.prepare('SELECT COUNT(*) AS n FROM history'),
+      upsertAnnotation: sqliteDb.prepare('INSERT OR REPLACE INTO annotations (file_key, page_num, items_json, updated_at) VALUES (?, ?, ?, ?)'),
+      getAnnotationPage: sqliteDb.prepare('SELECT items_json FROM annotations WHERE file_key = ? AND page_num = ?'),
+      listAnnotationsForFile: sqliteDb.prepare('SELECT page_num, items_json FROM annotations WHERE file_key = ?'),
+      listAllAnnotations: sqliteDb.prepare('SELECT file_key, page_num, items_json FROM annotations'),
+      deleteAnnotationPage: sqliteDb.prepare('DELETE FROM annotations WHERE file_key = ? AND page_num = ?'),
+      deleteAnnotationsForFile: sqliteDb.prepare('DELETE FROM annotations WHERE file_key = ?'),
+      countAnnotations: sqliteDb.prepare('SELECT COUNT(*) AS n FROM annotations'),
+      upsertBookmark: sqliteDb.prepare('INSERT OR REPLACE INTO bookmarks (id, file_key, page_num, y_ratio, label, color, template_id, created_at, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+      deleteBookmarksForFile: sqliteDb.prepare('DELETE FROM bookmarks WHERE file_key = ?'),
+      listBookmarksForFile: sqliteDb.prepare('SELECT * FROM bookmarks WHERE file_key = ?'),
+      listAllBookmarks: sqliteDb.prepare('SELECT * FROM bookmarks ORDER BY file_key'),
+      countBookmarks: sqliteDb.prepare('SELECT COUNT(*) AS n FROM bookmarks'),
+      upsertHighlights: sqliteDb.prepare('INSERT OR REPLACE INTO epub_highlights (file_key, highlights_json, updated_at) VALUES (?, ?, ?)'),
+      getHighlights: sqliteDb.prepare('SELECT highlights_json FROM epub_highlights WHERE file_key = ?'),
+      listAllHighlights: sqliteDb.prepare('SELECT file_key, highlights_json FROM epub_highlights'),
+      upsertDay: sqliteDb.prepare('INSERT OR REPLACE INTO reading_days (date_key, pages, seconds, app_seconds) VALUES (?, ?, ?, ?)'),
+      getDay: sqliteDb.prepare('SELECT * FROM reading_days WHERE date_key = ?'),
+      listDays: sqliteDb.prepare('SELECT * FROM reading_days ORDER BY date_key'),
+      deleteDay: sqliteDb.prepare('DELETE FROM reading_days WHERE date_key = ?'),
+      countDays: sqliteDb.prepare('SELECT COUNT(*) AS n FROM reading_days'),
+      upsertByBook: sqliteDb.prepare('INSERT OR REPLACE INTO reading_by_book (file_key, total_seconds, total_pages, days_json) VALUES (?, ?, ?, ?)'),
+      getByBook: sqliteDb.prepare('SELECT * FROM reading_by_book WHERE file_key = ?'),
+      listByBook: sqliteDb.prepare('SELECT * FROM reading_by_book'),
+      countByBook: sqliteDb.prepare('SELECT COUNT(*) AS n FROM reading_by_book'),
+      getKv: sqliteDb.prepare('SELECT value_json FROM kv_store WHERE key = ?'),
+      setKv: sqliteDb.prepare('INSERT OR REPLACE INTO kv_store (key, value_json, updated_at) VALUES (?, ?, ?)'),
+      upsertChapterText: sqliteDb.prepare('INSERT OR REPLACE INTO epub_text_cache (file_key, chapter_index, mtime, plain_text) VALUES (?, ?, ?, ?)'),
+      getChapterText: sqliteDb.prepare('SELECT mtime, plain_text FROM epub_text_cache WHERE file_key = ? AND chapter_index = ?'),
+      countTextCache: sqliteDb.prepare('SELECT COUNT(*) AS n FROM epub_text_cache'),
+    };
+    const alreadyMigrated = sqliteGetKv(SQLITE_MIGRATION_KEY) === '1';
+    if (!alreadyMigrated && fs.existsSync(DB_FILE)) {
+      migrateJsonToSqlite(cachedDbInstance || readDB());
+    }
+    sqliteReady = true;
+    resyncMirrorFromSqlite(cachedDbInstance || readDB());
+    console.info('[database] SQLite (WAL) فعال شد: ' + SQLITE_FILE);
+    return true;
+  } catch (err) {
+    console.warn('[database] راه‌اندازیِ SQLite ناموفق بود؛ موتورِ JSON فعال است:', err && err.message);
+    try { if (sqliteDb) sqliteDb.close(); } catch (_) {}
+    sqliteDb = null;
+    sqliteReady = false;
+    sqliteStmts = {};
+    return false;
+  }
+}
+
+// مهاجرتِ یک‌باره و اتمیک از db.json به library.sqlite. پیش از هر
+// تغییری، یک کپیِ پشتیبان db.json.migrated.bak ساخته می‌شود (فقط اگر
+// از قبل نبود). اگر تراکنش در میانه شکست بخورد، همه‌چیز به عقب
+// برمی‌گردد و موتورِ JSON ادامه می‌دهد.
+function migrateJsonToSqlite(jsonDb) {
+  try {
+    if (!fs.existsSync(SQLITE_MIGRATED_BAK)) fs.copyFileSync(DB_FILE, SQLITE_MIGRATED_BAK);
+  } catch (_) {}
+  const src = (jsonDb && typeof jsonDb === 'object') ? jsonDb : {};
+  const run = sqliteDb.transaction(() => {
+    for (const [norm, h] of Object.entries(src.history || {})) {
+      if (!h || typeof h !== 'object') continue;
+      sqliteStmts.upsertHistory.run(
+        norm,
+        typeof h.fileName === 'string' ? h.fileName : '',
+        typeof h.filePath === 'string' ? h.filePath : '',
+        typeof h.type === 'string' ? h.type : '',
+        Number(h.currentPage) || 1,
+        Number(h.totalPages) || 1,
+        Number(h.percentage) || 0,
+        typeof h.cover === 'string' ? h.cover : null,
+        Date.parse(h.updatedAt) || 0,
+        0,
+        0,
+        JSON.stringify(h)
+      );
+    }
+    for (const [norm, pages] of Object.entries(src.annotations || {})) {
+      if (!pages || typeof pages !== 'object') continue;
+      for (const [pageKey, items] of Object.entries(pages)) {
+        if (!Array.isArray(items)) continue;
+        sqliteStmts.upsertAnnotation.run(norm, String(pageKey), JSON.stringify(items), Date.now());
+      }
+    }
+    for (const [norm, list] of Object.entries(src.bookmarks || {})) {
+      if (!Array.isArray(list)) continue;
+      for (const bm of list) {
+        const clean = sanitizeBookmarkRecord(bm);
+        if (!clean) continue;
+        sqliteStmts.upsertBookmark.run(
+          clean.id,
+          norm,
+          clean.page,
+          clean.yRatio,
+          clean.name || '',
+          '',
+          clean.template,
+          Date.parse(clean.createdAt) || 0,
+          JSON.stringify(clean)
+        );
+      }
+    }
+    for (const [norm, list] of Object.entries(src.epubHighlights || {})) {
+      if (!Array.isArray(list)) continue;
+      sqliteStmts.upsertHighlights.run(norm, JSON.stringify(list), Date.now());
+    }
+    const days = (src.readingStats && src.readingStats.days) || {};
+    for (const [dateKey, d] of Object.entries(days)) {
+      if (!d || typeof d !== 'object') continue;
+      sqliteStmts.upsertDay.run(dateKey, Number(d.pages) || 0, Number(d.seconds) || 0, Number(d.appSeconds) || 0);
+    }
+    const byBook = (src.readingStats && src.readingStats.byBook) || {};
+    for (const [norm, b] of Object.entries(byBook)) {
+      if (!b || typeof b !== 'object') continue;
+      sqliteStmts.upsertByBook.run(norm, Number(b.totalSeconds) || 0, Number(b.totalPages) || 0, JSON.stringify(b.days || {}));
+    }
+    sqliteSetKv('bookmarkPreferences', JSON.stringify(src.bookmarkPreferences || defaultDB.bookmarkPreferences));
+    sqliteSetKv('customStatViews', JSON.stringify(Array.isArray(src.customStatViews) ? src.customStatViews : []));
+    sqliteSetKv('customColorSystem', JSON.stringify(src.customColorSystem || defaultDB.customColorSystem));
+    sqliteSetKv('readingTotalAppSeconds', String(Number(src.readingStats && src.readingStats.totalAppSeconds) || 0));
+    sqliteSetKv(SQLITE_MIGRATION_KEY, '1');
+  });
+  run();
+}
+
+// همگام‌سازیِ آینهٔ درون‌حافظه‌ایِ db.json از رویِ SQLite، در هر
+// راه‌اندازی. این کار، آینه را پس از یک خاموشیِ ناگهانی (که در آن
+// db.json عقب مانده) دوباره تازه می‌کند؛ بخش‌هایِ JSON-محور
+// (کتابخانه، کاورها، پروفایل، تنظیمات) دست نمی‌خورند. خطا در این
+// همگام‌سازی، موتور را متوقف نمی‌کند چون SQLite مرجع است.
+function resyncMirrorFromSqlite(jsonDb) {
+  if (!sqliteDb || !jsonDb || typeof jsonDb !== 'object') return;
+  try {
+    const freshHistory = {};
+    for (const row of sqliteStmts.listAllHistory.all()) {
+      const entry = sqliteHistoryRowToEntry(row);
+      if (entry) freshHistory[row.file_key] = entry;
+    }
+    jsonDb.history = freshHistory;
+    const freshAnnotations = {};
+    for (const row of sqliteStmts.listAllAnnotations.all()) {
+      let items = null;
+      try { items = JSON.parse(row.items_json || 'null'); } catch (_) {}
+      if (!Array.isArray(items)) continue;
+      if (!freshAnnotations[row.file_key]) freshAnnotations[row.file_key] = {};
+      freshAnnotations[row.file_key][row.page_num] = items;
+    }
+    jsonDb.annotations = freshAnnotations;
+    const freshBookmarks = {};
+    for (const row of sqliteStmts.listAllBookmarks.all()) {
+      const rec = sqliteBookmarkRowToRecord(row);
+      if (!rec) continue;
+      if (!freshBookmarks[row.file_key]) freshBookmarks[row.file_key] = [];
+      freshBookmarks[row.file_key].push(rec);
+    }
+    jsonDb.bookmarks = freshBookmarks;
+    const freshHighlights = {};
+    for (const row of sqliteStmts.listAllHighlights.all()) {
+      try {
+        const list = JSON.parse(row.highlights_json || 'null');
+        if (Array.isArray(list)) freshHighlights[row.file_key] = list;
+      } catch (_) {}
+    }
+    jsonDb.epubHighlights = freshHighlights;
+    const days = {};
+    for (const row of sqliteStmts.listDays.all()) {
+      days[row.date_key] = { pages: Number(row.pages) || 0, seconds: Number(row.seconds) || 0, appSeconds: Number(row.app_seconds) || 0 };
+    }
+    const byBook = {};
+    for (const row of sqliteStmts.listByBook.all()) {
+      let d = {};
+      try { d = JSON.parse(row.days_json || '{}'); } catch (_) {}
+      byBook[row.file_key] = {
+        totalSeconds: Number(row.total_seconds) || 0,
+        totalPages: Number(row.total_pages) || 0,
+        days: (d && typeof d === 'object' && !Array.isArray(d)) ? d : {},
+      };
+    }
+    if (!jsonDb.readingStats || typeof jsonDb.readingStats !== 'object') jsonDb.readingStats = {};
+    jsonDb.readingStats.days = days;
+    jsonDb.readingStats.byBook = byBook;
+    jsonDb.readingStats.totalAppSeconds = Number(sqliteGetKv('readingTotalAppSeconds')) || 0;
+    const prefs = sqliteGetKv('bookmarkPreferences');
+    if (prefs) { try { jsonDb.bookmarkPreferences = JSON.parse(prefs); } catch (_) {} }
+    const views = sqliteGetKv('customStatViews');
+    if (views) { try { const v = JSON.parse(views); if (Array.isArray(v)) jsonDb.customStatViews = v; } catch (_) {} }
+    const colors = sqliteGetKv('customColorSystem');
+    if (colors) { try { jsonDb.customColorSystem = JSON.parse(colors); } catch (_) {} }
+  } catch (_) {}
+  // آینه از رویِ SQLite بازسازی شد؛ اگر db.json عقب مانده باشد
+  // (خاموشیِ ناگهانی)، FLUSH_SYNC باید عکسِ تازه را بنویسد. در حالتِ
+  // عادی، محتوا یکی است و فقط یک بازنویسیِ یکسان در خروج رخ می‌دهد.
+  dbDirty = true;
+}
+
+// توزیع‌کنندهٔ اکشن‌هایِ SQLite. هر کیس، اعتبارسنجی، سقف‌ها و شکلِ
+// پاسخِ کیسِ JSONِ هم‌نام را دقیقاً تکرار می‌کند؛ با این تفاوت که
+// به‌جایِ writeDB، ردیف را در SQLite می‌نویسد و آینهٔ درون‌حافظه‌ای
+// را هم به‌روز می‌کند (بدونِ نوشتنِ db.json — فلاشِ آن با FLUSH_SYNC
+// هنگامِ خروج انجام می‌شود).
+function handleSqliteAction(action, payload, db, sendReply) {
+  switch (action) {
+    case 'SAVE_PROGRESS': {
+      const { filePath, currentPage, totalPages = 1, fileName = '', cover = null } = payload;
+      if (!filePath) {
+        sendReply({ type: 'error', action, message: 'آدرس فایل ارسال نشده است.' });
+        return;
+      }
+      const norm = normalizePath(filePath);
+      const existingHist = db.history[norm];
+      const incomingTotal = Number(totalPages) || 1;
+      const validTotal =
+        incomingTotal <= 1 && existingHist?.totalPages > 1
+          ? existingHist.totalPages
+          : Math.max(1, incomingTotal);
+      const validPage = Math.max(1, Math.min(Number(currentPage) || 1, validTotal));
+      const percentage = Math.round((validPage / validTotal) * 100);
+      const now = new Date().toISOString();
+      let resolvedCover = db.coverCache[norm]?.isCustom
+        ? coverEntryToUrl(db.coverCache[norm])
+        : isPermanentCover(cover)
+        ? cover
+        : coverEntryToUrl(db.coverCache[norm]) || existingHist?.cover || null;
+      if (resolvedCover && isPermanentCover(resolvedCover)) {
+        resolvedCover = syncCoverAcrossTables(db, norm, resolvedCover, false);
+      } else {
+        resolvedCover = null;
+      }
+      const historyEntry = {
+        filePath,
+        normPath: norm,
+        fileName: fileName || existingHist?.fileName || path.basename(filePath),
+        cover: resolvedCover,
+        currentPage: validPage,
+        totalPages: validTotal,
+        percentage,
+        updatedAt: now,
+      };
+      db.history[norm] = historyEntry;
+      const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
+      if (libItem) {
+        libItem.lastPage = validPage;
+        libItem.totalPages = validTotal;
+        libItem.percentage = percentage;
+        libItem.lastReadAt = now;
+        if (resolvedCover && !libItem.hasCustomCover) libItem.cover = resolvedCover;
+      }
+      const favItem = db.favorites.find((item) => normalizePath(item.path || item.filePath) === norm);
+      if (favItem) {
+        favItem.lastPage = validPage;
+        favItem.totalPages = validTotal;
+        favItem.percentage = percentage;
+        favItem.lastReadAt = now;
+        if (resolvedCover) favItem.cover = resolvedCover;
+      }
+      sqliteStmts.upsertHistory.run(
+        norm,
+        historyEntry.fileName,
+        filePath,
+        '',
+        validPage,
+        validTotal,
+        percentage,
+        resolvedCover,
+        Date.parse(now) || 0,
+        0,
+        0,
+        JSON.stringify(historyEntry)
+      );
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, progress: historyEntry });
+      break;
+    }
+
+    case 'GET_PROGRESS': {
+      const { filePath } = payload;
+      const norm = normalizePath(filePath);
+      const row = sqliteStmts.getHistory.get(norm);
+      const progress = sqliteHistoryRowToEntry(row) || {
+        filePath,
+        currentPage: 1,
+        totalPages: 1,
+        percentage: 0,
+        updatedAt: null,
+      };
+      sendReply({ type: 'done', action, progress });
+      break;
+    }
+
+    case 'RECORD_READING_ACTIVITY': {
+      const { date, pages = 0, seconds = 0, fileKey } = payload || {};
+      if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendReply({ type: 'error', action, message: 'تاریخِ فعالیت معتبر نیست.' });
+        return;
+      }
+      const addPages = Math.max(0, Math.min(10000, Math.floor(Number(pages) || 0)));
+      const addSeconds = Math.max(0, Math.min(86400, Math.floor(Number(seconds) || 0)));
+      if (addPages === 0 && addSeconds === 0) {
+        if (typeof fileKey === 'string' && fileKey.trim()) {
+          const normFile = normalizePath(fileKey);
+          if (normFile) {
+            if (!db.readingStats.byBook || typeof db.readingStats.byBook !== 'object') db.readingStats.byBook = {};
+            if (!db.readingStats.byBook[normFile]) db.readingStats.byBook[normFile] = { totalSeconds: 0, totalPages: 0, days: {} };
+            if (!sqliteStmts.getByBook.get(normFile)) sqliteStmts.upsertByBook.run(normFile, 0, 0, '{}');
+            sqliteTouchMirror();
+          }
+        }
+        sendReply({ type: 'done', action, success: true, days: db.readingStats?.days || {} });
+        return;
+      }
+      if (!db.readingStats || typeof db.readingStats !== 'object' || Array.isArray(db.readingStats)) {
+        db.readingStats = { days: {} };
+      }
+      if (!db.readingStats.days || typeof db.readingStats.days !== 'object') {
+        db.readingStats.days = {};
+      }
+      const prev = db.readingStats.days[date] || { pages: 0, seconds: 0 };
+      db.readingStats.days[date] = {
+        pages: Math.min(100000, (Number(prev.pages) || 0) + addPages),
+        seconds: Math.min(86400, (Number(prev.seconds) || 0) + addSeconds),
+        appSeconds: Math.min(86400, Number(prev.appSeconds) || 0),
+      };
+      const dayKeys = Object.keys(db.readingStats.days).sort();
+      if (dayKeys.length > 1095) {
+        for (const oldKey of dayKeys.slice(0, dayKeys.length - 1095)) {
+          delete db.readingStats.days[oldKey];
+        }
+      }
+      if (typeof fileKey === 'string' && fileKey.trim()) {
+        const normFile = normalizePath(fileKey);
+        if (normFile) {
+          if (!db.readingStats.byBook || typeof db.readingStats.byBook !== 'object') {
+            db.readingStats.byBook = {};
+          }
+          const prevB = db.readingStats.byBook[normFile] || { totalSeconds: 0, totalPages: 0, days: {} };
+          if (!prevB.days || typeof prevB.days !== 'object') prevB.days = {};
+          const prevBD = prevB.days[date] || { seconds: 0, pages: 0 };
+          prevB.days[date] = {
+            seconds: Math.min(86400, (Number(prevBD.seconds) || 0) + addSeconds),
+            pages: Math.min(10000, (Number(prevBD.pages) || 0) + addPages),
+          };
+          const bkKeys = Object.keys(prevB.days).sort();
+          if (bkKeys.length > 1095) {
+            for (const ok of bkKeys.slice(0, bkKeys.length - 1095)) delete prevB.days[ok];
+          }
+          db.readingStats.byBook[normFile] = {
+            totalSeconds: (Number(prevB.totalSeconds) || 0) + addSeconds,
+            totalPages: (Number(prevB.totalPages) || 0) + addPages,
+            days: prevB.days,
+          };
+        }
+      }
+      const dayRow = db.readingStats.days[date];
+      sqliteStmts.upsertDay.run(date, dayRow.pages, dayRow.seconds, dayRow.appSeconds || 0);
+      const keepDates = new Set(Object.keys(db.readingStats.days));
+      for (const row of sqliteStmts.listDays.all()) {
+        if (!keepDates.has(row.date_key)) sqliteStmts.deleteDay.run(row.date_key);
+      }
+      if (typeof fileKey === 'string' && fileKey.trim()) {
+        const normFile = normalizePath(fileKey);
+        if (normFile && db.readingStats.byBook && db.readingStats.byBook[normFile]) {
+          const bb = db.readingStats.byBook[normFile];
+          sqliteStmts.upsertByBook.run(normFile, bb.totalSeconds, bb.totalPages, JSON.stringify(bb.days || {}));
+        }
+      }
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, days: db.readingStats.days });
+      break;
+    }
+
+    case 'RECORD_APP_ACTIVITY': {
+      const { date, seconds = 0 } = payload || {};
+      if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendReply({ type: 'error', action, message: 'تاریخِ فعالیت معتبر نیست.' });
+        return;
+      }
+      const addSeconds = Math.max(0, Math.min(86400, Math.floor(Number(seconds) || 0)));
+      if (addSeconds === 0) {
+        sendReply({ type: 'done', action, success: true, totalAppSeconds: db.readingStats?.totalAppSeconds || 0 });
+        return;
+      }
+      if (!db.readingStats || typeof db.readingStats !== 'object' || Array.isArray(db.readingStats)) {
+        db.readingStats = { days: {}, totalAppSeconds: 0 };
+      }
+      if (!db.readingStats.days || typeof db.readingStats.days !== 'object') {
+        db.readingStats.days = {};
+      }
+      const prev = db.readingStats.days[date] || { pages: 0, seconds: 0, appSeconds: 0 };
+      db.readingStats.days[date] = {
+        pages: Number(prev.pages) || 0,
+        seconds: Number(prev.seconds) || 0,
+        appSeconds: Math.min(86400, (Number(prev.appSeconds) || 0) + addSeconds),
+      };
+      db.readingStats.totalAppSeconds = Math.min(315360000, (Number(db.readingStats.totalAppSeconds) || 0) + addSeconds);
+      const dayRow = db.readingStats.days[date];
+      sqliteStmts.upsertDay.run(date, dayRow.pages, dayRow.seconds, dayRow.appSeconds);
+      sqliteSetKv('readingTotalAppSeconds', String(db.readingStats.totalAppSeconds));
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, totalAppSeconds: db.readingStats.totalAppSeconds });
+      break;
+    }
+
+    case 'GET_READING_STATS': {
+      const days = {};
+      for (const row of sqliteStmts.listDays.all()) {
+        days[row.date_key] = { pages: Number(row.pages) || 0, seconds: Number(row.seconds) || 0, appSeconds: Number(row.app_seconds) || 0 };
+      }
+      const byBook = {};
+      for (const row of sqliteStmts.listByBook.all()) {
+        let d = {};
+        try { d = JSON.parse(row.days_json || '{}'); } catch (_) {}
+        byBook[row.file_key] = {
+          totalSeconds: Number(row.total_seconds) || 0,
+          totalPages: Number(row.total_pages) || 0,
+          days: (d && typeof d === 'object' && !Array.isArray(d)) ? d : {},
+        };
+      }
+      const totalAppSeconds = Number(sqliteGetKv('readingTotalAppSeconds')) || 0;
+      sendReply({ type: 'done', action, days, byBook, totalAppSeconds });
+      break;
+    }
+
+    case 'GET_RECENTS': {
+      const recents = sqliteStmts.listHistoryRecent.all().map((row) => sqliteHistoryRowToEntry(row)).filter(Boolean);
+      sendReply({ type: 'done', action, recents });
+      break;
+    }
+
+    case 'REMOVE_FROM_RECENTS': {
+      const { filePath } = payload;
+      const norm = normalizePath(filePath);
+      if (db.history[norm]) {
+        const removedFile = coverFileFromUrl(db.history[norm].cover);
+        delete db.history[norm];
+        purgeCoverCacheEntryIfBookGone(db, norm);
+        if (removedFile) deleteCoverFileIfUnreferenced(db, removedFile);
+        sqliteTouchMirror();
+      }
+      sqliteStmts.deleteHistory.run(norm);
+      sendReply({ type: 'done', action, success: true });
+      break;
+    }
+
+    case 'CLEAR_RECENTS': {
+      const removedFiles = Object.values(db.history || {})
+        .map((h) => coverFileFromUrl(h?.cover))
+        .filter(Boolean);
+      const removedNorms = Object.keys(db.history || {});
+      db.history = {};
+      removedNorms.forEach((normKey) => purgeCoverCacheEntryIfBookGone(db, normKey));
+      removedFiles.forEach((file) => deleteCoverFileIfUnreferenced(db, file));
+      sqliteStmts.clearHistory.run();
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true });
+      break;
+    }
+
+    case 'GET_ANNOTATIONS': {
+      const { filePath, pageNumber } = payload;
+      const norm = normalizePath(filePath);
+      if (pageNumber !== undefined && pageNumber !== null) {
+        const row = sqliteStmts.getAnnotationPage.get(norm, String(pageNumber));
+        let items = [];
+        try { items = JSON.parse(row?.items_json || 'null') || []; } catch (_) {}
+        if (!Array.isArray(items)) items = [];
+        sendReply({ type: 'done', action, items });
+      } else {
+        const annotations = {};
+        for (const row of sqliteStmts.listAnnotationsForFile.all(norm)) {
+          try {
+            const items = JSON.parse(row.items_json || 'null');
+            if (Array.isArray(items)) annotations[row.page_num] = items;
+          } catch (_) {}
+        }
+        sendReply({ type: 'done', action, annotations });
+      }
+      break;
+    }
+
+    case 'SAVE_ANNOTATIONS': {
+      const { filePath, pageNumber, items = [] } = payload;
+      const norm = normalizePath(filePath);
+      if (!norm || pageNumber === undefined || pageNumber === null) {
+        sendReply({ type: 'error', action, message: 'اطلاعات صفحه نامعتبر است.' });
+        return;
+      }
+      db.annotations = db.annotations || {};
+      if (!db.annotations[norm]) {
+        db.annotations[norm] = {};
+      }
+      const pageKey = String(pageNumber);
+      if (!Array.isArray(items) || items.length === 0) {
+        delete db.annotations[norm][pageKey];
+        sqliteStmts.deleteAnnotationPage.run(norm, pageKey);
+      } else {
+        db.annotations[norm][pageKey] = items;
+        sqliteStmts.upsertAnnotation.run(norm, pageKey, JSON.stringify(items), Date.now());
+      }
+      sqliteTouchMirror();
+      sendReply({
+        type: 'done',
+        action,
+        success: true,
+        items: db.annotations[norm][pageKey] || [],
+      });
+      break;
+    }
+
+    case 'CLEAR_ANNOTATIONS': {
+      const { filePath, pageNumber } = payload;
+      const norm = normalizePath(filePath);
+      if (norm && db.annotations && db.annotations[norm]) {
+        if (pageNumber !== undefined && pageNumber !== null) {
+          delete db.annotations[norm][String(pageNumber)];
+          sqliteStmts.deleteAnnotationPage.run(norm, String(pageNumber));
+        } else {
+          delete db.annotations[norm];
+          sqliteStmts.deleteAnnotationsForFile.run(norm);
+        }
+        sqliteTouchMirror();
+      }
+      sendReply({ type: 'done', action, success: true });
+      break;
+    }
+
+    case 'GET_ANNOTATION_TOTALS': {
+      let totalItems = 0;
+      let annotatedPages = 0;
+      let annotatedFiles = 0;
+      const perFile = {};
+      for (const row of sqliteStmts.listAllAnnotations.all()) {
+        let items = [];
+        try { items = JSON.parse(row.items_json || 'null') || []; } catch (_) {}
+        if (!Array.isArray(items)) items = [];
+        if (items.length > 0) annotatedPages += 1;
+        perFile[row.file_key] = (perFile[row.file_key] || 0) + items.length;
+        totalItems += items.length;
+      }
+      for (const n of Object.values(perFile)) {
+        if (n > 0) annotatedFiles += 1;
+      }
+      sendReply({ type: 'done', action, totalItems, annotatedPages, annotatedFiles });
+      break;
+    }
+
+    case 'GET_ANNOTATION_COUNTS': {
+      const counts = {};
+      for (const row of sqliteStmts.listAllAnnotations.all()) {
+        let items = [];
+        try { items = JSON.parse(row.items_json || 'null') || []; } catch (_) {}
+        if (!Array.isArray(items)) items = [];
+        counts[row.file_key] = (counts[row.file_key] || 0) + items.length;
+      }
+      for (const k of Object.keys(counts)) {
+        if (!(counts[k] > 0)) delete counts[k];
+      }
+      sendReply({ type: 'done', action, counts });
+      break;
+    }
+
+    case 'GET_BOOKMARKS': {
+      const { filePath } = payload;
+      const norm = normalizePath(filePath);
+      const list = sqliteStmts.listBookmarksForFile.all(norm).map((row) => sqliteBookmarkRowToRecord(row)).filter(Boolean);
+      sendReply({ type: 'done', action, bookmarks: list });
+      break;
+    }
+
+    case 'SAVE_BOOKMARKS': {
+      const { filePath, bookmarks = [] } = payload;
+      const norm = normalizePath(filePath);
+      if (!norm) {
+        sendReply({ type: 'error', action, message: 'مسیرِ فایل نامعتبر است.' });
+        return;
+      }
+      db.bookmarks = db.bookmarks || {};
+      const clean = (Array.isArray(bookmarks) ? bookmarks : []).map(sanitizeBookmarkRecord).filter(Boolean);
+      if (clean.length === 0) delete db.bookmarks[norm];
+      else db.bookmarks[norm] = clean;
+      const run = sqliteDb.transaction(() => {
+        sqliteStmts.deleteBookmarksForFile.run(norm);
+        for (const bm of clean) {
+          sqliteStmts.upsertBookmark.run(
+            bm.id,
+            norm,
+            bm.page,
+            bm.yRatio,
+            bm.name || '',
+            '',
+            bm.template,
+            Date.parse(bm.createdAt) || 0,
+            JSON.stringify(bm)
+          );
+        }
+      });
+      run();
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, bookmarks: clean });
+      break;
+    }
+
+    case 'GET_ALL_BOOKMARKS': {
+      const files = [];
+      let total = 0;
+      const grouped = {};
+      for (const row of sqliteStmts.listAllBookmarks.all()) {
+        const rec = sqliteBookmarkRowToRecord(row);
+        if (!rec) continue;
+        if (!grouped[row.file_key]) grouped[row.file_key] = [];
+        grouped[row.file_key].push(rec);
+      }
+      for (const [norm, list] of Object.entries(grouped)) {
+        if (list.length === 0) continue;
+        const hist = db.history && db.history[norm];
+        const libItem = (db.library || []).find((it) => normalizePath(it.path || it.filePath) === norm);
+        const favItem = (db.favorites || []).find((it) => normalizePath(it.path || it.filePath) === norm);
+        const filePath = (hist && (hist.filePath || hist.path))
+          || (libItem && (libItem.path || libItem.filePath))
+          || (favItem && (favItem.path || favItem.filePath))
+          || norm;
+        const fileName = String(filePath).split(/[\\/]/).pop() || norm;
+        files.push({ filePath, fileName, bookmarks: list });
+        total += list.length;
+      }
+      files.sort((a, b) => String(a.fileName).localeCompare(String(b.fileName)));
+      sendReply({ type: 'done', action, files, total });
+      break;
+    }
+
+    case 'GET_EPUB_HIGHLIGHTS': {
+      const { filePath } = payload || {};
+      const norm = normalizePath(filePath);
+      const row = sqliteStmts.getHighlights.get(norm);
+      let list = [];
+      try { list = JSON.parse(row?.highlights_json || 'null') || []; } catch (_) {}
+      sendReply({ type: 'done', action, highlights: Array.isArray(list) ? list : [] });
+      break;
+    }
+
+    case 'SAVE_EPUB_HIGHLIGHTS': {
+      const { filePath, highlights = [] } = payload || {};
+      const norm = normalizePath(filePath);
+      if (!norm || !Array.isArray(highlights)) {
+        sendReply({ type: 'error', action, message: 'هایلایت‌ها معتبر نیستند.' });
+        return;
+      }
+      const clean = sqliteCleanEpubHighlights(highlights);
+      if (!db.epubHighlights || typeof db.epubHighlights !== 'object') db.epubHighlights = {};
+      db.epubHighlights[norm] = clean;
+      sqliteStmts.upsertHighlights.run(norm, JSON.stringify(clean), Date.now());
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true });
+      break;
+    }
+
+    case 'GET_CUSTOM_STAT_VIEWS': {
+      let views = [];
+      try {
+        const raw = sqliteGetKv('customStatViews');
+        const parsed = JSON.parse(raw || 'null');
+        if (Array.isArray(parsed)) views = parsed;
+      } catch (_) {}
+      sendReply({ type: 'done', action, views });
+      break;
+    }
+
+    case 'SAVE_CUSTOM_STAT_VIEWS': {
+      const { views = [] } = payload || {};
+      if (!Array.isArray(views)) {
+        sendReply({ type: 'error', action, message: 'آماربندی‌ها معتبر نیستند.' });
+        return;
+      }
+      const clean = sqliteCleanStatViews(views);
+      db.customStatViews = clean;
+      sqliteSetKv('customStatViews', JSON.stringify(clean));
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, views: clean });
+      break;
+    }
+
+    case 'GET_BOOKMARK_PREFERENCES': {
+      let preferences = null;
+      try {
+        const raw = sqliteGetKv('bookmarkPreferences');
+        const parsed = JSON.parse(raw || 'null');
+        if (parsed && typeof parsed === 'object') preferences = parsed;
+      } catch (_) {}
+      if (!preferences) preferences = JSON.parse(JSON.stringify(defaultDB.bookmarkPreferences));
+      sendReply({ type: 'done', action, preferences });
+      break;
+    }
+
+    case 'SAVE_BOOKMARK_PREFERENCES': {
+      const { preferences = {} } = payload;
+      const next = sqliteCleanBookmarkPreferences(preferences, db.bookmarkPreferences);
+      db.bookmarkPreferences = next;
+      sqliteSetKv('bookmarkPreferences', JSON.stringify(next));
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, preferences: next });
+      break;
+    }
+
+    case 'GET_CUSTOM_COLOR_SYSTEM': {
+      let customColorSystem = null;
+      try {
+        const raw = sqliteGetKv('customColorSystem');
+        const parsed = JSON.parse(raw || 'null');
+        if (parsed && typeof parsed === 'object') customColorSystem = parsed;
+      } catch (_) {}
+      if (!customColorSystem) customColorSystem = JSON.parse(JSON.stringify(defaultDB.customColorSystem));
+      sendReply({ type: 'done', action, customColorSystem });
+      break;
+    }
+
+    case 'SAVE_CUSTOM_COLOR_SYSTEM': {
+      const { customColorSystem = {} } = payload;
+      const next = sqliteCleanColorSystem(customColorSystem);
+      db.customColorSystem = next;
+      sqliteSetKv('customColorSystem', JSON.stringify(next));
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, customColorSystem: next });
+      break;
+    }
+
+    case 'GET_EPUB_CHAPTER_TEXT': {
+      const { filePath, chapterIndex, mtime } = payload || {};
+      const norm = normalizePath(filePath);
+      const row = sqliteStmts.getChapterText.get(norm, Math.floor(Number(chapterIndex) || 0));
+      let found = false;
+      let plainText = null;
+      if (row && typeof row.plain_text === 'string') {
+        const wanted = Number(mtime) || 0;
+        if (!wanted || Number(row.mtime) === wanted) {
+          found = true;
+          plainText = row.plain_text;
+        }
+      }
+      sendReply({ type: 'done', action, success: true, found, plainText, chapterIndex: Math.floor(Number(chapterIndex) || 0) });
+      break;
+    }
+
+    case 'SAVE_EPUB_CHAPTER_TEXT': {
+      const { filePath, chapterIndex, mtime, plainText } = payload || {};
+      const norm = normalizePath(filePath);
+      if (!norm || chapterIndex === undefined || chapterIndex === null || typeof plainText !== 'string') {
+        sendReply({ type: 'error', action, message: 'متنِ فصل معتبر نیست.' });
+        return;
+      }
+      const capped = plainText.slice(0, 2000000);
+      sqliteStmts.upsertChapterText.run(norm, Math.floor(Number(chapterIndex)), Math.floor(Number(mtime) || 0), capped);
+      sendReply({ type: 'done', action, success: true });
+      break;
+    }
+
+    default:
+      sendReply({
+        type: 'error',
+        action,
+        message: `دستور ${action} در ورکر دیتابیس پشتیبانی نمی‌شود.`,
+      });
+  }
+}
+
+
 parentPort.on('message', (request) => {
   const { reqId, action, payload = {} } = request || {};
   let db = readDB();
@@ -1677,12 +2772,40 @@ parentPort.on('message', (request) => {
   };
 
   try {
+    // مرحلهٔ ۴۰ §۱: اطلاعاتِ موتورِ دیتابیس — در هر دو حالت (SQLite و
+    // JSON) پاسخ می‌دهد تا راهنمایِ مهاجرت بتواند فعال بودنِ SQLite را
+    // بررسی کند.
+    if (action === 'GET_DATABASE_INFO') {
+      let counts = { history: 0, annotations: 0, bookmarks: 0, readingDays: 0, byBook: 0, textCache: 0 };
+      let migrated = false;
+      if (sqliteReady) {
+        counts = sqliteGetCounts();
+        migrated = sqliteGetKv(SQLITE_MIGRATION_KEY) === '1';
+      }
+      sendReply({ type: 'done', action, success: true, engine: sqliteReady ? 'sqlite' : 'json', sqlitePath: SQLITE_FILE, jsonPath: DB_FILE, migrated, counts });
+      return;
+    }
+    // مرحلهٔ ۴۰ §۱: اکشن‌هایِ داغ، وقتی SQLite آماده است، از
+    // handleSqliteAction پاسخ می‌گیرند؛ بقیه به switchِ JSON می‌رسند.
+    if (sqliteReady && SQLITE_ROUTED_ACTIONS.has(action)) {
+      try {
+        handleSqliteAction(action, payload || {}, db, sendReply);
+      } catch (err) {
+        sendReply({ type: 'error', action, message: 'خطای سیستمی دیتابیس: ' + err.message });
+      }
+      return;
+    }
     switch (action) {
       case 'FLUSH_SYNC': {
         // پاسخ، صراحتاً FLUSH_SYNC_ACK است تا main در handshakeِ خروج
         // آن را از پاسخ‌های عادیِ db-action تشخیص بدهد. اگر main این
         // پیام را با reqId فرستاده باشد، sendReply همان reqId را هم
         // برمی‌گرداند.
+        // مرحلهٔ ۴۰ §۱: پیش از فلاشِ JSON، WAL را در فایلِ اصلیِ
+        // SQLite خالی کن تا library.sqlite همیشه خودکفا بماند.
+        if (sqliteReady) {
+          try { sqliteDb.pragma('wal_checkpoint(TRUNCATE)'); } catch (_) {}
+        }
         handleFlushSync()
           .then((result) => {
             sendReply({ type: 'FLUSH_SYNC_ACK', action, success: result.ok, flushed: result.flushed });

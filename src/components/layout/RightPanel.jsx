@@ -266,6 +266,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const [showSortMenu, setShowSortMenu] = useState(false);
   const [showChapterMenu, setShowChapterMenu] = useState(false);
   const [isHeartPulsing, setIsHeartPulsing] = useState(false);
+  // مرحلهٔ ۴۰ §۵: جمع/باز شدنِ فهرستِ «فایل‌هایِ این پوشه».
+  const [folderListCollapsed, setFolderListCollapsed] = useState(false);
   const [coverUrl, setCoverUrl] = useState(null);
   const [coverHover, setCoverHover] = useState(false);
 
@@ -1199,17 +1201,24 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               راست) — کلیک روی هر فایل، همان فایل را باز می‌کند. */}
           {Array.isArray(comicData?.folderFiles) && comicData.folderFiles.length > 0 && (
             <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text)', marginBottom: 8 }}>
-                {`فایل‌هایِ این پوشه (${comicData.folderFiles.length})`}
-              </div>
+              <button
+                type="button"
+                onClick={() => setFolderListCollapsed((v) => !v)}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', background: 'transparent', border: 'none', padding: 0, marginBottom: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, color: 'var(--text)' }}
+              >
+                <span>{`فایل‌هایِ این پوشه (${comicData.folderFiles.length})`}</span>
+                {folderListCollapsed ? <Icons.ChevronDown size={14} /> : <Icons.ChevronUp size={14} />}
+              </button>
+              {!folderListCollapsed && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
                 {comicData.folderFiles.map((f) => {
-                  const isCurrent = normalizeBookKey(f.path || '') === normalizeBookKey(comicData?.filePath || '');
+                  const isImageKind = f.kind === 'image';
+                  const isCurrent = isImageKind ? f.pageIndex === currentPage : normalizeBookKey(f.path || '') === normalizeBookKey(comicData?.filePath || '');
                   return (
                     <button
                       key={f.path}
                       type="button"
-                      onClick={() => onLoadComic(f.path)}
+                      onClick={() => { if (isImageKind && f.pageIndex) jumpToPage(f.pageIndex); else onLoadComic(f.path); }}
                       title={f.name}
                       style={{
                         display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
@@ -1221,20 +1230,18 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                       }}
                     >
                       <span style={{ color: 'var(--accent)', display: 'flex', flexShrink: 0 }}>
-                        {f.kind === 'pdf' ? <Icons.FileText size={13} /> : f.kind === 'epub' ? <Icons.BookOpen size={13} /> : f.kind === 'folder' ? <Icons.Folder size={13} /> : <Icons.FileArchive size={13} />}
+                        {f.kind === 'pdf' ? <Icons.FileText size={13} /> : f.kind === 'epub' ? <Icons.BookOpen size={13} /> : f.kind === 'folder' ? <Icons.Folder size={13} /> : f.kind === 'image' ? <Icons.Image size={13} /> : <Icons.FileArchive size={13} />}
                       </span>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
                     </button>
                   );
                 })}
               </div>
+              )}
             </div>
           )}
         </div>
 
-        {/* ===================================================================
-            ۴. کارت پایین (با اسکرول): تنظیم فاصله و آفست عمودی بین صفحات
-        =================================================================== */}
         <div style={styles.gapControlCard}>
           <div style={styles.gapHeaderRow}>
             <div style={styles.titleWithIcon}>

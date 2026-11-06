@@ -573,6 +573,36 @@ export const coreApi = {
     }
   },
 
+  // مرحلهٔ ۴۰ §۱: اطلاعاتِ موتورِ دیتابیس (sqlite یا json) + شمارشِ
+  // ردیف‌ها، برایِ بررسیِ فعال بودنِ SQLite.
+  getDatabaseInfo: async () => {
+    try {
+      return await coreApi.dbAction({ action: 'GET_DATABASE_INFO', payload: {} });
+    } catch (_) {
+      return { type: 'error', engine: 'unknown' };
+    }
+  },
+
+  // مرحلهٔ ۴۰ §۵: کشِ متنِ خالصِ فصلِ EPUB در SQLite — خواندن.
+  // اگر موتور JSON باشد یا mtime عوض شده باشد، found=false برمی‌گردد
+  // و خواننده، فصل را از اول می‌خواند.
+  getEpubChapterText: async (filePath, chapterIndex, mtimeMs) => {
+    try {
+      return await coreApi.dbAction({ action: 'GET_EPUB_CHAPTER_TEXT', payload: { filePath, chapterIndex, mtime: mtimeMs } });
+    } catch (_) {
+      return { type: 'error', found: false, plainText: null };
+    }
+  },
+
+  // مرحلهٔ ۴۰ §۵: کشِ متنِ خالصِ فصلِ EPUB در SQLite — نوشتن.
+  saveEpubChapterText: async (filePath, chapterIndex, mtimeMs, text) => {
+    try {
+      return await coreApi.dbAction({ action: 'SAVE_EPUB_CHAPTER_TEXT', payload: { filePath, chapterIndex, mtime: mtimeMs, plainText: text } });
+    } catch (_) {
+      return { success: false };
+    }
+  },
+
   // مرحله ۱۴: ثبتِ زمانِ حضورِ سراسریِ برنامه.
   recordAppActivity: async ({ date, seconds = 0 } = {}) => {
     return await coreApi.dbAction({
