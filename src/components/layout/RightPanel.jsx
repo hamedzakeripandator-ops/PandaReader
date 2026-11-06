@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react'
 import useAppStore from '../../store/useAppStore';
 import useReaderStore from '../../store/useReaderStore';
 import useLibraryStore from '../../store/useLibraryStore';
+import useSettingsStore from '../../store/useSettingsStore';
 import { coreApi } from '../../services/coreApi';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../common/Icons';
@@ -11,6 +12,31 @@ import useBookmarkStore, { resolveActiveBookKey, normalizeBookKey } from '../../
 import { BOOKMARK_TEMPLATE_MAP, computeViewportCenterYRatio, resolveBookmarkImage } from '../reader/bookmarkTemplates';
 
 const EMPTY_BOOKMARKS = Object.freeze([]);
+
+// مرحلهٔ ۴۱ §۵: نشانگرِ دایره‌ایِ آکاردئون‌ها — یک فلشِ برداریِ
+// ChevronDown که با باز/بسته شدن می‌چرخد (بدونِ کاراکترِ متنی).
+// نکته: ماژولِ Icons (SvgBase) مقدارِ strokeWidth را سخت‌کد «2»
+// گذاشته و propی strokeWidth را جلو نمی‌برد؛ پس «2.4» نوشته
+// می‌شود تا با اصلاحِ بعدیِ Icons اعمال شود، ولی فعلاً ضخامتِ
+// دیداری همان 2 است. چرخش از راهِ style اعمال می‌شود.
+const accordionCircleStyle = (isOpen) => ({
+  width: '26px',
+  height: '26px',
+  borderRadius: '50%',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: isOpen ? 'rgba(34, 211, 238, 0.16)' : 'rgba(255, 255, 255, 0.06)',
+  border: isOpen ? '1px solid rgba(34, 211, 238, 0.45)' : '1px solid rgba(255, 255, 255, 0.14)',
+  color: isOpen ? '#22d3ee' : '#cbd5e1',
+  transition: 'all 0.25s cubic-bezier(0.22, 1, 0.36, 1)',
+  boxShadow: isOpen ? '0 0 10px rgba(34, 211, 238, 0.2)' : 'none',
+  flexShrink: 0,
+});
+const accordionChevronStyle = (isOpen) => ({
+  transform: isOpen ? 'rotate(0deg)' : 'rotate(90deg)',
+  transition: 'transform 0.28s cubic-bezier(0.22, 1, 0.36, 1)',
+});
 
 const PageListRow = React.memo(function PageListRow({
   pageNum,
@@ -102,12 +128,39 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const showToast = useAppStore((state) => state.showToast);
 
   const comicData = useReaderStore((state) => state.comicData);
-  const currentPage = useReaderStore((state) => (isRightSidebarOpen ? state.currentPage : 1));
+  const currentPage = useReaderStore((state) => state.currentPage);
   const jumpToPage = useReaderStore((state) => state.jumpToPage);
   const pdfOutline = useReaderStore((state) => state.pdfOutline);
   const pdfOutlineFile = useReaderStore((state) => state.pdfOutlineFile);
   const pdfOutlineStatus = useReaderStore((state) => state.pdfOutlineStatus);
   const epubChapters = useReaderStore((state) => state.epubChapters || []);
+  // مرحلهٔ ۴۲: زومِ زنده، حالتِ نمایشِ زنده و شمارِ کلِ صفحه‌ها از
+  // استورِ ریدر — کارت‌هایِ CBZ/EPUB مقدارِ فعلی را نشان می‌دهند،
+  // نه پیش‌فرضِ تنظیمات.
+  const zoomLevel = useReaderStore((state) => state.zoomLevel);
+  const comicViewMode = useReaderStore((state) => state.comicViewMode || 'vertical');
+  const epubViewMode = useReaderStore((state) => state.epubViewMode || 'vertical');
+  const storeTotalPages = useReaderStore((state) => state.totalPages || 0);
+  // مرحلهٔ ۴۱ §۳: نوشتنِ تنظیماتِ پیش‌فرضِ CBZ/EPUB در استورِ
+  // تنظیمات — اگر اکشنی هنوز نباشد، صدا زدنِ آن با ?. بی‌اثر
+  // می‌ماند (بدونِ کرش).
+  const setCbzDefaultZoom = useSettingsStore((state) => state.setCbzDefaultZoom);
+  const setCbzDefaultViewMode = useSettingsStore((state) => state.setCbzDefaultViewMode);
+  const setEpubDefaultZoom = useSettingsStore((state) => state.setEpubDefaultZoom);
+  const setEpubDefaultViewMode = useSettingsStore((state) => state.setEpubDefaultViewMode);
+  const setComicViewMode = useReaderStore((state) => state.setComicViewMode);
+  const setEpubViewMode = useReaderStore((state) => state.setEpubViewMode);
+  const setZoomLevel = useReaderStore((state) => state.setZoomLevel);
+  // مرحلهٔ ۴۱ §۳: قانونِ طلایی — نوعِ فایلِ بازشده.
+  const isCbzFile = Boolean(comicData?.filePath && comicData.filePath.toLowerCase().endsWith('.cbz'));
+  const isEpubFile = Boolean(comicData?.type === 'epub' || (comicData?.filePath && comicData.filePath.toLowerCase().endsWith('.epub')));
+  // مرحلهٔ ۴۲: زومِ زندهٔ کارت‌ها (درصد) — همیشه در بازهٔ مجاز نگه داشته می‌شود.
+  const liveCbzZoomPct = Math.max(50, Math.min(300, Math.round((Number(zoomLevel) || 1) * 100)));
+  const liveEpubZoomPct = Math.max(50, Math.min(250, Math.round((Number(zoomLevel) || 1) * 100)));
+  // پیش‌نویسِ ورودیِ عددیِ زوم تا تایپِ آزاد (مثلاً پاک کردنِ عدد
+  // و تایپِ عددِ تازه) با مقدارِ کنترل‌شدهٔ استور تداخل نکند.
+  const [cbzZoomDraft, setCbzZoomDraft] = useState(null);
+  const [epubZoomDraft, setEpubZoomDraft] = useState(null);
   const setComicData = useReaderStore((state) => state.setComicData);
 
   // استیت‌های تنظیم فاصله صفحات (Page Offset / Gap)
@@ -277,7 +330,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const scrollContainerRef = useRef(null);
 
   const currentSort = comicData?.dirInfo?.sortBy || 'name_asc';
-  const totalPages = comicData?.items?.length || comicData?.savedTotalPages || 0;
+  const totalPages = isEpubFile ? (storeTotalPages || epubChapters.length) : (comicData?.items?.length || comicData?.savedTotalPages || 0);
   const nextComic = comicData?.nextComic;
   const prevComic = comicData?.prevComic;
   const dirInfo = comicData?.dirInfo;
@@ -368,6 +421,45 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
       try { rowEl.scrollIntoView({ block: 'nearest', behavior: 'auto' }); } catch (_) {}
     }
   }, [activeOutlineIndex]);
+
+  // مرحلهٔ ۴۱ §۲: فصلِ فعالِ EPUB — در EpubViewer، currentPage
+  // برابرِ شمارهٔ فصل است (chapterIndex + 1)؛ پس فصلِ فعال از
+  // currentPage به‌دست می‌آید. کارتِ فصلِ فعال، خودکار وسط‌چین
+  // می‌شود؛ اگر از قبل کامل دیده شود، اسکرولی رخ نمی‌دهد تا
+  // اسکرولِ دستیِ کاربر دزدیده نشود.
+  const activeEpubChapterIndex = useMemo(() => {
+    if (!epubChapters || epubChapters.length === 0) return -1;
+    return Math.min(Math.max((currentPage || 1) - 1, 0), epubChapters.length - 1);
+  }, [epubChapters, currentPage]);
+  const epubChapterListRef = useRef(null);
+  const epubChapterRefs = useRef(new Map());
+  useEffect(() => {
+    if (activeEpubChapterIndex < 0) return;
+    const rowEl = epubChapterRefs.current.get(activeEpubChapterIndex);
+    const listEl = epubChapterListRef.current;
+    if (!rowEl || !listEl || typeof rowEl.scrollIntoView !== 'function') return;
+    try {
+      const listRect = listEl.getBoundingClientRect();
+      const rowRect = rowEl.getBoundingClientRect();
+      if (rowRect.top < listRect.top || rowRect.bottom > listRect.bottom) {
+        rowEl.scrollIntoView({ block: 'center', behavior: 'auto' });
+      }
+    } catch (_) {}
+  }, [activeEpubChapterIndex]);
+  // مرحلهٔ ۴۲: پرش به فصلِ EPUB — اول currentPage با jumpToPage
+  // همگام می‌شود، بعد رویدادِ سراسری برایِ EpubViewer فرستاده می‌شود.
+  const jumpToEpubChapter = useCallback((idx) => {
+    if (!epubChapters || idx < 0 || idx >= epubChapters.length) return;
+    jumpToPage(idx + 1);
+    window.dispatchEvent(new CustomEvent('app:epub-jump', { detail: { chapterIndex: idx } }));
+  }, [epubChapters, jumpToPage]);
+
+  // مرحلهٔ ۴۲: پرش از فهرستِ صفحه‌هایِ پنل — در EPUB، رویدادِ
+  // سراسریِ فصل هم فرستاده می‌شود تا EpubViewer همگام بماند.
+  const handlePanelPageJump = useCallback((page) => {
+    jumpToPage(page);
+    if (isEpubFile) window.dispatchEvent(new CustomEvent('app:epub-jump', { detail: { chapterIndex: (Number(page) || 1) - 1 } }));
+  }, [jumpToPage, isEpubFile]);
 
   // دریافت و همگام‌سازی تصویر کاور
   useEffect(() => {
@@ -556,6 +648,47 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
     }
   };
 
+  // مرحلهٔ ۴۱ §۳: تغییرِ «زومِ نرمال» و حالتِ نمایش — هم تنظیمِ
+  // پیش‌فرض در استورِ تنظیمات ذخیره می‌شود و هم فوراً با اکشنِ
+  // ریدر استور رویِ نمایِ فعلی اعمال می‌شود (زوم از راهِ
+  // setZoomLevel که VerticalViewer و EpubViewer هر دو می‌خوانند؛
+  // حالتِ CBZ از راهِ setComicViewMode و حالتِ EPUB از راهِ
+  // setEpubViewMode که اگر هنوز در استور نباشد، با ?. رد می‌شود).
+  const applyCbzZoom = useCallback((pct) => {
+    const num = Math.max(50, Math.min(300, Math.round(Number(pct) || 165)));
+    setCbzDefaultZoom?.(num);
+    setZoomLevel?.(num / 100, { force: true });
+  }, [setCbzDefaultZoom, setZoomLevel]);
+  const applyCbzViewMode = useCallback((mode) => {
+    const next = mode === 'vertical' ? 'vertical' : 'horizontal-paged';
+    setCbzDefaultViewMode?.(next);
+    setComicViewMode?.(next);
+  }, [setCbzDefaultViewMode, setComicViewMode]);
+  const applyEpubZoom = useCallback((pct) => {
+    const num = Math.max(50, Math.min(250, Math.round(Number(pct) || 100)));
+    setEpubDefaultZoom?.(num);
+    setZoomLevel?.(num / 100, { force: true });
+  }, [setEpubDefaultZoom, setZoomLevel]);
+  const applyEpubViewMode = useCallback((mode) => {
+    const next = mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical';
+    setEpubDefaultViewMode?.(next);
+    setEpubViewMode?.(next);
+  }, [setEpubDefaultViewMode, setEpubViewMode]);
+  // ثبتِ پیش‌نویسِ ورودیِ عددیِ زوم با Enter/blur (عددِ بیرونِ
+  // بازه، به نزدیک‌ترین سرِ بازه چسبانده می‌شود).
+  const commitCbzZoomDraft = useCallback(() => {
+    if (cbzZoomDraft === null) return;
+    const num = Math.round(Number(cbzZoomDraft));
+    setCbzZoomDraft(null);
+    if (Number.isFinite(num)) applyCbzZoom(num);
+  }, [cbzZoomDraft, applyCbzZoom]);
+  const commitEpubZoomDraft = useCallback(() => {
+    if (epubZoomDraft === null) return;
+    const num = Math.round(Number(epubZoomDraft));
+    setEpubZoomDraft(null);
+    if (Number.isFinite(num)) applyEpubZoom(num);
+  }, [epubZoomDraft, applyEpubZoom]);
+
   const currentComicName =
     comicData?.fileName || (filePath ? filePath.split(/[\\/]/).pop() : 'فایلی باز نشده است');
 
@@ -701,7 +834,9 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   <Icons.Bookmark size={15} />
                 </span>
                 <span style={styles.panelHeaderTitle}>بوک‌مارک‌ها ({sortedBookmarks.length.toLocaleString('fa-IR')})</span>
-                <span style={styles.bookmarkSectionChevron}>{isBookmarksSectionOpen ? '▾' : '◂'}</span>
+                <span style={accordionCircleStyle(isBookmarksSectionOpen)}>
+                  <Icons.ChevronDown size={15} strokeWidth="2.4" style={accordionChevronStyle(isBookmarksSectionOpen)} />
+                </span>
               </button>
               <button
                 type="button"
@@ -799,7 +934,9 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                     <Icons.Bookmark size={14} />
                   </span>
                   <span style={styles.panelHeaderTitle}>تمپلیت‌هایِ من</span>
-                <span style={styles.bookmarkSectionChevron}>{isBookmarkTemplatesOpen ? '▾' : '◂'}</span>
+                <span style={accordionCircleStyle(isBookmarkTemplatesOpen)}>
+                  <Icons.ChevronDown size={15} strokeWidth="2.4" style={accordionChevronStyle(isBookmarkTemplatesOpen)} />
+                </span>
               </button>
               </div>
               <div style={{ display: isBookmarkTemplatesOpen ? undefined : 'none' }}>
@@ -962,14 +1099,43 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               <span style={{ fontSize: 14, fontWeight: 700 }}>فصل‌های کتاب</span>
               <span style={{ fontSize: 11, color: 'var(--muted)' }}>{epubChapters.length} فصل</span>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <button
+                type="button"
+                disabled={activeEpubChapterIndex <= 0}
+                onClick={() => jumpToEpubChapter(activeEpubChapterIndex - 1)}
+                style={{ ...styles.epubNavBtn, opacity: activeEpubChapterIndex <= 0 ? 0.4 : 1 }}
+                title="رفتن به فصل قبلی"
+              >
+                <Icons.ChevronRight size={14} />
+                <span>فصل قبلی</span>
+              </button>
+              <span style={{ flex: 1, textAlign: 'center', fontSize: 12, fontWeight: 700, color: 'var(--text)' }}>
+                {`فصل ${(activeEpubChapterIndex + 1).toLocaleString('fa-IR')} از ${epubChapters.length.toLocaleString('fa-IR')}`}
+              </span>
+              <button
+                type="button"
+                disabled={activeEpubChapterIndex < 0 || activeEpubChapterIndex >= epubChapters.length - 1}
+                onClick={() => jumpToEpubChapter(activeEpubChapterIndex + 1)}
+                style={{ ...styles.epubNavBtn, opacity: activeEpubChapterIndex >= epubChapters.length - 1 ? 0.4 : 1 }}
+                title="رفتن به فصل بعدی"
+              >
+                <span>فصل بعدی</span>
+                <Icons.ChevronLeft size={14} />
+              </button>
+            </div>
+            <div ref={epubChapterListRef} style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
               {epubChapters.map((ch, idx) => {
-                const isActive = currentPage === idx + 1;
+                const isActive = idx === activeEpubChapterIndex;
                 return (
                   <button
                     key={ch.id || idx}
                     type="button"
-                    onClick={() => window.dispatchEvent(new CustomEvent('app:epub-jump', { detail: { chapterIndex: idx } }))}
+                    ref={(el) => {
+                      if (el) epubChapterRefs.current.set(idx, el);
+                      else epubChapterRefs.current.delete(idx);
+                    }}
+                    onClick={() => jumpToEpubChapter(idx)}
                     style={{
                       display: 'flex', gap: 8, alignItems: 'center', textAlign: 'right',
                       background: isActive ? 'rgba(34,211,238,0.12)' : 'var(--panel2)',
@@ -1064,7 +1230,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   isCurrentChap={p.chapterName === activeChapterTitle}
                   isActive={p.pageNum === currentPage}
                   activePageRef={activePageRef}
-                  onJumpToPage={jumpToPage}
+                  onJumpToPage={handlePanelPageJump}
                   hasBookmark={bookmarkedPages.has(p.pageNum)}
                 />
               ))
@@ -1207,7 +1373,9 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', background: 'transparent', border: 'none', padding: 0, marginBottom: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, fontWeight: 700, color: 'var(--text)' }}
               >
                 <span>{`فایل‌هایِ این پوشه (${comicData.folderFiles.length})`}</span>
-                {folderListCollapsed ? <Icons.ChevronDown size={14} /> : <Icons.ChevronUp size={14} />}
+                <span style={accordionCircleStyle(!folderListCollapsed)}>
+                  <Icons.ChevronDown size={15} strokeWidth="2.4" style={accordionChevronStyle(!folderListCollapsed)} />
+                </span>
               </button>
               {!folderListCollapsed && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
@@ -1290,6 +1458,142 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
             })}
           </div>
         </div>
+
+        {/* مرحلهٔ ۴۱ §۳: کارت‌هایِ تنظیماتِ وابسته به فرمت — فقط
+            برایِ فایلِ CBZ یا EPUB؛ برایِ PDF/ZIP/RAR و پوشهٔ
+            عادی، هیچ‌کدام نمایش داده نمی‌شود. */}
+        {isCbzFile && (
+          <div style={styles.formatCard}>
+            <div style={styles.titleWithIcon}>
+              <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                <Icons.FileArchive size={14} />
+              </span>
+              <span style={styles.gapCardTitle}>تنظیمات نمایش CBZ</span>
+            </div>
+            <div style={styles.formatRow}>
+              <span style={styles.formatLabel}>زوم نرمال CBZ</span>
+              <span style={styles.gapValueBadge}>{liveCbzZoomPct.toLocaleString('fa-IR')}٪</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="range"
+                min="50"
+                max="300"
+                step="5"
+                value={cbzZoomDraft ?? liveCbzZoomPct}
+                onChange={(e) => applyCbzZoom(e.target.value)}
+                style={styles.gapSlider}
+                title={`زوم نرمال CBZ: ${liveCbzZoomPct} درصد`}
+              />
+              <input
+                type="number"
+                min="50"
+                max="300"
+                value={cbzZoomDraft ?? liveCbzZoomPct}
+                onChange={(e) => setCbzZoomDraft(e.target.value)}
+                onBlur={commitCbzZoomDraft}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitCbzZoomDraft(); }}
+                style={styles.formatNumberInput}
+                title="زوم نرمال CBZ (۵۰ تا ۳۰۰ درصد)"
+              />
+            </div>
+            <div style={styles.formatRow}>
+              <span style={styles.formatLabel}>حالت نمایش</span>
+              <div style={styles.formatSegWrap}>
+                <button
+                  type="button"
+                  onClick={() => applyCbzViewMode('horizontal-paged')}
+                  style={{
+                    ...styles.formatSegBtn,
+                    ...(comicViewMode === 'horizontal-paged'
+                      ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#0a0f13', fontWeight: 700 }
+                      : {}),
+                  }}
+                >
+                  افقی
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyCbzViewMode('vertical')}
+                  style={{
+                    ...styles.formatSegBtn,
+                    ...(comicViewMode === 'vertical'
+                      ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#0a0f13', fontWeight: 700 }
+                      : {}),
+                  }}
+                >
+                  عمودی
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {isEpubFile && (
+          <div style={styles.formatCard}>
+            <div style={styles.titleWithIcon}>
+              <span style={{ color: 'var(--accent)', display: 'flex' }}>
+                <Icons.BookOpen size={14} />
+              </span>
+              <span style={styles.gapCardTitle}>تنظیمات نمایش EPUB</span>
+            </div>
+            <div style={styles.formatRow}>
+              <span style={styles.formatLabel}>زوم نرمال EPUB</span>
+              <span style={styles.gapValueBadge}>{liveEpubZoomPct.toLocaleString('fa-IR')}٪</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <input
+                type="range"
+                min="50"
+                max="250"
+                step="5"
+                value={epubZoomDraft ?? liveEpubZoomPct}
+                onChange={(e) => applyEpubZoom(e.target.value)}
+                style={styles.gapSlider}
+                title={`زوم نرمال EPUB: ${liveEpubZoomPct} درصد`}
+              />
+              <input
+                type="number"
+                min="50"
+                max="250"
+                value={epubZoomDraft ?? liveEpubZoomPct}
+                onChange={(e) => setEpubZoomDraft(e.target.value)}
+                onBlur={commitEpubZoomDraft}
+                onKeyDown={(e) => { if (e.key === 'Enter') commitEpubZoomDraft(); }}
+                style={styles.formatNumberInput}
+                title="زوم نرمال EPUB (۵۰ تا ۲۵۰ درصد)"
+              />
+            </div>
+            <div style={styles.formatRow}>
+              <span style={styles.formatLabel}>حالت نمایش</span>
+              <div style={styles.formatSegWrap}>
+                <button
+                  type="button"
+                  onClick={() => applyEpubViewMode('vertical')}
+                  style={{
+                    ...styles.formatSegBtn,
+                    ...(epubViewMode === 'vertical'
+                      ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#0a0f13', fontWeight: 700 }
+                      : {}),
+                  }}
+                >
+                  عمودی
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyEpubViewMode('horizontal-paged')}
+                  style={{
+                    ...styles.formatSegBtn,
+                    ...(epubViewMode === 'horizontal-paged'
+                      ? { backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: '#0a0f13', fontWeight: 700 }
+                      : {}),
+                  }}
+                >
+                  افقی
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -1892,6 +2196,86 @@ const styles = {
     transition: 'all 0.18s ease',
     outline: 'none',
   },
+  // مرحلهٔ ۴۱ §۲/§۳: دکمهٔ ناوبریِ فصلِ EPUB + کارتِ تنظیماتِ
+  // وابسته به فرمت (CBZ/EPUB).
+  epubNavBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '5px',
+    backgroundColor: 'var(--panel)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    color: 'var(--text)',
+    padding: '6px 10px',
+    borderRadius: '9px',
+    cursor: 'pointer',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 600,
+    outline: 'none',
+    flexShrink: 0,
+  },
+  formatCard: {
+    padding: '12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    backgroundColor: 'var(--panel2)',
+    borderRadius: '14px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    width: '100%',
+    boxSizing: 'border-box',
+    flexShrink: 0,
+  },
+  formatRow: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  formatLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontWeight: 600,
+    fontSize: '12px',
+    color: 'var(--text)',
+  },
+  formatNumberInput: {
+    width: '64px',
+    flexShrink: 0,
+    fontFamily: 'var(--font-mono)',
+    fontSize: '12px',
+    fontWeight: 700,
+    color: 'var(--text)',
+    backgroundColor: 'var(--panel)',
+    border: '1px solid var(--border)',
+    borderRadius: '8px',
+    padding: '4px 6px',
+    outline: 'none',
+    textAlign: 'center',
+    direction: 'ltr',
+  },
+  formatSegWrap: {
+    display: 'flex',
+    gap: '5px',
+  },
+  formatSegBtn: {
+    padding: '5px 12px',
+    borderRadius: '8px',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    backgroundColor: 'var(--panel)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    fontWeight: 600,
+    cursor: 'pointer',
+    outline: 'none',
+    transition: 'all 0.15s ease',
+  },
   gapControlCard: {
     padding: '12px',
     display: 'flex',
@@ -1962,11 +2346,6 @@ const styles = {
     cursor: 'pointer',
     color: 'var(--text)',
     fontFamily: 'var(--font-fa)',
-  },
-  bookmarkSectionChevron: {
-    color: 'var(--muted)',
-    fontSize: '13px',
-    lineHeight: 1,
   },
   // مرحلهٔ ۳۰ — بدنهٔ بازشوندهٔ بوک‌مارک‌ها: سقفِ ۳۸vh + اسکرولِ
   // داخلی تا با ۱۰۰ بوک‌مارک هم کلِ پنل را اشغال نکند.

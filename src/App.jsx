@@ -169,6 +169,9 @@ export default function App() {
   const isScreenshotModalOpen = useAppStore((state) => state.isScreenshotModalOpen);
   const setIsAnnotationActive = useAppStore((state) => state.setIsAnnotationActive);
   const setIsAreaZoomActive = useAppStore((state) => state.setIsAreaZoomActive);
+  // مرحلهٔ ۴۱ §۴: رنگِ پس‌زمینهٔ ناحیهٔ خواندن در حالتِ مطالعه
+  // (از تنظیمات؛ تا وقتی فیلد در استور نیامده، همان پیش‌فرضِ '#2b3038').
+  const readerBackdropColor = useSettingsStore((state) => state.readerBackdropColor || '#2b3038');
 
   const [isDragging, setIsDragging] = useState(false);
   const [loadingFileName, setLoadingFileName] = useState('');
@@ -180,6 +183,8 @@ export default function App() {
   const leftCloseTimerRef = useRef(null);
   const rightCloseTimerRef = useRef(null);
   const isCanceledRef = useRef(false);
+  // مرحله ۴۲: شمارنده نسل بارگذاری؛ هر شروع جدید، نسل را یک واحد جلو می‌برد.
+  const loadSeqRef = useRef(0);
   const isProcessingRef = useRef(false);
   // مرحلهٔ ۳۹ §۱: فهرستِ فایل‌هایِ پوشهٔ بازشده (برایِ نمایش در پنلِ
   // راست و ناوبریِ قبلی/بعدی در همان پوشه)؛ تا وقتی فایلی خارج از
@@ -246,6 +251,8 @@ export default function App() {
   // ۲. لغو فوری عملیات بارگذاری توسط کاربر
   const handleCancelLoading = useCallback(async () => {
     isCanceledRef.current = true;
+    // مرحله ۴۲: نسل بارگذاری را هم جلو ببر تا ادامه بارگذاری در حال اجرا رها شود.
+    ++loadSeqRef.current;
     isProcessingRef.current = false;
     if (transitionTimerRef.current) {
       clearTimeout(transitionTimerRef.current);
@@ -389,6 +396,8 @@ export default function App() {
 
       isProcessingRef.current = true;
       isCanceledRef.current = false;
+      // مرحله ۴۲: شناسه نسل این بارگذاری؛ اگر بارگذاری جدیدتر شروع شود یا لغو شود، ادامه این نسل رها می‌شود.
+      const mySeq = ++loadSeqRef.current;
       setIsAnnotationActive(false);
       setIsAreaZoomActive(false);
 
@@ -403,6 +412,7 @@ export default function App() {
       if (filePaths[0].toLowerCase().endsWith('.epub')) {
         try {
           const epub = await coreApi.loadEpubBook(filePaths[0]);
+          if (loadSeqRef.current !== mySeq || isCanceledRef.current) return;
           if (!epub || !epub.success) {
             throw new Error((epub && epub.message) || 'خواندنِ فایلِ EPUB ناموفق بود.');
           }
@@ -425,6 +435,7 @@ export default function App() {
               }),
               timeoutGuard,
             ]);
+            if (loadSeqRef.current !== mySeq || isCanceledRef.current) return;
             if (progRes?.progress) {
               const dbPage = Number(progRes.progress.currentPage) || 1;
               savedPage = Math.max(1, Math.min(dbPage, chapters.length));
@@ -484,6 +495,7 @@ export default function App() {
 
       try {
         const result = await coreApi.handleDrop(filePaths);
+        if (loadSeqRef.current !== mySeq || isCanceledRef.current) return;
 
         if (isCanceledRef.current || result?.canceled) {
           setIsLoading(false);
@@ -509,6 +521,7 @@ export default function App() {
           }
           folderFilesRef.current = { folderPath: result.filePath, files };
           await processFiles([files[0].path]);
+          if (loadSeqRef.current !== mySeq || isCanceledRef.current) return;
           return;
         }
 
@@ -548,6 +561,7 @@ export default function App() {
               }),
               timeoutGuard,
             ]);
+            if (loadSeqRef.current !== mySeq || isCanceledRef.current) return;
 
             if (progRes?.progress) {
               const dbPage = Number(progRes.progress.currentPage) || 1;
@@ -1006,7 +1020,7 @@ export default function App() {
             ...styles.centerReader,
             width: '100%',
             padding: isReadingMode ? '0' : '10px',
-            backgroundColor: isReadingMode ? '#0a0f13' : 'var(--panel)',
+            backgroundColor: isReadingMode ? readerBackdropColor : 'var(--panel)',
           }}
         >
           <button

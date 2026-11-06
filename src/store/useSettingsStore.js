@@ -436,6 +436,14 @@ export const DEFAULT_PREFERENCES = {
   homeRecentCustomPresets: [],
   // مرحلهٔ ۳۵ §۶: تمپلیتِ کنترلِ اسلایدرِ هیرویِ کتابخانه (پیش‌فرض آینه).
   heroSliderVariant: 'mirror',
+  // مرحلهٔ ۴۱ §۱: پیش‌فرض‌هایِ وابسته به فرمتِ فایل و رنگِ پس‌زمینهٔ ریدر.
+  // در preferences ماندگار می‌شوند (localStorage + دیتابیس، مثلِ بقیهٔ کلیدها)
+  // و رویِ فیلدهایِ هم‌نامِ سطحِ استور هم آینه می‌شوند.
+  cbzDefaultZoom: 165,
+  cbzDefaultViewMode: 'horizontal-paged',
+  epubDefaultZoom: 100,
+  epubDefaultViewMode: 'vertical',
+  readerBackdropColor: '#2b3038',
 };
 
 export const DEFAULT_PROFILE = {
@@ -474,6 +482,27 @@ export function formatShortcutLabel({ ctrl, shift, alt, code, key }) {
   parts.push(keyName);
   return parts.join(' + ');
 }
+
+// مرحلهٔ ۴۱ §۱: اعتبارسنجیِ مقادیرِ وابسته به فرمت (ورودیِ ذخیره‌شدهٔ
+// قدیمی یا دیتابیس هم از همین فیلتر می‌گذرد).
+const clampFormatZoom = (value, min, max, fallback) => {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+};
+const sanitizeFormatViewMode = (value, fallback) =>
+  value === 'vertical' || value === 'horizontal-paged' ? value : fallback;
+const sanitizeBackdropColor = (value, fallback) =>
+  typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+// آینهٔ سطحِ استور از preferences (منبعِ ماندگار): هر جا preferences
+// عوض شود، این پنج فیلد هم همان‌جا همگام می‌شوند.
+const syncFormatPrefs = (prefs) => ({
+  cbzDefaultZoom: clampFormatZoom(prefs?.cbzDefaultZoom, 50, 300, 165),
+  cbzDefaultViewMode: sanitizeFormatViewMode(prefs?.cbzDefaultViewMode, 'horizontal-paged'),
+  epubDefaultZoom: clampFormatZoom(prefs?.epubDefaultZoom, 50, 250, 100),
+  epubDefaultViewMode: sanitizeFormatViewMode(prefs?.epubDefaultViewMode, 'vertical'),
+  readerBackdropColor: sanitizeBackdropColor(prefs?.readerBackdropColor, '#2b3038'),
+});
 
 const loadSavedState = () => {
   try {
@@ -667,6 +696,9 @@ const useSettingsStore = create((set, get) => ({
     return base;
   })(),
   profile: { ...DEFAULT_PROFILE, ...(saved?.profile || {}) },
+  // مرحلهٔ ۴۱ §۱: آینهٔ سطحِ استورِ تنظیماتِ وابسته به فرمت؛ مقدارِ
+  // اولیه از همان preferencesِ ذخیره‌شده در localStorage خوانده می‌شود.
+  ...syncFormatPrefs(saved?.preferences),
 
   // ۱. واکشی و ادغام تنظیمات و پروفایل از دیتابیس لوکال
   initSettings: async () => {
@@ -683,7 +715,7 @@ const useSettingsStore = create((set, get) => ({
       const setsRes = await coreApi.dbAction({ action: 'GET_SETTINGS' });
       if (setsRes?.settings) {
         const mergedPrefs = { ...get().preferences, ...setsRes.settings };
-        set({ preferences: mergedPrefs });
+        set({ preferences: mergedPrefs, ...syncFormatPrefs(mergedPrefs) });
       }
 
       // دریافت میانبرها
@@ -883,7 +915,8 @@ const useSettingsStore = create((set, get) => ({
   // با updatePreferences ماندگارش کند (Save) یا با همین تابع،
   // مقادیرِ پیش از باز شدنِ مودال را برگرداند (Rollback on Cancel).
   previewPreferences: (partialPrefs) => {
-    set({ preferences: { ...get().preferences, ...partialPrefs } });
+    const nextPrefs = { ...get().preferences, ...partialPrefs };
+    set({ preferences: nextPrefs, ...syncFormatPrefs(nextPrefs) });
   },
 
   // ۳. تنظیمات برنامه و ریدر با ذخیره هماهنگ در دیتابیس
@@ -896,9 +929,43 @@ const useSettingsStore = create((set, get) => ({
     try { localStorage.setItem('comicReader.heroSliderVariant.v1', v); } catch (_) {}
   },
 
+  // مرحلهٔ ۴۱ §۱: اکشن‌هایِ تنظیماتِ وابسته به فرمت و رنگِ پس‌زمینهٔ ریدر.
+  // هر کدام از همان مسیرِ updatePreferences می‌گذرد، پس هم در localStorage
+  // و هم با SAVE_SETTING در دیتابیس ماندگار می‌شود. مقدارِ نامعتبر،
+  // بی‌صدا نادیده گرفته می‌شود (مقدارِ جاری می‌ماند).
+  setCbzDefaultZoom: (value) => {
+    const v = clampFormatZoom(value, 50, 300, get().cbzDefaultZoom ?? 165);
+    if (get().cbzDefaultZoom === v) return;
+    get().updatePreferences({ cbzDefaultZoom: v });
+  },
+
+  setCbzDefaultViewMode: (mode) => {
+    const v = sanitizeFormatViewMode(mode, get().cbzDefaultViewMode ?? 'horizontal-paged');
+    if (get().cbzDefaultViewMode === v) return;
+    get().updatePreferences({ cbzDefaultViewMode: v });
+  },
+
+  setEpubDefaultZoom: (value) => {
+    const v = clampFormatZoom(value, 50, 250, get().epubDefaultZoom ?? 100);
+    if (get().epubDefaultZoom === v) return;
+    get().updatePreferences({ epubDefaultZoom: v });
+  },
+
+  setEpubDefaultViewMode: (mode) => {
+    const v = sanitizeFormatViewMode(mode, get().epubDefaultViewMode ?? 'vertical');
+    if (get().epubDefaultViewMode === v) return;
+    get().updatePreferences({ epubDefaultViewMode: v });
+  },
+
+  setReaderBackdropColor: (color) => {
+    const v = sanitizeBackdropColor(color, get().readerBackdropColor ?? '#2b3038');
+    if (get().readerBackdropColor === v) return;
+    get().updatePreferences({ readerBackdropColor: v });
+  },
+
   updatePreferences: (partialPrefs) => {
     const updated = { ...get().preferences, ...partialPrefs };
-    set({ preferences: updated });
+    set({ preferences: updated, ...syncFormatPrefs(updated) });
     saveStateToStorage({
       shortcuts: get().shortcuts,
       preferences: updated,
@@ -917,7 +984,7 @@ const useSettingsStore = create((set, get) => ({
   },
 
   resetPreferences: () => {
-    set({ preferences: { ...DEFAULT_PREFERENCES } });
+    set({ preferences: { ...DEFAULT_PREFERENCES }, ...syncFormatPrefs(DEFAULT_PREFERENCES) });
     saveStateToStorage({
       shortcuts: get().shortcuts,
       preferences: { ...DEFAULT_PREFERENCES },
@@ -1004,6 +1071,7 @@ const useSettingsStore = create((set, get) => ({
         shortcuts: nextShortcuts,
         preferences: nextPrefs,
         profile: nextProfile,
+        ...syncFormatPrefs(nextPrefs),
       });
 
       saveStateToStorage({

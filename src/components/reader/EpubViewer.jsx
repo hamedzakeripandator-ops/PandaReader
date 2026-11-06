@@ -13,6 +13,7 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import useReaderStore from '../../store/useReaderStore';
+import useSettingsStore from '../../store/useSettingsStore';
 import useAppStore from '../../store/useAppStore';
 import useLibraryStore from '../../store/useLibraryStore';
 import useBookmarkStore, { normalizeBookKey } from '../../store/useBookmarkStore';
@@ -88,6 +89,31 @@ function readLs(key, fallback) {
 function writeLs(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
 }
+
+// مرحلهٔ ۴۱ §۳: کلیدِ ذخیرهٔ موقعیتِ داکِ شناورِ EPUB.
+export const EPUB_DOCK_POSITION_KEY = 'comicReader.epubDockPosition.v1';
+
+// مرحلهٔ ۴۱ §۳: clamp موقعیتِ داک — پنل هرگز از صفحه بیرون نمی‌زند.
+// width: عرضِ داک در حالتِ جاری (۴۲ برای دکمهٔ بسته، ۲۶۴ برای پنلِ باز).
+export function clampEpubDockPosition(x, y, width, viewportWidth, viewportHeight) {
+  const w = typeof width === 'number' && width > 0 ? width : 264;
+  const vw = typeof viewportWidth === 'number' && viewportWidth > 0 ? viewportWidth : 1200;
+  const vh = typeof viewportHeight === 'number' && viewportHeight > 0 ? viewportHeight : 800;
+  const maxX = Math.max(12, vw - w - 12);
+  const maxY = Math.max(72, vh - 64);
+  return {
+    x: Math.min(Math.max(typeof x === 'number' && Number.isFinite(x) ? x : 18, 12), maxX),
+    y: Math.min(Math.max(typeof y === 'number' && Number.isFinite(y) ? y : 82, 72), maxY),
+  };
+}
+
+// مرحلهٔ ۴۱ §۶: نگاشتِ زومِ پیش‌فرضِ EPUB (درصد) به اندازهٔ فونت —
+// زومِ EPUB اندازهٔ فونت است (۱۸ در ۱۰۰٪)؛ بازهٔ مجاز ۱۴ تا ۲۸.
+export function epubDefaultZoomToFontSize(epubDefaultZoom) {
+  const z = typeof epubDefaultZoom === 'number' && epubDefaultZoom > 0 ? epubDefaultZoom : 100;
+  return Math.min(28, Math.max(14, Math.round((18 * z) / 100)));
+}
+
 
 // پاک‌سازیِ دفاعیِ سمتِ رندرر (پروسسِ اصلی هم پاک کرده است): حذفِ
 // script/style/link/iframe/object/embed/form و رویدادهایِ on* و
@@ -237,6 +263,10 @@ function applySearchMarksToEl(root, query, options) {
 export default function EpubViewer({ filePath }) {
   const setCurrentPage = useReaderStore((state) => state.setCurrentPage);
   const setEpubChapters = useReaderStore((state) => state.setEpubChapters);
+  // مرحلهٔ ۴۲ §۲: زوم، همگام‌سازی totalPages و پرش targetPage.
+  const setTotalPages = useReaderStore((state) => state.setTotalPages);
+  const targetPage = useReaderStore((state) => state.targetPage);
+  const clearTargetPage = useReaderStore((state) => state.clearTargetPage);
   const isAnnotationActive = useAppStore((state) => Boolean(state.isAnnotationActive));
   const showToast = useAppStore((state) => state.showToast);
   const isRightSidebarOpen = useAppStore((state) => state.isRightSidebarOpen);
@@ -249,14 +279,49 @@ export default function EpubViewer({ filePath }) {
   // می‌ماند، چون زومِ EPUB اندازهٔ فونت است؛ سیم‌کشی برای سازگاری
   // و آینده است).
   const zoomLevel = useReaderStore((state) => state.zoomLevel);
-  const safeZoom = Math.min(3.5, Math.max(0.1, Number(zoomLevel) || 1));
+  const safeZoom = Math.min(3.5, Math.max(0.4, Number(zoomLevel) || 1));
   const setCurrentView = useAppStore((state) => state.setCurrentView);
   const updateReadingProgress = useLibraryStore((state) => state.updateReadingProgress);
+  // مرحلهٔ ۴۱ §۱/§۵/§۶: اشتراکِ currentPage (برایِ گاردِ حلقه) + حالتِ
+  // نمایشِ EPUB و رنگِ پس‌زمینه — با fallback تا اگر فیلدِ جدیدِ استور
+  // هنوز اضافه نشده بود، خواننده خراب نشود.
+  const currentPage = useReaderStore((state) => state.currentPage);
+  const epubViewMode = useReaderStore((state) => state.epubViewMode || 'vertical');
+  const setEpubViewMode = useReaderStore((state) => state.setEpubViewMode);
+  const readerBackdropColor = useSettingsStore((state) => state.readerBackdropColor || '#2b3038');
+  // مرحلهٔ ۴۱ §۱: گاردِ بارگذاریِ دوبارهٔ کتاب — فقط وقتی فایل واقعاً عوض شده باشد.
+  const loadedEpubFileRef = useRef(null);
+  // مرحلهٔ ۴۱ §۳: موقعیتِ داکِ شناور (ذخیره در localStorage؛ پیش‌فرض همان جایِ فعلی).
+  const [dockPos, setDockPos] = useState(() => {
+    const v = readLs(EPUB_DOCK_POSITION_KEY, null);
+    if (v && typeof v.x === 'number' && typeof v.y === 'number') {
+      return clampEpubDockPosition(v.x, v.y, 264, typeof window !== 'undefined' ? window.innerWidth : 1200, typeof window !== 'undefined' ? window.innerHeight : 800);
+    }
+    return { x: 18, y: 82 };
+  });
+  const [isDockDragging, setIsDockDragging] = useState(false);
+  const dockDragRef = useRef(null);
+  const dockWasDraggedRef = useRef(false);
+  useEffect(() => { writeLs(EPUB_DOCK_POSITION_KEY, dockPos); }, [dockPos]);
+  // مرحلهٔ ۴۱ §۲/§۴: ورق زدنِ افقی + نشانگرِ انتقالِ فصل.
+  const [flipDirection, setFlipDirection] = useState(0);
+  const prevChapterIndexRef = useRef(0);
+  const flipClearTimerRef = useRef(null);
+  const flipRafRef = useRef(null);
+  const wheelCooldownRef = useRef(0);
+  // مرحلهٔ ۴۲ §۳: گیت دو مرحله‌ای لبه + نادیده گرفتن اسکرول برنامه‌ای.
+  const edgeReachedAtRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
+  const [chapterTransitionNotice, setChapterTransitionNotice] = useState('');
+  const transitionNoticeTimerRef = useRef(null);
 
   const [book, setBook] = useState(null);
   const [bookLoading, setBookLoading] = useState(true);
   const [bookError, setBookError] = useState('');
   const [chapterIndex, setChapterIndex] = useState(0);
+  // مرحلهٔ ۴۱ §۱: آینهٔ refیِ فصلِ فعلی — گاردِ حلقهٔ currentPage ↔ chapterIndex.
+  const chapterIndexRef = useRef(0);
+  useEffect(() => { chapterIndexRef.current = chapterIndex; }, [chapterIndex]);
   const [chapterHtml, setChapterHtml] = useState('');
   const [chapterLoading, setChapterLoading] = useState(false);
 
@@ -284,6 +349,9 @@ export default function EpubViewer({ filePath }) {
   });
   const [dockOpen, setDockOpen] = useState(() => readLs('comicReader.epubDockOpen.v1', false) === true);
   const [dockMounted, setDockMounted] = useState(() => readLs('comicReader.epubDockOpen.v1', false) === true);
+  // مرحلهٔ ۴۲ §۴: آینهٔ refی باز بودن داک — افکت کلید ([]) وضعیت را از ref می‌خواند.
+  const dockOpenRef = useRef(false);
+  useEffect(() => { dockOpenRef.current = dockOpen; }, [dockOpen]);
   const dockCloseTimerRef = useRef(null);
 
   const [highlights, setHighlights] = useState([]);
@@ -304,6 +372,9 @@ export default function EpubViewer({ filePath }) {
   const chapters = useMemo(() => (book && Array.isArray(book.chapters) ? book.chapters : []), [book]);
   const theme = THEMES[themeId] || THEMES.light;
   const columnWidth = COLUMN_WIDTHS[columnWidthId] || COLUMN_WIDTHS.standard;
+  // مرحلهٔ ۴۲ §۲: زوم زنده — اندازهٔ فونت و عرض ستون با زوم مقیاس می‌گیرند.
+  const effectiveFontSize = Math.round(Math.min(48, Math.max(11, fontSize * safeZoom)));
+  const effectiveMaxWidth = columnWidthId === 'full' ? '100%' : `${Math.round(Math.min(1600, Math.max(420, (typeof columnWidth.maxWidth === 'number' ? columnWidth.maxWidth : 720) * Math.pow(safeZoom, 0.65))))}px`;
   const chapterHighlightCount = useMemo(
     () => (highlights || []).filter((h) => h.chapterIndex === chapterIndex).length,
     [highlights, chapterIndex],
@@ -364,11 +435,18 @@ export default function EpubViewer({ filePath }) {
   }, []);
   useEffect(() => () => {
     if (dockCloseTimerRef.current) clearTimeout(dockCloseTimerRef.current);
+    if (flipClearTimerRef.current) clearTimeout(flipClearTimerRef.current);
+    if (flipRafRef.current) cancelAnimationFrame(flipRafRef.current);
+    if (transitionNoticeTimerRef.current) clearTimeout(transitionNoticeTimerRef.current);
   }, []);
 
   // بارگذاریِ کتاب + شروعِ جلسهٔ مطالعه.
   useEffect(() => {
     if (!filePath) return undefined;
+    // مرحلهٔ ۴۱ §۱: فقط وقتی فایل واقعاً عوض شده بارگذاری کن — تغییرِ
+    // استیتِ داخلی هرگز باعثِ اجرایِ دوباره نمی‌شود.
+    if (loadedEpubFileRef.current === filePath) return undefined;
+    loadedEpubFileRef.current = filePath;
     let isMounted = true;
     setBookLoading(true);
     setBookError('');
@@ -383,10 +461,27 @@ export default function EpubViewer({ filePath }) {
       const list = Array.isArray(res.chapters) ? res.chapters : [];
       setBook({ title: res.title || '', creator: res.creator || '', coverUrl: res.coverUrl || null, chapters: list });
       setEpubChapters(list.map((c) => ({ id: c.id, title: c.title })));
+      if (typeof setTotalPages === 'function') setTotalPages(list.length);
       epubFileMtimeRef.current = Number(res.sourceMtimeMs) || 0;
       epubChapterTextMemCacheRef.current.clear();
       const startPage = useReaderStore.getState().currentPage || 1;
-      setChapterIndex(Math.max(0, Math.min(startPage - 1, list.length - 1)));
+      const startIdx = Math.max(0, Math.min(startPage - 1, list.length - 1));
+      // مرحلهٔ ۴۱ §۱: گارد — فقط وقتی فصلِ شروع واقعاً فرق دارد بنویس.
+      if (chapterIndexRef.current !== startIdx) setChapterIndex(startIdx);
+      chapterIndexRef.current = startIdx;
+      // مرحلهٔ ۴۱ §۶: پیش‌فرض‌هایِ EPUB موقعِ لودِ کتاب — حالتِ نمایش
+      // از تنظیمات؛ زوم (درصد) به اندازهٔ فونت نگاشت می‌شود، فقط وقتی
+      // کاربر تا حالا اندازهٔ فونت را خودش عوض نکرده باشد (کلیدِ
+      // localStorage نباشد) تا انتخابِ دستیِ او رونویسی نشود. خواندن
+      // با getState تا وابستگیِ افکت عوض نشود و کتاب دوباره لود نشود.
+      try {
+        const defaultMode = useSettingsStore.getState().epubDefaultViewMode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical';
+        const applyMode = useReaderStore.getState().setEpubViewMode;
+        if (typeof applyMode === 'function' && useReaderStore.getState().epubViewMode !== defaultMode) applyMode(defaultMode);
+        if (localStorage.getItem('comicReader.epubFontSize.v1') === null) {
+          setFontSize(epubDefaultZoomToFontSize(useSettingsStore.getState().epubDefaultZoom));
+        }
+      } catch (_) {}
       setBookLoading(false);
     }).catch((err) => {
       if (!isMounted) return;
@@ -399,8 +494,10 @@ export default function EpubViewer({ filePath }) {
     }).catch(() => {});
     return () => {
       isMounted = false;
+      loadedEpubFileRef.current = null;
       try { readingActivity.end(); } catch (_) {}
       setEpubChapters([]);
+      if (typeof setTotalPages === 'function') setTotalPages(0);
     };
   }, [filePath, setEpubChapters]);
 
@@ -422,7 +519,7 @@ export default function EpubViewer({ filePath }) {
         try {
           const plain = stripEpubHtmlToPlainText(res.html || '');
           if (plain.trim()) {
-            epubChapterTextMemCacheRef.current.set(chapterIndex, plain);
+            setMemCache(chapterIndex, plain);
             coreApi.saveEpubChapterText(filePath, chapterIndex, epubFileMtimeRef.current, plain).catch(() => {});
           }
         } catch (_) {}
@@ -440,7 +537,8 @@ export default function EpubViewer({ filePath }) {
       setChapterHtml('<p>بارگذاریِ این فصل ناموفق بود.</p>');
       setChapterLoading(false);
     });
-    setCurrentPage(chapterIndex + 1);
+    // مرحلهٔ ۴۱ §۱: گاردِ حلقه — فقط وقتی currentPage واقعاً فرق دارد بنویس.
+    if (useReaderStore.getState().currentPage !== chapterIndex + 1) setCurrentPage(chapterIndex + 1);
     try { readingActivity.visitPage(chapterIndex + 1); } catch (_) {}
     try { updateReadingProgress(filePath, chapterIndex + 1, chapters.length); } catch (_) {}
     if (contentRef.current) contentRef.current.scrollTop = 0;
@@ -453,6 +551,196 @@ export default function EpubViewer({ filePath }) {
     if (typeof scrollRatio === 'number') pendingBookmarkScrollRef.current = scrollRatio;
     setChapterIndex(next);
   }, [chapters.length]);
+  // مرحلهٔ ۴۱ §۱: رفرنسِ پایدارِ goToChapter — افکت‌ها به‌جایِ خودِ تابع،
+  // از این ref می‌خوانند تا تغییرِ رفرنسِ تابع هرگز افکتی را دوباره اجرا نکند.
+  const goToChapterRef = useRef(goToChapter);
+  useEffect(() => { goToChapterRef.current = goToChapter; }, [goToChapter]);
+  // مرحلهٔ ۴۱ §۱: همگام‌سازیِ تغییرِ بیرونیِ currentPage (مثلاً setComicData
+  // موقعِ باز شدنِ کتاب یا پرش از پنلِ راست) به فصلِ جاری — با گاردِ ref
+  // تا حلقه نسازد: اگر فصلِ هدف همان فصلِ فعلی است، چیزی نوشته نمی‌شود.
+  useEffect(() => {
+    if (!book || chapters.length === 0) return;
+    const target = Math.max(0, Math.min((Number(currentPage) || 1) - 1, chapters.length - 1));
+    if (target !== chapterIndexRef.current) setChapterIndex(target);
+  }, [currentPage, book, chapters]);
+  // مرحلهٔ ۴۱ §۴: انیمیشنِ ورق زدنِ افقی — جهت از رویِ علامتِ تغییرِ فصل؛
+  // در لودِ اول (هنوز chapterHtml خالی است) انیمیشنی پخش نمی‌شود. اول
+  // به ۰ برمی‌گردد و در فریمِ بعد جهت را می‌گیرد تا ورق‌هایِ سریعِ
+  // هم‌جهت هم انیمیشن را از اول پخش کنند.
+  useEffect(() => {
+    if (epubViewMode !== 'horizontal-paged') return undefined;
+    if (!chapterHtml) { prevChapterIndexRef.current = chapterIndex; return undefined; }
+    const prev = prevChapterIndexRef.current;
+    if (chapterIndex === prev) return undefined;
+    const dir = chapterIndex > prev ? 1 : -1;
+    prevChapterIndexRef.current = chapterIndex;
+    setFlipDirection(0);
+    if (flipClearTimerRef.current) { clearTimeout(flipClearTimerRef.current); flipClearTimerRef.current = null; }
+    if (flipRafRef.current) { cancelAnimationFrame(flipRafRef.current); flipRafRef.current = null; }
+    flipRafRef.current = requestAnimationFrame(() => {
+      flipRafRef.current = null;
+      setFlipDirection(dir);
+      flipClearTimerRef.current = setTimeout(() => { setFlipDirection(0); flipClearTimerRef.current = null; }, 340);
+    });
+    return () => {
+      if (flipClearTimerRef.current) { clearTimeout(flipClearTimerRef.current); flipClearTimerRef.current = null; }
+      if (flipRafRef.current) { cancelAnimationFrame(flipRafRef.current); flipRafRef.current = null; }
+    };
+  }, [chapterIndex, epubViewMode]);
+  // مرحلهٔ ۴۱ §۲: نشانگرِ نرمِ انتقالِ فصل (خودکار بعد از ~۱٫۱ ثانیه پاک می‌شود).
+  const showChapterTransitionNotice = useCallback((dir) => {
+    if (transitionNoticeTimerRef.current) clearTimeout(transitionNoticeTimerRef.current);
+    setChapterTransitionNotice(dir > 0 ? 'در حالِ رفتن به فصلِ بعد…' : 'در حالِ رفتن به فصلِ قبل…');
+    transitionNoticeTimerRef.current = setTimeout(() => { setChapterTransitionNotice(''); transitionNoticeTimerRef.current = null; }, 1100);
+  }, []);
+  // مرحلهٔ ۴۱ §۲: رفتن به فصلِ بعدی/قبلی با اسکرول — عمودی: فقط در لبهٔ
+  // بالا/پایین و با کول‌داونِ ۵۵۰ میلی‌ثانیه؛ افقی: هر چرخ، فصل را ورق می‌زند.
+  // رفتن به فصل (از راهِ افکتِ فصل) scrollTop را صفر می‌کند، یعنی به ابتدایِ فصل.
+  // مرحلهٔ ۴۲ §۲/§۳: چرخ ماوس — اول زوم با Ctrl، بعد گیت دو مرحله‌ای لبه.
+  // چرخ اول در لبه فقط «رسیدن به لبه» را ثبت می‌کند؛ ورق زدن فقط وقتی
+  // انجام می‌شود که چرخ بعدی، ۳۸۰ میلی‌ثانیه بعد و با دلتای بیش از ۳۵
+  // برسد. اسکرول برنامه‌ای بعد از ورق، تا ۵۰۰ میلی‌ثانیه نادیده گرفته می‌شود.
+  const handleContentWheel = (e) => {
+    if (!chapters.length || !e) return;
+    // (۱) چرخ+Ctrl را شنوندهٔ نیتیوِ پایین‌تر انجام می‌دهد؛ اینجا فقط نادیده گرفته می‌شود تا گیتِ لبه فصل را ورق نزند.
+    if (e.ctrlKey || e.metaKey) return;
+    // (۲) اسکرول برنامه‌ای بعد از ورق (دکمه/داک) را نادیده بگیر.
+    if (Date.now() < programmaticScrollUntilRef.current) return;
+    const sc = contentRef.current;
+    if (!sc) return;
+    const now = Date.now();
+    const maxScrollTop = Math.max(0, sc.scrollHeight - sc.clientHeight);
+    const canScrollDown = sc.scrollTop < maxScrollTop - 2;
+    const canScrollUp = sc.scrollTop > 2;
+    // ورق زدن با گیت دو مرحله‌ای — چرخ اول فقط لبه را ثبت می‌کند.
+    const flipWithGate = (dir) => {
+      if (now - wheelCooldownRef.current < 550) return;
+      if (edgeReachedAtRef.current === 0) {
+        edgeReachedAtRef.current = now;
+        return;
+      }
+      if (now - edgeReachedAtRef.current >= 380 && Math.abs(e.deltaY) > 35) {
+        wheelCooldownRef.current = now;
+        edgeReachedAtRef.current = 0;
+        programmaticScrollUntilRef.current = now + 500;
+        showChapterTransitionNotice(dir);
+        goToChapter(chapterIndex + dir);
+      }
+    };
+    if (epubViewMode === 'horizontal-paged') {
+      // هنوز جای اسکرول هست — ریست کن و بگذار طبیعی اسکرول شود.
+      if (e.deltaY > 0 && canScrollDown) { edgeReachedAtRef.current = 0; return; }
+      if (e.deltaY < 0 && canScrollUp) { edgeReachedAtRef.current = 0; return; }
+      // اسکرول افقی صریح — همان قرارداد قبلی: d > 25 یعنی فصل بعد.
+      if (Math.abs(e.deltaX || 0) > Math.abs(e.deltaY) * 1.5) {
+        const d = e.deltaX || 0;
+        if (now - wheelCooldownRef.current < 550) return;
+        if (d > 25 && chapterIndex < chapters.length - 1) {
+          wheelCooldownRef.current = now;
+          programmaticScrollUntilRef.current = now + 500;
+          showChapterTransitionNotice(1);
+          goToChapter(chapterIndex + 1);
+        } else if (d < -25 && chapterIndex > 0) {
+          wheelCooldownRef.current = now;
+          programmaticScrollUntilRef.current = now + 500;
+          showChapterTransitionNotice(-1);
+          goToChapter(chapterIndex - 1);
+        }
+        return;
+      }
+      if (e.deltaY > 0 && !canScrollDown && chapterIndex < chapters.length - 1) { flipWithGate(1); return; }
+      if (e.deltaY < 0 && !canScrollUp && chapterIndex > 0) { flipWithGate(-1); return; }
+      return;
+    }
+    const atBottom = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 15;
+    const atTop = sc.scrollTop <= 5;
+    if (e.deltaY > 0 && !atBottom) { edgeReachedAtRef.current = 0; return; }
+    if (e.deltaY < 0 && !atTop) { edgeReachedAtRef.current = 0; return; }
+    if (atBottom && e.deltaY > 0 && chapterIndex < chapters.length - 1) { flipWithGate(1); return; }
+    if (atTop && e.deltaY < 0 && chapterIndex > 0) { flipWithGate(-1); return; }
+  };
+  // مرحلهٔ ۴۲ §۲: زوم با چرخ+Ctrl با شنوندهٔ نیتیوِ غیر-passive (الگوی PdfViewer).
+  // شنوندهٔ onWheelِ ری‌اکت passive است و preventDefault در آن بی‌اثر می‌ماند؛
+  // پس زومِ Ctrl+Wheel اینجا وصل می‌شود تا زومِ پیش‌فرضِ مرورگر هم‌زمان اجرا نشود.
+  // مقدارِ زوم با getState خوانده می‌شود تا افکت وابستگی نداشته باشد.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return undefined;
+    const handleNativeWheelZoom = (ev) => {
+      if (!ev.ctrlKey && !ev.metaKey) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const current = Number(useReaderStore.getState().zoomLevel) || 1;
+      const next = Math.min(3.5, Math.max(0.4, current + (ev.deltaY < 0 ? 0.1 : -0.1)));
+      if (Math.abs(next - current) >= 0.005) useReaderStore.getState().setZoomLevel(next);
+    };
+    el.addEventListener('wheel', handleNativeWheelZoom, { passive: false });
+    return () => { el.removeEventListener('wheel', handleNativeWheelZoom); };
+  }, []);
+
+  // مرحلهٔ ۴۱ §۲: کلیدهایِ جهت‌نما در حالتِ افقی — راست‌به‌چپ: ArrowLeft
+  // فصلِ بعد، ArrowRight فصلِ قبل (مثلِ دکمه‌هایِ داک). اگر useKeyboard
+  // همین کلید را قبلاً گرفته باشد (defaultPrevented)، دخالت نمی‌کنیم.
+  useEffect(() => {
+    if (epubViewMode !== 'horizontal-paged') return undefined;
+    const onKey = (e) => {
+      if (!e || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const now = Date.now();
+      if (now - wheelCooldownRef.current < 550) return;
+      if (e.key === 'ArrowLeft' && chapterIndex < chapters.length - 1) {
+        e.preventDefault();
+        wheelCooldownRef.current = now;
+        showChapterTransitionNotice(1);
+        goToChapterRef.current(chapterIndex + 1);
+      } else if (e.key === 'ArrowRight' && chapterIndex > 0) {
+        e.preventDefault();
+        wheelCooldownRef.current = now;
+        showChapterTransitionNotice(-1);
+        goToChapterRef.current(chapterIndex - 1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [epubViewMode, chapterIndex, chapters.length, showChapterTransitionNotice]);
+  // مرحلهٔ ۴۱ §۳: درگِ داکِ شناور — هم دکمهٔ بستهٔ Aa و هم هدرِ پنلِ باز.
+  // حرکتِ بیش از ۴ پیکسل یعنی درگ (wasDragged) و کلیکِ بعدی نادیده گرفته می‌شود.
+  const startDockDrag = useCallback((e, width) => {
+    if (!e || (typeof e.button === 'number' && e.button !== 0)) return;
+    if (typeof e.preventDefault === 'function') e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    dockDragRef.current = { startX, startY, origX: dockPos.x, origY: dockPos.y, width: width || 264, moved: false };
+    setIsDockDragging(true);
+    const onMove = (ev) => {
+      const st = dockDragRef.current;
+      if (!st) return;
+      const dx = ev.clientX - st.startX;
+      const dy = ev.clientY - st.startY;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) st.moved = true;
+      setDockPos(clampEpubDockPosition(st.origX + dx, st.origY + dy, st.width, window.innerWidth, window.innerHeight));
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const st = dockDragRef.current;
+      dockDragRef.current = null;
+      setIsDockDragging(false);
+      if (st && st.moved) {
+        dockWasDraggedRef.current = true;
+        setTimeout(() => { dockWasDraggedRef.current = false; }, 0);
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [dockPos]);
+  // مرحلهٔ ۴۱ §۳: کلیکِ دکمهٔ Aa — اگر همین ژست درگ بوده، باز نشود.
+  const handleDockButtonClick = useCallback(() => {
+    if (dockWasDraggedRef.current) { dockWasDraggedRef.current = false; return; }
+    openDock();
+  }, [openDock]);
   // مرحلهٔ ۳۹ §۵: ویرایشِ مستقیمِ شمارهٔ فصل از رویِ نشانگرِ پایین-راست.
   const [isEditingPageHud, setIsEditingPageHud] = useState(false);
   const [pageHudDraft, setPageHudDraft] = useState('');
@@ -467,6 +755,9 @@ export default function EpubViewer({ filePath }) {
   // گزینه‌هایِ PdfViewer (کلمهٔ کامل، پیش‌فرض روشن).
   const [epubSearchOpen, setEpubSearchOpen] = useState(false);
   const [epubSearchQuery, setEpubSearchQuery] = useState('');
+  // مرحلهٔ ۴۲ §۴: آینهٔ refی باز بودن نوار جستجو — افکت کلید ([]) وضعیت را از ref می‌خواند.
+  const epubSearchOpenRef = useRef(false);
+  useEffect(() => { epubSearchOpenRef.current = epubSearchOpen; }, [epubSearchOpen]);
   // مرحلهٔ ۴۰ §۵: ماندگاریِ تاگل‌هایِ جستجو در localStorage.
   const [epubSearchOptions, setEpubSearchOptions] = useState(() => {
     try {
@@ -491,14 +782,36 @@ export default function EpubViewer({ filePath }) {
   // مرحلهٔ ۴۰ §۵: کشِ متنِ خالصِ فصل‌ها — حافظه (per-book) + SQLite.
   const epubChapterTextMemCacheRef = useRef(new Map());
   const epubFileMtimeRef = useRef(0);
+  // مرحلهٔ ۴۲ §۴: کلید ترکیبی کش (mtime کتاب + شمارهٔ فصل) تا کش کتاب
+  // قبلی با کتاب جدید قاطی نشود؛ سقف ۶۰ فصل — قدیمی‌ترین ورودی اول حذف می‌شود.
+  const cacheKey = (idx) => `${epubFileMtimeRef.current}:${idx}`;
+  const setMemCache = (idx, text) => {
+    const map = epubChapterTextMemCacheRef.current;
+    map.set(cacheKey(idx), text);
+    if (map.size > 60) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
+    }
+  };
 
   // Ctrl+F در نمایِ EPUB، نوارِ جستجو را باز می‌کند.
   useEffect(() => {
     const onKey = (e) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault();
+        // اگر نوار از قبل باز است، فقط ورودی را فوکوس کن.
+        if (epubSearchInputRef.current) epubSearchInputRef.current.focus();
+        if (epubSearchOpenRef.current) return;
         setEpubSearchOpen(true);
         setTimeout(() => { if (epubSearchInputRef.current) epubSearchInputRef.current.focus(); }, 0);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (epubSearchOpenRef.current) {
+          setEpubSearchOpen(false);
+        } else if (dockOpenRef.current) {
+          closeDock();
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -523,12 +836,12 @@ export default function EpubViewer({ filePath }) {
   // خواندنِ فصل از EPUB. در صورتِ نبودنِ موتورِ SQLite یا عوض شدنِ
   // mtime، بی‌صدا به خواندنِ فصل برمی‌گردد.
   const getEpubChapterPlainText = useCallback(async (chapterIdx) => {
-    const mem = epubChapterTextMemCacheRef.current.get(chapterIdx);
+    const mem = epubChapterTextMemCacheRef.current.get(cacheKey(chapterIdx));
     if (typeof mem === 'string') return mem;
     try {
       const cached = await coreApi.getEpubChapterText(filePath, chapterIdx, epubFileMtimeRef.current);
       if (cached && cached.found && typeof cached.plainText === 'string') {
-        epubChapterTextMemCacheRef.current.set(chapterIdx, cached.plainText);
+        setMemCache(chapterIdx, cached.plainText);
         return cached.plainText;
       }
     } catch (_) {}
@@ -538,7 +851,7 @@ export default function EpubViewer({ filePath }) {
       const res = await coreApi.loadEpubChapter(filePath, ch.id);
       const html = res && res.success ? (res.html || '') : '';
       const text = stripEpubHtmlToPlainText(html);
-      epubChapterTextMemCacheRef.current.set(chapterIdx, text);
+      setMemCache(chapterIdx, text);
       if (text.trim()) coreApi.saveEpubChapterText(filePath, chapterIdx, epubFileMtimeRef.current, text).catch(() => {});
       return text;
     } catch (_) {
@@ -562,11 +875,6 @@ export default function EpubViewer({ filePath }) {
       for (let k = ci; k < Math.min(chapters.length, ci + CHUNK); k++) {
         if (epubSearchRunIdRef.current !== runId) return;
         const ch = chapters[k];
-        let html = '';
-        try {
-          const res = await coreApi.loadEpubChapter(filePath, ch.id);
-          html = res && res.success ? (res.html || '') : '';
-        } catch (_) { html = ''; }
         if (epubSearchRunIdRef.current !== runId) return;
         const text = await getEpubChapterPlainText(k);
         if (epubSearchRunIdRef.current !== runId) return;
@@ -632,14 +940,24 @@ export default function EpubViewer({ filePath }) {
     }
   }, [chapterHtml, chapterIndex, epubSearchQuery, epubSearchOptions, epubSearchMarkedChapter]);
   // پرش از پنلِ راست (فصل‌ها).
+  // پرش از پنلِ راست (فصل‌ها) — مرحلهٔ ۴۱ §۱: با goToChapterRef تا
+  // تغییرِ رفرنسِ تابع، افکت را دوباره اجرا نکند.
   useEffect(() => {
     const onJump = (e) => {
       const idx = Number(e?.detail?.chapterIndex);
-      if (Number.isFinite(idx)) goToChapter(idx);
+      if (Number.isFinite(idx)) goToChapterRef.current(idx);
     };
     window.addEventListener('app:epub-jump', onJump);
     return () => window.removeEventListener('app:epub-jump', onJump);
-  }, [goToChapter]);
+  }, []);
+  // مرحلهٔ ۴۲ §۲: پرش به صفحهٔ هدف از استور (مثلأ از TopBar) — با گارد
+  // ref تا حلقه نسازد؛ بعد از پرش، سیگنال پاک می‌شود.
+  useEffect(() => {
+    if (targetPage == null) return;
+    const idx = (Number(targetPage) || 1) - 1;
+    if (idx !== chapterIndexRef.current) goToChapterRef.current(idx);
+    clearTargetPage();
+  }, [targetPage]);
 
   // حاشیه‌نویسی‌ها: همان plumbingای PdfViewer (دیتابیس + آینهٔ محلی).
   useEffect(() => {
@@ -891,6 +1209,8 @@ export default function EpubViewer({ filePath }) {
         .epub-chapter-content h1, .epub-chapter-content h2, .epub-chapter-content h3, .epub-chapter-content h4 { line-height: 1.4; margin: 0.8em 0 0.5em; }
         .epub-chapter-content a { color: #22d3ee; }
         .epub-chapter-content table { max-width: 100%; border-collapse: collapse; }
+        @keyframes epub-flip-next { from { opacity: 0; transform: translate3d(-32px, 0, 0) scale(0.97); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
+        @keyframes epub-flip-prev { from { opacity: 0; transform: translate3d(32px, 0, 0) scale(0.97); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
       `}</style>
 
       <AnnotationToolbar
@@ -911,14 +1231,15 @@ export default function EpubViewer({ filePath }) {
       {!dockMounted && (
         <button
           type="button"
-          onClick={openDock}
+          onClick={handleDockButtonClick}
+          onMouseDown={(e) => startDockDrag(e, 42)}
           title="تنظیماتِ مطالعه و فهرستِ فصل‌ها"
           style={{
-            position: 'absolute', top: 82, left: 18, zIndex: 45,
+            position: 'absolute', top: dockPos.y, left: dockPos.x, zIndex: 45,
             width: 42, height: 42, borderRadius: 12,
             background: 'rgba(13, 19, 26, 0.82)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
             border: '1px solid rgba(34, 211, 238, 0.35)',
-            color: '#e2e8f0', cursor: 'pointer',
+            color: '#e2e8f0', cursor: isDockDragging ? 'grabbing' : 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontFamily: "'Estedad', sans-serif", fontSize: 17, fontWeight: 700,
             boxShadow: '0 4px 16px rgba(0,0,0,0.45)',
@@ -934,7 +1255,7 @@ export default function EpubViewer({ filePath }) {
         <div
           dir="rtl"
           style={{
-            position: 'absolute', top: 82, left: 18, zIndex: 45,
+            position: 'absolute', top: dockPos.y, left: dockPos.x, zIndex: 45,
             width: 264, maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
             display: 'flex', flexDirection: 'column', gap: 12,
             padding: 14, borderRadius: 16,
@@ -948,7 +1269,11 @@ export default function EpubViewer({ filePath }) {
             pointerEvents: dockOpen ? 'auto' : 'none',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div
+            onMouseDown={(e) => startDockDrag(e, 264)}
+            title="برای جابه‌جاییِ پنل بکشید"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: isDockDragging ? 'grabbing' : 'grab', userSelect: 'none' }}
+          >
             <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>تنظیماتِ مطالعه</span>
             <button
               type="button"
@@ -1093,6 +1418,26 @@ export default function EpubViewer({ filePath }) {
             <span style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>{(THEMES[themeId] || THEMES.light).name}</span>
           </div>
 
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--muted)' }}>حالتِ نمایش</span>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button
+                type="button"
+                onClick={() => { if (typeof setEpubViewMode === 'function') setEpubViewMode('vertical'); }}
+                style={{ flex: 1, background: epubViewMode === 'vertical' ? 'rgba(34,211,238,0.16)' : 'rgba(255,255,255,0.06)', border: epubViewMode === 'vertical' ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11 }}
+              >
+                عمودی
+              </button>
+              <button
+                type="button"
+                onClick={() => { if (typeof setEpubViewMode === 'function') setEpubViewMode('horizontal-paged'); }}
+                style={{ flex: 1, background: epubViewMode === 'horizontal-paged' ? 'rgba(34,211,238,0.16)' : 'rgba(255,255,255,0.06)', border: epubViewMode === 'horizontal-paged' ? '1px solid rgba(34,211,238,0.5)' : '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, padding: '6px 4px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11 }}
+              >
+                افقیِ صفحه‌ای
+              </button>
+            </div>
+          </div>
+
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
             <button type="button" onClick={handleAddBookmark} title="افزودن بوک‌مارک در همین‌جا" style={{ height: '38px', whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: '6px', padding: '0 10px', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12 }}>
               <Icons.Bookmark size={14} />
@@ -1198,17 +1543,23 @@ export default function EpubViewer({ filePath }) {
       )}
 
       {/* برگهٔ فصل */}
-      <div ref={contentRef} data-reader-scroll-container="true" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 80px', direction: 'rtl' }}>
+      {/* مرحلهٔ ۴۱ §۲: نشانگرِ نرمِ انتقالِ فصل با اسکرول. */}
+      {chapterTransitionNotice && (
+        <div style={{ position: 'absolute', top: 76, left: '50%', transform: 'translateX(-50%)', zIndex: 55, background: 'rgba(13, 19, 26, 0.9)', border: '1px solid rgba(34, 211, 238, 0.35)', color: '#e2e8f0', borderRadius: 999, padding: '6px 14px', fontSize: 12.5, boxShadow: '0 4px 16px rgba(0,0,0,0.45)', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+          {chapterTransitionNotice}
+        </div>
+      )}
+      <div ref={contentRef} data-reader-scroll-container="true" onWheel={handleContentWheel} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 80px', direction: 'rtl', background: readerBackdropColor }}>
         {chapterLoading ? (
           <div style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
         ) : (
-          <div data-bookmark-page={chapterIndex + 1} style={{ position: 'relative', maxWidth: columnWidth.maxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)' }}>
+          <div data-bookmark-page={chapterIndex + 1} style={{ position: 'relative', maxWidth: effectiveMaxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)', animation: flipDirection === 1 ? 'epub-flip-next 340ms cubic-bezier(0.22, 1, 0.36, 1)' : flipDirection === -1 ? 'epub-flip-prev 340ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined, willChange: 'transform, opacity' }}>
             <div
               ref={chapterElRef}
               className="epub-chapter-content"
               onMouseUp={handleContentMouseUp}
               onClick={handleContentClick}
-              style={{ fontSize, fontFamily, lineHeight, wordBreak: 'break-word', textAlign: textAlignId === 'justify' ? 'justify' : 'right' }}
+              style={{ fontSize: effectiveFontSize, fontFamily, lineHeight, wordBreak: 'break-word', textAlign: textAlignId === 'justify' ? 'justify' : 'right' }}
               dangerouslySetInnerHTML={{ __html: chapterHtml }}
             />
             {shouldMountAnnotationLayer && (
@@ -1293,6 +1644,30 @@ export default function EpubViewer({ filePath }) {
           ) : (
             `فصل ${chapterIndex + 1} از ${chapters.length}`
           )}
+        </div>
+      )}
+      {/* مرحلهٔ ۴۲ §۱: داک کپسولی شیشه‌ای ناوبری در حالت افقی — ۸۴ پیکسل از پایین، تا زیر داک BottomControls (باند ۱۸ تا ۶۴ پیکسل، zIndex 48) نرود؛ مثل VerticalViewer. */}
+      {epubViewMode === 'horizontal-paged' && chapters.length > 1 && (
+        <div style={{ position: 'absolute', bottom: '84px', left: '50%', transform: 'translateX(-50%)', zIndex: 38, background: 'rgba(13, 19, 26, 0.88)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1px solid rgba(34, 211, 238, 0.28)', borderRadius: '999px', padding: '5px 8px', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
+          <button
+            type="button"
+            title="فصل قبلی"
+            disabled={chapterIndex <= 0}
+            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex - 1); }}
+            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: chapterIndex <= 0 ? 0.35 : 1 }}
+          >
+            <Icons.ChevronRight size={18} />
+          </button>
+          <span style={{ fontSize: 12.5, color: '#e2e8f0', fontWeight: 700, whiteSpace: 'nowrap', textAlign: 'center' }}>{`فصل ${(chapterIndex + 1).toLocaleString('fa-IR')} از ${chapters.length.toLocaleString('fa-IR')}`}</span>
+          <button
+            type="button"
+            title="فصل بعدی"
+            disabled={chapterIndex >= chapters.length - 1}
+            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex + 1); }}
+            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: chapterIndex >= chapters.length - 1 ? 0.35 : 1 }}
+          >
+            <Icons.ChevronLeft size={18} />
+          </button>
         </div>
       )}
       {/* منویِ شناورِ انتخابِ متن */}

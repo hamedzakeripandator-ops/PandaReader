@@ -308,6 +308,9 @@ export default function VerticalViewer() {
   const readingTheme = useSettingsStore((state) => state.preferences?.readingTheme || 'default');
   const readingBrightness = useSettingsStore((state) => state.preferences?.readingBrightness ?? 1);
   const readingWarmth = useSettingsStore((state) => state.preferences?.readingWarmth ?? 0);
+  // مرحلهٔ ۴۱ §۴: رنگِ پس‌زمینهٔ ناحیهٔ خواندن (از تنظیمات؛ تا وقتی
+  // فیلد در استور نیامده، همان پیش‌فرضِ '#2b3038' استفاده می‌شود).
+  const readerBackdropColor = useSettingsStore((state) => state.readerBackdropColor || '#2b3038');
   const pageFilter = useMemo(
     () => getReadingThemeFilter(readingTheme, readingBrightness, readingWarmth),
     [readingTheme, readingBrightness, readingWarmth]
@@ -367,6 +370,10 @@ export default function VerticalViewer() {
   const hPageIndexRef = useRef(0);
   const hFlipDirRef = useRef(1);
   const hWheelAtRef = useRef(0);
+  // مرحلهٔ ۴۲ §۳: ثبت لحظه رسیدن به لبه اسکرول (گیت دوگامی چرخ ماوس)
+  // و پنجره محافظت پس از ورق خودکار (تا اسکرول ناشی از ورق، ورق دیگری نسازد).
+  const edgeReachedAtRef = useRef(0);
+  const programmaticScrollUntilRef = useRef(0);
   const hSyncKeyRef = useRef('');
   const isHorizontalPagedRef = useRef(false);
   const [hPageIndex, setHPageIndex] = useState(0);
@@ -505,10 +512,12 @@ export default function VerticalViewer() {
       if (e.key === 'ArrowRight') {
         e.preventDefault();
         e.stopPropagation();
+        programmaticScrollUntilRef.current = Date.now() + 500;
         flipHorizontalPage(1);
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         e.stopPropagation();
+        programmaticScrollUntilRef.current = Date.now() + 500;
         flipHorizontalPage(-1);
       }
     };
@@ -524,23 +533,55 @@ export default function VerticalViewer() {
     if (!el) return undefined;
     const onWheel = (e) => {
       const now = Date.now();
+      // مرحلهٔ ۴۲ §۳: تا ۵۰۰ میلی‌ثانیه پس از ورق خودکار (دکمه/کلید)،
+      // چرخ ماوس نادیده گرفته می‌شود تا اسکرول ناشی از ورق، ورق دیگری نسازد.
+      if (now < programmaticScrollUntilRef.current) return;
       if (now - hWheelAtRef.current < 400) return;
-      const canScrollRight = el.scrollWidth > el.clientWidth + 2;
-      const canScrollDown = el.scrollHeight > el.clientHeight + 2;
-      const atRightEdge = !canScrollRight || el.scrollLeft >= el.scrollWidth - el.clientWidth - 2;
-      const atBottomEdge = !canScrollDown || el.scrollTop >= el.scrollHeight - el.clientHeight - 2;
-      const atLeftEdge = !canScrollRight || el.scrollLeft <= 2;
-      const atTopEdge = !canScrollDown || el.scrollTop <= 2;
-      const forward = e.deltaY > 0 || e.deltaX > 0;
-      const backward = e.deltaY < 0 || e.deltaX < 0;
-      if (forward && atRightEdge && atBottomEdge) {
+      const el = hContainerRef.current;
+      if (!el) return;
+      const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+      const canScrollDown = el.scrollTop < maxScrollTop - 2;
+      const canScrollUp = el.scrollTop > 2;
+      const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+      const canScrollRight = el.scrollLeft < maxScrollLeft - 2;
+      const canScrollLeft = el.scrollLeft > 2;
+      // ژست عمودی‌غالب: تا وقتی جای اسکرول هست، بگذار طبیعی اسکرول شود؛
+      // در لبه، لمس اول فقط ثبت می‌شود و لمس دوم (پس از ۳۸۰ میلی‌ثانیه
+      // و با شدت بیش از ۳۵) ورق می‌زند.
+      if (Math.abs(e.deltaY) >= Math.abs(e.deltaX || 0)) {
+        if (e.deltaY > 0 && canScrollDown) {
+          edgeReachedAtRef.current = 0;
+          return;
+        }
+        if (e.deltaY < 0 && canScrollUp) {
+          edgeReachedAtRef.current = 0;
+          return;
+        }
+        if (e.deltaY === 0) return;
+        if (edgeReachedAtRef.current === 0) {
+          edgeReachedAtRef.current = now;
+          return;
+        }
+        if (now - edgeReachedAtRef.current >= 380 && Math.abs(e.deltaY) > 35) {
+          e.preventDefault();
+          hWheelAtRef.current = now;
+          programmaticScrollUntilRef.current = now + 500;
+          flipHorizontalPage(e.deltaY > 0 ? 1 : -1);
+          edgeReachedAtRef.current = 0;
+        }
+        return;
+      }
+      // ژست افقی‌غالب: تا وقتی جای پن هست، بگذار طبیعی پن شود؛
+      // در لبه افقی، فوراً ورق می‌زند.
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5) {
+        if (e.deltaX > 0 && canScrollRight) return;
+        if (e.deltaX < 0 && canScrollLeft) return;
+        if (e.deltaX === 0) return;
         e.preventDefault();
         hWheelAtRef.current = now;
-        flipHorizontalPage(1);
-      } else if (backward && atLeftEdge && atTopEdge) {
-        e.preventDefault();
-        hWheelAtRef.current = now;
-        flipHorizontalPage(-1);
+        programmaticScrollUntilRef.current = now + 500;
+        flipHorizontalPage(e.deltaX > 0 ? 1 : -1);
+        edgeReachedAtRef.current = 0;
       }
     };
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -1325,6 +1366,7 @@ export default function VerticalViewer() {
           data-reader-scroll-container="true"
           style={{
             ...styles.scrollContainer,
+            backgroundColor: readerBackdropColor,
             pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
             cursor: isHPanning ? 'grabbing' : undefined,
             userSelect: isHPanning ? 'none' : undefined,
@@ -1348,9 +1390,11 @@ export default function VerticalViewer() {
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
+              // مرحلهٔ ۴۱ §۳: ورقِ فوق‌نرمِ افقی — لغزشِ translate3d +
+              // مقیاسِ ظریفِ 0.97 به 1 + محو/ظاهرِ نرم، در ۳۴۰ میلی‌ثانیه.
               opacity: hEntering ? 0 : 1,
-              transform: hEntering ? `translateX(${hFlipDirRef.current >= 0 ? 48 : -48}px)` : 'translateX(0)',
-              transition: 'opacity 0.26s ease, transform 0.26s ease',
+              transform: hEntering ? `translate3d(${hFlipDirRef.current >= 0 ? 48 : -48}px, 0, 0) scale(0.97)` : 'translate3d(0, 0, 0) scale(1)',
+              transition: 'opacity 340ms cubic-bezier(0.22, 1, 0.36, 1), transform 340ms cubic-bezier(0.22, 1, 0.36, 1)',
               willChange: 'transform, opacity',
             }}
           >
@@ -1403,6 +1447,7 @@ export default function VerticalViewer() {
         data-reader-scroll-container="true"
         style={{
           ...styles.scrollContainer,
+          backgroundColor: readerBackdropColor,
           pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
           cursor: isPanning ? 'grabbing' : undefined,
           userSelect: isPanning ? 'none' : undefined,
@@ -1503,29 +1548,35 @@ export default function VerticalViewer() {
         </div>
       </div>
       )}
+      {/* مرحلهٔ ۴۲ §۱: داک کپسولی شیشه‌ای ورق در حالت افقی — جایگزین
+          دکمه‌های کناری top: '50%' که روی دستگیره‌های App.jsx می‌افتادند.
+          ترتیب RTL است: «قبلی» در راست، «بعدی» در چپ. */}
       {isHorizontalPaged && itemsCount > 1 && (
-        <>
+        <div
+          style={{ position: 'absolute', bottom: '84px', left: '50%', transform: 'translateX(-50%)', zIndex: 38, background: 'rgba(13, 19, 26, 0.88)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1px solid rgba(34, 211, 238, 0.28)', borderRadius: '999px', padding: '5px 8px', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 10px 28px rgba(0,0,0,0.45)', direction: 'rtl' }}
+        >
           <button
             type="button"
             title="صفحه قبلی"
             aria-label="صفحه قبلی"
             disabled={hPageIndex <= 0}
-            onClick={() => flipHorizontalPage(-1)}
-            style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', zIndex: 40, width: 44, height: 44, borderRadius: '50%', background: 'rgba(13,19,26,0.7)', border: '1px solid rgba(34,211,238,0.35)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: hPageIndex <= 0 ? 0.35 : 1 }}
+            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; flipHorizontalPage(-1); }}
+            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: hPageIndex <= 0 ? 0.35 : 1, padding: 0 }}
           >
-            <Icons.ChevronLeft size={20} />
+            <Icons.ChevronRight size={18} />
           </button>
+          <span style={{ color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', whiteSpace: 'nowrap' }}>{`صفحهٔ ${(hPageIndex + 1).toLocaleString('fa-IR')} از ${itemsCount.toLocaleString('fa-IR')}`}</span>
           <button
             type="button"
             title="صفحه بعدی"
             aria-label="صفحه بعدی"
             disabled={hPageIndex >= itemsCount - 1}
-            onClick={() => flipHorizontalPage(1)}
-            style={{ position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)', zIndex: 40, width: 44, height: 44, borderRadius: '50%', background: 'rgba(13,19,26,0.7)', border: '1px solid rgba(34,211,238,0.35)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, opacity: hPageIndex >= itemsCount - 1 ? 0.35 : 1 }}
+            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; flipHorizontalPage(1); }}
+            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: hPageIndex >= itemsCount - 1 ? 0.35 : 1, padding: 0 }}
           >
-            <Icons.ChevronRight size={20} />
+            <Icons.ChevronLeft size={18} />
           </button>
-        </>
+        </div>
       )}
 
       {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ

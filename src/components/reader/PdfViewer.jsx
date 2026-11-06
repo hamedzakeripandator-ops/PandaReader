@@ -1111,6 +1111,9 @@ export default function PdfViewer({ filePath }) {
   const readingTheme = useSettingsStore((state) => state.preferences?.readingTheme || 'default');
   const readingBrightness = useSettingsStore((state) => state.preferences?.readingBrightness ?? 1);
   const readingWarmth = useSettingsStore((state) => state.preferences?.readingWarmth ?? 0);
+  // مرحلهٔ ۴۱ §۴: رنگِ پس‌زمینهٔ اطرافِ صفحه (از تنظیمات؛ تا وقتی
+  // فیلد در استور نیامده، همان پیش‌فرضِ '#2b3038' استفاده می‌شود).
+  const readerBackdropColor = useSettingsStore((state) => state.readerBackdropColor || '#2b3038');
   const pageFilter = useMemo(
     () => getReadingThemeFilter(readingTheme, readingBrightness, readingWarmth),
     [readingTheme, readingBrightness, readingWarmth]
@@ -3865,6 +3868,7 @@ export default function PdfViewer({ filePath }) {
         data-reader-scroll-container="true"
         style={{
           ...styles.scrollContainer,
+          backgroundColor: readerBackdropColor,
           pointerEvents: isSnippingActive || isAreaZoomActive ? 'none' : 'auto',
           cursor: isPanning ? 'grabbing' : undefined,
           userSelect: isPanning ? 'none' : undefined,
@@ -3909,8 +3913,8 @@ export default function PdfViewer({ filePath }) {
                   pageGap={safePageGap}
                   pdfDoc={pdfDoc}
                   zoomLevel={safeZoom}
-                  hiDpiRenderTick={hiDpiRenderTick}
-                  deepRefreshTick={deepRefreshTick}
+                  hiDpiRenderTick={pageNum === activePage ? hiDpiRenderTick : 0}
+                  deepRefreshTick={pageNum === activePage ? deepRefreshTick : 0}
                   distanceFromActive={distance}
                   isNearViewport={distance <= 1}
                   isActivePage={pageNum === activePage}
@@ -4066,7 +4070,7 @@ const styles = {
     // خاکستری‌مایه خواست و عددِ پیشین هم دقیقاً همین است. فقط خودِ
     // برگهٔ کاغذ (pageWrapper) سفید می‌ماند. پدینگِ افقیِ ۸۰ = جایِ
     // مارکرِ ۶۸ + پلِ اتصالِ ۱۰ پیکسل + حاشیهٔ امن.
-    backgroundColor: '#0a0f13',
+    backgroundColor: '#2b3038',
     padding: '10px 80px',
     position: 'relative',
     userSelect: 'none',

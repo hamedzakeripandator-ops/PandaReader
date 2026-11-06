@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import { coreApi } from '../services/coreApi';
+import useSettingsStore from './useSettingsStore';
 
 let saveZoomTimer = null;
-let saveGapTimer = null;
+let saveComicGapTimer = null;
+let savePdfGapTimer = null;
 
 // Minimum zoom lowered from 40% to 10% (0.1) per user requirement
 const MIN_ZOOM = 0.1;
@@ -52,10 +54,29 @@ const normalizeStorePath = (p) => {
   return p.trim().replace(/[\\/]+/g, '\\').toLowerCase();
 };
 
+// مرحلهٔ ۴۱ §۱: کلیدِ پایدارِ فصلِ EPUB برایِ مقایسهٔ فهرست‌ها
+// (فصل‌ها شکلِ { id, title } دارند و عنوان در پنلِ راست نمایش داده
+// می‌شود؛ پس کلید، id و title را با هم می‌سنجد تا عنوانِ عوض‌شده
+// هم به‌روز شود؛ id اگر نبود، title وگرنه ایندکس).
+const epubChapterKey = (chapter, index) => {
+  if (chapter && typeof chapter === 'object') {
+    if (chapter.id !== undefined && chapter.id !== null && chapter.id !== '') return `id:${chapter.id}|title:${typeof chapter.title === 'string' ? chapter.title : ''}`;
+    if (typeof chapter.title === 'string' && chapter.title) return `title:${chapter.title}`;
+  }
+  return `index:${index}`;
+};
+const sameEpubChapters = (prev, next) => {
+  if (prev === next) return true;
+  if (!Array.isArray(prev) || !Array.isArray(next) || prev.length !== next.length) return false;
+  return next.every((chapter, index) => epubChapterKey(chapter, index) === epubChapterKey(prev[index], index));
+};
+
 const useReaderStore = create((set, get) => ({
   comicData: null,
   currentPage: 1,
   targetPage: null,
+  // مرحلهٔ ۴۲: شمارِ کلِ صفحه‌هایِ EPUBِ جاری (قرارداد با EpubViewer؛ با عوض‌شدنِ فایل صفر می‌شود).
+  totalPages: 0,
   zoomLevel: getInitialZoom(),
   preAreaZoomLevel: null,
   areaZoomTarget: null, // { id, targetZoom, pageNumber, pageRatioX, pageRatioY, normCenterX, normCenterY, rect, timestamp }
@@ -78,6 +99,8 @@ const useReaderStore = create((set, get) => ({
   // مرحلهٔ ۴۰ §۴: حالتِ نمایشِ کمیک — عمودی (طوماری) یا افقیِ صفحه‌ای
   // (مخصوصِ CBZ/مانگایِ landscape).
   comicViewMode: 'vertical',
+  // مرحلهٔ ۴۱ §۱: حالتِ نمایشِ EPUB — عمودی (طوماری) یا افقیِ صفحه‌ای.
+  epubViewMode: 'vertical',
   // مرحلهٔ ۴۰ §۵: سیگنالِ جستجویِ EPUB از TopBar (آینهٔ PDF).
   epubSearchRequestId: 0,
   epubSearchQuery: '',
@@ -129,7 +152,15 @@ const useReaderStore = create((set, get) => ({
     }
   },
 
-  setEpubChapters: (chapters) => set({ epubChapters: Array.isArray(chapters) ? chapters : [] }),
+  // مرحلهٔ ۴۱ §۱: گاردِ حلقهٔ بی‌نهایتِ EPUB — اگر فهرستِ تازه با
+  // فهرستِ جاری (طول و کلیدِ پایدارِ هر فصل) برابر بود، اصلاً set
+  // نمی‌زنیم تا افکتِ [filePath, setEpubChapters] در EpubViewer
+  // با آرایهٔ تازه‌ساخته‌شدهٔ هم‌مقدار، دوباره شلیک نشود.
+  setEpubChapters: (chapters) => {
+    const next = Array.isArray(chapters) ? chapters : [];
+    if (sameEpubChapters(get().epubChapters, next)) return;
+    set({ epubChapters: next });
+  },
 
   setComicData: (data) => {
     if (!data) {
@@ -137,6 +168,7 @@ const useReaderStore = create((set, get) => ({
         comicData: null,
         currentPage: 1,
         targetPage: null,
+        totalPages: 0,
         preAreaZoomLevel: null,
         areaZoomTarget: null,
         rotation: 0,
@@ -148,6 +180,7 @@ const useReaderStore = create((set, get) => ({
         pdfOutlineStatus: 'idle',
         epubChapters: [],
         comicViewMode: 'vertical',
+        epubViewMode: 'vertical',
         epubSearchRequestId: 0,
         epubSearchQuery: '',
       });
@@ -169,15 +202,30 @@ const useReaderStore = create((set, get) => ({
         ? data.savedResumePage
         : 1;
 
-    // مرحلهٔ ۴۰ §۴: فایلِ .cbz، خودکار افقیِ صفحه‌ای با زومِ ۱۶۵٪
-    // باز می‌شود؛ بقیهٔ فایل‌ها، عمودی می‌مانند.
+    // مرحلهٔ ۴۰ §۴ (از مرحلهٔ ۴۱ §۳: از تنظیمات خوانده می‌شود):
+    // فایلِ .cbz با زوم و حالتِ پیش‌فرضِ CBZ باز می‌شود؛ بقیهٔ
+    // فایل‌ها، عمودی می‌مانند.
     const openedPath = data?.filePath || data?.path || '';
     const isCbzFile = typeof openedPath === 'string' && /\.cbz$/i.test(openedPath);
+    const isEpubFile = typeof openedPath === 'string' && /\.epub$/i.test(openedPath);
+    // مرحلهٔ ۴۱ §۳: تنظیماتِ وابسته به فرمت، خودکار اعمال می‌شود —
+    // فایلِ .cbz با زوم و حالتِ پیش‌فرضِ CBZ، فایلِ .epub با زوم و
+    // حالتِ پیش‌فرضِ EPUB (زومِ EPUB همان zoomLevel است؛ EpubViewer
+    // هم از همین فیلد می‌خواند و فیلدِ جدایِ زومِ EPUB ندارد).
+    // پیش‌فرض‌هایِ تنظیمات (۱۶۵٪ / افقی برایِ CBZ) همان رفتارِ
+    // مرحلهٔ ۴۰ است، پس تا وقتی کاربر چیزی عوض نکرده، هیچ چیز
+    // عوض نمی‌شود؛ PDF و بقیهٔ فرمت‌ها دقیقاً مثلِ قبل‌اند.
+    const formatSettings = useSettingsStore.getState();
+    const cbzZoom = Math.min(3.5, Math.max(0.1, (Number(formatSettings.cbzDefaultZoom) || 165) / 100));
+    const cbzMode = formatSettings.cbzDefaultViewMode === 'vertical' ? 'vertical' : 'horizontal-paged';
+    const epubZoom = Math.min(3.5, Math.max(0.1, (Number(formatSettings.epubDefaultZoom) || 100) / 100));
+    const epubMode = formatSettings.epubDefaultViewMode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical';
 
     set({
       comicData: data,
       currentPage: resumePage,
       targetPage: null,
+      totalPages: 0,
       preAreaZoomLevel: null,
       areaZoomTarget: null,
       rotation: 0,
@@ -185,8 +233,10 @@ const useReaderStore = create((set, get) => ({
       pdfOutlineFile: '',
       pdfOutlineStatus: 'idle',
       epubChapters: [],
-      comicViewMode: isCbzFile ? 'horizontal-paged' : 'vertical',
-      ...(isCbzFile ? { zoomLevel: 1.65 } : {}),
+      comicViewMode: isCbzFile ? cbzMode : 'vertical',
+      epubViewMode: isEpubFile ? epubMode : 'vertical',
+      ...(isCbzFile ? { zoomLevel: cbzZoom } : {}),
+      ...(isEpubFile ? { zoomLevel: epubZoom } : {}),
       epubSearchRequestId: 0,
       epubSearchQuery: '',
     });
@@ -199,6 +249,9 @@ const useReaderStore = create((set, get) => ({
   },
 
   setTargetPage: (pageNumber) => set({ targetPage: pageNumber }),
+
+  // مرحلهٔ ۴۲: ثبتِ شمارِ کلِ صفحه‌ها از EpubViewer (فقط عددِ صحیحِ مثبت؛ بقیه صفر).
+  setTotalPages: (n) => { const v = Number.isFinite(Number(n)) && Number(n) > 0 ? Math.floor(Number(n)) : 0; if (get().totalPages === v) return; set({ totalPages: v }); },
 
   // مرحله ۶ ـ بخش الف: فهرستِ PDF (Outline). فقط برای سندِ جاری
   // معتبر است؛ با عوض‌شدنِ فایل، در setComicData پاک می‌شود.
@@ -226,8 +279,8 @@ const useReaderStore = create((set, get) => ({
 
     set({ comicPageGap: clamped });
 
-    if (saveGapTimer) clearTimeout(saveGapTimer);
-    saveGapTimer = setTimeout(() => {
+    if (saveComicGapTimer) clearTimeout(saveComicGapTimer);
+    saveComicGapTimer = setTimeout(() => {
       try {
         localStorage.setItem('comic_reader_comic_gap', String(clamped));
       } catch (_) {}
@@ -239,7 +292,7 @@ const useReaderStore = create((set, get) => ({
           })
           .catch(() => {});
       }
-      saveGapTimer = null;
+      saveComicGapTimer = null;
     }, 300);
   },
 
@@ -249,8 +302,8 @@ const useReaderStore = create((set, get) => ({
 
     set({ pdfPageGap: clamped });
 
-    if (saveGapTimer) clearTimeout(saveGapTimer);
-    saveGapTimer = setTimeout(() => {
+    if (savePdfGapTimer) clearTimeout(savePdfGapTimer);
+    savePdfGapTimer = setTimeout(() => {
       try {
         localStorage.setItem('comic_reader_pdf_gap', String(clamped));
       } catch (_) {}
@@ -262,7 +315,7 @@ const useReaderStore = create((set, get) => ({
           })
           .catch(() => {});
       }
-      saveGapTimer = null;
+      savePdfGapTimer = null;
     }, 300);
   },
 
@@ -320,7 +373,7 @@ const useReaderStore = create((set, get) => ({
         coreApi
           .dbAction({
             action: 'SAVE_SETTING',
-            payload: { key: 'defaultZoom', value: Math.min(2.5, clamped) },
+            payload: { key: 'defaultZoom', value: Math.min(3.5, clamped) },
           })
           .catch(() => {});
       }
@@ -400,7 +453,7 @@ const useReaderStore = create((set, get) => ({
         const res = await coreApi.dbAction({ action: 'GET_SETTINGS' });
         if (res?.settings?.defaultZoom) {
           const parsed = parseFloat(res.settings.defaultZoom);
-          if (!isNaN(parsed) && parsed >= MIN_ZOOM && parsed <= 2.5) {
+          if (!isNaN(parsed) && parsed >= MIN_ZOOM && parsed <= MAX_ZOOM) {
             target = parsed;
           }
         }
@@ -435,6 +488,10 @@ const useReaderStore = create((set, get) => ({
   setComicViewMode: (mode) =>
     set({ comicViewMode: mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical' }),
 
+  // مرحلهٔ ۴۱ §۱: سوییچِ حالتِ نمایشِ EPUB (عمودی/افقیِ صفحه‌ای).
+  setEpubViewMode: (mode) =>
+    set({ epubViewMode: mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical' }),
+
   // مرحلهٔ ۴۰ §۵: آغازِ جستجو در EPUBِ فعلی از TopBar (آینهٔ PDF).
   triggerEpubSearch: (query) =>
     set((state) => ({
@@ -447,18 +504,64 @@ const useReaderStore = create((set, get) => ({
     set({ loadingProgress: typeof progress === 'number' ? progress : 0 }),
 
   closeComic: () => {
+    // مرحلهٔ ۴۲: مقدارهایِ در انتظارِ ذخیره (زوم و گپ‌ها) پیش از
+    // بستن، فوراً نوشته می‌شوند تا با clearTimeout گم نشوند.
+    if (saveZoomTimer) {
+      try {
+        localStorage.setItem('comic_reader_zoom_level', String(get().zoomLevel));
+      } catch (_) {}
+      if (coreApi.isAvailable()) {
+        coreApi
+          .dbAction({
+            action: 'SAVE_SETTING',
+            payload: { key: 'defaultZoom', value: Math.min(3.5, get().zoomLevel) },
+          })
+          .catch(() => {});
+      }
+    }
+    if (saveComicGapTimer) {
+      try {
+        localStorage.setItem('comic_reader_comic_gap', String(get().comicPageGap));
+      } catch (_) {}
+      if (coreApi.isAvailable()) {
+        coreApi
+          .dbAction({
+            action: 'SAVE_SETTING',
+            payload: { key: 'comicPageGap', value: get().comicPageGap },
+          })
+          .catch(() => {});
+      }
+    }
+    if (savePdfGapTimer) {
+      try {
+        localStorage.setItem('comic_reader_pdf_gap', String(get().pdfPageGap));
+      } catch (_) {}
+      if (coreApi.isAvailable()) {
+        coreApi
+          .dbAction({
+            action: 'SAVE_SETTING',
+            payload: { key: 'pdfPageGap', value: get().pdfPageGap },
+          })
+          .catch(() => {});
+      }
+    }
     if (saveZoomTimer) {
       clearTimeout(saveZoomTimer);
       saveZoomTimer = null;
     }
-    if (saveGapTimer) {
-      clearTimeout(saveGapTimer);
-      saveGapTimer = null;
+    if (saveComicGapTimer) {
+      clearTimeout(saveComicGapTimer);
+      saveComicGapTimer = null;
+    }
+    if (savePdfGapTimer) {
+      clearTimeout(savePdfGapTimer);
+      savePdfGapTimer = null;
     }
     set({
       comicData: null,
       currentPage: 1,
       targetPage: null,
+      totalPages: 0,
       preAreaZoomLevel: null,
       areaZoomTarget: null,
       rotation: 0,
@@ -466,6 +569,7 @@ const useReaderStore = create((set, get) => ({
       pdfSearchQuery: '',
       pdfSearchRequestId: 0,
       comicViewMode: 'vertical',
+      epubViewMode: 'vertical',
       epubSearchRequestId: 0,
       epubSearchQuery: '',
     });

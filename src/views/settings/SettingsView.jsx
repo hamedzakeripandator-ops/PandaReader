@@ -23,16 +23,35 @@ export default function SettingsView() {
     resetShortcutsToDefault,
     updatePreference,
     setHeroSliderVariant,
+    // مرحله 41: پیش‌فرض‌های اختصاصی CBZ و EPUB و رنگ پس‌زمینهٔ
+    // اطراف صفحهٔ مطالعه (مقادیر پیش‌فرض، همان قرارداد استور).
+    cbzDefaultZoom = 165,
+    cbzDefaultViewMode = 'horizontal-paged',
+    epubDefaultZoom = 100,
+    epubDefaultViewMode = 'vertical',
+    readerBackdropColor = '#2b3038',
+    setCbzDefaultZoom,
+    setCbzDefaultViewMode,
+    setEpubDefaultZoom,
+    setEpubDefaultViewMode,
+    setReaderBackdropColor,
   } = useSettingsStore();
 
   const { setZoomLevel } = useReaderStore();
   const showToast = useAppStore((state) => state.showToast);
 
-  const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader' | 'storage'
+  const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader' | 'formats' | 'storage'
 
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی.
   const [backupBusy, setBackupBusy] = useState(null); // null | 'export' | 'import'
   const [backupStatus, setBackupStatus] = useState('');
+  // مرحله 41: پیش‌نویس‌های محلی ورودی‌های عددی و متنی؛ کاربر
+  // می‌تواند مقدار میانی (مثلاً خالی یا ناقص) را تایپ کند و مقدار
+  // نهایی فقط هنگام blur یا Enter در استور ذخیره می‌شود.
+  const [cbzZoomDraft, setCbzZoomDraft] = useState(null);
+  const [epubZoomDraft, setEpubZoomDraft] = useState(null);
+  const [hexDraft, setHexDraft] = useState(null);
+  const [hexError, setHexError] = useState('');
   const [lastBackup, setLastBackup] = useState(() => {
     try {
       const raw = window.localStorage.getItem('comicReader.lastBackup');
@@ -138,6 +157,113 @@ export default function SettingsView() {
     setZoomLevel(num);
   };
 
+  // مرحله 41 §4: 8 پالت پیشنهادی رنگ پس‌زمینهٔ اطراف صفحه.
+  const BACKDROP_PALETTES = [
+    { name: 'خاکستری استودیویی ملایم (پیشنهادی)', hex: '#2b3038' },
+    { name: 'خاکستری کاغذی خنثی', hex: '#3a404a' },
+    { name: 'بژ گرم کتابخانه (سپیا)', hex: '#3d3832' },
+    { name: 'سرمهٔای مات آرامش‌بخش', hex: '#1e2633' },
+    { name: 'سبز مریم‌گلی تیره', hex: '#232d2b' },
+    { name: 'دودی ملایم شب', hex: '#181c22' },
+    { name: 'روشن کرمی روز', hex: '#dcd9d0' },
+    { name: 'تاریک عمیق کلاسیک', hex: '#0a0f13' },
+  ];
+
+  // مرحله 41: محدودسازی درصد زوم به بازهٔ مجاز و ذخیره در استور.
+  const clampZoomPercent = (raw, min, max, fallback) => {
+    const n = parseInt(raw, 10);
+    if (Number.isNaN(n)) return fallback;
+    return Math.min(max, Math.max(min, n));
+  };
+  const commitCbzZoom = (raw) => {
+    const v = clampZoomPercent(raw, 50, 300, 165);
+    if (setCbzDefaultZoom) setCbzDefaultZoom(v);
+    setCbzZoomDraft(null);
+  };
+  const commitEpubZoom = (raw) => {
+    const v = clampZoomPercent(raw, 50, 250, 100);
+    if (setEpubDefaultZoom) setEpubDefaultZoom(v);
+    setEpubZoomDraft(null);
+  };
+
+  // مرحله 41 §4: اعتبارسنجی کد HEX (فقط # + 6 رقم hex).
+  const isValidHex = (v) => /^#[0-9a-fA-F]{6}$/.test(v || '');
+  // مقدار نمایشی ورودی رنگ؛ اگر مقدار استور معتبر نباشد، به
+  // پیش‌فرض قرارداد برمی‌گردد تا <input type="color"> خراب نشود.
+  const backdropColorValue = isValidHex(readerBackdropColor) ? readerBackdropColor : '#2b3038';
+  const handleBackdropSelect = (hex) => {
+    setHexDraft(null);
+    setHexError('');
+    if (setReaderBackdropColor) setReaderBackdropColor(hex);
+  };
+  const handleHexChange = (raw) => {
+    setHexDraft(raw);
+    if (isValidHex(raw)) {
+      setHexError('');
+      if (setReaderBackdropColor) setReaderBackdropColor(raw.toLowerCase());
+    } else if (raw.length >= 7) {
+      setHexError('کد HEX معتبر نیست؛ باید به شکل #RRGGBB با 6 رقم باشد.');
+    } else {
+      setHexError('');
+    }
+  };
+  const handleHexBlur = () => {
+    if (hexDraft != null && !isValidHex(hexDraft)) {
+      setHexDraft(null);
+      setHexError('کد HEX معتبر نیست؛ مقدار قبلی برگردانده شد.');
+    }
+  };
+
+  // مرحله 41: گزینهٔ رادیویی شکیل برای حالت خواندن پیش‌فرض
+  // (CBZ و EPUB) — همان الگوی کارت‌های انتخاب سبک اسلایدر در
+  // مرحلهٔ 35: دایرهٔ تیک‌دار برای گزینهٔ فعال.
+  const renderViewModeOption = (value, currentValue, onSelect, title, desc) => {
+    const isActive = currentValue === value;
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onSelect}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } }}
+        style={{ ...styles.radioOption, ...(isActive ? styles.radioOptionActive : {}) }}
+      >
+        {isActive ? (
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 }}>
+            <circle cx="12" cy="12" r="9" />
+            <polyline points="20 6 9 17 4 12" strokeWidth="2.5" />
+          </svg>
+        ) : (
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 }}>
+            <circle cx="12" cy="12" r="9" />
+          </svg>
+        )}
+        <div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <strong style={{ fontSize: 13, color: isActive ? '#67e8f9' : 'var(--text)' }}>{title}</strong>
+            {isActive && (<span style={{ fontSize: 11, color: '#67e8f9' }}>فعال</span>)}
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--muted)', margin: '4px 0 0' }}>{desc}</p>
+        </div>
+      </div>
+    );
+  };
+
+  // مرحله 41: دکمه‌های سریع درصد زوم (CBZ و EPUB).
+  const renderQuickZoomButtons = (values, currentValue, onSelect) => (
+    <div style={styles.quickRow}>
+      {values.map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onSelect(v)}
+          style={{ ...styles.quickBtn, ...(currentValue === v ? styles.quickBtnActive : {}) }}
+        >
+          {v}%
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <div style={styles.container}>
       <div style={styles.containerInner}>
@@ -179,6 +305,18 @@ export default function SettingsView() {
           >
             <Icons.BookOpen size={15} />
             <span>تنظیمات ریدر و ظاهر</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('formats')}
+            style={{
+              ...styles.tabBtn,
+              ...(activeTab === 'formats' ? styles.tabBtnActive : {}),
+            }}
+          >
+            <Icons.Library size={15} />
+            <span>فرمت‌های CBZ و EPUB</span>
           </button>
           <button
             type="button"
@@ -320,6 +458,73 @@ export default function SettingsView() {
         </div>
 
         {/* مرحلهٔ ۳۵ §۶: انتخابِ سبکِ کنترلِ اسلایدرِ کتابخانه (موج صوتی) */}
+        {/* مرحله 41 §4: رنگ پس‌زمینهٔ اطراف صفحهٔ مطالعه */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>رنگ پس‌زمینهٔ اطراف صفحهٔ مطالعه (کاهش کنتراست با صفحهٔ سفید)</h3>
+          <p style={styles.cardDesc}>
+            رنگ تیرهٔ اطراف صفحه، خستگی چشم هنگام خواندن صفحات سفید را کم می‌کند. یک پالت آماده انتخاب کن یا رنگ دلخواه خودت را بساز؛ تغییر در لحظه در استور ذخیره می‌شود.
+          </p>
+
+          <div style={styles.paletteGrid}>
+            {BACKDROP_PALETTES.map((p) => {
+              const isActive = (readerBackdropColor || '').toLowerCase() === p.hex;
+              return (
+                <div key={p.hex} style={styles.paletteItem}>
+                  <button
+                    type="button"
+                    onClick={() => handleBackdropSelect(p.hex)}
+                    title={p.name}
+                    aria-label={p.name}
+                    style={{ ...styles.paletteSwatch, backgroundColor: p.hex, ...(isActive ? styles.paletteSwatchActive : {}) }}
+                  >
+                    <span style={styles.palettePage} />
+                    {isActive && (
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="#0a0f13" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', position: 'absolute', top: 6, right: 6 }}>
+                        <circle cx="12" cy="12" r="9" />
+                        <polyline points="20 6 9 17 4 12" strokeWidth="2.5" />
+                      </svg>
+                    )}
+                  </button>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span style={styles.paletteName}>{p.name}</span>
+                    {isActive && (<span style={{ fontSize: 11, color: '#67e8f9' }}>فعال</span>)}
+                  </div>
+                  <span style={styles.monoValue} dir="ltr">{p.hex}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={styles.colorRow}>
+            <span style={styles.prefTitle}>رنگ دلخواه</span>
+            <input
+              type="color"
+              value={backdropColorValue}
+              onChange={(e) => handleBackdropSelect(e.target.value)}
+              style={styles.colorInput}
+              aria-label="انتخاب رنگ دلخواه پس‌زمینه"
+            />
+            <input
+              type="text"
+              value={hexDraft ?? readerBackdropColor}
+              onChange={(e) => handleHexChange(e.target.value)}
+              onBlur={handleHexBlur}
+              style={styles.hexInput}
+              dir="ltr"
+              placeholder="#2b3038"
+              aria-label="کد HEX رنگ پس‌زمینه"
+            />
+            {hexError && (<span style={styles.hexError}>{hexError}</span>)}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ ...styles.paletteSwatch, backgroundColor: backdropColorValue, width: 96, height: 64, cursor: 'default' }}>
+              <span style={styles.palettePage} />
+            </span>
+            <span style={styles.prefSub}>پیش‌نمایش: برگهٔ سفید روی رنگ انتخاب‌شدهٔ فعلی</span>
+          </div>
+        </div>
+
         <div style={styles.sectionCard}>
           <h3 style={styles.cardTitle}>سبک کنترل اسلایدر کتابخانه (موج صوتی)</h3>
           <p style={styles.cardDesc}>
@@ -393,6 +598,117 @@ export default function SettingsView() {
                 </div>
               );
             })}
+          </div>
+        </div>
+        </>
+      )}
+
+      {/* مرحله 41 §3: تب «فرمت‌های CBZ و EPUB» — همهٔ تنظیمات
+          اختصاصی این دو فرمت این‌جا متمرکز است؛ در تب‌های دیگر
+          هیچ تنظیم CBZ/EPUB نیست. */}
+      {activeTab === 'formats' && (
+        <>
+        {/* کارت اول: تنظیمات اختصاصی مانگا و کمیک (CBZ) */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>تنظیمات اختصاصی مانگا و کمیک (CBZ)</h3>
+          <p style={styles.cardDesc}>
+            حالت خواندن و زوم پیش‌فرض فقط برای فایل‌های CBZ؛ هنگام باز شدن هر کمیک تازه، همین مقدارها اعمال می‌شوند.
+          </p>
+
+          <div style={styles.prefGrid}>
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>حالت خواندن پیش‌فرض</span>
+              </div>
+              <div style={styles.radioGroup}>
+                {renderViewModeOption('horizontal-paged', cbzDefaultViewMode, () => { if (setCbzDefaultViewMode) setCbzDefaultViewMode('horizontal-paged'); }, 'افقی (صفحه‌ای - مخصوص مانگا)', 'ورق زدن صفحه‌به‌صفحه؛ مناسب مانگا و کمیک')}
+                {renderViewModeOption('vertical', cbzDefaultViewMode, () => { if (setCbzDefaultViewMode) setCbzDefaultViewMode('vertical'); }, 'عمودی (اسکرول پیوسته)', 'همهٔ صفحات پشت سر هم با اسکرول')}
+              </div>
+            </div>
+
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>درصد زوم نرمال (پیش‌فرض) هنگام باز شدن CBZ</span>
+                <span style={styles.monoValue}>{cbzDefaultZoom}%</span>
+              </div>
+              <input
+                type="range"
+                min="50"
+                max="300"
+                step="5"
+                value={cbzDefaultZoom}
+                onChange={(e) => { if (setCbzDefaultZoom) setCbzDefaultZoom(parseInt(e.target.value, 10)); }}
+                style={styles.slider}
+              />
+              <div style={styles.zoomRow}>
+                <input
+                  type="number"
+                  min="50"
+                  max="300"
+                  step="5"
+                  value={cbzZoomDraft ?? cbzDefaultZoom}
+                  onChange={(e) => setCbzZoomDraft(e.target.value)}
+                  onBlur={(e) => commitCbzZoom(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  style={styles.numberInput}
+                  aria-label="درصد زوم پیش‌فرض CBZ"
+                />
+                <span style={styles.prefSub}>٪ — بین 50 تا 300</span>
+                {renderQuickZoomButtons([100, 135, 165, 200], cbzDefaultZoom, (v) => { setCbzZoomDraft(null); if (setCbzDefaultZoom) setCbzDefaultZoom(v); })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* کارت دوم: تنظیمات اختصاصی کتاب‌های الکترونیکی (EPUB) */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>تنظیمات اختصاصی کتاب‌های الکترونیکی (EPUB)</h3>
+          <p style={styles.cardDesc}>
+            حالت خواندن و زوم پیش‌فرض فقط برای فایل‌های EPUB؛ هنگام باز شدن هر کتاب تازه، همین مقدارها اعمال می‌شوند.
+          </p>
+
+          <div style={styles.prefGrid}>
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>حالت خواندن پیش‌فرض</span>
+              </div>
+              <div style={styles.radioGroup}>
+                {renderViewModeOption('vertical', epubDefaultViewMode, () => { if (setEpubDefaultViewMode) setEpubDefaultViewMode('vertical'); }, 'عمودی (اسکرول پیوسته با رفتن خودکار به فصل بعد)', 'خواندن پیوستهٔ فصل‌ها بدون توقف در پایان هر فصل')}
+                {renderViewModeOption('horizontal-paged', epubDefaultViewMode, () => { if (setEpubDefaultViewMode) setEpubDefaultViewMode('horizontal-paged'); }, 'افقی (ورق زدن صفحه‌ای)', 'ورق زدن صفحه‌به‌صفحه مثل کتاب چاپی')}
+              </div>
+            </div>
+
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>درصد زوم نرمال (پیش‌فرض) هنگام باز شدن EPUB</span>
+                <span style={styles.monoValue}>{epubDefaultZoom}%</span>
+              </div>
+              <input
+                type="range"
+                min="50"
+                max="250"
+                step="5"
+                value={epubDefaultZoom}
+                onChange={(e) => { if (setEpubDefaultZoom) setEpubDefaultZoom(parseInt(e.target.value, 10)); }}
+                style={styles.slider}
+              />
+              <div style={styles.zoomRow}>
+                <input
+                  type="number"
+                  min="50"
+                  max="250"
+                  step="5"
+                  value={epubZoomDraft ?? epubDefaultZoom}
+                  onChange={(e) => setEpubZoomDraft(e.target.value)}
+                  onBlur={(e) => commitEpubZoom(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  style={styles.numberInput}
+                  aria-label="درصد زوم پیش‌فرض EPUB"
+                />
+                <span style={styles.prefSub}>٪ — بین 50 تا 250</span>
+                {renderQuickZoomButtons([85, 100, 125, 150], epubDefaultZoom, (v) => { setEpubZoomDraft(null); if (setEpubDefaultZoom) setEpubDefaultZoom(v); })}
+              </div>
+            </div>
           </div>
         </div>
         </>
@@ -726,5 +1042,144 @@ const styles = {
     fontFamily: 'var(--font-fa)',
     fontSize: '11.5px',
     color: 'var(--muted)',
+  },
+  // مرحله 41: استایل‌های تب فرمت‌ها و کارت رنگ پس‌زمینه.
+  radioGroup: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  radioOption: {
+    border: '1px solid var(--border)',
+    background: 'rgba(255,255,255,0.03)',
+    borderRadius: 14,
+    padding: '14px 16px',
+    cursor: 'pointer',
+    width: '100%',
+    boxSizing: 'border-box',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+  },
+  radioOptionActive: {
+    border: '2px solid #22d3ee',
+    background: 'rgba(34,211,238,0.08)',
+  },
+  zoomRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  numberInput: {
+    width: '76px',
+    padding: '8px 10px',
+    borderRadius: '10px',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '13px',
+    fontWeight: 700,
+    textAlign: 'center',
+    direction: 'ltr',
+  },
+  quickRow: {
+    display: 'flex',
+    gap: '8px',
+    flexWrap: 'wrap',
+  },
+  quickBtn: {
+    padding: '6px 12px',
+    borderRadius: '9px',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '12px',
+    fontWeight: 700,
+    cursor: 'pointer',
+    direction: 'ltr',
+  },
+  quickBtnActive: {
+    backgroundColor: 'var(--accent)',
+    border: '1px solid var(--accent)',
+    color: '#0a0f13',
+  },
+  paletteGrid: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '14px',
+  },
+  paletteItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '6px',
+    flex: '1 1 104px',
+    maxWidth: '128px',
+  },
+  paletteSwatch: {
+    position: 'relative',
+    width: '100%',
+    height: '64px',
+    borderRadius: '12px',
+    border: '1px solid var(--border)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+    padding: 0,
+  },
+  paletteSwatchActive: {
+    border: '2px solid #22d3ee',
+    boxShadow: '0 0 0 2px rgba(34,211,238,0.25)',
+  },
+  palettePage: {
+    width: '26px',
+    height: '38px',
+    backgroundColor: '#ffffff',
+    borderRadius: '2px',
+    boxShadow: '0 1px 5px rgba(0,0,0,0.45)',
+    display: 'block',
+  },
+  paletteName: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11px',
+    color: 'var(--text)',
+    textAlign: 'center',
+  },
+  colorRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  colorInput: {
+    width: '48px',
+    height: '38px',
+    padding: '3px',
+    borderRadius: '10px',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    cursor: 'pointer',
+  },
+  hexInput: {
+    width: '110px',
+    padding: '8px 10px',
+    borderRadius: '10px',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    color: 'var(--text)',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '13px',
+    fontWeight: 700,
+    textAlign: 'center',
+    direction: 'ltr',
+  },
+  hexError: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    color: '#f87171',
   },
 };

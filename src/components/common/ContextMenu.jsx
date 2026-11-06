@@ -753,8 +753,15 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                       style={{
                         display: 'flex',
                         alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                        width: '20px',
+                        height: '20px',
+                        borderRadius: '50%',
+                        border: `1px solid ${action.isOpen ? 'rgba(34, 211, 238, 0.5)' : 'rgba(139, 148, 158, 0.35)'}`,
+                        backgroundColor: action.isOpen ? 'rgba(34, 211, 238, 0.12)' : 'transparent',
                         color: action.isOpen ? '#22d3ee' : '#8B949E',
-                        transition: 'transform 250ms cubic-bezier(0.16, 1, 0.3, 1)',
+                        transition: 'transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), background-color 0.28s ease, border-color 0.28s ease',
                         transform: action.isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
                       }}
                     >
@@ -788,15 +795,16 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   // Stage 8 Part B: menu zoom restored to the exact pre-Part-A
   // behaviour — render only while open, no exit retention, no
   // dynamic transformOrigin, no fade-out override. The entry
-  // keyframe below is byte-identical to the pre-Part-A one
-  // (scale(0.94) + translateY(-6px), 0.18s, spring curve).
+  // keyframe below: Stage 41 §6 replaced the pre-Part-A one
+  // with contextMenuSmoothIn (scale(0.95), 220ms, spring curve).
   if (!isContextMenuOpen) return null;
 
   return (
     <>
       <style>{`
-        @keyframes contextMenuFadeIn {
-          from { opacity: 0; transform: scale(0.94) translateY(-6px); }
+        /* مرحلهٔ ۴۱ §۶: ورودِ نرمِ منویِ کلیک‌راست. */
+        @keyframes contextMenuSmoothIn {
+          from { opacity: 0; transform: scale(0.95) translateY(-6px); }
           to { opacity: 1; transform: scale(1) translateY(0); }
         }
         @keyframes indicatorPulse {
@@ -975,13 +983,14 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
               return (
                 <React.Fragment key={seg.header.id}>
                   {renderMenuItem(seg.header)}
-                  <div style={{ display: 'grid', gridTemplateRows: isOpen ? '1fr' : '0fr', opacity: isOpen ? 1 : 0, transition: 'grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, margin-top 240ms cubic-bezier(0.16, 1, 0.3, 1)', marginTop: isOpen ? '6px' : '0px', pointerEvents: isOpen ? 'auto' : 'none' }}>
+                  {/* مرحلهٔ ۴۱ §۶: زیرمنویِ آکاردئونیِ نرم — بسته، قابلِ کلیک نیست. */}
+                  <div style={{ display: 'grid', gridTemplateRows: isOpen ? '1fr' : '0fr', opacity: isOpen ? 1 : 0, transform: isOpen ? 'translateY(0)' : 'translateY(-6px)', transition: 'grid-template-rows 0.32s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.28s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), margin-top 0.28s ease', marginTop: isOpen ? '6px' : '0px', pointerEvents: isOpen ? 'auto' : 'none' }}>
                     <div style={{ overflow: 'hidden', minHeight: 0 }}>
                       {seg.children.map((child) => (
                         <React.Fragment key={child.id}>
                           {renderMenuItem(child)}
                           {child.id === 'moveToFolder' && hasComic && (
-                            <div style={{ display: 'grid', gridTemplateRows: showFolderPicker ? '1fr' : '0fr', opacity: showFolderPicker ? 1 : 0, transition: 'grid-template-rows 260ms cubic-bezier(0.16, 1, 0.3, 1), opacity 200ms ease, margin-top 240ms cubic-bezier(0.16, 1, 0.3, 1)', marginTop: showFolderPicker ? '6px' : '0px', pointerEvents: showFolderPicker ? 'auto' : 'none' }}>
+                            <div style={{ display: 'grid', gridTemplateRows: showFolderPicker ? '1fr' : '0fr', opacity: showFolderPicker ? 1 : 0, transform: showFolderPicker ? 'translateY(0)' : 'translateY(-6px)', transition: 'grid-template-rows 0.32s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.28s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1), margin-top 0.28s ease', marginTop: showFolderPicker ? '6px' : '0px', pointerEvents: showFolderPicker ? 'auto' : 'none' }}>
                               <div style={{ overflow: 'hidden', minHeight: 0 }}>
                   <div
                     style={{
@@ -1087,7 +1096,7 @@ const styles = {
     boxShadow: '0 18px 50px rgba(0, 0, 0, 0.8)',
     userSelect: 'none',
     direction: 'rtl',
-    animation: 'contextMenuFadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+    animation: 'contextMenuSmoothIn 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards',
     boxSizing: 'border-box',
   },
   menuList: {
