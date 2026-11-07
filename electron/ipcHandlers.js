@@ -9,16 +9,10 @@ const directoryService = require('./services/directoryService');
 // COMIC_READER_DATA_DIR (که main.js پیش از اسپاونِ ورکر تنظیم
 // می‌کند) حتماً خوانده شده باشد. هرگز throw نمی‌کند.
 let ipcLoggerCache = null;
-function getIpcLogger() {
-  if (ipcLoggerCache) return ipcLoggerCache;
-  try {
-    const { createLogger } = require('./logger');
-    ipcLoggerCache = createLogger(process.env.COMIC_READER_DATA_DIR);
-  } catch (_) {
-    ipcLoggerCache = null;
-  }
-  return ipcLoggerCache;
-}
+// مرحلهٔ ۴۳ — فازِ سوم: نمونهٔ `app` برایِ توابعِ سطحِ ماژول
+// (`getProtectedCacheDir` و `getSearchIndexDir`) که بیرونِ `module.exports`
+// تعریف شده‌اند و پارامترِ `app` را نمی‌بینند؛ در `module.exports` ست می‌شود.
+let ipcApp = null;
 function getIpcLogger() {
   if (ipcLoggerCache) return ipcLoggerCache;
   try {
@@ -39,7 +33,7 @@ function getIpcLogger() {
 // فایلِ اصلی نوشته نمی‌شوند.
 function getProtectedCacheDir() {
   try {
-    const base = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (app && typeof app.getPath === 'function' ? app.getPath('userData') : '');
+    const base = (ipcApp && ipcApp.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (ipcApp && typeof ipcApp.getPath === 'function' ? ipcApp.getPath('userData') : '');
     return base ? path.join(base, 'protected-cache') : '';
   } catch (_) { return ''; }
 }
@@ -644,7 +638,7 @@ function resolveCopyOutputPath(pdfPath, desiredName, desiredPath) {
 // کهنه را بازنویسی کند؛ محتوا، مختصاتِ کلماتِ استخراج‌شده از
 // pdf.js در زمانِ پرینت است.
 function getSearchIndexDir() {
-  const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
+  const dataDir = (ipcApp && ipcApp.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
   const dir = path.join(dataDir || path.join(require('os').homedir(), '.comic-reader'), 'search-index');
   try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
   return dir;
@@ -754,6 +748,7 @@ function invalidateComicRamCache(appInstance, rawPath) {
 }
 
 module.exports = function(app) {
+  ipcApp = app;
   const tempDir = path.join(app.getPath('temp'), 'ComicReaderCache');
 
   let activeExtractionContext = null;

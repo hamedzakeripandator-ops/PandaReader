@@ -472,44 +472,6 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
     onErase?.(item.id);
   }, [onErase, item.id]);
 
-  const commonProps = {
-    stroke: toRgbaWithAlpha(color, opacity) || toPureRgbCss(color) || color,
-    strokeWidth: sw,
-    opacity: 1,
-    onClick: handleClick,
-    onTap: handleClick,
-    perfectDrawEnabled: false,
-    shadowForStrokeEnabled: false,
-    ...fillProps,
-  };
-
-  // مستطیل ساده
-  if (boxStyle === 'rect') {
-    return (
-      <Rect
-        x={item.x}
-        y={item.y}
-        width={item.width}
-        height={item.height}
-        {...commonProps}
-      />
-    );
-  }
-
-  // مستطیل گوشه‌گرد
-  if (boxStyle === 'round') {
-    return (
-      <Rect
-        x={item.x}
-        y={item.y}
-        width={item.width}
-        height={item.height}
-        cornerRadius={12}
-        {...commonProps}
-      />
-    );
-  }
-
   // کادر ابری — رسم با Canvas 2D نیتیو
   const cloudSceneFunc = useCallback(
     (ctx, shape) => {
@@ -555,6 +517,44 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
     },
     [item.x, item.y, item.width, item.height, sw]
   );
+
+  const commonProps = {
+    stroke: toRgbaWithAlpha(color, opacity) || toPureRgbCss(color) || color,
+    strokeWidth: sw,
+    opacity: 1,
+    onClick: handleClick,
+    onTap: handleClick,
+    perfectDrawEnabled: false,
+    shadowForStrokeEnabled: false,
+    ...fillProps,
+  };
+
+  // مستطیل ساده
+  if (boxStyle === 'rect') {
+    return (
+      <Rect
+        x={item.x}
+        y={item.y}
+        width={item.width}
+        height={item.height}
+        {...commonProps}
+      />
+    );
+  }
+
+  // مستطیل گوشه‌گرد
+  if (boxStyle === 'round') {
+    return (
+      <Rect
+        x={item.x}
+        y={item.y}
+        width={item.width}
+        height={item.height}
+        cornerRadius={12}
+        {...commonProps}
+      />
+    );
+  }
 
   return (
     <Shape
@@ -1749,6 +1749,18 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // مرحلهٔ ۳۸ §۶: نشستِ pan در حالتِ select — { container,
   // startClientX/Y, startScrollLeft/Top, onMove, onEnd } یا null.
   const panSessionRef = useRef(null);
+
+  // مرحلهٔ ۴۳ فازِ سوم (F9): اگر کامپوننت وسطِ ژستِ pan آنمانت شود،
+  // onEnd هرگز صدا زده نمی‌شود و سه لیسنرِ window می‌مانند؛ این
+  // cleanup همان سه لیسنر را با همان هندلرهایِ نشست پاک می‌کند.
+  useEffect(() => () => {
+    const session = panSessionRef.current;
+    if (!session) return;
+    panSessionRef.current = null;
+    window.removeEventListener('pointermove', session.onMove, true);
+    window.removeEventListener('pointerup', session.onEnd, true);
+    window.removeEventListener('pointercancel', session.onEnd, true);
+  }, []);
   // محافظِ کامیتِ مضاعفِ ترنسفورم: چون onTransformEnd هم روی
   // Transformer و هم روی Groupهای پوششی می‌تواند آتش شود، اولین
   // هندلری که اجرا می‌شود، همهٔ نودها را پردازش و کامیت می‌کند و

@@ -118,6 +118,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   onContextMenu,
   pageFilter,
   frameZoomLevel,
+  fitToScreen,
 }) {
   const pageNum = index + 1;
   const rawPath = item?.path || item?.filePath || '';
@@ -158,6 +159,15 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   const normalizedRotation = ((Number(rotation) || 0) % 360 + 360) % 360;
   const isSwappedRotation = normalizedRotation === 90 || normalizedRotation === 270;
   const useSwappedLayout = isSwappedRotation && frameWidth > 0;
+  // مرحلهٔ ۴۳ §۴: Fit-to-Screen در حالت افقی — در زوم ۱۰۰٪، ارتفاع
+  // صفحه دقیقاً 'calc(100vh - 28px)' است؛ با زوم دستی، همان سقف
+  // ضربدر زوم می‌شود تا صفحه بزرگ شود و جای اسکرول عمودی پیدا کند
+  // (وگرنه گیت لبه مرحله ۴۲ در افقی، هیچ‌وقت شاخه «اول اسکرول»
+  // را نمی‌دید).
+  const fitZoom = Math.min(3.5, Math.max(0.1, Number(frameZoomLevel) || 1));
+  const fitMaxHeight = fitToScreen
+    ? (fitZoom === 1 ? 'calc(100vh - 28px)' : `calc((100vh - 28px) * ${fitZoom})`)
+    : undefined;
 
   const isSeamlessMode = pageGap === 0 && !rotation;
   // مرحلهٔ ۳۵ §۵: اگر صفحه، استیکیِ کاملاً بیرون از کاغذ دارد، قاب
@@ -182,8 +192,10 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
       className="comic-page-item"
       style={{
         ...styles.imageWrapper,
-        height: knownHeight ? `${knownHeight}px` : 'auto',
-        minHeight: knownHeight ? `${knownHeight}px` : '450px',
+        width: fitToScreen ? 'fit-content' : undefined,
+        maxWidth: fitToScreen ? '100%' : undefined,
+        height: fitToScreen ? 'auto' : (knownHeight ? `${knownHeight}px` : 'auto'),
+        minHeight: fitToScreen ? '0' : (knownHeight ? `${knownHeight}px` : '450px'),
         marginBottom: isLastItem ? '0px' : `${pageGap}px`,
         contain: (isSeamlessMode || frameHasOverflowSticky) ? 'layout style' : 'layout paint',
         overflow: (isSeamlessMode || frameHasOverflowSticky) ? 'visible' : 'hidden',
@@ -224,11 +236,11 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
           left: useSwappedLayout ? '50%' : undefined,
           top: useSwappedLayout ? '50%' : undefined,
           width: useSwappedLayout ? (knownHeight ? `${knownHeight}px` : '450px') : '100%',
-          height: useSwappedLayout ? `${frameWidth}px` : '100%',
+          height: useSwappedLayout ? `${frameWidth}px` : (fitToScreen ? 'auto' : '100%'),
           // کانتینرِ درونی، هرگز فرو نمی‌ریزد: حتی وقتی تصویر هنوز
           // اندازه نشده یا خطا داده، minHeightِ کادر را دارد تا
           // لایه، همیشه جعبهٔ زنده داشته باشد.
-          minHeight: knownHeight ? `${knownHeight}px` : '450px',
+          minHeight: fitToScreen ? '0' : (knownHeight ? `${knownHeight}px` : '450px'),
           transform: useSwappedLayout
             ? `translate(-50%, -50%) rotate(${rotation}deg)`
             : (rotation ? `rotate(${rotation}deg)` : 'none'),
@@ -243,12 +255,17 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
             draggable={false}
             style={{
               ...styles.image,
-              height: knownHeight
-                ? isSeamlessMode && !isLastItem
-                  ? 'calc(100% + 1px)'
-                  : '100%'
-                : 'auto',
-              objectFit: 'fill',
+              width: fitToScreen ? 'auto' : undefined,
+              height: fitToScreen
+                ? 'auto'
+                : (knownHeight
+                  ? isSeamlessMode && !isLastItem
+                    ? 'calc(100% + 1px)'
+                    : '100%'
+                  : 'auto'),
+              maxWidth: fitToScreen ? '100%' : undefined,
+              maxHeight: fitMaxHeight,
+              objectFit: fitToScreen ? 'contain' : 'fill',
               // فاز ۳: فیلترِ شارپنسِ SVG (کانولوشنِ ۳×۳ روی کلِ تصویر)
               // فقط وقتی روشن است که پاسِ HiDPI فعال باشد و زوم ≤ ۱٫۵
               // و استودیو خاموش باشد؛ در زومِ بالا یا حینِ حاشیه‌نویسی،
@@ -378,6 +395,8 @@ export default function VerticalViewer() {
   const isHorizontalPagedRef = useRef(false);
   const [hPageIndex, setHPageIndex] = useState(0);
   const [hEntering, setHEntering] = useState(false);
+  // مرحلهٔ ۴۳ §۴: چیدمان افقی — تک‌برگ (پیش‌فرض) یا دو‌صفحه‌ای کنار هم.
+  const [isDoubleSpread, setIsDoubleSpread] = useState(false);
 
   // مرحله ۱۵ — درگِ چهارجهته با ماوس (دکمهٔ چپ در مطالعهٔ عادی،
   // دکمهٔ وسط در هر حالتی؛ جزئیاتِ کامل در useDragPan). این فراخوان،
@@ -461,9 +480,11 @@ export default function VerticalViewer() {
     try { updateReadingProgress(currentFilePath, clamped + 1, itemsCount); } catch (_) {}
   }, [itemsCount, currentFilePath, setCurrentPage, updateReadingProgress]);
 
+  // مرحلهٔ ۴۳ §۴: در حالت دو‌صفحه‌ای، هر ورق دو صفحه جلو می‌رود؛
+  // در تک‌برگ، یک صفحه (مثل قبل).
   const flipHorizontalPage = useCallback((dir) => {
-    goToHorizontalPage(hPageIndexRef.current + dir);
-  }, [goToHorizontalPage]);
+    goToHorizontalPage(hPageIndexRef.current + dir * (isDoubleSpread ? 2 : 1));
+  }, [goToHorizontalPage, isDoubleSpread]);
 
   // مرحلهٔ ۴۰ §۴: ورود به حالتِ افقی (یا عوض شدنِ فایل) — صفحهٔ
   // افقی از صفحهٔ جاریِ استور شروع می‌شود.
@@ -481,7 +502,8 @@ export default function VerticalViewer() {
   useEffect(() => {
     if (!isHorizontalPaged) return;
     const keepUrls = new Set();
-    for (const ni of [hPageIndex - 1, hPageIndex, hPageIndex + 1]) {
+    // مرحلهٔ ۴۳ §۴: در دو‌صفحه‌ای، برگ دوم جفت بعدی هم پیش‌دیکد می‌شود.
+    for (const ni of [hPageIndex - 1, hPageIndex, hPageIndex + 1, hPageIndex + 2]) {
       if (ni < 0 || ni >= itemsCount) continue;
       const raw = items[ni]?.path || items[ni]?.filePath || '';
       if (!raw) continue;
@@ -668,6 +690,18 @@ export default function VerticalViewer() {
     filePath: currentFilePath,
   });
   visibleIndicesRef.current = visibleIndices;
+
+  // مرحلهٔ ۴۳ §۱: ورق با دکمه‌های نشانگر پایین-راست — ناوبری عمدی
+  // مستقیم (نه چرخ ماوس) تا با گیت لبه مرحله ۴۲ تداخل نکند؛ در
+  // افقی، پنجره ۵۰۰ میلی‌ثانیه‌ای محافظ ورق هم ست می‌شود.
+  const goHudPage = useCallback((dir) => {
+    if (isHorizontalPaged) {
+      programmaticScrollUntilRef.current = Date.now() + 500;
+      flipHorizontalPage(dir);
+    } else {
+      jumpToPage(Math.max(1, Math.min(itemsCount, activePageIndex + 1 + dir)));
+    }
+  }, [isHorizontalPaged, flipHorizontalPage, jumpToPage, itemsCount, activePageIndex]);
 
   useEffect(() => {
     if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
@@ -1326,9 +1360,67 @@ export default function VerticalViewer() {
 
   const activePageNum = (isHorizontalPaged ? hPageIndex : activePageIndex) + 1;
   const currentActivePageAnnotations =
-    annotationsByPage[String(activePageNum)] || [];
-  const hFrameBookmarks = pageBookmarkMap[activePageNum] || EMPTY_PAGE_BOOKMARKS;
+    annotationsByPage[String(activePageNum)] || EMPTY_PAGE_ANNOTATIONS;
   const enableHiDpiCrispPass = isScrollIdle && safeZoom > 1.12;
+
+  // مرحلهٔ ۴۳ §۴: قاب افقی یک صفحه با بوک‌مارک‌های همان صفحه —
+  // در تک‌برگ، همان قاب تنها؛ در دو‌صفحه‌ای، یکی از دو برگ کنار هم.
+  // هر برگ، حاشیه‌نویسی‌ها و بوک‌مارک‌های صفحه خودش را می‌گیرد.
+  const renderHorizontalFrame = (pageIdx) => {
+    const frameBookmarks = pageBookmarkMap[pageIdx + 1] || EMPTY_PAGE_BOOKMARKS;
+    const frameAnnotations = annotationsByPage[String(pageIdx + 1)] || EMPTY_PAGE_ANNOTATIONS;
+    return (
+      <div
+        key={pageIdx}
+        style={isDoubleSpread
+          ? { position: 'relative', flex: '0 1 auto', width: 'fit-content', maxWidth: 'calc(50% - 6px)' }
+          : { position: 'relative', width: 'fit-content', maxWidth: '100%' }}
+      >
+        <ComicPageFrame
+          item={items[pageIdx]}
+          index={pageIdx}
+          isLastItem={pageIdx === itemsCount - 1}
+          knownHeight={(heights || [])[pageIdx] ?? null}
+          frameWidth={frameWidth}
+          pageGap={safePageGap}
+          rotation={rotation}
+          isHiDpiPassActive={enableHiDpiCrispPass}
+          isNearViewport
+          isSharpenFilterActive={enableHiDpiCrispPass && safeZoom <= 1.5 && !isAnnotationActive}
+          pageAnnotations={frameAnnotations}
+          onCommitPageAnnotations={handleCommitPageAnnotations}
+          pageFilter={pageFilter}
+          frameZoomLevel={safeZoom}
+          onImageLoad={recordImageDimensions}
+          onFrameRendered={handleFrameRendered}
+          onContextMenu={handleFrameContextMenu}
+          fitToScreen
+        />
+        {frameBookmarks.map((bm) => (
+          <div
+            key={bm.id}
+            style={{
+              position: 'absolute',
+              top: bm.yRatio <= 0 ? '0px' : `calc(${bm.yRatio * 100}% - 12px)`,
+              left: bm.side === 'left' ? undefined : 'calc(100% + 10px)',
+              right: bm.side === 'left' ? 'calc(100% + 10px)' : undefined,
+              zIndex: 50,
+            }}
+          >
+            <BookmarkMarker
+              bookmark={bm}
+              imageUrl={resolveBookmarkImage(bm, bookmarkPreferences)}
+              onOpen={handleOpenBookmark}
+              onDelete={handleDeleteBookmark}
+              onRename={handleRenameBookmark}
+              onMove={handleMoveBookmark}
+              onMoveBookmark={handleMoveBookmark}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   return (
     <div style={styles.outerWrapper}>
@@ -1388,8 +1480,10 @@ export default function VerticalViewer() {
               width: frameWidth || '100%',
               margin: '0 auto',
               display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
+              flexDirection: isDoubleSpread ? 'row' : 'column',
+              alignItems: isDoubleSpread ? 'flex-start' : 'center',
+              justifyContent: isDoubleSpread ? 'center' : undefined,
+              gap: isDoubleSpread ? 12 : 0,
               // مرحلهٔ ۴۱ §۳: ورقِ فوق‌نرمِ افقی — لغزشِ translate3d +
               // مقیاسِ ظریفِ 0.97 به 1 + محو/ظاهرِ نرم، در ۳۴۰ میلی‌ثانیه.
               opacity: hEntering ? 0 : 1,
@@ -1398,47 +1492,9 @@ export default function VerticalViewer() {
               willChange: 'transform, opacity',
             }}
           >
-            <ComicPageFrame
-              item={items[hPageIndex]}
-              index={hPageIndex}
-              isLastItem={hPageIndex === itemsCount - 1}
-              knownHeight={(heights || [])[hPageIndex] ?? null}
-              frameWidth={frameWidth}
-              pageGap={safePageGap}
-              rotation={rotation}
-              isHiDpiPassActive={enableHiDpiCrispPass}
-              isNearViewport
-              isSharpenFilterActive={enableHiDpiCrispPass && safeZoom <= 1.5 && !isAnnotationActive}
-              pageAnnotations={currentActivePageAnnotations}
-              onCommitPageAnnotations={handleCommitPageAnnotations}
-              pageFilter={pageFilter}
-              frameZoomLevel={safeZoom}
-              onImageLoad={recordImageDimensions}
-              onFrameRendered={handleFrameRendered}
-              onContextMenu={handleFrameContextMenu}
-            />
-            {hFrameBookmarks.map((bm) => (
-              <div
-                key={bm.id}
-                style={{
-                  position: 'absolute',
-                  top: bm.yRatio <= 0 ? '0px' : `calc(${bm.yRatio * 100}% - 12px)`,
-                  left: bm.side === 'left' ? undefined : 'calc(100% + 10px)',
-                  right: bm.side === 'left' ? 'calc(100% + 10px)' : undefined,
-                  zIndex: 50,
-                }}
-              >
-                <BookmarkMarker
-                  bookmark={bm}
-                  imageUrl={resolveBookmarkImage(bm, bookmarkPreferences)}
-                  onOpen={handleOpenBookmark}
-                  onDelete={handleDeleteBookmark}
-                  onRename={handleRenameBookmark}
-                  onMove={handleMoveBookmark}
-                  onMoveBookmark={handleMoveBookmark}
-                />
-              </div>
-            ))}
+            {isDoubleSpread
+              ? [hPageIndex, hPageIndex + 1].filter((i) => i < itemsCount).map((i) => renderHorizontalFrame(i))
+              : renderHorizontalFrame(hPageIndex)}
           </div>
         </div>
       ) : (
@@ -1548,37 +1604,6 @@ export default function VerticalViewer() {
         </div>
       </div>
       )}
-      {/* مرحلهٔ ۴۲ §۱: داک کپسولی شیشه‌ای ورق در حالت افقی — جایگزین
-          دکمه‌های کناری top: '50%' که روی دستگیره‌های App.jsx می‌افتادند.
-          ترتیب RTL است: «قبلی» در راست، «بعدی» در چپ. */}
-      {isHorizontalPaged && itemsCount > 1 && (
-        <div
-          style={{ position: 'absolute', bottom: '84px', left: '50%', transform: 'translateX(-50%)', zIndex: 38, background: 'rgba(13, 19, 26, 0.88)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1px solid rgba(34, 211, 238, 0.28)', borderRadius: '999px', padding: '5px 8px', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 10px 28px rgba(0,0,0,0.45)', direction: 'rtl' }}
-        >
-          <button
-            type="button"
-            title="صفحه قبلی"
-            aria-label="صفحه قبلی"
-            disabled={hPageIndex <= 0}
-            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; flipHorizontalPage(-1); }}
-            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: hPageIndex <= 0 ? 0.35 : 1, padding: 0 }}
-          >
-            <Icons.ChevronRight size={18} />
-          </button>
-          <span style={{ color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', whiteSpace: 'nowrap' }}>{`صفحهٔ ${(hPageIndex + 1).toLocaleString('fa-IR')} از ${itemsCount.toLocaleString('fa-IR')}`}</span>
-          <button
-            type="button"
-            title="صفحه بعدی"
-            aria-label="صفحه بعدی"
-            disabled={hPageIndex >= itemsCount - 1}
-            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; flipHorizontalPage(1); }}
-            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: hPageIndex >= itemsCount - 1 ? 0.35 : 1, padding: 0 }}
-          >
-            <Icons.ChevronLeft size={18} />
-          </button>
-        </div>
-      )}
-
       {/* مرحلهٔ ۳۷ §۳: نشانگرِ شناورِ «صفحهٔ X از Y» در پایین-راستِ
           محیطِ مطالعه — بدونِ هیچ تغییری در RightPanel. */}
       {itemsCount > 0 && (
@@ -1587,8 +1612,18 @@ export default function VerticalViewer() {
           onMouseEnter={() => setPageHudHovered(true)}
           onMouseLeave={() => setPageHudHovered(false)}
           title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
-          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '304px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '342px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 8px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease', display: 'flex', alignItems: 'center', gap: 8 }}
         >
+          <button
+            type="button"
+            title="صفحه قبلی"
+            aria-label="صفحه قبلی"
+            disabled={isHorizontalPaged ? hPageIndex <= 0 : activePageIndex <= 0}
+            onClick={(e) => { e.stopPropagation(); goHudPage(-1); }}
+            style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: (isHorizontalPaged ? hPageIndex <= 0 : activePageIndex <= 0) ? 0.35 : 1, padding: 0, flexShrink: 0 }}
+          >
+            <Icons.ChevronRight size={16} />
+          </button>
           {isEditingPageHud ? (
             <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <input
@@ -1623,8 +1658,45 @@ export default function VerticalViewer() {
               </button>
             </span>
           ) : (
-            `صفحه ${(isHorizontalPaged ? hPageIndex : activePageIndex) + 1} از ${itemsCount}`
+            isHorizontalPaged && isDoubleSpread
+              ? `صفحه ${hPageIndex + 1}-${Math.min(hPageIndex + 2, itemsCount)} از ${itemsCount}`
+              : `صفحه ${(isHorizontalPaged ? hPageIndex : activePageIndex) + 1} از ${itemsCount}`
           )}
+          <button
+            type="button"
+            title="صفحه بعدی"
+            aria-label="صفحه بعدی"
+            disabled={isHorizontalPaged ? hPageIndex >= itemsCount - (isDoubleSpread ? 2 : 1) : activePageIndex >= itemsCount - 1}
+            onClick={(e) => { e.stopPropagation(); goHudPage(1); }}
+            style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: (isHorizontalPaged ? hPageIndex >= itemsCount - (isDoubleSpread ? 2 : 1) : activePageIndex >= itemsCount - 1) ? 0.35 : 1, padding: 0, flexShrink: 0 }}
+          >
+            <Icons.ChevronLeft size={16} />
+          </button>
+        </div>
+      )}
+      {/* مرحلهٔ ۴۳ §۴: گزینه تک‌برگ / دو‌صفحه‌ای — فقط در حالت افقی. */}
+      {isHorizontalPaged && itemsCount > 1 && (
+        <div
+          style={{ position: 'absolute', bottom: '18px', left: '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '4px', color: '#e2e8f0', fontSize: '12px', fontWeight: 700, direction: 'rtl', display: 'flex', alignItems: 'center', gap: '4px', boxShadow: '0 4px 14px rgba(0,0,0,0.4)' }}
+        >
+          <button
+            type="button"
+            title="نمایش تک‌برگ (تناسب با صفحه)"
+            aria-pressed={!isDoubleSpread}
+            onClick={() => setIsDoubleSpread(false)}
+            style={{ borderRadius: '7px', border: 'none', padding: '5px 10px', fontFamily: 'inherit', fontSize: '12px', fontWeight: 700, cursor: 'pointer', color: !isDoubleSpread ? '#06202a' : '#e2e8f0', background: !isDoubleSpread ? '#22d3ee' : 'transparent' }}
+          >
+            تک‌برگ
+          </button>
+          <button
+            type="button"
+            title="نمایش دوصفحه‌ای کنار هم"
+            aria-pressed={isDoubleSpread}
+            onClick={() => setIsDoubleSpread(true)}
+            style={{ borderRadius: '7px', border: 'none', padding: '5px 10px', fontFamily: 'inherit', fontSize: '12px', fontWeight: 700, cursor: 'pointer', color: isDoubleSpread ? '#06202a' : '#e2e8f0', background: isDoubleSpread ? '#22d3ee' : 'transparent' }}
+          >
+            دو‌صفحه‌ای
+          </button>
         </div>
       )}
       <RenderProgressHud

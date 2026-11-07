@@ -194,6 +194,15 @@ export default function useKeyboard(callbacks = {}) {
           readerState.setPdfSearchOpen(false);
           return;
         }
+        // مرحلهٔ ۴۳ فازِ سوم (F5): اورلیِ EPUB (نوارِ جستجو یا داکِ
+        // چرخ‌دنده) استیتِ محلیِ EpubViewer است، نه استور؛ پس هماهنگی
+        // از راهِ پرچمِ window است، دقیقاً به سبکِ
+        // window.__isRecordingShortcut. اگر اورلی باز است، رویداد را
+        // نگه نمی‌داریم تا هندلرِ حبابیِ EpubViewer خودش نوار/داک را
+        // ببندد؛ کتاب بسته نمی‌شود.
+        if (window.__epubOverlayOpen) {
+          return;
+        }
         if (appState.isAreaZoomActive) {
           e.preventDefault();
           e.stopPropagation();

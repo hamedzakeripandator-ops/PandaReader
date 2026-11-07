@@ -77,6 +77,11 @@ const FONT_OPTIONS = [
 
 const LINE_HEIGHTS = [1.5, 1.7, 1.9, 2.1, 2.4];
 
+// مرحلهٔ ۴۳ فازِ سوم (F6): آرایهٔ مشترکِ «فصل بدونِ حاشیه‌نویسی» —
+// مثلِ EMPTY_PAGE_ANNOTATIONS در VerticalViewer/PdfViewer: `|| []`یِ
+// تازه در هر رندر، مقایسهٔ سطحیِ memoیِ لایهٔ Konva را می‌شکست.
+const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
+
 function readLs(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -398,7 +403,7 @@ export default function EpubViewer({ filePath }) {
     () => (pageBookmarkList || []).filter((bm) => Number(bm.page) === chapterIndex + 1),
     [pageBookmarkList, chapterIndex],
   );
-  const currentChapterAnnotations = annotationsByPage[String(chapterIndex + 1)] || [];
+  const currentChapterAnnotations = annotationsByPage[String(chapterIndex + 1)] || EMPTY_PAGE_ANNOTATIONS;
   const shouldMountAnnotationLayer = isAnnotationActive || currentChapterAnnotations.length > 0;
 
   useEffect(() => { writeLs('comicReader.epubFontSize.v1', fontSize); }, [fontSize]);
@@ -451,6 +456,10 @@ export default function EpubViewer({ filePath }) {
     setBookLoading(true);
     setBookError('');
     setBook(null);
+    // مرحلهٔ ۴۳ فازِ سوم (F4): با باز شدنِ کتابِ تازه، نوارِ جستجویِ
+    // کتابِ قبلی بسته می‌شود؛ افکتِ بستنِ نوار، نتایج و مارک‌ها را
+    // خودش پاک می‌کند.
+    setEpubSearchOpen(false);
     coreApi.loadEpubBook(filePath).then((res) => {
       if (!isMounted) return;
       if (!res || !res.success) {
@@ -705,7 +714,7 @@ export default function EpubViewer({ filePath }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [epubViewMode, chapterIndex, chapters.length, showChapterTransitionNotice]);
-  // مرحلهٔ ۴۱ §۳: درگِ داکِ شناور — هم دکمهٔ بستهٔ Aa و هم هدرِ پنلِ باز.
+  // مرحلهٔ ۴۱ §۳: درگِ داکِ شناور — هم دکمهٔ بستهٔ چرخ‌دنده و هم هدرِ پنلِ باز.
   // حرکتِ بیش از ۴ پیکسل یعنی درگ (wasDragged) و کلیکِ بعدی نادیده گرفته می‌شود.
   const startDockDrag = useCallback((e, width) => {
     if (!e || (typeof e.button === 'number' && e.button !== 0)) return;
@@ -736,7 +745,7 @@ export default function EpubViewer({ filePath }) {
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   }, [dockPos]);
-  // مرحلهٔ ۴۱ §۳: کلیکِ دکمهٔ Aa — اگر همین ژست درگ بوده، باز نشود.
+  // مرحلهٔ ۴۱ §۳: کلیکِ دکمهٔ چرخ‌دنده — اگر همین ژست درگ بوده، باز نشود.
   const handleDockButtonClick = useCallback(() => {
     if (dockWasDraggedRef.current) { dockWasDraggedRef.current = false; return; }
     openDock();
@@ -758,6 +767,15 @@ export default function EpubViewer({ filePath }) {
   // مرحلهٔ ۴۲ §۴: آینهٔ refی باز بودن نوار جستجو — افکت کلید ([]) وضعیت را از ref می‌خواند.
   const epubSearchOpenRef = useRef(false);
   useEffect(() => { epubSearchOpenRef.current = epubSearchOpen; }, [epubSearchOpen]);
+
+  // مرحلهٔ ۴۳ فازِ سوم (F5): پرچمِ سراسریِ باز بودنِ اورلیِ EPUB —
+  // نوارِ جستجو یا داکِ چرخ‌دنده — تا useKeyboard در فازِ capture،
+  // با Escape کتاب را نبندد و رویداد به هندلرِ حبابیِ همین فایل برسد؛
+  // دقیقاً به سبکِ window.__isRecordingShortcut.
+  useEffect(() => {
+    window.__epubOverlayOpen = epubSearchOpen || dockOpen;
+    return () => { window.__epubOverlayOpen = false; };
+  }, [epubSearchOpen, dockOpen]);
   // مرحلهٔ ۴۰ §۵: ماندگاریِ تاگل‌هایِ جستجو در localStorage.
   const [epubSearchOptions, setEpubSearchOptions] = useState(() => {
     try {
@@ -1202,7 +1220,7 @@ export default function EpubViewer({ filePath }) {
   const chapter = chapters[chapterIndex];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative', paddingTop: 64 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative' }}>
       <style>{`
         .epub-chapter-content img { max-width: 100%; height: auto; }
         .epub-chapter-content p { margin: 0 0 1em; }
@@ -1211,6 +1229,8 @@ export default function EpubViewer({ filePath }) {
         .epub-chapter-content table { max-width: 100%; border-collapse: collapse; }
         @keyframes epub-flip-next { from { opacity: 0; transform: translate3d(-32px, 0, 0) scale(0.97); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
         @keyframes epub-flip-prev { from { opacity: 0; transform: translate3d(32px, 0, 0) scale(0.97); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
+        .epub-dock-gear { display: flex; transition: transform 0.4s ease; }
+        .epub-dock-btn:hover .epub-dock-gear { transform: rotate(90deg); }
       `}</style>
 
       <AnnotationToolbar
@@ -1230,6 +1250,7 @@ export default function EpubViewer({ filePath }) {
           مطالعه حفظ شود. */}
       {!dockMounted && (
         <button
+          className="epub-dock-btn"
           type="button"
           onClick={handleDockButtonClick}
           onMouseDown={(e) => startDockDrag(e, 42)}
@@ -1245,7 +1266,7 @@ export default function EpubViewer({ filePath }) {
             boxShadow: '0 4px 16px rgba(0,0,0,0.45)',
           }}
         >
-          Aa
+          <span className="epub-dock-gear"><Icons.Settings size={20} /></span>
           <span style={{ position: 'absolute', top: -6, left: -6, minWidth: 18, height: 18, borderRadius: 9, background: '#22d3ee', color: '#0b1220', fontSize: 10, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 4px', direction: 'ltr' }}>
             {chapterIndex + 1}
           </span>
@@ -1549,7 +1570,7 @@ export default function EpubViewer({ filePath }) {
           {chapterTransitionNotice}
         </div>
       )}
-      <div ref={contentRef} data-reader-scroll-container="true" onWheel={handleContentWheel} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '24px 80px', direction: 'rtl', background: readerBackdropColor }}>
+      <div ref={contentRef} data-reader-scroll-container="true" onWheel={handleContentWheel} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '28px 80px 24px', direction: 'rtl', background: readerBackdropColor }}>
         {chapterLoading ? (
           <div style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
         ) : (
@@ -1606,8 +1627,19 @@ export default function EpubViewer({ filePath }) {
           onMouseEnter={() => setPageHudHovered(true)}
           onMouseLeave={() => setPageHudHovered(false)}
           title="برای رفتن به صفحهٔ دلخواه کلیک کنید"
-          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '342px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease' }}
+          style={{ position: 'absolute', bottom: '18px', right: isRightSidebarOpen ? '342px' : '22px', zIndex: 35, background: 'rgba(13, 19, 26, 0.86)', backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)', border: pageHudHovered || isEditingPageHud ? '1px solid rgba(34, 211, 238, 0.7)' : '1px solid rgba(34, 211, 238, 0.25)', borderRadius: '10px', padding: '6px 14px', color: '#e2e8f0', fontSize: '12.5px', fontWeight: 700, direction: 'rtl', pointerEvents: 'auto', cursor: isEditingPageHud ? 'default' : 'pointer', boxShadow: '0 4px 14px rgba(0,0,0,0.4)', transition: 'right 0.25s ease, border-color 0.2s ease', display: 'flex', alignItems: 'center', gap: 8 }}
         >
+          {chapters.length > 1 && (
+            <button
+              type="button"
+              title="فصلِ قبلی"
+              disabled={chapterIndex <= 0}
+              onClick={(e) => { e.stopPropagation(); programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex - 1); }}
+              style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: chapterIndex <= 0 ? 'default' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, flexShrink: 0, opacity: chapterIndex <= 0 ? 0.35 : 1 }}
+            >
+              <Icons.ChevronRight size={16} />
+            </button>
+          )}
           {isEditingPageHud ? (
             <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <input
@@ -1644,30 +1676,17 @@ export default function EpubViewer({ filePath }) {
           ) : (
             `فصل ${chapterIndex + 1} از ${chapters.length}`
           )}
-        </div>
-      )}
-      {/* مرحلهٔ ۴۲ §۱: داک کپسولی شیشه‌ای ناوبری در حالت افقی — ۸۴ پیکسل از پایین، تا زیر داک BottomControls (باند ۱۸ تا ۶۴ پیکسل، zIndex 48) نرود؛ مثل VerticalViewer. */}
-      {epubViewMode === 'horizontal-paged' && chapters.length > 1 && (
-        <div style={{ position: 'absolute', bottom: '84px', left: '50%', transform: 'translateX(-50%)', zIndex: 38, background: 'rgba(13, 19, 26, 0.88)', backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)', border: '1px solid rgba(34, 211, 238, 0.28)', borderRadius: '999px', padding: '5px 8px', display: 'inline-flex', alignItems: 'center', gap: '10px', boxShadow: '0 10px 28px rgba(0,0,0,0.45)' }}>
-          <button
-            type="button"
-            title="فصل قبلی"
-            disabled={chapterIndex <= 0}
-            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex - 1); }}
-            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: chapterIndex <= 0 ? 0.35 : 1 }}
-          >
-            <Icons.ChevronRight size={18} />
-          </button>
-          <span style={{ fontSize: 12.5, color: '#e2e8f0', fontWeight: 700, whiteSpace: 'nowrap', textAlign: 'center' }}>{`فصل ${(chapterIndex + 1).toLocaleString('fa-IR')} از ${chapters.length.toLocaleString('fa-IR')}`}</span>
-          <button
-            type="button"
-            title="فصل بعدی"
-            disabled={chapterIndex >= chapters.length - 1}
-            onClick={() => { programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex + 1); }}
-            style={{ width: 34, height: 34, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: chapterIndex >= chapters.length - 1 ? 0.35 : 1 }}
-          >
-            <Icons.ChevronLeft size={18} />
-          </button>
+          {chapters.length > 1 && (
+            <button
+              type="button"
+              title="فصلِ بعدی"
+              disabled={chapterIndex >= chapters.length - 1}
+              onClick={(e) => { e.stopPropagation(); programmaticScrollUntilRef.current = Date.now() + 500; goToChapter(chapterIndex + 1); }}
+              style={{ width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', color: '#e2e8f0', cursor: chapterIndex >= chapters.length - 1 ? 'default' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, flexShrink: 0, opacity: chapterIndex >= chapters.length - 1 ? 0.35 : 1 }}
+            >
+              <Icons.ChevronLeft size={16} />
+            </button>
+          )}
         </div>
       )}
       {/* منویِ شناورِ انتخابِ متن */}

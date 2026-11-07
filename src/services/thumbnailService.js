@@ -250,6 +250,29 @@ async function safeDestroyPdfResources(page, doc, loadingTask) {
 
 // کش رم در سطح اپلیکیشن برای دسترسی فوری و بدون فریز
 const memoryCoverCache = new Map();
+
+// مرحلهٔ ۴۳ فازِ سوم (F7): سقفِ کشِ رمِ کاورها — هم‌تراز با سقفِ
+// ۳۰۰ ورودیِ کشِ کاورِ دیتابیس (MAX_COVER_CACHE_ENTRIES)؛ Map ترتیبِ
+// درج را نگه می‌دارد، پس قدیمی‌ترین ورودی اول حذف می‌شود (LRU: ورودیِ
+// خوانده‌شده یا دوباره‌نوشته‌شده، به انتها می‌رود).
+const MEMORY_COVER_CACHE_MAX = 300;
+const setMemoryCover = (norm, value) => {
+  if (!norm || !value) return;
+  if (memoryCoverCache.has(norm)) memoryCoverCache.delete(norm);
+  memoryCoverCache.set(norm, value);
+  while (memoryCoverCache.size > MEMORY_COVER_CACHE_MAX) {
+    const oldest = memoryCoverCache.keys().next().value;
+    if (oldest === undefined) break;
+    memoryCoverCache.delete(oldest);
+  }
+};
+const getMemoryCover = (norm) => {
+  if (!memoryCoverCache.has(norm)) return undefined;
+  const value = memoryCoverCache.get(norm);
+  memoryCoverCache.delete(norm);
+  memoryCoverCache.set(norm, value);
+  return value;
+};
 // نقشه جلوگیری از ارسال درخواست‌های هم‌زمان برای یک مسیر مشترک
 const inFlightRequests = new Map();
 
@@ -486,7 +509,7 @@ export const thumbnailService = {
     const norm = normalizeCoverKey(filePath);
     const valid = resolveCoverUrl(dataUrl);
     if (!norm || !valid) return;
-    memoryCoverCache.set(norm, valid);
+    setMemoryCover(norm, valid);
     useLibraryStore.getState().cacheCover?.(filePath, valid);
   },
 
@@ -497,14 +520,14 @@ export const thumbnailService = {
 
     // گام اول: بررسی کش رم فوق‌سریع
     if (memoryCoverCache.has(norm)) {
-      return memoryCoverCache.get(norm);
+      return getMemoryCover(norm);
     }
 
     // گام دوم: بررسی کش استور کتابخانه
     const dbCover = useLibraryStore.getState().getCover?.(norm);
     const validDbCover = resolveCoverUrl(dbCover);
     if (validDbCover && (validDbCover.startsWith('data:') || validDbCover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
-      memoryCoverCache.set(norm, validDbCover);
+      setMemoryCover(norm, validDbCover);
       return validDbCover;
     }
 
@@ -517,7 +540,7 @@ export const thumbnailService = {
       .add(norm, async () => {
         // بررسی مجدد کش رم پس از نوبت در صف (در صورتی که PdfViewer در این فاصله کاور را ساخته باشد)
         if (memoryCoverCache.has(norm)) {
-          return memoryCoverCache.get(norm);
+          return getMemoryCover(norm);
         }
 
         try {
@@ -529,7 +552,7 @@ export const thumbnailService = {
             });
             const resolvedFromDb = resolveCoverUrl(cachedDbRes?.cover);
             if (resolvedFromDb && (resolvedFromDb.startsWith('data:') || resolvedFromDb.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
-              memoryCoverCache.set(norm, resolvedFromDb);
+              setMemoryCover(norm, resolvedFromDb);
               useLibraryStore.getState().cacheCover?.(filePath, resolvedFromDb);
               return resolvedFromDb;
             }
@@ -662,7 +685,7 @@ export const thumbnailService = {
 
               // ذخیره فوری کاور قبل از اجرای متدهای پاک‌سازی
               if (dataUrl && dataUrl.startsWith('data:image/')) {
-                memoryCoverCache.set(norm, dataUrl);
+                setMemoryCover(norm, dataUrl);
                 useLibraryStore.getState().cacheCover?.(filePath, dataUrl);
                 return dataUrl;
               }
@@ -681,7 +704,7 @@ export const thumbnailService = {
           if (res && res.success && res.cover) {
             const resolved = resolveCoverUrl(res.cover);
             if (resolved) {
-              memoryCoverCache.set(norm, resolved);
+              setMemoryCover(norm, resolved);
               useLibraryStore.getState().cacheCover?.(filePath, resolved);
               return resolved;
             }
@@ -719,12 +742,12 @@ export const thumbnailService = {
   peekCover: (filePath) => {
     const norm = normalizeCoverKey(filePath);
     if (!norm) return null;
-    if (memoryCoverCache.has(norm)) return memoryCoverCache.get(norm);
+    if (memoryCoverCache.has(norm)) return getMemoryCover(norm);
 
     const dbCover = useLibraryStore.getState().getCover?.(norm);
     const validDbCover = resolveCoverUrl(dbCover);
     if (validDbCover && (validDbCover.startsWith('data:') || validDbCover.startsWith('comic://'))) { // مرحله ۲: کاورِ روی دیسک هم معتبر است
-      memoryCoverCache.set(norm, validDbCover);
+      setMemoryCover(norm, validDbCover);
       return validDbCover;
     }
     return null;

@@ -218,6 +218,10 @@ const useReaderStore = create((set, get) => ({
     const formatSettings = useSettingsStore.getState();
     const cbzZoom = Math.min(3.5, Math.max(0.1, (Number(formatSettings.cbzDefaultZoom) || 165) / 100));
     const cbzMode = formatSettings.cbzDefaultViewMode === 'vertical' ? 'vertical' : 'horizontal-paged';
+    // مرحلهٔ ۴۳ §۴: در حالت افقی، صفحه باید Fit-to-Screen باز شود، پس
+    // زوم بازشدن ۱۰۰٪ است نه cbzDefaultZoom؛ در حالت عمودی،
+    // cbzDefaultZoom مثل قبل اعمال می‌شود.
+    const cbzOpenZoom = cbzMode === 'horizontal-paged' ? 1 : cbzZoom;
     const epubZoom = Math.min(3.5, Math.max(0.1, (Number(formatSettings.epubDefaultZoom) || 100) / 100));
     const epubMode = formatSettings.epubDefaultViewMode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical';
 
@@ -235,8 +239,11 @@ const useReaderStore = create((set, get) => ({
       epubChapters: [],
       comicViewMode: isCbzFile ? cbzMode : 'vertical',
       epubViewMode: isEpubFile ? epubMode : 'vertical',
-      ...(isCbzFile ? { zoomLevel: cbzZoom } : {}),
+      ...(isCbzFile ? { zoomLevel: cbzOpenZoom } : {}),
       ...(isEpubFile ? { zoomLevel: epubZoom } : {}),
+      pdfSearchOpen: false,
+      pdfSearchQuery: '',
+      pdfSearchRequestId: 0,
       epubSearchRequestId: 0,
       epubSearchQuery: '',
     });
@@ -484,9 +491,31 @@ const useReaderStore = create((set, get) => ({
       pdfSearchRequestId: (state.pdfSearchRequestId || 0) + 1,
     })),
 
-  // مرحلهٔ ۴۰ §۴: سوییچِ حالتِ نمایشِ کمیک (عمودی/افقیِ صفحه‌ای).
-  setComicViewMode: (mode) =>
-    set({ comicViewMode: mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical' }),
+  // مرحلهٔ ۴۳ §۴: سوییچ حالت نمایش کمیک (عمودی/افقی صفحه‌ای) —
+  // همراه با زوم پیش‌فرض همان حالت، فقط یک بار در لحظه سوییچ:
+  // افقی ← ۱۰۰٪ (Fit-to-Screen)، عمودی ← cbzDefaultZoom. گارد
+  // برابری (هم برای حالت و هم برای زوم) جلوی setهای بیهوده و حلقه
+  // را می‌گیرد؛ بعد از سوییچ، زوم دستی کاربر دست نمی‌خورد و هیچ
+  // افکتی آن را برنمی‌گرداند. (گارد زوم یعنی «اگر زوم همین است،
+  // فقط حالت را ست کن» — نه رد کردن خود سوییچ.)
+  setComicViewMode: (mode) => {
+    const next = mode === 'horizontal-paged' ? 'horizontal-paged' : 'vertical';
+    if (get().comicViewMode === next) return;
+    if (next === 'horizontal-paged') {
+      if (get().zoomLevel === 1) {
+        set({ comicViewMode: next });
+        return;
+      }
+      set({ comicViewMode: next, zoomLevel: 1 });
+      return;
+    }
+    const verticalZoom = Math.min(3.5, Math.max(0.1, (Number(useSettingsStore.getState().cbzDefaultZoom) || 165) / 100));
+    if (get().zoomLevel === verticalZoom) {
+      set({ comicViewMode: next });
+      return;
+    }
+    set({ comicViewMode: next, zoomLevel: verticalZoom });
+  },
 
   // مرحلهٔ ۴۱ §۱: سوییچِ حالتِ نمایشِ EPUB (عمودی/افقیِ صفحه‌ای).
   setEpubViewMode: (mode) =>
