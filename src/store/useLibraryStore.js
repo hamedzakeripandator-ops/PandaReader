@@ -1,19 +1,37 @@
 import { create } from 'zustand';
 import { coreApi } from '../services/coreApi';
+import annotationLocalBackup from '../services/annotationLocalBackup';
 
 const STORAGE_KEYS = {
   LIBRARY: 'comic_reader_library_v4',
   FOLDERS: 'comic_reader_folders_v4',
+  FAVORITE_FOLDERS: 'comicReader.favoriteFolders.v1',
   FAVORITES: 'comic_reader_favorites_v4',
   RECENTS: 'comic_reader_recents_v4',
   DOWNLOADS: 'comic_reader_downloads_v4',
   DOWNLOADS_DIR: 'comic_reader_downloads_dir_v4',
   RECENT_LIMIT: 'comicReader.recentLimit.v1',
+  // مرحلهٔ ۵۰ §۵: پیکربندیِ منبعِ اسلایدرِ هیرو — یک کلیدِ واحد
+  // در localStorage؛ همان آبجکت در دیتابیس هم زیرِ کلیدِ تنظیمیِ
+  // 'heroSliderConfig' با مسیرِ موجودِ SAVE_SETTING / kv_store
+  // ('setting:heroSliderConfig') ذخیره می‌شود؛ جدولِ تازه ساخته
+  // نشد چون SAVE_SETTING عمومی است و هر کلیدِ دلخواه را می‌پذیرد.
+  HERO_SLIDER_CONFIG: 'comicReader.heroSliderConfig.v1',
 };
 
 // متغیرهای مدیریت تایمر دی‌بانس و ذخیره اضطراری پیشرفت مطالعه
 let progressDebounceTimer = null;
 let pendingProgressPayload = null;
+
+// مرحلهٔ ۵۲ §۱: نگهبان‌هایِ همگام‌سازیِ فایل‌هایِ رفته — یک فراخوانِ
+// در حالِ اجرا، بینِ همهٔ فراخواننده‌ها مشترک است و فراخوانِ تازهٔ
+// بدونِ مسیرِ مشخص، تا ۵ ثانیه پس از آخرین اجرایِ موفق، همان خلاصهٔ
+// قبلی را برمی‌گرداند (بدونِ پیامِ IPC تازه)؛ پس ورودِ هم‌زمان به
+// تب و مونتِ نما، هرگز حلقهٔ IPC نمی‌سازد.
+let missingSyncInflight = null;
+let missingSyncLastRunAt = 0;
+let missingSyncLastSummary = null;
+const MISSING_SYNC_DEDUPE_MS = 5000;
 
 // استانداردسازی مسیر فایل برای سیستم‌عامل‌های مختلف
 const normalizePath = (p) => {
@@ -105,11 +123,140 @@ function readRecentLimit() {
   }
 }
 
+// مرحلهٔ ۵۰ §۵ — مدلِ دادهٔ منبعِ اسلایدرِ هیرو.
+// heroSliderSource: 'auto' (پیش‌فرض: پین‌شده‌ها و آخرین مطالعه‌ها)
+//   | 'custom' (فقط کتاب‌هایِ دستی) | 'library-folder' | 'favorite-folder'
+// heroSliderFolderId: شناسهٔ پوشهٔ انتخاب‌شده (فقط برایِ دو حالتِ پوشه)
+// customSliderBookPaths: مسیرهایِ نرمال‌شدهٔ کتاب‌هایِ دستی.
+const HERO_SLIDER_SOURCES = ['auto', 'custom', 'library-folder', 'favorite-folder'];
+
+function normalizeHeroSliderConfig(value) {
+  const fallback = { heroSliderSource: 'auto', heroSliderFolderId: null, customSliderBookPaths: [] };
+  if (!value || typeof value !== 'object') return fallback;
+  const source = HERO_SLIDER_SOURCES.includes(value.heroSliderSource)
+    ? value.heroSliderSource
+    : 'auto';
+  const folderId =
+    (source === 'library-folder' || source === 'favorite-folder') &&
+    typeof value.heroSliderFolderId === 'string' &&
+    value.heroSliderFolderId.trim()
+      ? value.heroSliderFolderId.trim()
+      : null;
+  const seen = new Set();
+  const paths = [];
+  (Array.isArray(value.customSliderBookPaths) ? value.customSliderBookPaths : []).forEach((p) => {
+    const norm = normalizePath(p);
+    if (norm && !seen.has(norm)) {
+      seen.add(norm);
+      paths.push(norm);
+    }
+  });
+  return { heroSliderSource: source, heroSliderFolderId: folderId, customSliderBookPaths: paths };
+}
+
+function readHeroSliderConfig() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.HERO_SLIDER_CONFIG);
+    if (!raw) return normalizeHeroSliderConfig(null);
+    return normalizeHeroSliderConfig(JSON.parse(raw));
+  } catch (_) {
+    return normalizeHeroSliderConfig(null);
+  }
+}
+
+// ذخیرهٔ دوگانه: localStorage (فوری و آفلاین) + دیتابیس از مسیرِ
+// موجودِ تنظیمات (SAVE_SETTING با کلیدِ 'heroSliderConfig' که در
+// ورکرِ دیتابیس به kv_store با کلیدِ 'setting:heroSliderConfig'
+// می‌رسد و در آینهٔ JSON هم همگام می‌شود). خطایِ دیتابیس، ذخیرهٔ
+// محلی را خراب نمی‌کند.
+function persistHeroSliderConfig(config) {
+  const clean = normalizeHeroSliderConfig(config);
+  writeLocal(STORAGE_KEYS.HERO_SLIDER_CONFIG, clean);
+  try {
+    if (coreApi.isAvailable()) {
+      coreApi
+        .dbAction({ action: 'SAVE_SETTING', key: 'heroSliderConfig', value: clean })
+        .catch(() => {});
+    }
+  } catch (_) {}
+  return clean;
+}
+
+// مرحلهٔ ۵۰ §۵ — حلِ خالصِ آیتم‌هایِ اسلایدر از رویِ منبع (تابعِ
+// خالص؛ LibraryView و تست‌ها از همین‌جا می‌خوانند). حالتِ auto
+// رفتارِ قبلی است (پین‌شده‌ها، بعد اخیر، بعد کتابخانه — سقفِ ۷).
+// حالت‌هایِ پوشه و دستی هیچ سقفی ندارند. مرحلهٔ ۵۲ §۱: کتابِ
+// حذف‌شده از اسلایدر کنار نمی‌رود؛ با پرچمِ isMissing:true
+// می‌ماند تا کاربر هشدار را ببیند. 
+export function resolveHeroSliderItems({ source, folderId, customPaths, library, recentItems, favorites }) {
+  const normOf = (item) => {
+    const rawP = item?.path || item?.filePath;
+    if (!rawP) return '';
+    return rawP.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+  };
+  const byNorm = new Map();
+  [...(library || []), ...(Array.isArray(recentItems) ? recentItems : [])].forEach((item) => {
+    const norm = normOf(item);
+    if (norm && !byNorm.has(norm)) byNorm.set(norm, item);
+  });
+  if (source === 'custom') {
+    // مرحلهٔ ۵۲ §۱: کتابِ رفته حذف نمی‌شود — اگر در کتابخانه/اخیر
+    // هست، با همان پرچمِ isMissing برمی‌گردد؛ اگر فقط در فهرستِ
+    // دستی مانده و ردیفی ندارد، کارتِ حداقلی با پرچمِ هشدار ساخته
+    // می‌شود تا اسلایدر، بی‌صدا خالی نشود.
+    return (customPaths || [])
+      .map((p) => {
+        const item = byNorm.get(p);
+        if (item) return item;
+        const raw = String(p || '');
+        if (!raw) return null;
+        return {
+          path: raw,
+          filePath: raw,
+          name: raw.split(/[\\/]/).pop() || raw,
+          isMissing: true,
+        };
+      })
+      .filter(Boolean);
+  }
+  if (source === 'library-folder' && folderId) {
+    return (library || []).filter((i) => i.folderId === folderId);
+  }
+  if (source === 'favorite-folder' && folderId) {
+    const favByNorm = new Map();
+    [...(favorites || []), ...(library || [])].forEach((item) => {
+      const norm = normOf(item);
+      if (norm && !favByNorm.has(norm)) favByNorm.set(norm, item);
+    });
+    return (favorites || [])
+      .filter((f) => f.favoriteFolderId === folderId)
+      .map((f) => favByNorm.get(normOf(f)))
+      .filter(Boolean);
+  }
+  const pinnedList = (library || []).filter((i) => Boolean(i.isPinned));
+  const combinedMap = new Map();
+  [...pinnedList, ...(Array.isArray(recentItems) ? recentItems : []), ...(library || [])].forEach(
+    (item) => {
+      const norm = normOf(item);
+      if (norm && !combinedMap.has(norm)) combinedMap.set(norm, item);
+    }
+  );
+  return Array.from(combinedMap.values()).slice(0, 7);
+}
+
 const useLibraryStore = create((set, get) => ({
   library: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
   libraryItems: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
   libraryFolders: readLocal(STORAGE_KEYS.FOLDERS, []),
+  // مرحله ۴۹ (C): پوشه‌هایِ مستقلِ علاقه‌مندی‌ها — فهرستی جدا از
+  // libraryFolders با کلیدِ لوکال‌استوریجِ خودش؛ کارگرِ B فقط از
+  // همین فیلد می‌خواند.
+  favoriteFolders: readLocal(STORAGE_KEYS.FAVORITE_FOLDERS, []),
+  // مرحلهٔ ۵۰ §۵: پیکربندیِ منبعِ اسلایدرِ هیرو (خوانده‌شده از
+  // localStorage؛ initLibrary نسخهٔ دیتابیس را هم رویِ آن سوار می‌کند).
+  ...readHeroSliderConfig(),
   activeFolderId: 'ALL', // 'ALL' | 'PINNED' | 'UNFOLDERED' | folder.id
+  activeFavoriteFolderId: 'ALL', // 'ALL' | 'PINNED' | 'UNFOLDERED' | folder.id — پوشه فعال نمای علاقه‌مندی‌ها، جدا از کتابخانه
   favorites: readLocal(STORAGE_KEYS.FAVORITES, []),
   recentItems: readLocal(STORAGE_KEYS.RECENTS, []),
   // مرحلهٔ ۳۰ — حدِ نمایشِ مواردِ اخیر در نمایِ Recent (پیش‌فرض
@@ -126,6 +273,7 @@ const useLibraryStore = create((set, get) => ({
     try {
       const localLib = sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, []));
       const localFolders = readLocal(STORAGE_KEYS.FOLDERS, []);
+      const localFavFolders = readLocal(STORAGE_KEYS.FAVORITE_FOLDERS, []);
       const localFavs = readLocal(STORAGE_KEYS.FAVORITES, []);
       const localRecents = readLocal(STORAGE_KEYS.RECENTS, []);
       const localDownloads = readLocal(STORAGE_KEYS.DOWNLOADS, []);
@@ -135,6 +283,7 @@ const useLibraryStore = create((set, get) => ({
         library: localLib,
         libraryItems: localLib,
         libraryFolders: localFolders,
+        favoriteFolders: localFavFolders,
         favorites: localFavs,
         recentItems: localRecents,
         downloads: localDownloads,
@@ -156,6 +305,30 @@ const useLibraryStore = create((set, get) => ({
           set({ libraryFolders: libRes.folders });
           writeLocal(STORAGE_KEYS.FOLDERS, libRes.folders);
         }
+
+        // مرحله ۴۹ (C): پوشه‌هایِ علاقه‌مندی‌ها جدا از پوشه‌هایِ
+        // کتابخانه خوانده می‌شوند (اکشنِ جدا، مثلِ GET_LIBRARY برایِ
+        // libraryFolders).
+        try {
+          const favFoldersRes = await coreApi.dbAction({ action: 'GET_FAVORITE_FOLDERS' });
+          if (Array.isArray(favFoldersRes?.favoriteFolders)) {
+            set({ favoriteFolders: favFoldersRes.favoriteFolders });
+            writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, favFoldersRes.favoriteFolders);
+          }
+        } catch (_) {}
+
+        // مرحلهٔ ۵۰ §۵: پیکربندیِ اسلایدر از دیتابیس (GET_SETTINGS؛
+        // کلیدِ 'heroSliderConfig' از kv_store). وقتی دیتابیس نسخه‌ای
+        // دارد، مرجع است و رویِ آینهٔ محلی نوشته می‌شود؛ اگر ندارد،
+        // همان مقدارِ محلی می‌ماند و با اولین تغییر، ذخیره می‌شود.
+        try {
+          const settingsRes = await coreApi.dbAction({ action: 'GET_SETTINGS' });
+          if (settingsRes?.settings && 'heroSliderConfig' in settingsRes.settings) {
+            const dbConfig = normalizeHeroSliderConfig(settingsRes.settings.heroSliderConfig);
+            set(dbConfig);
+            writeLocal(STORAGE_KEYS.HERO_SLIDER_CONFIG, dbConfig);
+          }
+        } catch (_) {}
 
         if (Array.isArray(libRes?.library)) {
           const mergedMap = new Map();
@@ -227,7 +400,38 @@ const useLibraryStore = create((set, get) => ({
 
         const favRes = await coreApi.dbAction({ action: 'GET_FAVORITES' });
         if (Array.isArray(favRes?.favorites)) {
+          // مرحله ۴۹ (C): پوشهٔ هر علاقه‌مندی فقط از favoriteFolderIdِ
+          // خودِ ردیفِ علاقه‌مندی خوانده می‌شود؛ پوشهٔ کتابخانه
+          // (folderIdِ ردیفِ کتاب) دیگر هیچ اثری رویِ علاقه‌مندی‌ها
+          // ندارد. فیلدِ قدیمیِ folderId رویِ ردیفِ علاقه‌مندی،
+          // دست‌نخورده می‌ماند (حفظ‌شده ولی نادیده‌گرفته‌شده) تا
+          // بازگشت به مرحلهٔ ۴۸، سازمان‌دهیِ قبلی را از دست ندهد.
+          // مهاجرتِ یک‌باره (گزینهٔ الف) در ورکرِ دیتابیس انجام شده
+          // است؛ اینجا فقط برایِ آیتم‌هایِ فقط-محلی (که در دیتابیس
+          // نیستند) همان نگاشتِ folderId به پوشهٔ علاقه‌مندیِ هم‌نام
+          // اعمال می‌شود تا پس از ری‌لود، بی‌پوشه نشوند.
+          if (Array.isArray(favRes?.favoriteFolders)) {
+            set({ favoriteFolders: favRes.favoriteFolders });
+            writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, favRes.favoriteFolders);
+          }
           const mergedFavsMap = new Map();
+          const validFavFolderIds = new Set((get().favoriteFolders || []).map((f) => f.id));
+          const libFolderById = new Map((get().libraryFolders || []).map((f) => [f.id, f]));
+          const favFolderByLibId = new Map();
+          const favFolderByNameColor = new Map();
+          (get().favoriteFolders || []).forEach((f) => {
+            if (f.migratedFromLibraryFolderId) favFolderByLibId.set(f.migratedFromLibraryFolderId, f);
+            favFolderByNameColor.set(`${(f.name || '').trim()}|${f.color || ''}`, f);
+          });
+          const resolveMigratedFavFolderId = (legacyFolderId) => {
+            if (!legacyFolderId) return null;
+            const byLibId = favFolderByLibId.get(legacyFolderId);
+            if (byLibId) return byLibId.id;
+            const libFolder = libFolderById.get(legacyFolderId);
+            if (!libFolder) return null;
+            const byNameColor = favFolderByNameColor.get(`${(libFolder.name || '').trim()}|${libFolder.color || ''}`);
+            return byNameColor ? byNameColor.id : null;
+          };
           [...favRes.favorites, ...localFavs].forEach((item) => {
             const rawP = item.path || item.filePath;
             const norm = normalizePath(rawP);
@@ -235,10 +439,15 @@ const useLibraryStore = create((set, get) => ({
               const validCover = isPermanentCover(item.cover)
                 ? item.cover
                 : dbCovers[norm] || null;
+              const ownFavFolderId =
+                item.favoriteFolderId && validFavFolderIds.has(item.favoriteFolderId)
+                  ? item.favoriteFolderId
+                  : null;
               mergedFavsMap.set(norm, {
                 ...item,
                 path: rawP,
                 cover: validCover,
+                favoriteFolderId: ownFavFolderId || resolveMigratedFavFolderId(item.folderId),
               });
             }
           });
@@ -246,9 +455,148 @@ const useLibraryStore = create((set, get) => ({
           set({ favorites: mergedFavs });
           writeLocal(STORAGE_KEYS.FAVORITES, mergedFavs);
         }
+
+        // مرحلهٔ ۵۲ §۱: پس از ادغامِ کامل، یک بار همگام‌سازیِ
+        // فایل‌هایِ رفته (یک پیامِ دسته‌ای)؛ خطا، بوت را خراب
+        // نمی‌کند و بهترین تلاش است.
+        try { await get().syncMissingFiles(); } catch (_) {}
       }
     } catch (e) {
       console.error('Failed to init library store with native DB:', e);
+    }
+  },
+
+  // مرحلهٔ ۵۲ §۱: همگام‌سازیِ دسته‌ایِ فایل‌هایِ حذف‌شده با ورکر.
+  // فقط یک پیامِ IPC در هر اجرا (بدونِ حلقهٔ per-file). onlyPaths
+  // اختیاری است: اگر داده شد، فقط همان مسیرها بررسی می‌شوند
+  // (مثلاً وقتی فایلی رویِ دیسک پیدا نشد)؛ وگرنه همهٔ مسیرهایِ
+  // شناخته‌شده. نتیجهٔ ورکر رویِ استیت اعمال می‌شود: فایلِ رفته از
+  // recentItems می‌رود و در library/favorites با isMissing:true
+  // می‌ماند؛ فایلِ برگشته، پرچمش برداشته می‌شود؛ کاورهایِ آزادشده
+  // از cachedCovers می‌روند؛ بوک‌مارک‌ها و آینهٔ حاشیه‌نویسیِ
+  // محلیِ همان فایل‌ها هم پاک می‌شوند (ردیف‌هایِ دیتابیس را ورکر
+  // در همان پیام پاک کرده است). خطا یا نبودِ coreApi، null
+  // برمی‌گرداند و هرگز throw نمی‌کند.
+  syncMissingFiles: async (onlyPaths) => {
+    const paths = Array.isArray(onlyPaths)
+      ? onlyPaths.filter((p) => typeof p === 'string' && p)
+      : [];
+    const scoped = paths.length > 0;
+    if (missingSyncInflight) return missingSyncInflight;
+    if (
+      !scoped &&
+      missingSyncLastSummary &&
+      Date.now() - missingSyncLastRunAt < MISSING_SYNC_DEDUPE_MS
+    ) {
+      return missingSyncLastSummary;
+    }
+    const run = (async () => {
+      let result = null;
+      try {
+        if (!coreApi.isAvailable()) return null;
+        // مسیرِ ترجیحی، کانالِ تازهٔ 'sync-missing-files' است
+        // (۶۰ ثانیه)؛ اگر پری‌لودِ زنده هنوز آن را نداشت، کانالِ
+        // قدیمیِ 'prune-missing-files' — که در ورکر، همان
+        // همگام‌سازیِ امنِ §۱ است و همان ۶۰ ثانیه را دارد — و در
+        // آخر، مسیرِ عمومیِ db-action.
+        if (typeof coreApi.syncMissingFiles === 'function') {
+          result = await coreApi.syncMissingFiles(scoped ? { paths } : undefined);
+        } else if (!scoped && typeof coreApi.pruneMissingFiles === 'function') {
+          result = await coreApi.pruneMissingFiles();
+        } else {
+          const res = await coreApi.dbAction({
+            action: 'SYNC_AND_CLEAN_MISSING_FILES',
+            payload: scoped ? { paths } : {},
+          });
+          result =
+            res && res.type === 'done'
+              ? { success: true, ...res }
+              : { success: false, error: (res && res.message) || 'همگام‌سازی انجام نشد.' };
+        }
+      } catch (_) {
+        return null;
+      }
+      if (!result || !result.success) return null;
+      const missing = Array.isArray(result.missingPaths) ? result.missingPaths : [];
+      const returned = Array.isArray(result.returnedPaths) ? result.returnedPaths : [];
+      const freed = Array.isArray(result.coversFreedPaths) ? result.coversFreedPaths : [];
+      const summary = {
+        checked: result.checked || 0,
+        purgedFromRecent: result.purgedFromRecent || 0,
+        keptWithWarning: result.keptWithWarning || 0,
+        coversFreed: result.coversFreed || 0,
+        missingPaths: missing,
+        returnedPaths: returned,
+      };
+      if (missing.length === 0 && returned.length === 0 && freed.length === 0) {
+        missingSyncLastSummary = summary;
+        missingSyncLastRunAt = Date.now();
+        return summary;
+      }
+      const missingNorms = new Set(missing.map((p) => normalizePath(p)).filter(Boolean));
+      const returnedNorms = new Set(returned.map((p) => normalizePath(p)).filter(Boolean));
+      const freedNorms = new Set(freed.map((n) => normalizePath(n)).filter(Boolean));
+      // آینهٔ حاشیه‌نویسیِ محلیِ فایل‌هایِ رفته (کلیدهایِ
+      // comicReader.annotations.v1:<hash>:<page>)؛ دیتابیس را ورکر
+      // در همان پیام پاک کرده است.
+      try {
+        missing.forEach((p) => {
+          try { annotationLocalBackup.clearFileBackups(p); } catch (_) {}
+        });
+      } catch (_) {}
+      // بوک‌مارک‌هایِ رندرر برایِ همان فایل‌ها؛ import پویا تا
+      // چرخهٔ import با useBookmarkStore ساخته نشود.
+      try {
+        const bmModule = await import('./useBookmarkStore');
+        const removeFn =
+          bmModule && bmModule.default && typeof bmModule.default.getState === 'function'
+            ? bmModule.default.getState().removeFileBookmarks
+            : null;
+        if (typeof removeFn === 'function') {
+          try { removeFn(missing); } catch (_) {}
+        }
+      } catch (_) {}
+      const flagList = (list) =>
+        (Array.isArray(list) ? list : []).map((item) => {
+          const norm = normalizePath(item.path || item.filePath);
+          if (missingNorms.has(norm)) return { ...item, isMissing: true };
+          if (returnedNorms.has(norm) && item.isMissing) return { ...item, isMissing: false };
+          return item;
+        });
+      const nextLib = flagList(get().library);
+      const nextLibItems = flagList(get().libraryItems);
+      const nextFavs = flagList(get().favorites);
+      const nextRecents = (Array.isArray(get().recentItems) ? get().recentItems : []).filter(
+        (item) => !missingNorms.has(normalizePath(item.path || item.filePath))
+      );
+      const nextCachedCovers = { ...(get().cachedCovers || {}) };
+      const nextCustomCoverPaths = { ...(get().customCoverPaths || {}) };
+      freedNorms.forEach((norm) => {
+        delete nextCachedCovers[norm];
+        delete nextCustomCoverPaths[norm];
+      });
+      const sortedLib = sortLibraryItems(nextLib);
+      const sortedLibItems = sortLibraryItems(nextLibItems);
+      set({
+        library: sortedLib,
+        libraryItems: sortedLibItems,
+        favorites: nextFavs,
+        recentItems: nextRecents,
+        cachedCovers: nextCachedCovers,
+        customCoverPaths: nextCustomCoverPaths,
+      });
+      writeLocal(STORAGE_KEYS.LIBRARY, sortedLib);
+      writeLocal(STORAGE_KEYS.FAVORITES, nextFavs);
+      writeLocal(STORAGE_KEYS.RECENTS, nextRecents);
+      missingSyncLastSummary = summary;
+      missingSyncLastRunAt = Date.now();
+      return summary;
+    })();
+    missingSyncInflight = run;
+    try {
+      return await run;
+    } finally {
+      missingSyncInflight = null;
     }
   },
 
@@ -446,6 +794,13 @@ const useLibraryStore = create((set, get) => ({
   },
 
   // پین / آن‌پین کردن آیتم در صدر کتابخانه و ذخیره در دیتابیس
+  // مرحله ۴۷ §۲: ورودی هم رشتهٔ مسیر و هم آبجکت کامل کتاب را
+  // می‌پذیرد؛ هرگز آیتمِ بدونِ مسیر یا بدونِ نام ساخته نمی‌شود.
+  // به‌روزرسانیِ خوش‌بینانه فقط isPinned و pinnedAt را عوض می‌کند و
+  // همهٔ فیلدهایِ دیگر (کاور، نام، مسیر، پیشرفت، نوع فایل و...)
+  // دست‌نخورده می‌مانند؛ recentItems هم با همان تغییرِ حداقلی
+  // همگام می‌شود. پاسخِ ورکر هیچ‌وقت جایگزینِ کورکورانهٔ استیت
+  // نمی‌شود و فقط با حفظِ کاورهایِ درون‌حافظه ادغام می‌شود.
   togglePin: async (comicOrPath) => {
     if (!comicOrPath) return false;
     const isObj = typeof comicOrPath === 'object';
@@ -474,22 +829,78 @@ const useLibraryStore = create((set, get) => ({
           : item
       );
     } else {
+      // آبجکت ورودی ممکن است از Recent یا اسلایدر آمده باشد؛ فیلدهایِ
+      // غنیِ آن (پیشرفت، نوع فایل، صفحهٔ جاری، کاور) حفظ می‌شوند تا
+      // ورودیِ تازهٔ کتابخانه، نسخهٔ فقیرانهٔ کتاب نشود.
+      const source = isObj ? comicOrPath : {};
+      const recentMatch = get().recentItems.find(
+        (item) => normalizePath(item.path || item.filePath) === norm
+      );
+      const favMatch = get().favorites.find(
+        (item) => normalizePath(item.path || item.filePath) === norm
+      );
       const validCover =
-        (isObj && isPermanentCover(comicOrPath.cover) ? comicOrPath.cover : null) ||
+        (isPermanentCover(source.cover) ? source.cover : null) ||
+        (isPermanentCover(recentMatch?.cover) ? recentMatch.cover : null) ||
+        (isPermanentCover(favMatch?.cover) ? favMatch.cover : null) ||
         get().cachedCovers[norm] ||
         null;
+
+      const totalPages =
+        Number(source.totalPages || source.items?.length) ||
+        Number(recentMatch?.totalPages) ||
+        1;
+      const lastPage = Math.max(
+        1,
+        Math.min(
+          totalPages,
+          Number(source.lastPage || source.currentPage) ||
+            Number(recentMatch?.lastPage || recentMatch?.currentPage) ||
+            1
+        )
+      );
+      const progressValue =
+        typeof source.percentage === 'number'
+          ? source.percentage
+          : typeof source.progress === 'number'
+          ? source.progress
+          : typeof recentMatch?.percentage === 'number'
+          ? recentMatch.percentage
+          : typeof recentMatch?.progress === 'number'
+          ? recentMatch.progress
+          : Math.min(100, Math.round((lastPage / Math.max(1, totalPages)) * 100));
 
       const newEntry = {
         path: rawPath,
         name:
-          (isObj && (comicOrPath.name || comicOrPath.fileName)) ||
+          source.name ||
+          source.fileName ||
+          recentMatch?.name ||
+          recentMatch?.fileName ||
+          favMatch?.name ||
+          favMatch?.fileName ||
           rawPath.split(/[\\/]/).pop() ||
           'بدون نام',
         cover: validCover,
-        fileSize: (isObj && comicOrPath.fileSize) || '',
-        totalPages: (isObj && (comicOrPath.totalPages || comicOrPath.items?.length)) || 1,
-        lastPage: (isObj && comicOrPath.lastPage) || 1,
-        folderId: (isObj && comicOrPath.folderId) || null,
+        type:
+          source.type ||
+          recentMatch?.type ||
+          favMatch?.type ||
+          (norm.endsWith('.pdf') ? 'pdf' : 'zip'),
+        fileSize: source.fileSize || recentMatch?.fileSize || favMatch?.fileSize || '',
+        totalPages,
+        lastPage,
+        currentPage: lastPage,
+        percentage: progressValue,
+        progress: progressValue,
+        // مرحله ۴۹ (C): folderIdِ ردیفِ علاقه‌مندی (favMatch) دیگر
+        // مرجع نیست؛ ورودیِ تازهٔ کتابخانه، پوشه‌اش را فقط از منبعِ
+        // کتابخانه‌ای (source/recent) می‌گیرد.
+        folderId: source.folderId ?? recentMatch?.folderId ?? null,
+        hasCustomCover: Boolean(
+          source.hasCustomCover || recentMatch?.hasCustomCover
+        ),
+        lastReadAt: recentMatch?.lastReadAt || favMatch?.lastReadAt || null,
         isPinned: true,
         pinnedAt: now,
         addedAt: now,
@@ -498,8 +909,25 @@ const useLibraryStore = create((set, get) => ({
     }
 
     const sorted = sortLibraryItems(nextList);
-    set({ library: sorted, libraryItems: sorted });
+    // همگام‌سازیِ recentItems با همان تغییرِ حداقلی: فقط پین.
+    const hadRecent = get().recentItems.some(
+      (item) => normalizePath(item.path || item.filePath) === norm
+    );
+    const nextRecents = hadRecent
+      ? get().recentItems.map((item) =>
+          normalizePath(item.path || item.filePath) === norm
+            ? { ...item, isPinned: nextPinned, pinnedAt: nextPinned ? now : null }
+            : item
+        )
+      : null;
+
+    set({
+      library: sorted,
+      libraryItems: sorted,
+      ...(nextRecents ? { recentItems: nextRecents } : {}),
+    });
     writeLocal(STORAGE_KEYS.LIBRARY, sorted);
+    if (nextRecents) writeLocal(STORAGE_KEYS.RECENTS, nextRecents);
 
     coreApi
       .dbAction({
@@ -509,14 +937,86 @@ const useLibraryStore = create((set, get) => ({
           comic: isObj ? comicOrPath : { path: rawPath },
         },
       })
+      .then((res) => {
+        if (Array.isArray(res?.library)) {
+          get().mergeLibraryFromDb(res.library);
+        }
+      })
       .catch(() => {});
 
     return nextPinned;
   },
 
+  // ادغامِ امنِ پاسخِ ورکر با استیتِ رندرر (مرحله ۴۷ §۲): ردیف‌هایِ
+  // خامِ ورکر، کاورِ درون‌حافظه را ندارند؛ پس جایگزینیِ کورکورانهٔ
+  // library با آن‌ها، کارت‌ها را خالی می‌کرد. اینجا فقط وضعیتِ پین
+  // از ورکر گرفته می‌شود و کاور و فیلدهایِ غنیِ رندرر همیشه می‌مانند؛
+  // آیتمِ فقط-ورکری اضافه و آیتمِ فقط-رندرری نگه داشته می‌شود.
+  mergeLibraryFromDb: (dbLibrary) => {
+    if (!Array.isArray(dbLibrary)) return;
+    const current = get().library;
+    const byNorm = new Map();
+    current.forEach((item) => {
+      const n = normalizePath(item.path || item.filePath);
+      if (n && !byNorm.has(n)) byNorm.set(n, item);
+    });
+
+    const merged = [];
+    dbLibrary.forEach((dbItem) => {
+      const n = normalizePath(dbItem?.path || dbItem?.filePath);
+      if (!n) return;
+      const existing = byNorm.get(n);
+      if (existing) {
+        byNorm.delete(n);
+        merged.push({
+          ...existing,
+          isPinned: Boolean(dbItem.isPinned),
+          pinnedAt: dbItem.isPinned
+            ? dbItem.pinnedAt || existing.pinnedAt || null
+            : null,
+          cover:
+            existing.cover ||
+            (isPermanentCover(dbItem.cover) ? dbItem.cover : null) ||
+            get().cachedCovers[n] ||
+            null,
+        });
+        return;
+      }
+      merged.push({
+        ...dbItem,
+        path: dbItem.path || dbItem.filePath,
+        cover: isPermanentCover(dbItem.cover)
+          ? dbItem.cover
+          : get().cachedCovers[n] || null,
+        isPinned: Boolean(dbItem.isPinned),
+        pinnedAt: dbItem.pinnedAt || null,
+      });
+    });
+    // آیتم‌هایِ فقط-رندرر (مثلاً تازه اضافه‌شده و هنوز نرسیده به
+    // ورکر) حذف نمی‌شوند.
+    byNorm.forEach((item) => merged.push(item));
+
+    const sorted = sortLibraryItems(merged);
+    set({ library: sorted, libraryItems: sorted });
+    writeLocal(STORAGE_KEYS.LIBRARY, sorted);
+    // مرحله ۴۹ (C): این ادغام عمداً پوشه را دست نمی‌زند — قراردادِ
+    // مرحله ۴۷ §۲ فقط وضعیتِ پین را از ورکر می‌گیرد. پاسخِ پین ممکن
+    // است پیش از یک انتسابِ پوشهٔ جدیدتر ساخته شده باشد؛ گرفتنِ
+    // folderId از آن، انتسابِ تازه را برمی‌گرداند. پوشهٔ کتابخانه فقط
+    // در assignToFolder و deleteFolder، و پوشهٔ علاقه‌مندی‌ها فقط در
+    // assignToFavoriteFolder و deleteFavoriteFolder و toggleFavorite
+    // و initLibrary همگام می‌شود؛ هیچ‌کدام، دیگری را دست نمی‌زند.
+  },
+
   // تغییر پوشه فعال در نمای کتابخانه
   setActiveFolder: (folderId) => {
     set({ activeFolderId: folderId || 'ALL' });
+  },
+
+  // تغییر پوشه فعال در نمای علاقه‌مندی‌ها (جدا از پوشه فعال
+  // کتابخانه، تا انتخابِ پوشه در یک نما، تبِ نمایِ دیگر را عوض نکند)
+  setActiveFavoriteFolder: (folderId) => {
+    set({ activeFavoriteFolderId: folderId || 'ALL' });
   },
 
   // ساخت پوشه جدید در کتابخانه و ذخیره در دیتابیس
@@ -579,7 +1079,9 @@ const useLibraryStore = create((set, get) => ({
     return true;
   },
 
-  // حذف پوشه از کتابخانه (آیتم‌های داخل آن حذف نمی‌شوند و به حالت بدون پوشه برمی‌گردند)
+  // حذف پوشه از کتابخانه (آیتم‌های داخل آن حذف نمی‌شوند و به حالت بدون پوشه برمی‌گردند؛
+  // کتابِ هیچ‌کدام پاک نمی‌شود). مرحله ۴۹ (C): حذفِ پوشهٔ کتابخانه،
+  // پوشه‌هایِ علاقه‌مندی‌ها و favoriteFolderId را دست نمی‌زند.
   deleteFolder: async (folderId) => {
     if (!folderId) return;
     const updatedFolders = get().libraryFolders.filter((f) => f.id !== folderId);
@@ -653,6 +1155,9 @@ const useLibraryStore = create((set, get) => ({
     set({ library: sorted, libraryItems: sorted });
     writeLocal(STORAGE_KEYS.LIBRARY, sorted);
 
+    // مرحله ۴۹ (C): انتسابِ پوشهٔ کتابخانه، علاقه‌مندی‌ها را دست
+    // نمی‌زند؛ favoriteFolderIdِ همان کتاب، مستقل می‌ماند.
+
     await coreApi
       .dbAction({
         action: 'ASSIGN_TO_LIBRARY_FOLDER',
@@ -665,6 +1170,218 @@ const useLibraryStore = create((set, get) => ({
       .catch(() => {});
 
     return true;
+  },
+
+  // =========================================================================
+  // مرحله ۴۹ (C): پوشه‌بندیِ مستقلِ علاقه‌مندی‌ها — دقیقاً هم‌ارزِ
+  // پوشه‌هایِ کتابخانه در شکل و رفتار، ولی با فهرست، فیلد و اکشن‌هایِ
+  // کاملاً جدا؛ هیچ‌کدام از این چهار اکشن، libraryFolders یا folderId
+  // را نمی‌خواند و نمی‌نویسد.
+  // =========================================================================
+  // ساخت پوشه جدید در علاقه‌مندی‌ها و ذخیره در دیتابیس
+  createFavoriteFolder: async (name, color = '#22d3ee', icon = 'Folder') => {
+    const cleanName = (name || '').trim();
+    if (!cleanName) return null;
+
+    const tempFolder = {
+      id: `favfolder_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: cleanName,
+      color,
+      icon,
+      createdAt: new Date().toISOString(),
+    };
+
+    const nextFolders = [...get().favoriteFolders, tempFolder];
+    set({ favoriteFolders: nextFolders });
+    writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, nextFolders);
+
+    try {
+      const res = await coreApi.dbAction({
+        action: 'CREATE_FAVORITE_FOLDER',
+        payload: { name: cleanName, color, icon },
+      });
+      if (Array.isArray(res?.favoriteFolders)) {
+        set({ favoriteFolders: res.favoriteFolders });
+        writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, res.favoriteFolders);
+        return res.folder || tempFolder;
+      }
+    } catch (_) {}
+
+    return tempFolder;
+  },
+
+  // ویرایش نام و رنگ پوشه علاقه‌مندی‌ها
+  renameFavoriteFolder: async (folderId, name, color) => {
+    if (!folderId) return false;
+    const cleanName = (name || '').trim();
+
+    const updatedFolders = get().favoriteFolders.map((f) =>
+      f.id === folderId
+        ? {
+            ...f,
+            ...(cleanName ? { name: cleanName } : {}),
+            ...(color ? { color } : {}),
+          }
+        : f
+    );
+
+    set({ favoriteFolders: updatedFolders });
+    writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, updatedFolders);
+
+    await coreApi
+      .dbAction({
+        action: 'RENAME_FAVORITE_FOLDER',
+        payload: { folderId, name: cleanName, color },
+      })
+      .catch(() => {});
+
+    return true;
+  },
+
+  // حذف پوشه از علاقه‌مندی‌ها (آیتم‌های داخل آن حذف نمی‌شوند و به حالت بدون پوشه برمی‌گردند؛
+  // کتابِ هیچ‌کدام پاک نمی‌شود و پوشه‌هایِ کتابخانه دست نمی‌خورند)
+  deleteFavoriteFolder: async (folderId) => {
+    if (!folderId) return;
+    const updatedFolders = get().favoriteFolders.filter((f) => f.id !== folderId);
+    const updatedFavs = get().favorites.map((item) =>
+      item.favoriteFolderId === folderId ? { ...item, favoriteFolderId: null } : item
+    );
+
+    set((state) => ({
+      favoriteFolders: updatedFolders,
+      favorites: updatedFavs,
+      activeFavoriteFolderId:
+        state.activeFavoriteFolderId === folderId ? 'ALL' : state.activeFavoriteFolderId,
+    }));
+
+    writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, updatedFolders);
+    writeLocal(STORAGE_KEYS.FAVORITES, updatedFavs);
+
+    await coreApi
+      .dbAction({
+        action: 'DELETE_FAVORITE_FOLDER',
+        payload: { folderId },
+      })
+      .catch(() => {});
+  },
+
+  // اختصاص دادن یا انتقال علاقه‌مندی به یک پوشه خاصِ علاقه‌مندی‌ها
+  assignToFavoriteFolder: async (comicOrPath, folderId = null) => {
+    if (!comicOrPath) return false;
+    const isObj = typeof comicOrPath === 'object';
+    const rawPath = isObj ? comicOrPath.path || comicOrPath.filePath : comicOrPath;
+    const norm = normalizePath(rawPath);
+    if (!norm) return false;
+
+    const currentFavs = get().favorites;
+    const exists = currentFavs.some(
+      (item) => normalizePath(item.path || item.filePath) === norm
+    );
+
+    let nextFavs;
+    if (exists) {
+      nextFavs = currentFavs.map((item) =>
+        normalizePath(item.path || item.filePath) === norm
+          ? { ...item, favoriteFolderId: folderId || null }
+          : item
+      );
+    } else {
+      const validCover =
+        (isObj && isPermanentCover(comicOrPath.cover) ? comicOrPath.cover : null) ||
+        get().cachedCovers[norm] ||
+        null;
+
+      const newItem = {
+        path: rawPath,
+        name:
+          (isObj && (comicOrPath.name || comicOrPath.fileName)) ||
+          rawPath.split(/[\/]/).pop() ||
+          'بدون نام',
+        cover: validCover,
+        fileSize: (isObj && comicOrPath.fileSize) || '',
+        totalPages: (isObj && (comicOrPath.totalPages || comicOrPath.items?.length)) || 1,
+        lastPage: (isObj && comicOrPath.lastPage) || 1,
+        favoriteFolderId: folderId || null,
+        favoritedAt: new Date().toISOString(),
+      };
+      nextFavs = [newItem, ...currentFavs];
+    }
+
+    set({ favorites: nextFavs });
+    writeLocal(STORAGE_KEYS.FAVORITES, nextFavs);
+
+    await coreApi
+      .dbAction({
+        action: 'ASSIGN_TO_FAVORITE_FOLDER',
+        payload: {
+          filePath: rawPath,
+          folderId: folderId || null,
+          comic: isObj ? comicOrPath : { path: rawPath },
+        },
+      })
+      .catch(() => {});
+
+    return true;
+  },
+
+  // مرحلهٔ ۵۰ §۵ — اکشن‌هایِ منبعِ اسلایدرِ هیرو.
+  // نکته: مسیرهایِ دستی فقط نرمال و یکتا می‌شوند؛ کتابِ حذف‌شده
+  // از کتابخانه، هنگامِ حلِ منبع (LibraryView) از اسلایدها کنار
+  // می‌رود، پس مسیرِ کهنه هرگز اسلایدِ خالی یا کرش نمی‌سازد.
+  isBookInHeroSlider: (comicOrPath) => {
+    if (!comicOrPath) return false;
+    const rawPath =
+      typeof comicOrPath === 'object' ? comicOrPath.path || comicOrPath.filePath : comicOrPath;
+    const norm = normalizePath(rawPath);
+    if (!norm) return false;
+    return (get().customSliderBookPaths || []).includes(norm);
+  },
+
+  toggleBookInHeroSlider: (comicOrPath) => {
+    if (!comicOrPath) return false;
+    const rawPath =
+      typeof comicOrPath === 'object' ? comicOrPath.path || comicOrPath.filePath : comicOrPath;
+    const norm = normalizePath(rawPath);
+    if (!norm) return false;
+    const current = get().customSliderBookPaths || [];
+    const exists = current.includes(norm);
+    const next = exists ? current.filter((p) => p !== norm) : [...current, norm];
+    const clean = persistHeroSliderConfig({
+      heroSliderSource: get().heroSliderSource || 'auto',
+      heroSliderFolderId: get().heroSliderFolderId || null,
+      customSliderBookPaths: next,
+    });
+    set({ customSliderBookPaths: clean.customSliderBookPaths });
+    return !exists;
+  },
+
+  setHeroSliderSource: (sourceType, folderId = null) => {
+    const source = HERO_SLIDER_SOURCES.includes(sourceType) ? sourceType : 'auto';
+    const clean = persistHeroSliderConfig({
+      heroSliderSource: source,
+      heroSliderFolderId:
+        (source === 'library-folder' || source === 'favorite-folder') &&
+        typeof folderId === 'string' &&
+        folderId.trim()
+          ? folderId.trim()
+          : null,
+      customSliderBookPaths: get().customSliderBookPaths || [],
+    });
+    set({
+      heroSliderSource: clean.heroSliderSource,
+      heroSliderFolderId: clean.heroSliderFolderId,
+    });
+    return clean.heroSliderSource;
+  },
+
+  setCustomSliderBookPaths: (paths) => {
+    const clean = persistHeroSliderConfig({
+      heroSliderSource: get().heroSliderSource || 'auto',
+      heroSliderFolderId: get().heroSliderFolderId || null,
+      customSliderBookPaths: Array.isArray(paths) ? paths : [],
+    });
+    set({ customSliderBookPaths: clean.customSliderBookPaths });
+    return clean.customSliderBookPaths;
   },
 
   // ۴. مدیریت علاقه‌مندی‌ها (Favorites)
@@ -691,6 +1408,10 @@ const useLibraryStore = create((set, get) => ({
         ? comic.cover
         : get().cachedCovers[norm] || null;
 
+      // مرحله ۴۹ (C): علاقه‌مندیِ تازه، در پوشه‌بندیِ علاقه‌مندی‌ها
+      // بدونِ پوشه شروع می‌شود؛ پوشهٔ کتاب در کتابخانه ارث برده
+      // نمی‌شود. فقط وقتی فراخوان، favoriteFolderId داده باشد (مثلاً
+      // از منویِ پوشه در نمایِ علاقه‌مندی‌ها) همان گرفته می‌شود.
       const favItem = {
         path: rawPath,
         name: comic.name || comic.fileName || rawPath.split(/[\\/]/).pop() || 'بدون نام',
@@ -698,6 +1419,7 @@ const useLibraryStore = create((set, get) => ({
         fileSize: comic.fileSize || '',
         totalPages: comic.totalPages || comic.items?.length || 1,
         lastPage: comic.lastPage || 1,
+        favoriteFolderId: comic.favoriteFolderId || null,
         favoritedAt: new Date().toISOString(),
       };
       updated = [favItem, ...currentFavs];

@@ -99,6 +99,33 @@ function writeBookmarksLocalStorage(filePath, list) {
     window.localStorage.setItem(LS_BOOKMARKS_KEY, JSON.stringify(parsed));
   } catch (_) {}
 }
+// مرحلهٔ ۵۲ §۱: حذفِ آینهٔ localStorage برایِ چند فایل، با تطابقِ
+// کلیدِ نرمال‌شده (کلیدهایِ آینه، مسیرِ خام‌اند و ممکن است با
+// بزرگی/کوچکیِ حروف یا جداکننده فرق کنند؛ پس همهٔ کلیدها با
+// normalizeBookKey مقایسه می‌شوند، نه با برابریِ رشته‌ای).
+function removeFileBookmarksFromLocalStorage(filePaths) {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return 0;
+    const norms = new Set(
+      (Array.isArray(filePaths) ? filePaths : []).map((p) => normalizeBookKey(p)).filter(Boolean)
+    );
+    if (norms.size === 0) return 0;
+    let parsed = {};
+    try { parsed = JSON.parse(window.localStorage.getItem(LS_BOOKMARKS_KEY) || '{}') || {}; } catch (_) { parsed = {}; }
+    let removed = 0;
+    Object.keys(parsed).forEach((key) => {
+      if (norms.has(normalizeBookKey(key))) {
+        delete parsed[key];
+        removed += 1;
+      }
+    });
+    if (removed > 0) window.localStorage.setItem(LS_BOOKMARKS_KEY, JSON.stringify(parsed));
+    return removed;
+  } catch (_) {
+    return 0;
+  }
+}
+
 // اتحادِ دو فهرست بر اساسِ id: فهرستِ override در تعارض برنده است و
 // آیتم‌هایِ فقطِ base هم حفظ می‌شوند (ترتیبِ base اول، سپس فقطِ override).
 function mergeBookmarkLists(base, override) {
@@ -489,6 +516,44 @@ const useBookmarkStore = create((set, get) => ({
       set({ allBookmarksLoaded: true });
       return {};
     }
+  },
+
+  // مرحلهٔ ۵۲ §۱: حذفِ بوک‌مارک‌هایِ فایل‌هایِ رفته از استور و
+  // آینهٔ localStorage. ورکر در همان همگام‌سازیِ دسته‌ای، ردیف‌هایِ
+  // دیتابیس را پاک کرده است؛ اینجا فقط آینه‌هایِ رندرر خالی
+  // می‌شوند تا با ری‌لود، بوک‌مارکِ کتابِ حذف‌شده زنده نشود.
+  // هیچ IPC تازه‌ای ندارد.
+  removeFileBookmarks: (filePaths) => {
+    const paths = Array.isArray(filePaths) ? filePaths : [];
+    if (paths.length === 0) return 0;
+    const norms = new Set(paths.map((p) => normalizeBookKey(p)).filter(Boolean));
+    if (norms.size === 0) return 0;
+    let removed = 0;
+    set((state) => {
+      const nextByFile = { ...(state.bookmarksByFile || {}) };
+      Object.keys(nextByFile).forEach((key) => {
+        if (norms.has(normalizeBookKey(key))) {
+          delete nextByFile[key];
+          removed += 1;
+        }
+      });
+      const nextAll = { ...(state.allBookmarkFiles || {}) };
+      Object.keys(nextAll).forEach((key) => {
+        if (norms.has(normalizeBookKey(key))) delete nextAll[key];
+      });
+      const total = Object.values(nextAll).reduce(
+        (sum, entry) => sum + (Array.isArray(entry?.bookmarks) ? entry.bookmarks.length : Array.isArray(entry) ? entry.length : 0),
+        0
+      );
+      return {
+        bookmarksByFile: nextByFile,
+        allBookmarkFiles: nextAll,
+        totalBookmarkCount: total,
+        loadedFilePath: norms.has(normalizeBookKey(state.loadedFilePath)) ? null : state.loadedFilePath,
+      };
+    });
+    removeFileBookmarksFromLocalStorage(paths);
+    return removed;
   },
 
   // مرحله ۱۴: ساخت‌هایِ سفارشیِ کاربر — در تنظیماتِ سراسری

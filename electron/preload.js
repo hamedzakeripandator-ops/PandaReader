@@ -102,6 +102,34 @@ contextBridge.exposeInMainWorld('api', {
     return ipcRenderer.invoke('export-annotated-pdf', sanitizePayload(payload));
   },
 
+  // مرحلهٔ ۴۴ §۴: خروجیِ CBZ و EPUBِ حاشیه‌نویسی‌شده + خواندنِ
+  // مانیفستِ جاسازی‌شدهٔ CBZ. بافرهایِ تصویری به‌صورتِ رشتهٔ base64
+  // (data URL) می‌روند، پس sanitizePayload با چرخهٔ JSON آن‌ها را
+  // خراب نمی‌کند (درسِ مرحلهٔ ۳۲)؛ مسیرِ باینریِ امنِ saveRebuiltPdf
+  // لازم نیست، چون هیچ Uint8Arrayای در payload نیست.
+  exportAnnotatedCbz: (payload) => {
+    return ipcRenderer.invoke('export-annotated-cbz', sanitizePayload(payload));
+  },
+
+  exportAnnotatedEpub: (payload) => {
+    return ipcRenderer.invoke('export-annotated-epub', sanitizePayload(payload));
+  },
+
+  // مرحلهٔ ۴۶ §۲: خروجیِ HTMLِ مستقلِ گزارشِ آماربندی. رشتهٔ HTML با
+  // چرخهٔ JSON سالم می‌ماند، پس sanitizePayload مثلِ exportAnnotatedCbz
+  // کافی است؛ قراردادِ payload با ipcHandlers و coreApi یکی است:
+  // { html, defaultFileName }.
+  exportStatsHtml: (payload) => {
+    return ipcRenderer.invoke('export-stats-html', sanitizePayload(payload));
+  },
+
+  getEmbeddedCbzAnnotations: (filePath) => {
+    if (!filePath || typeof filePath !== 'string') {
+      return Promise.resolve({ success: false, error: 'مسیرِ فایل مشخص نشده است.' });
+    }
+    return ipcRenderer.invoke('get-embedded-cbz-annotations', { filePath: filePath.trim() });
+  },
+
   // مرحله ۸ ـ بخش الف: استراتژیِ Xodo — بررسیِ محافظت و ساختِ
   // نسخهٔ کپیِ بدونِ قفل، فقط هنگامِ ورود به استودیو.
   checkPdfProtection: (filePath) => {
@@ -173,6 +201,12 @@ contextBridge.exposeInMainWorld('api', {
 
   pruneMissingFiles: () => {
     return ipcRenderer.invoke('prune-missing-files');
+  },
+
+  // مرحلهٔ ۵۲ §۱: همگام‌سازیِ دسته‌ایِ فایل‌هایِ حذف‌شده (یک پیام؛
+  // ورکر همان رفتارِ امنِ تازه را زیرِ این نام می‌دهد).
+  syncMissingFiles: (payload) => {
+    return ipcRenderer.invoke('sync-missing-files', sanitizePayload(payload || {}));
   },
 
   // مرحله ۱۳: پاک‌سازیِ جداگانهٔ کاورها و کش‌ها + پیش‌نمایشِ

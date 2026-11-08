@@ -16,7 +16,7 @@ const FALLBACK_SLIDE_BACKGROUNDS = [
 
 const AUTO_PLAY_MS = 6000;
 
-export default function KineticHeroSlider({ items = [], onOpenComic }) {
+export default function KineticHeroSlider({ items = [], onOpenComic, capSlides = true }) {
   const favorites = useLibraryStore((state) => state.favorites);
   const cachedCovers = useLibraryStore((state) => state.cachedCovers);
   const toggleFavorite = useLibraryStore((state) => state.toggleFavorite);
@@ -25,23 +25,162 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
   const showToast = useAppStore((state) => state.showToast);
   const heroSliderVariant = useSettingsStore((state) => state.preferences?.heroSliderVariant || 'mirror');
 
+  // مرحلهٔ ۵۰ §۵ — پیکربندیِ منبعِ اسلایدر (مدلِ دادهٔ استور).
+  const heroSliderSource = useLibraryStore((state) => state.heroSliderSource || 'auto');
+  const heroSliderFolderId = useLibraryStore((state) => state.heroSliderFolderId || null);
+  const customSliderBookPaths = useLibraryStore((state) => state.customSliderBookPaths || []);
+  const library = useLibraryStore((state) => state.library || []);
+  const recentItems = useLibraryStore((state) => state.recentItems || []);
+  const libraryFolders = useLibraryStore((state) => state.libraryFolders || []);
+  const favoriteFolders = useLibraryStore((state) => state.favoriteFolders || []);
+  const setHeroSliderSource = useLibraryStore((state) => state.setHeroSliderSource);
+  const toggleBookInHeroSlider = useLibraryStore((state) => state.toggleBookInHeroSlider);
+  const setCustomSliderBookPaths = useLibraryStore((state) => state.setCustomSliderBookPaths);
+
   const [currentIndex, setCurrentIndex] = useState(0);
+  // مرحلهٔ ۵۰ §۵ — منویِ منبع و پنجرهٔ انتخابِ دستیِ کتاب‌ها.
+  const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
   const [resolvedCovers, setResolvedCovers] = useState({});
+  // مرحله ۴۷ §۲: نشانی‌هایِ خرابِ کاور و اسلایدهایی که یک‌بار
+  // استخراجِ دوباره برایشان امتحان شده؛ تا خطایِ تصویر، چرخهٔ
+  // درخواستِ بی‌پایان نسازد.
+  const [coverRetryTick, setCoverRetryTick] = useState(0);
+  const failedCoverUrlsRef = useRef(new Set());
+  const retriedNormsRef = useRef(new Set());
 
   const dragStartXRef = useRef(0);
   const dragCurrentXRef = useRef(0);
   const hasDraggedRef = useRef(false);
 
-  const slides = useMemo(() => (Array.isArray(items) ? items.slice(0, 7) : []), [items]);
+  // مرحلهٔ ۵۰ §۵ — تعدادِ پویا: برشِ ثابتِ ۷تایی فقط برایِ حالتِ
+  // خودکار می‌ماند (capSlides)؛ در حالت‌هایِ پوشه و دستی، لیستِ
+  // اسلایدها دقیقاً به‌اندازهٔ کتاب‌هایِ واقعیِ منبع است (پوشهٔ
+  // ۳ کتابی = ۳ اسلاید، ۲۰ کتابی = ۲۰ اسلاید).
+  const slides = useMemo(() => {
+    if (!Array.isArray(items)) return [];
+    return capSlides ? items.slice(0, 7) : items;
+  }, [items, capSlides]);
   const totalSlides = slides.length;
+  // مرحلهٔ ۵۰ §۵ — پیشگیریِ ۱: تقسیم بر صفر هرگز رخ نمی‌دهد؛
+  // safeIndex همیشه در بازهٔ معتبر است و به‌جایِ currentIndexِ خام
+  // برایِ اسلایدِ فعال و کنترلِ موج استفاده می‌شود.
+  const safeIndex = totalSlides > 0 ? currentIndex % totalSlides : 0;
 
   useEffect(() => {
     if (currentIndex >= totalSlides && totalSlides > 0) {
       setCurrentIndex(0);
     }
   }, [totalSlides, currentIndex]);
+
+  // مرحلهٔ ۵۰ §۵ — پیشگیریِ ۲: با تغییرِ منبعِ اسلایدر (نوع، پوشه
+  // یا فهرستِ دستی)، اندیس فوراً صفر می‌شود تا slides[currentIndex]
+  // هرگز undefined نشود. گاردِ currentIndex !== 0 از رندرِ اضافه
+  // جلوگیری می‌کند؛ currentIndex عمداً در وابستگی‌ها نیست تا فقط
+  // تغییرِ منبع، ریست را بسازد.
+  const heroSourceSignature = useMemo(
+    () =>
+      `${heroSliderSource || 'auto'}|${heroSliderFolderId || ''}|${(customSliderBookPaths || []).join(',')}`,
+    [heroSliderSource, heroSliderFolderId, customSliderBookPaths]
+  );
+  useEffect(() => {
+    if (currentIndex !== 0) setCurrentIndex(0);
+  }, [heroSourceSignature]); // eslint-disable-line react-hooks/exhaustive-deps
+
+
+  // مرحلهٔ ۵۰ §۵ — برچسبِ دکمهٔ «منبع اسلایدر» و شمارِ کتاب‌هایِ
+  // هر پوشه برایِ منو.
+  const sourceLabel = useMemo(() => {
+    if (heroSliderSource === 'custom') return 'انتخاب دستی';
+    if (heroSliderSource === 'library-folder') {
+      const f = (libraryFolders || []).find((x) => x.id === heroSliderFolderId);
+      return f ? `پوشه: ${f.name}` : 'پوشهٔ حذف‌شده';
+    }
+    if (heroSliderSource === 'favorite-folder') {
+      const f = (favoriteFolders || []).find((x) => x.id === heroSliderFolderId);
+      return f ? `پوشه علاقه‌مندی: ${f.name}` : 'پوشهٔ حذف‌شده';
+    }
+    return 'خودکار';
+  }, [heroSliderSource, heroSliderFolderId, libraryFolders, favoriteFolders]);
+
+  const libraryFolderCount = useMemo(() => {
+    const counts = new Map();
+    (library || []).forEach((item) => {
+      if (!item?.folderId) return;
+      counts.set(item.folderId, (counts.get(item.folderId) || 0) + 1);
+    });
+    return counts;
+  }, [library]);
+
+  const favoriteFolderCount = useMemo(() => {
+    const counts = new Map();
+    (favorites || []).forEach((item) => {
+      if (!item?.favoriteFolderId) return;
+      counts.set(item.favoriteFolderId, (counts.get(item.favoriteFolderId) || 0) + 1);
+    });
+    return counts;
+  }, [favorites]);
+
+  // مرحلهٔ ۵۰ §۵ — فهرستِ پنجرهٔ انتخابِ دستی: همهٔ کتاب‌هایِ
+  // کتابخانه + مواردِ Recent که در کتابخانه نیستند، یکتا و با
+  // جستجویِ سادهٔ نام/مسیر.
+  const pickerBooks = useMemo(() => {
+    const map = new Map();
+    [...(library || []), ...(recentItems || [])].forEach((item) => {
+      const rawP = item?.path || item?.filePath;
+      if (!rawP) return;
+      const norm = rawP.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+      if (norm && !map.has(norm)) map.set(norm, item);
+    });
+    const q = (pickerQuery || '').trim().toLowerCase();
+    const all = Array.from(map.values());
+    if (!q) return all;
+    return all.filter((item) => {
+      const name = (item?.name || item?.fileName || '').toLowerCase();
+      const p = (item?.path || item?.filePath || '').toLowerCase();
+      return name.includes(q) || p.includes(q);
+    });
+  }, [library, recentItems, pickerQuery]);
+
+  const customPathSet = useMemo(
+    () => new Set(customSliderBookPaths || []),
+    [customSliderBookPaths]
+  );
+
+  const handlePickSource = useCallback(
+    (sourceType, folderId = null) => {
+      setHeroSliderSource(sourceType, folderId);
+      setCurrentIndex(0);
+      setSourceMenuOpen(false);
+      setPickerOpen(false);
+    },
+    [setHeroSliderSource]
+  );
+
+  // باز کردنِ پنجرهٔ انتخابِ دستی، منبع را هم رویِ «انتخاب دستی»
+  // می‌گذارد تا تیک‌زدن بی‌درنگ در اسلایدر دیده شود.
+  const handleOpenPicker = useCallback(() => {
+    if (heroSliderSource !== 'custom') setHeroSliderSource('custom');
+    setCurrentIndex(0);
+    setSourceMenuOpen(false);
+    setPickerOpen(true);
+  }, [heroSliderSource, setHeroSliderSource]);
+
+  const handleTogglePickerBook = useCallback(
+    (item) => {
+      if (heroSliderSource !== 'custom') setHeroSliderSource('custom');
+      toggleBookInHeroSlider(item);
+    },
+    [heroSliderSource, setHeroSliderSource, toggleBookInHeroSlider]
+  );
+
+  const emptyHint =
+    heroSliderSource === 'custom'
+      ? 'هنوز کتابی برایِ اسلایدر انتخاب نکرده‌ای؛ از دکمهٔ «منبع اسلایدر» کتاب‌ها را تیک بزن.'
+      : 'این پوشه کتابی ندارد یا کتاب‌هایِ آن حذف شده‌اند؛ پوشهٔ دیگری را انتخاب کن یا به حالتِ خودکار برگرد.';
 
   // استخراج و همگام‌سازی زنده کاورها برای تمام اسلایدها
   useEffect(() => {
@@ -51,9 +190,10 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
       const rawPath = item?.path || item?.filePath;
       if (!rawPath) return;
       const norm = rawPath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+      const failed = failedCoverUrlsRef.current;
 
       const fromStoreCache = resolveCoverUrl(cachedCovers?.[norm]);
-      if (fromStoreCache) {
+      if (fromStoreCache && !failed.has(fromStoreCache)) {
         setResolvedCovers((prev) =>
           prev[norm] === fromStoreCache ? prev : { ...prev, [norm]: fromStoreCache }
         );
@@ -62,15 +202,19 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
 
       const directCover =
         resolveCoverUrl(item?.cover) || thumbnailService.peekCover(rawPath);
-      if (directCover) {
+      if (directCover && !failed.has(directCover)) {
         setResolvedCovers((prev) =>
           prev[norm] === directCover ? prev : { ...prev, [norm]: directCover }
         );
         return;
       }
 
+      // مرحله ۴۷ §۲: استخراجِ دوباره فقط یک‌بار برایِ هر مسیر
+      // امتحان می‌شود تا خطایِ تصویر، حلقهٔ درخواست نسازد.
+      if (retriedNormsRef.current.has(norm)) return;
+      retriedNormsRef.current.add(norm);
       thumbnailService.getThumbnail(rawPath).then((thumb) => {
-        if (isMounted && thumb) {
+        if (isMounted && thumb && !failed.has(thumb)) {
           setResolvedCovers((prev) => ({ ...prev, [norm]: thumb }));
         }
       });
@@ -79,7 +223,22 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
     return () => {
       isMounted = false;
     };
-  }, [slides, cachedCovers]);
+  }, [slides, cachedCovers, coverRetryTick]);
+
+  // مرحله ۴۷ §۲ — خطایِ پوستر، اسلاید را خالی نمی‌گذارد: نشانیِ
+  // خراب کنار گذاشته می‌شود تا کاورِ سالمِ آیتم (یا استخراجِ دوباره)
+  // جایش بنشیند؛ اگر هیچ مرجعی نبود، پس‌زمینهٔ جایگزین می‌ماند.
+  const handlePosterError = useCallback((norm, badSrc) => {
+    if (badSrc) failedCoverUrlsRef.current.add(badSrc);
+    if (!norm) return;
+    setResolvedCovers((prev) => {
+      if (!(norm in prev)) return prev;
+      const next = { ...prev };
+      delete next[norm];
+      return next;
+    });
+    setCoverRetryTick((t) => t + 1);
+  }, []);
 
   const moveSlider = useCallback(
     (dir) => {
@@ -183,7 +342,155 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
     }
   };
 
-  if (totalSlides === 0) return null;
+  // مرحلهٔ ۵۰ §۵ — پیشگیریِ ۱: منبعِ خالی هرگز کرش نمی‌کند؛ در
+  // حالتِ خودکار رفتارِ قبلی (رندر نشدن) حفظ می‌شود و در حالت‌هایِ
+  // دستی/پوشه، بنرِ راهنما با دکمهٔ بازگشت به خودکار نشان داده می‌شود.
+  if (totalSlides === 0 && heroSliderSource === 'auto') return null;
+
+  // مرحلهٔ ۵۱ §۲ — منویِ منبعِ اسلایدر (بدونِ نوارِ بیرونی):
+  // دکمهٔ «منبع» به داخلِ کارت منتقل شد (ردیفِ دکمه‌هایِ عملیاتِ
+  // اسلاید + بنرِ خالی) و فقط منویِ شیشه‌ایِ انتخابِ منبع و پنجرهٔ
+  // تیک‌زدنِ کتاب‌ها اینجا رندر می‌شوند؛ منو رویِ کارت باز می‌شود
+  // (zIndex 80) و با بک‌دراپ بسته می‌شود. تابعِ سادهٔ JSX است،
+  // نه کامپوننتِ جدا — هوک ندارد.
+  const renderSourceMenu = () => (
+    <>
+      {sourceMenuOpen && (
+        <div
+          className="kinetic-source-menu"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className={`kinetic-source-item${heroSliderSource === 'auto' ? ' active' : ''}`}
+            onClick={() => handlePickSource('auto')}
+          >
+            <span>خودکار (پین‌شده‌ها و اخیر)</span>
+            {heroSliderSource === 'auto' && <Icons.Check size={13} />}
+          </button>
+          <button
+            type="button"
+            className={`kinetic-source-item${heroSliderSource === 'custom' ? ' active' : ''}`}
+            onClick={handleOpenPicker}
+          >
+            <span>انتخاب دستی کتاب‌ها ({customSliderBookPaths.length} کتاب)</span>
+            {heroSliderSource === 'custom' && <Icons.Check size={13} />}
+          </button>
+          <div className="kinetic-source-sep">پوشه‌های کتابخانه</div>
+          {(libraryFolders || []).length === 0 && (
+            <div className="kinetic-source-sep">پوشه‌ای نیست</div>
+          )}
+          {(libraryFolders || []).map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              className={`kinetic-source-item${heroSliderSource === 'library-folder' && heroSliderFolderId === f.id ? ' active' : ''}`}
+              onClick={() => handlePickSource('library-folder', f.id)}
+            >
+              <span>
+                پوشه: {f.name} ({libraryFolderCount.get(f.id) || 0} کتاب)
+              </span>
+              {heroSliderSource === 'library-folder' && heroSliderFolderId === f.id && (
+                <Icons.Check size={13} />
+              )}
+            </button>
+          ))}
+          <div className="kinetic-source-sep">پوشه‌های علاقه‌مندی</div>
+          {(favoriteFolders || []).length === 0 && (
+            <div className="kinetic-source-sep">پوشه‌ای نیست</div>
+          )}
+          {(favoriteFolders || []).map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              className={`kinetic-source-item${heroSliderSource === 'favorite-folder' && heroSliderFolderId === f.id ? ' active' : ''}`}
+              onClick={() => handlePickSource('favorite-folder', f.id)}
+            >
+              <span>
+                پوشه علاقه‌مندی: {f.name} ({favoriteFolderCount.get(f.id) || 0} کتاب)
+              </span>
+              {heroSliderSource === 'favorite-folder' && heroSliderFolderId === f.id && (
+                <Icons.Check size={13} />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {pickerOpen && (
+        <div
+          className="kinetic-picker"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="kinetic-picker-head">
+            <span className="kinetic-picker-title">
+              انتخاب دستی کتاب‌ها ({customSliderBookPaths.length} انتخاب‌شده)
+            </span>
+            <button
+              type="button"
+              className="kinetic-picker-clear"
+              onClick={() => setCustomSliderBookPaths([])}
+            >
+              پاک کردن همه
+            </button>
+            <button
+              type="button"
+              className="kinetic-picker-close"
+              onClick={() => setPickerOpen(false)}
+              title="بستن"
+            >
+              <Icons.X size={14} />
+            </button>
+          </div>
+          <input
+            type="text"
+            className="kinetic-picker-search"
+            value={pickerQuery}
+            onChange={(e) => setPickerQuery(e.target.value)}
+            placeholder="جستجویِ نام یا مسیر کتاب..."
+          />
+          <div className="kinetic-picker-list">
+            {pickerBooks.length === 0 && (
+              <div className="kinetic-source-sep">کتابی پیدا نشد</div>
+            )}
+            {pickerBooks.map((book) => {
+              const rawP = book?.path || book?.filePath || '';
+              const norm = rawP.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+              const checked = customPathSet.has(norm);
+              const title =
+                book?.name || book?.fileName || rawP.split(/[\\/]/).pop() || 'Untitled';
+              return (
+                <div
+                  key={rawP || title}
+                  className="kinetic-picker-row"
+                  onClick={() => handleTogglePickerBook(book)}
+                >
+                  <button
+                    type="button"
+                    className={`kinetic-picker-check${checked ? ' on' : ''}`}
+                    aria-label={checked ? 'حذف از اسلایدر' : 'افزودن به اسلایدر'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleTogglePickerBook(book);
+                    }}
+                  >
+                    {checked && <Icons.Check size={13} />}
+                  </button>
+                  <span className="kinetic-picker-name" title={rawP}>
+                    {title}
+                  </span>
+                  <span className="kinetic-picker-path" title={rawP}>
+                    {rawP}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </>
+  );
 
 
   return (
@@ -192,6 +499,211 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
         .kinetic-slider-wrapper {
           width: 100%;
           margin: 0 auto;
+          position: relative;
+        }
+        .kinetic-source-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 39;
+          background: transparent;
+        }
+        /* مرحلهٔ ۵۱ §۲ — منو و پنجره نسبت به رپرِ اسلایدر (بالایِ کارت)
+           باز می‌شوند؛ zIndex 80 بالاتر از بک‌دراپ (39) است. */
+        .kinetic-source-menu {
+          position: absolute;
+          top: 8px;
+          right: 0;
+          min-width: 290px;
+          max-width: 360px;
+          max-height: 330px;
+          overflow-y: auto;
+          background: rgba(16, 20, 28, 0.97);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 14px;
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.65);
+          padding: 6px;
+          z-index: 80;
+        }
+        .kinetic-source-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          width: 100%;
+          text-align: right;
+          background: transparent;
+          border: 0;
+          color: #ffffff;
+          font-family: var(--font-fa);
+          font-size: 12.5px;
+          font-weight: 600;
+          padding: 9px 10px;
+          border-radius: 9px;
+          cursor: pointer;
+        }
+        .kinetic-source-item:hover {
+          background: rgba(34, 211, 238, 0.12);
+        }
+        .kinetic-source-item.active {
+          background: rgba(34, 211, 238, 0.16);
+          color: #22d3ee;
+        }
+        .kinetic-source-sep {
+          font-family: var(--font-fa);
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.5);
+          padding: 8px 10px 4px;
+        }
+        .kinetic-picker {
+          position: absolute;
+          top: 8px;
+          right: 0;
+          left: 0;
+          max-height: 360px;
+          display: flex;
+          flex-direction: column;
+          background: rgba(16, 20, 28, 0.97);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 14px;
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+          box-shadow: 0 18px 44px rgba(0, 0, 0, 0.65);
+          padding: 10px;
+          z-index: 80;
+        }
+        .kinetic-picker-head {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .kinetic-picker-title {
+          flex: 1;
+          font-family: var(--font-fa);
+          font-size: 13px;
+          font-weight: 700;
+          color: #ffffff;
+        }
+        .kinetic-picker-clear {
+          background: transparent;
+          border: 0;
+          color: #f72585;
+          font-family: var(--font-fa);
+          font-size: 11.5px;
+          font-weight: 700;
+          cursor: pointer;
+          padding: 4px 6px;
+        }
+        .kinetic-picker-close {
+          background: rgba(255, 255, 255, 0.08);
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          border-radius: 8px;
+          color: #ffffff;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 26px;
+          height: 26px;
+          padding: 0;
+        }
+        .kinetic-picker-search {
+          margin-top: 8px;
+          width: 100%;
+          box-sizing: border-box;
+          padding: 8px 10px;
+          border-radius: 9px;
+          border: 1px solid rgba(255, 255, 255, 0.14);
+          background: rgba(255, 255, 255, 0.06);
+          color: #ffffff;
+          font-family: var(--font-fa);
+          font-size: 12px;
+          outline: none;
+        }
+        .kinetic-picker-list {
+          margin-top: 8px;
+          overflow-y: auto;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .kinetic-picker-row {
+          display: flex;
+          align-items: center;
+          gap: 9px;
+          padding: 7px 8px;
+          border-radius: 9px;
+          cursor: pointer;
+          min-width: 0;
+        }
+        .kinetic-picker-row:hover {
+          background: rgba(255, 255, 255, 0.06);
+        }
+        .kinetic-picker-check {
+          width: 22px;
+          height: 22px;
+          border-radius: 7px;
+          border: 2px solid rgba(255, 255, 255, 0.35);
+          background: transparent;
+          color: #ffffff;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 0;
+          flex-shrink: 0;
+        }
+        .kinetic-picker-check.on {
+          background: #22d3ee;
+          border-color: #22d3ee;
+        }
+        .kinetic-picker-name {
+          font-family: var(--font-fa);
+          font-size: 12.5px;
+          font-weight: 700;
+          color: #ffffff;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          max-width: 42%;
+        }
+        .kinetic-picker-path {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: rgba(255, 255, 255, 0.5);
+          direction: ltr;
+          text-align: right;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          flex: 1;
+        }
+        .kinetic-empty {
+          border: 1px dashed rgba(34, 211, 238, 0.45);
+          border-radius: 20px;
+          background: rgba(34, 211, 238, 0.06);
+          padding: 30px 24px;
+          text-align: center;
+          font-family: var(--font-fa);
+        }
+        .kinetic-empty-title {
+          font-size: 15px;
+          font-weight: 800;
+          color: #ffffff;
+          margin-bottom: 8px;
+        }
+        .kinetic-empty-text {
+          font-size: 12.5px;
+          line-height: 1.9;
+          color: rgba(255, 255, 255, 0.75);
+          margin: 0 0 16px;
+        }
+        .kinetic-empty-actions {
+          display: flex;
+          gap: 10px;
+          justify-content: center;
+          flex-wrap: wrap;
         }
         .kinetic-slider-container {
           position: relative;
@@ -471,6 +983,50 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
       `}</style>
 
       <div className="kinetic-slider-wrapper">
+        {(sourceMenuOpen || pickerOpen) && (
+          <div
+            className="kinetic-source-backdrop"
+            onClick={() => {
+              setSourceMenuOpen(false);
+              setPickerOpen(false);
+            }}
+          />
+        )}
+        {totalSlides === 0 ? (
+          <div className="kinetic-empty">
+            <div className="kinetic-empty-title">اسلایدر خالی است</div>
+            <p className="kinetic-empty-text">{emptyHint}</p>
+            <div className="kinetic-empty-actions">
+              <button type="button" className="btn-morph" onClick={handleOpenPicker}>
+                انتخاب کتاب‌ها
+              </button>
+              <button
+                type="button"
+                className="btn-morph btn-morph-subtle"
+                onClick={() => handlePickSource('auto')}
+              >
+                بازگشت به حالت خودکار
+              </button>
+              {/* مرحلهٔ ۵۱ §۲ — در حالتِ خالی کارتی نیست؛ دکمهٔ منبع
+                  اینجا می‌ماند تا راهنمایِ بنر («از دکمهٔ منبع
+                  اسلایدر...») به دکمه‌ای واقعی اشاره کند. */}
+              <button
+                type="button"
+                className="btn-morph btn-morph-subtle"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPickerOpen(false);
+                  setSourceMenuOpen((prev) => !prev);
+                }}
+                title="تغییرِ منبعِ کتاب‌هایِ اسلایدر"
+              >
+                <Icons.Sliders size={14} />
+                <span>منبع: {sourceLabel}</span>
+              </button>
+            </div>
+          </div>
+        ) : (
         <div
           className={`kinetic-slider-container ${isDragging ? 'is-dragging' : ''}`}
           onMouseEnter={() => setIsHovered(true)}
@@ -486,13 +1042,21 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
           onTouchEnd={handleTouchEnd}
         >
           {slides.map((item, idx) => {
-            const isActive = idx === currentIndex;
+            const isActive = idx === safeIndex;
             const rawPath = item?.path || item?.filePath || '';
+            // مرحله ۴۷ §۲: اسلایدِ بدونِ مسیر، هویتِ یکتا ندارد و با
+            // کلیدِ اندیسی، پس از جابه‌جاییِ پین، محتوایِ اسلایدِ
+            // دیگری را می‌گرفت؛ رندر نمی‌شود.
+            if (!rawPath) return null;
             const norm = rawPath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
             const title =
               item?.name || item?.fileName || rawPath.split(/[\\/]/).pop() || 'Untitled';
-            const coverSrc =
+            // مرحله ۴۷ §۲: نشانیِ خرابِ کاور کنار گذاشته می‌شود تا
+            // پوستر، تصویرِ شکسته نشان ندهد و پس‌زمینهٔ جایگزین بیاید.
+            const rawCover =
               resolvedCovers[norm] || resolveCoverUrl(item?.cover) || null;
+            const coverSrc =
+              rawCover && !failedCoverUrlsRef.current.has(rawCover) ? rawCover : null;
             const fallbackBg =
               FALLBACK_SLIDE_BACKGROUNDS[idx % FALLBACK_SLIDE_BACKGROUNDS.length];
 
@@ -502,12 +1066,14 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                 norm
             );
             const isPinned = Boolean(item?.isPinned);
+            // مرحلهٔ ۵۲ §۱: اسلایدِ فایلِ حذف‌شده (پرچم از استور).
+            const isMissing = Boolean(item?.isMissing);
             const lastPage = item?.lastPage || item?.currentPage || 1;
             const totalPages = item?.totalPages || 1;
 
             return (
               <div
-                key={rawPath || idx}
+                key={rawPath}
                 className={`kinetic-slide ${isActive ? 'active' : 'exit'}`}
                 data-index={idx}
               >
@@ -547,6 +1113,22 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                       </span>
                     )}
 
+                    {/* مرحلهٔ ۵۲ §۱: چیپِ هشدارِ فایلِ حذف‌شده در ردیفِ چیپ‌هایِ بالا */}
+                    {isMissing && (
+                      <span
+                        className="kinetic-slide-tag"
+                        style={{
+                          background: 'rgba(239, 68, 68, 0.92)',
+                          border: '1px solid #fca5a5',
+                          color: '#ffffff',
+                          fontWeight: 800,
+                        }}
+                      >
+                        <Icons.AlertTriangle size={12} />
+                        <span>هشدار: فایل از سیستم حذف شده است</span>
+                      </span>
+                    )}
+
                     {totalPages > 1 && (
                       <span className="kinetic-slide-tag kinetic-tag-drag">
                         <span>
@@ -568,14 +1150,25 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                     <button
                       type="button"
                       className="btn-morph"
+                      disabled={isMissing}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (hasDraggedRef.current) return;
+                        // مرحلهٔ ۵۲ §۱: اسلایدِ حذف‌شده هرگز ریدر را
+                        // باز نمی‌کند (دکمه هم disabled است؛ این
+                        // گارد، لایهٔ دوم است).
+                        if (isMissing) return;
                         onOpenComic?.(item);
                       }}
+                      style={
+                        isMissing
+                          ? { opacity: 0.55, cursor: 'not-allowed' }
+                          : undefined
+                      }
+                      title={isMissing ? 'فایل در سیستم موجود نیست' : undefined}
                     >
                       <Icons.BookOpen size={15} />
-                      <span>ادامه مطالعه این عنوان</span>
+                      <span>{isMissing ? 'فایل در سیستم موجود نیست' : 'ادامه مطالعه این عنوان'}</span>
                     </button>
 
                     <button
@@ -623,6 +1216,23 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                       <span>{isPinned ? 'پین‌شده' : 'پین'}</span>
                     </button>
 
+                    {heroSliderSource === 'custom' && (
+                      <button
+                        type="button"
+                        className="btn-morph btn-morph-subtle"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (hasDraggedRef.current) return;
+                          toggleBookInHeroSlider(item);
+                          showToast('از اسلایدر حذف شد', { type: 'info' });
+                        }}
+                        title="حذف این کتاب از اسلایدر"
+                      >
+                        <Icons.Layers size={14} />
+                        <span>حذف از اسلایدر</span>
+                      </button>
+                    )}
+
                     <button
                       type="button"
                       className="btn-morph btn-morph-subtle"
@@ -631,6 +1241,26 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                     >
                       <Icons.Camera size={14} />
                       <span>تغییر کاور</span>
+                    </button>
+
+                    {/* مرحلهٔ ۵۱ §۲ — دکمهٔ منبعِ اسلایدر داخلِ کارت،
+                        کنارِ دکمه‌هایِ عملیات؛ onMouseDown و onClick
+                        انتشار را می‌گیرند تا کلیک نه اسلاید را بکشد
+                        و نه کتاب را باز کند. */}
+                    <button
+                      type="button"
+                      className="btn-morph btn-morph-subtle"
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (hasDraggedRef.current) return;
+                        setPickerOpen(false);
+                        setSourceMenuOpen((prev) => !prev);
+                      }}
+                      title="تغییرِ منبعِ کتاب‌هایِ اسلایدر"
+                    >
+                      <Icons.Sliders size={14} />
+                      <span>منبع: {sourceLabel}</span>
                     </button>
                   </div>
                 </div>
@@ -643,7 +1273,12 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
                   style={{ cursor: 'pointer' }}
                 >
                   {coverSrc ? (
-                    <img src={coverSrc} alt={title} draggable={false} />
+                    <img
+                      src={coverSrc}
+                      alt={title}
+                      draggable={false}
+                      onError={() => handlePosterError(norm, coverSrc)}
+                    />
                   ) : (
                     <span style={{ color: '#f72585', display: 'flex' }}>
                       <Icons.BookOpen size={38} />
@@ -667,7 +1302,7 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
               style={{ position: 'absolute', bottom: '22px', left: '50%', transform: 'translateX(-50%)', zIndex: 35, pointerEvents: 'auto', overflow: 'visible', marginTop: '18px', marginBottom: '6px' }}
             >
               <SliderControls
-                currentIndex={currentIndex}
+                currentIndex={safeIndex}
                 total={totalSlides}
                 onPrev={() => moveSlider(1)}
                 onNext={() => moveSlider(-1)}
@@ -677,6 +1312,8 @@ export default function KineticHeroSlider({ items = [], onOpenComic }) {
             </div>
           )}
         </div>
+        )}
+        {renderSourceMenu()}
       </div>
     </>
   );

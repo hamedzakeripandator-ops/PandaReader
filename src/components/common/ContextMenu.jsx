@@ -9,6 +9,11 @@ import Icons from './Icons';
 import useBookmarkStore, { resolveActiveBookKey } from '../../store/useBookmarkStore';
 import { BOOKMARK_TEMPLATE_MAP, computeViewportCenterYRatio, resolveBookmarkImage } from '../reader/bookmarkTemplates';
 
+// مرحلهٔ ۴۴ §۵ (OPT-03): آرایهٔ خالیِ منجمدِ مشترک — سلکتورهایِ
+// `|| []` در هر تغییرِ استور، هویتِ تازه می‌ساختند و مشترک را
+// بی‌دلیل ری‌رندر می‌کردند؛ این ثابت، هویت را پایدار نگه می‌دارد.
+const EMPTY_ARRAY = Object.freeze([]);
+
 export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const isContextMenuOpen = useAppStore((state) => state.isContextMenuOpen);
   const contextMenuPos = useAppStore((state) => state.contextMenuPos);
@@ -23,16 +28,21 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
   const resetZoom = useReaderStore((state) => state.resetZoom);
   const rotateClockwise = useReaderStore((state) => state.rotateClockwise);
 
-  const libraryFolders = useLibraryStore((state) => state.libraryFolders || []);
+  const libraryFolders = useLibraryStore((state) => state.libraryFolders || EMPTY_ARRAY);
+  const favoriteFolders = useLibraryStore((state) => state.favoriteFolders || EMPTY_ARRAY);
   const toggleFavorite = useLibraryStore((state) => state.toggleFavorite);
   const togglePin = useLibraryStore((state) => state.togglePin);
+  // مرحلهٔ ۵۰ §۵ — عضویت در فهرستِ دستیِ اسلایدرِ هیرو.
+  const heroSliderSource = useLibraryStore((state) => state.heroSliderSource || 'auto');
+  const toggleBookInHeroSlider = useLibraryStore((state) => state.toggleBookInHeroSlider);
   const selectAndSetCustomCover = useLibraryStore((state) => state.selectAndSetCustomCover);
   const assignToFolder = useLibraryStore((state) => state.assignToFolder);
+  const assignToFavoriteFolder = useLibraryStore((state) => state.assignToFavoriteFolder);
 
   const shortcuts = useSettingsStore((state) => state.shortcuts);
   const currentView = useAppStore((state) => state.currentView);
   const bookmarkPreferences = useBookmarkStore((state) => state.preferences || {});
-  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || []);
+  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || EMPTY_ARRAY);
   const addBookmark = useBookmarkStore((state) => state.addBookmark);
 
   const [highlightStyle, setHighlightStyle] = useState({
@@ -69,6 +79,13 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     return filePath ? filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase() : '';
   }, [filePath]);
 
+  // مرحله ۴۹ (C): حوزهٔ پوشهٔ منو — از کارتِ فرستنده می‌آید
+  // (ComicCard در نمایِ علاقه‌مندی‌ها folderScope='favorites'
+  // می‌فرستد)؛ در نمایِ خواننده یا هر جایِ دیگر، پیش‌فرض،
+  // پوشه‌هایِ کتابخانه است.
+  const folderScope = targetComicObj?.folderScope === 'favorites' ? 'favorites' : 'library';
+  const isFavoritesScope = folderScope === 'favorites';
+
   const isFav = useLibraryStore(
     useCallback(
       (state) => {
@@ -97,10 +114,28 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     )
   );
 
+  const inHeroSlider = useLibraryStore(
+    useCallback(
+      (state) => {
+        if (!normPath) return false;
+        return (state.customSliderBookPaths || []).includes(normPath);
+      },
+      [normPath]
+    )
+  );
+
   const currentFolderId = useLibraryStore(
     useCallback(
       (state) => {
         if (!normPath) return null;
+        if (folderScope === 'favorites') {
+          const found = (state.favorites || []).find(
+            (item) =>
+              (item.path || item.filePath || '').trim().replace(/[\\/]+/g, '\\').toLowerCase() ===
+              normPath
+          );
+          return found?.favoriteFolderId || null;
+        }
         const found = (state.library || []).find(
           (item) =>
             (item.path || item.filePath || '').trim().replace(/[\\/]+/g, '\\').toLowerCase() ===
@@ -108,9 +143,13 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
         );
         return found?.folderId || null;
       },
-      [normPath]
+      [normPath, folderScope]
     )
   );
+
+  // مرحله ۴۹ (C): فهرست و اکشنِ فعالِ پوشه، بر اساسِ حوزهٔ منو.
+  const activeFolders = isFavoritesScope ? favoriteFolders : libraryFolders;
+  const assignFolderAction = isFavoritesScope ? assignToFavoriteFolder : assignToFolder;
 
   // ریست زیرمنوها هنگام بسته شدن و اندازه‌گیری دقیق ارتفاع برای مهار لبه‌های صفحه
   useEffect(() => {
@@ -452,6 +491,26 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           },
         },
         {
+          id: 'heroSlider',
+          isSubItem: true,
+          section: 'library',
+          label: inHeroSlider ? 'حذف از اسلایدر بالا' : 'نمایش در اسلایدر بالا',
+          shortcut: '',
+          icon: <Icons.Layers size={14} />,
+          onClick: () => {
+            if (!hasComic) return;
+            const added = toggleBookInHeroSlider(targetComicObj);
+            showToast(
+              added
+                ? heroSliderSource === 'custom'
+                  ? 'به اسلایدر اضافه شد'
+                  : 'به فهرستِ اسلایدر اضافه شد — برایِ نمایش، منبعِ اسلایدر را رویِ «انتخاب دستی» بگذار'
+                : 'از اسلایدر حذف شد',
+              { type: added ? 'success' : 'info' }
+            );
+          },
+        },
+        {
           id: 'customCover',
           isSubItem: true,
           section: 'library',
@@ -470,8 +529,8 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
           id: 'moveToFolder',
           isSubItem: true,
           section: 'library',
-          label: 'انتقال به پوشه کتابخانه...',
-          shortcut: showFolderPicker ? '▲' : '▼',
+          label: isFavoritesScope ? 'انتقال به پوشه علاقه‌مندی‌ها...' : 'انتقال به پوشه کتابخانه...',
+          shortcut: showFolderPicker ? '−' : '+',
           icon: <Icons.FolderPlus size={14} />,
           keepOpen: true,
           onClick: () => setShowFolderPicker((prev) => !prev),
@@ -647,6 +706,9 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     hasComic,
     isFav,
     isPinned,
+    inHeroSlider,
+    heroSliderSource,
+    toggleBookInHeroSlider,
     copyFeedback,
     expandedSection,
     showFolderPicker,
@@ -654,6 +716,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
     contextMenuData,
     filePath,
     targetComicObj,
+    folderScope,
     onOpenComic,
     onOpenFile,
     openScreenshotModal,
@@ -1001,7 +1064,7 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                   >
                     <div
                       onClick={async () => {
-                        await assignToFolder(targetComicObj, null);
+                        await assignFolderAction(targetComicObj, null);
                         closeContextMenu();
                         showToast('از پوشه خارج شد (نمایش در نمای کلی)', { type: 'info' });
                       }}
@@ -1017,14 +1080,14 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                       {!currentFolderId && <Icons.Check size={13} />}
                     </div>
 
-                    {libraryFolders.length > 0 ? (
-                      libraryFolders.map((folder) => {
+                    {activeFolders.length > 0 ? (
+                      activeFolders.map((folder) => {
                         const isAssigned = currentFolderId === folder.id;
                         return (
                           <div
                             key={folder.id}
                             onClick={async () => {
-                              await assignToFolder(targetComicObj, folder.id);
+                              await assignFolderAction(targetComicObj, folder.id);
                               closeContextMenu();
                               showToast(`به پوشه «${folder.name}» منتقل شد`, {
                                 type: 'success',
@@ -1055,7 +1118,9 @@ export default function ContextMenu({ onOpenComic, onOpenFile }) {
                       })
                     ) : (
                       <div style={styles.emptyFoldersHint}>
-                        هنوز پوشه‌ای در کتابخانه نساخته‌اید.
+                        {isFavoritesScope
+                          ? 'هنوز پوشه‌ای در علاقه‌مندی‌ها نساخته‌اید.'
+                          : 'هنوز پوشه‌ای در کتابخانه نساخته‌اید.'}
                       </div>
                     )}
                   </div>

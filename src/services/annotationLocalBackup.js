@@ -230,6 +230,34 @@ function clearAllAnnotationBackups() {
   return removed;
 }
 
+// مرحلهٔ ۵۲ §۱: پاک‌کردنِ فقط آینهٔ یک فایلِ مشخص (نه همهٔ آینه).
+// کلیدها `comicReader.annotations.v1:<hash64(filePath)>:<pageNumber>`
+// هستند؛ پس با هشِ همان مسیر، فقط کلیدهایِ همان سند جمع و بعد حذف
+// می‌شوند (جمع‌کردن اول، حذف بعد — مثلِ clearAllAnnotationBackups —
+// تا پیمایشِ localStorage به‌هم نریزد). بقیهٔ localStorage دست
+// نمی‌خورد. هرگز throw نمی‌کند و شمارِ حذف‌شده‌ها را برمی‌گرداند.
+function clearFileBackups(filePath) {
+  if (!storageAvailable() || !filePath) return 0;
+  const prefix = PREFIX + hashFilePath(filePath) + ':';
+  let keys = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix)) keys.push(key);
+    }
+  } catch (_) {
+    return 0;
+  }
+  let removed = 0;
+  for (const key of keys) {
+    try {
+      localStorage.removeItem(key);
+      removed += 1;
+    } catch (_) {}
+  }
+  return removed;
+}
+
 const annotationLocalBackup = {
   PREFIX,
   hashFilePath,
@@ -240,6 +268,7 @@ const annotationLocalBackup = {
   restoreBackupsAsPages,
   mergeBackupsIntoPages,
   clearAllAnnotationBackups,
+  clearFileBackups,
 };
 
 export default annotationLocalBackup;

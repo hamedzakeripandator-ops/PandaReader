@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import useLibraryStore from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import { coreApi } from '../../services/coreApi';
@@ -11,12 +11,67 @@ const COVER_GRADIENTS = [
   'linear-gradient(145deg, #132226 0%, #1b3a4b 50%, #0a0f13 100%)',
 ];
 
+// مرحله ۴۸: نقشهٔ سطحِ ماژولِ کاورهایِ حل‌شده. هر کاوری که یک‌بار روی
+// هر نمونهٔ کارت نمایش داده شد، با کلیدِ مسیرِ نرمال‌شده اینجا
+// می‌ماند تا نمونهٔ بعدیِ همان مسیر — پس از آنمانت/ریمانت در
+// مرتب‌سازیِ دوباره پس از پین، جابه‌جاییِ پوشه یا رندرِ دوبارهٔ
+// اسلایدر — آن را همگام (sync) و بدونِ حتی یک میلی‌ثانیه خالی بودن
+// برگرداند؛ حتی وقتی کشِ رم و کشِ استور پاک شده باشند یا درخواستِ
+// در حالِ پرواز لغو شده باشد. فقط کاورِ نمایش‌داده‌شده ذخیره
+// می‌شود، نه وعدهٔ در انتظار؛ سقف ۳۰۰ ورودی مثلِ کشِ رمِ کاور است.
+const cardResolvedCoverMap = new Map();
+const CARD_RESOLVED_COVER_MAX = 300;
+
+function normalizeCardCoverKey(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  return filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+}
+
+function readResolvedCover(filePath) {
+  const key = normalizeCardCoverKey(filePath);
+  if (!key || !cardResolvedCoverMap.has(key)) return null;
+  const value = cardResolvedCoverMap.get(key);
+  cardResolvedCoverMap.delete(key);
+  cardResolvedCoverMap.set(key, value);
+  return value;
+}
+
+function recordResolvedCover(filePath, coverUrl) {
+  const key = normalizeCardCoverKey(filePath);
+  if (!key || !coverUrl) return;
+  if (cardResolvedCoverMap.has(key)) cardResolvedCoverMap.delete(key);
+  cardResolvedCoverMap.set(key, coverUrl);
+  while (cardResolvedCoverMap.size > CARD_RESOLVED_COVER_MAX) {
+    const oldest = cardResolvedCoverMap.keys().next().value;
+    if (oldest === undefined) break;
+    cardResolvedCoverMap.delete(oldest);
+  }
+}
+
+function forgetResolvedCover(filePath, coverUrl) {
+  const key = normalizeCardCoverKey(filePath);
+  if (!key) return;
+  if (cardResolvedCoverMap.get(key) === coverUrl) cardResolvedCoverMap.delete(key);
+}
+
+// مرحلهٔ ۵۲ §۱: پیام و تشخیصِ فایلِ حذف‌شده — تابعِ خالص تا
+// گاردِ کلیک و تست‌ها از همان منطق بخوانند.
+export const MISSING_FILE_TOAST = 'این فایل از روی سیستم شما حذف یا جابه‌جا شده است.';
+export function isMissingFileItem(item) {
+  return Boolean(item && item.isMissing === true);
+}
+
 export default function ComicCard({
   item,
   onOpenComic,
   onRemove,
   showRemoveBtn = true,
+  folderScope = 'library',
 }) {
+  // مرحله ۴۹ (C): حوزهٔ پوشهٔ این کارت — 'library' (پیش‌فرض، رفتارِ
+  // قبلی برایِ LibraryView) یا 'favorites' (نمایِ علاقه‌مندی‌ها:
+  // منویِ سریع و بج، پوشه‌هایِ علاقه‌مندی را نشان می‌دهند).
+  const isFavoritesScope = folderScope === 'favorites';
   const filePath = item?.path || item?.filePath || '';
   const normPath = useMemo(
     () => (filePath ? filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase() : ''),
@@ -55,11 +110,16 @@ export default function ComicCard({
   const assignedFolderObj = useLibraryStore(
     useCallback(
       (state) => {
+        if (isFavoritesScope) {
+          const fId = item?.favoriteFolderId;
+          if (!fId) return null;
+          return (state.favoriteFolders || []).find((f) => f.id === fId) || null;
+        }
         const fId = item?.folderId;
         if (!fId) return null;
         return (state.libraryFolders || []).find((f) => f.id === fId) || null;
       },
-      [item?.folderId]
+      [item?.folderId, item?.favoriteFolderId, isFavoritesScope]
     )
   );
 
@@ -71,12 +131,33 @@ export default function ComicCard({
   );
 
   const libraryFolders = useLibraryStore((state) => state.libraryFolders || []);
+  const favoriteFolders = useLibraryStore((state) => state.favoriteFolders || []);
   const toggleFavorite = useLibraryStore((state) => state.toggleFavorite);
   const togglePin = useLibraryStore((state) => state.togglePin);
+  // مرحلهٔ ۵۰ §۵ — عضویتِ این کتاب در فهرستِ دستیِ اسلایدرِ هیرو.
+  const heroSliderSource = useLibraryStore((state) => state.heroSliderSource || 'auto');
+  const toggleBookInHeroSlider = useLibraryStore((state) => state.toggleBookInHeroSlider);
+  const inHeroSlider = useLibraryStore(
+    useCallback(
+      (state) => {
+        if (!normPath) return false;
+        return (state.customSliderBookPaths || []).includes(normPath);
+      },
+      [normPath]
+    )
+  );
   const selectAndSetCustomCover = useLibraryStore(
     (state) => state.selectAndSetCustomCover
   );
   const assignToFolder = useLibraryStore((state) => state.assignToFolder);
+  const assignToFavoriteFolder = useLibraryStore((state) => state.assignToFavoriteFolder);
+
+  // مرحله ۴۹ (C): فهرست و اکشنِ فعالِ پوشه، بر اساسِ حوزهٔ کارت.
+  const activeFolders = isFavoritesScope ? favoriteFolders : libraryFolders;
+  const currentFolderId = isFavoritesScope
+    ? item?.favoriteFolderId || null
+    : item?.folderId || null;
+  const assignFolderAction = isFavoritesScope ? assignToFavoriteFolder : assignToFolder;
 
   const showToast = useAppStore((state) => state.showToast);
   const openContextMenu = useAppStore((state) => state.openContextMenu);
@@ -86,11 +167,34 @@ export default function ComicCard({
 
   const [isHovered, setIsHovered] = useState(false);
   const [showFolderMenu, setShowFolderMenu] = useState(false);
+
+  // مرحله ۴۷ §۲: فهرستِ کاورهایِ خراب و شمارشِ تلاش‌هایِ بازیابی، تا
+  // خطایِ گذرایِ تصویر یا لغوِ درخواستِ تنبل، کارت را برای همیشه
+  // خالی نکند. coverRetryRef فقط یک‌بار استخراجِ دوباره را مجاز
+  // می‌کند تا چرخهٔ خطا و درخواستِ بی‌پایان ساخته نشود.
+  // مرحله ۴۸: این refها پیش از مقداردهیِ اولیهٔ coverUrl می‌آیند تا
+  // مقداردهیِ همگام بتواند نشانیِ خراب را از نقشهٔ سطحِ ماژول کنار
+  // بگذارد.
+  const coverRetryRef = useRef(0);
+  const coverRequestPendingRef = useRef(false);
+  const failedCoverUrlsRef = useRef(new Set());
+
+  // مرحله ۴۸: مقداردهیِ همگامِ کاور. ترتیبِ مرجع‌ها از تازه‌ترین به
+  // قدیمی‌ترین است: استور، بعد کاورِ آیتم، بعد نقشهٔ سطحِ ماژولِ
+  // کاورهایِ حل‌شده، بعد peek همگامِ کش. نقشهٔ ماژول آخرین سنگر است:
+  // وقتی کشِ رم و استور پاک شده‌اند، باز هم کاورِ قبلاً نمایش‌داده‌شده
+  // را بی‌درنگ برمی‌گرداند و کارت حتی یک میلی‌ثانیه خالی نمی‌ماند.
   const [coverUrl, setCoverUrl] = useState(() => {
+    const fromMap = readResolvedCover(filePath);
+    const mapCover =
+      fromMap && !failedCoverUrlsRef.current.has(fromMap)
+        ? resolveCoverUrl(fromMap)
+        : null;
     return (
       resolveCoverUrl(cachedCoverInStore) ||
       resolveCoverUrl(item?.cover) ||
-      thumbnailService.peekCover(filePath)
+      mapCover ||
+      thumbnailService.peekCachedCover(filePath)
     );
   });
 
@@ -133,32 +237,123 @@ export default function ComicCard({
     let isMounted = true;
     if (!filePath) return;
 
+    // با رسیدنِ اطلاعاتِ تازهٔ کاور، بودجهٔ یک تلاشِ دوباره تازه می‌شود.
+    coverRetryRef.current = 0;
+
     const fromStore = resolveCoverUrl(cachedCoverInStore);
-    if (fromStore) {
+    if (fromStore && !failedCoverUrlsRef.current.has(fromStore)) {
       setCoverUrl(fromStore);
       return;
     }
 
+    const fromMap = readResolvedCover(filePath);
+    const mapCover =
+      fromMap && !failedCoverUrlsRef.current.has(fromMap)
+        ? resolveCoverUrl(fromMap)
+        : null;
     const existing =
-      resolveCoverUrl(item?.cover) || thumbnailService.peekCover(filePath);
-    if (existing) {
+      resolveCoverUrl(item?.cover) ||
+      mapCover ||
+      thumbnailService.peekCachedCover(filePath);
+    if (existing && !failedCoverUrlsRef.current.has(existing)) {
       setCoverUrl(existing);
       return;
     }
 
+    coverRequestPendingRef.current = true;
     thumbnailService.getThumbnail(filePath).then((res) => {
-      if (isMounted && res) {
+      coverRequestPendingRef.current = false;
+      if (isMounted && res && !failedCoverUrlsRef.current.has(res)) {
         setCoverUrl(res);
       }
     });
 
     return () => {
       isMounted = false;
-      // مرحله ۴ — آنمانتِ کارت (خروج از دید در گریدِ تنبل) درخواستِ در
-      // صفِ این مسیر را لغو می‌کند تا صف زیرِ بارِ کارت‌های رفته قفل نشود.
-      thumbnailService.cancelThumbnailRequest?.(filePath);
+      // مرحله ۴۷ §۲: فقط وقتی درخواستِ همین کارت هنوز در صف است لغو
+      // می‌شود. لغوِ بی‌قید در پاک‌سازی، درخواستِ مشترکِ همان مسیر را
+      // برای کارت‌هایِ دیگر (مثلاً اسلایدر) هم می‌کشت و آن‌ها را خالی
+      // می‌گذاشت.
+      if (coverRequestPendingRef.current) {
+        thumbnailService.cancelThumbnailRequest?.(filePath);
+      }
     };
   }, [filePath, item?.cover, cachedCoverInStore]);
+
+  // مرحله ۴۷ §۲ — بازیابیِ کاور پس از خالی شدنِ آن: اگر coverUrl
+  // خالی شد ولی استور هنوز کاورِ سالم دارد، همان برگردانده می‌شود؛
+  // وگرنه فقط یک‌بار استخراجِ دوباره امتحان می‌شود. بدونِ این افکت،
+  // یک خطایِ گذرایِ تصویر تا ریمانتِ کارت، آن را خالی نگه می‌داشت.
+  useEffect(() => {
+    if (coverUrl || !filePath) return;
+    const failed = failedCoverUrlsRef.current;
+    const storeCover = resolveCoverUrl(cachedCoverInStore);
+    const itemCover = resolveCoverUrl(item?.cover);
+    const fromMap = readResolvedCover(filePath);
+    const mapCover =
+      fromMap && !failed.has(fromMap) ? resolveCoverUrl(fromMap) : null;
+    const peeked = thumbnailService.peekCachedCover(filePath);
+    const recovered =
+      (storeCover && !failed.has(storeCover) ? storeCover : null) ||
+      (itemCover && !failed.has(itemCover) ? itemCover : null) ||
+      (mapCover && !failed.has(mapCover) ? mapCover : null) ||
+      (peeked && !failed.has(peeked) ? peeked : null);
+    if (recovered) {
+      setCoverUrl(recovered);
+      return;
+    }
+    if (coverRetryRef.current >= 1) return;
+    coverRetryRef.current += 1;
+    let isMounted = true;
+    thumbnailService.getThumbnail(filePath).then((res) => {
+      if (isMounted && res && !failed.has(res)) {
+        setCoverUrl(res);
+      }
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [coverUrl, filePath, item?.cover, cachedCoverInStore]);
+
+  // مرحله ۴۸: هر کاورِ نمایش‌داده‌شده در نقشهٔ سطحِ ماژول ثبت
+  // می‌شود تا نمونهٔ بعدیِ همان مسیر آن را همگام برگرداند. نشانیِ
+  // خراب ثبت نمی‌شود.
+  useEffect(() => {
+    if (!coverUrl || !filePath) return;
+    if (failedCoverUrlsRef.current.has(coverUrl)) return;
+    recordResolvedCover(filePath, coverUrl);
+  }, [coverUrl, filePath]);
+
+  // مرحله ۴۷ §۲ — خطایِ تصویر، کاور را برای همیشه پاک نمی‌کند: اول
+  // کاورِ سالمِ استور یا کش برگردانده می‌شود؛ فقط وقتی هیچ مرجعِ
+  // سالمی نیست، جای‌خالی می‌ماند تا افکتِ بازیابی، استخراجِ دوباره
+  // را امتحان کند. نشانیِ خراب در فهرستِ خراب‌ها می‌ماند تا دوباره
+  // همان نشانیِ خراب، چرخهٔ خطا نسازد.
+  const handleCoverError = useCallback(() => {
+    if (coverUrl) {
+      failedCoverUrlsRef.current.add(coverUrl);
+      // مرحله ۴۸: نشانیِ خراب از نقشهٔ سطحِ ماژول هم پاک می‌شود تا
+      // ریمانتِ بعدی دوباره همان نشانیِ خراب را سرو نکند.
+      forgetResolvedCover(filePath, coverUrl);
+    }
+    const failed = failedCoverUrlsRef.current;
+    const storeCover = resolveCoverUrl(cachedCoverInStore);
+    const itemCover = resolveCoverUrl(item?.cover);
+    const fromMap = readResolvedCover(filePath);
+    const mapCover =
+      fromMap && !failed.has(fromMap) ? resolveCoverUrl(fromMap) : null;
+    const peeked = thumbnailService.peekCachedCover(filePath);
+    const recovered =
+      (storeCover && !failed.has(storeCover) ? storeCover : null) ||
+      (itemCover && !failed.has(itemCover) ? itemCover : null) ||
+      (mapCover && !failed.has(mapCover) ? mapCover : null) ||
+      (peeked && !failed.has(peeked) ? peeked : null);
+    if (recovered && recovered !== coverUrl) {
+      setCoverUrl(recovered);
+      return;
+    }
+    setCoverUrl(null);
+  }, [coverUrl, cachedCoverInStore, item?.cover, filePath]);
 
   const handleToggleFav = (e) => {
     e.stopPropagation();
@@ -185,13 +380,34 @@ export default function ComicCard({
       ...item,
       path: filePath,
       name: title,
-      cover: coverUrl,
+      cover: coverUrl || item?.cover || null,
     });
     showToast(
       pinnedNow
         ? `«${title}» در صدر کتابخانه پین شد`
         : `«${title}» از حالت پین خارج شد`,
       { type: pinnedNow ? 'success' : 'info' }
+    );
+  };
+
+  const handleToggleHeroSlider = (e) => {
+    e.stopPropagation();
+    if (!filePath) return;
+    const added = toggleBookInHeroSlider({
+      ...item,
+      path: filePath,
+      name: title,
+      cover: coverUrl || item?.cover || null,
+    });
+    // تیک‌زدن فقط فهرستِ دستی را عوض می‌کند؛ اگر منبعِ اسلایدر
+    // رویِ «انتخاب دستی» نیست، کاربر باید منبع را هم عوض کند.
+    showToast(
+      added
+        ? heroSliderSource === 'custom'
+          ? `«${title}» به اسلایدر اضافه شد`
+          : `«${title}» به فهرستِ اسلایدر اضافه شد — برایِ نمایش، منبعِ اسلایدر را رویِ «انتخاب دستی» بگذار`
+        : `«${title}» از اسلایدر حذف شد`,
+      { type: added ? 'success' : 'info' }
     );
   };
 
@@ -209,11 +425,11 @@ export default function ComicCard({
   const handleAssignFolder = async (e, folderId) => {
     e.stopPropagation();
     setShowFolderMenu(false);
-    await assignToFolder(
+    await assignFolderAction(
       { ...item, path: filePath, name: title, cover: coverUrl },
       folderId
     );
-    const fObj = libraryFolders.find((f) => f.id === folderId);
+    const fObj = activeFolders.find((f) => f.id === folderId);
     showToast(
       fObj ? `به پوشه «${fObj.name}» منتقل شد` : 'از پوشه خارج شد',
       { type: 'success' }
@@ -223,6 +439,17 @@ export default function ComicCard({
   const handleShowFolder = (e) => {
     e.stopPropagation();
     if (filePath) coreApi.showItemInFolder(filePath);
+  };
+
+  // مرحلهٔ ۵۲ §۱: گاردِ کلیکِ کارتِ حذف‌شده — فقط Toast نشان
+  // می‌دهد و هرگز onOpenComic را صدا نمی‌زند (پس باز کردنِ فایلِ
+  // رفته، کرش نمی‌کند). دکمهٔ سطل، جداست و همچنان کار می‌کند.
+  const handleCardClick = () => {
+    if (isMissingFileItem(item)) {
+      showToast(MISSING_FILE_TOAST, { type: 'warning' });
+      return;
+    }
+    if (onOpenComic) onOpenComic(item);
   };
 
   const handleRemoveClick = (e) => {
@@ -241,6 +468,10 @@ export default function ComicCard({
           path: filePath,
           name: title,
           cover: coverUrl,
+          // مرحله ۴۹ (C): حوزهٔ پوشه همراهِ کارت فرستاده می‌شود تا
+          // منویِ راست‌کلیک، در نمایِ علاقه‌مندی‌ها پوشه‌هایِ
+          // علاقه‌مندی و در کتابخانه پوشه‌هایِ کتابخانه را نشان دهد.
+          folderScope,
         },
       }
     );
@@ -259,7 +490,7 @@ export default function ComicCard({
     <div
       draggable={Boolean(filePath)}
       onDragStart={handleDragStart}
-      onClick={() => onOpenComic && onOpenComic(item)}
+      onClick={handleCardClick}
       onContextMenu={handleCardContextMenu}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
@@ -287,7 +518,7 @@ export default function ComicCard({
           <img
             src={coverUrl}
             alt={title}
-            onError={() => setCoverUrl(null)}
+            onError={handleCoverError}
             draggable={false}
             style={{
               ...styles.coverImg,
@@ -307,6 +538,14 @@ export default function ComicCard({
 
         {/* بج فرمت بالا-چپ */}
         <span style={styles.formatBadge}>{extBadge}</span>
+
+        {/* مرحلهٔ ۵۲ §۱: بجِ «فایل حذف شده» رویِ کاور */}
+        {isMissingFileItem(item) && (
+          <span style={styles.missingBadgeOnCover}>
+            <Icons.AlertTriangle size={12} />
+            <span>فایل حذف شده</span>
+          </span>
+        )}
 
         {/* دکمه‌های شناور بالا-راست: قلب علاقه‌مندی + دکمه پین در صدر کتابخانه */}
         <div style={styles.topFloatingActions}>
@@ -371,9 +610,24 @@ export default function ComicCard({
                 ...styles.miniActionBtn,
                 borderColor: showFolderMenu ? 'var(--accent)' : 'var(--border)',
               }}
-              title="انتقال به پوشه کتابخانه"
+              title={isFavoritesScope ? 'انتقال به پوشه علاقه‌مندی‌ها' : 'انتقال به پوشه کتابخانه'}
             >
               <Icons.FolderPlus size={13} />
+            </button>
+
+            <button
+              type="button"
+              onClick={handleToggleHeroSlider}
+              style={{
+                ...styles.miniActionBtn,
+                // مرحلهٔ ۵۲ §۲ — پس‌زمینه همیشه تیره است تا آیکون سفید خوانا بماند؛ هرگز سفید یا فیروزه‌ای روشن نمی‌شود.
+                color: inHeroSlider ? '#34d399' : '#ffffff',
+                borderColor: inHeroSlider ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255, 255, 255, 0.14)',
+                backgroundColor: inHeroSlider ? 'rgba(12, 16, 23, 0.92)' : 'rgba(12, 16, 23, 0.88)',
+              }}
+              title={inHeroSlider ? 'حذف از اسلایدر بالا' : 'نمایش در اسلایدر بالا'}
+            >
+              <Icons.Layers size={13} />
             </button>
 
             <button
@@ -409,14 +663,14 @@ export default function ComicCard({
               onClick={(e) => handleAssignFolder(e, null)}
               style={{
                 ...styles.folderQuickItem,
-                color: !item?.folderId ? 'var(--accent)' : 'var(--text)',
+                color: !currentFolderId ? 'var(--accent)' : 'var(--text)',
               }}
             >
               <span>بدون پوشه (نمای کلی)</span>
-              {!item?.folderId && <Icons.Check size={12} />}
+              {!currentFolderId && <Icons.Check size={12} />}
             </div>
-            {libraryFolders.map((f) => {
-              const isCurr = item?.folderId === f.id;
+            {activeFolders.map((f) => {
+              const isCurr = currentFolderId === f.id;
               return (
                 <div
                   key={f.id}
@@ -483,6 +737,14 @@ export default function ComicCard({
                 }}
               >
                 {isFav ? 'مورد علاقه' : 'عادی'}
+              </span>
+            )}
+            {inHeroSlider && <span style={styles.sliderTag}>در اسلایدر</span>}
+            {/* مرحلهٔ ۵۲ §۱: بجِ «فایل حذف شده» در فوترِ کارت */}
+            {isMissingFileItem(item) && (
+              <span style={styles.missingBadge}>
+                <Icons.AlertTriangle size={11} />
+                <span>فایل حذف شده</span>
               </span>
             )}
           </div>
@@ -710,6 +972,54 @@ const styles = {
     backgroundColor: 'rgba(34, 211, 238, 0.14)',
     padding: '2px 7px',
     borderRadius: '6px',
+  },
+  // مرحلهٔ ۵۲ §۱: بجِ «فایل حذف شده» — همین استایلِ دقیق، هم
+  // رویِ کاور (با موقعیتِ مطلق) و هم در فوترِ کارت استفاده می‌شود.
+  missingBadge: {
+    fontFamily: 'var(--font-fa)',
+    background: 'rgba(239, 68, 68, 0.92)',
+    border: '1px solid #fca5a5',
+    color: '#ffffff',
+    padding: '3px 8px',
+    borderRadius: '6px',
+    fontSize: '10.5px',
+    fontWeight: 800,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    whiteSpace: 'nowrap',
+  },
+  missingBadgeOnCover: {
+    fontFamily: 'var(--font-fa)',
+    background: 'rgba(239, 68, 68, 0.92)',
+    border: '1px solid #fca5a5',
+    color: '#ffffff',
+    padding: '3px 8px',
+    borderRadius: '6px',
+    fontSize: '10.5px',
+    fontWeight: 800,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '4px',
+    whiteSpace: 'nowrap',
+    position: 'absolute',
+    top: '36px',
+    left: '8px',
+    zIndex: 2,
+  },
+  // مرحلهٔ ۵۰ §۵ — برچسبِ «در اسلایدر» برایِ کتاب‌هایِ فهرستِ دستی.
+  sliderTag: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '10px',
+    fontWeight: 700,
+    color: '#22d3ee',
+    backgroundColor: 'rgba(34, 211, 238, 0.14)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(34, 211, 238, 0.35)',
+    padding: '2px 7px',
+    borderRadius: '6px',
+    whiteSpace: 'nowrap',
   },
   folderBadgeTag: {
     fontFamily: 'var(--font-fa)',

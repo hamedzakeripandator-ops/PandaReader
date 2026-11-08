@@ -216,6 +216,7 @@ export default function BookmarksView({ onOpenComic }) {
 
   return (
     <div style={styles.view}>
+      <div style={styles.viewInner}>
       <div style={styles.header}>
         <span style={{ color: 'var(--accent)', display: 'flex' }}>
           <Icons.Bookmark size={22} />
@@ -512,6 +513,7 @@ export default function BookmarksView({ onOpenComic }) {
           ) : null}
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -523,11 +525,17 @@ const styles = {
     margin: '0 auto',
     width: '100%',
     boxSizing: 'border-box',
-    direction: 'rtl',
+    direction: 'ltr',
     fontFamily: 'var(--font-fa)',
     color: 'var(--text)',
     overflowY: 'auto',
     height: '100%',
+  },
+  // مرحله ۴۴: قفلِ جهت — پوسته ltr، محتوایِ درونی rtl تا نوارِ اسکرول در سمتِ راست بماند
+  viewInner: {
+    direction: 'rtl',
+    width: '100%',
+    boxSizing: 'border-box',
   },
   header: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' },
   title: { fontSize: '20px', fontWeight: 800 },

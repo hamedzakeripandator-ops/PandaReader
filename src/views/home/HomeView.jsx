@@ -166,7 +166,7 @@ export default function HomeView({ onSelectFile, onSelectFolder, onOpenComic }) 
 
           {/* تیتر بزرگ: Estedad 800 32px + کلمه برند لاتین Manrope 800 */}
           <h1 style={styles.mainTitle}>
-            به <span style={styles.brandInline}>ComicReader</span> خوش آمدید
+            به <span style={styles.brandInline}>PandaReader</span> خوش آمدید
           </h1>
 
           {/* پاراگراف: Estedad 400 14px + فرمت‌های فایل داخل code با Mono 500 */}

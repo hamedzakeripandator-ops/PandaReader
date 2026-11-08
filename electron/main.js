@@ -632,6 +632,10 @@ function createWindow() {
     height: 900,
     backgroundColor: '#0a0f13',
     frame: false,
+    // مرحلهٔ ۴۷ §۳: عنوانِ پنجرهٔ اصلی (برندِ جدیدِ برنامه).
+    // بدونِ این گزینه، الکترون عنوان را از تگِ <title> سندِ HTML می‌گیرد؛
+    // این مقدارِ صریح، همان برندِ PandaReader را از همان لحظهٔ ساختِ پنجره تثبیت می‌کند.
+    title: 'PandaReader',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,

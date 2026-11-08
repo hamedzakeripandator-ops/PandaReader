@@ -5,6 +5,7 @@ import useLibraryStore from '../../store/useLibraryStore';
 import useVirtualScroll from '../../hooks/useVirtualScroll';
 import useContextMenu from '../../hooks/useContextMenu';
 import { coreApi } from '../../services/coreApi';
+import { renderPageOverlay, buildPageGeometry } from '../../utils/annotationPdfExport';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
 import Icons from '../common/Icons';
 import AnnotationLayer from './AnnotationLayer';
@@ -29,6 +30,56 @@ function buildComicImageUrl(filePath) {
   }
   const sanitized = trimmed.replace(/^[\\/]+/, '');
   return `comic://media/?path=${encodeURIComponent(sanitized)}`;
+}
+
+// مرحلهٔ ۴۴ §۴: بارگذاریِ یک تصویر از URL (comic:// یا data URL).
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('بارگذاریِ تصویرِ صفحه انجام نشد.'));
+    img.src = src;
+  });
+}
+
+// مرحلهٔ ۴۴ §۴: پختِ یک صفحهٔ CBZ — تصویرِ اصلی رویِ بومِ هم‌اندازهٔ
+// naturalWidth × naturalHeight رسم می‌شود و حاشیه‌نویسی‌ها با همان
+// renderPageOverlayای PDF (همان هندسهٔ buildPageGeometry با چرخشِ
+// CSS) رویش پخته می‌شوند. مختصاتِ ذخیره‌سازی کسریِ خالص‌اند، پس
+// هندسه با viewportای ۱۰۰۰ واحدی و aspectِ واقعیِ صفحه دقیق است.
+// فرمتِ خروجی، همان فرمتِ اصلی است (JPEG با کیفیت ۰٫۹۲، WebP با
+// ۰٫۹۲، بقیه PNG) تا حجمِ فایل منفجر نشود.
+async function bakeCbzPageImage(rawPath, itemsForPage, rotation) {
+  const img = await loadImageElement(buildComicImageUrl(rawPath));
+  const nw = img.naturalWidth;
+  const nh = img.naturalHeight;
+  if (!nw || !nh) return null;
+  const viewH = (1000 * nh) / nw;
+  const geometry = buildPageGeometry({ width: 1000, height: viewH, transform: [1, 0, 0, -1, 0, viewH], rotate: 0, view: [0, 0, 1000, viewH] }, rotation || 0);
+  const rendered = await renderPageOverlay(itemsForPage, geometry);
+  if (!rendered || (!rendered.overlayPng && !rendered.highlightPng)) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = nw;
+  canvas.height = nh;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.drawImage(img, 0, 0, nw, nh);
+  if (rendered.highlightPng) {
+    const hlImg = await loadImageElement(rendered.highlightPng);
+    ctx.drawImage(hlImg, 0, 0, nw, nh);
+  }
+  if (rendered.overlayPng) {
+    const ovImg = await loadImageElement(rendered.overlayPng);
+    ctx.drawImage(ovImg, 0, 0, nw, nh);
+  }
+  const ext = String(rawPath || '').split('.').pop().toLowerCase();
+  let dataUrl = null;
+  if (ext === 'jpg' || ext === 'jpeg') dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+  else if (ext === 'webp') dataUrl = canvas.toDataURL('image/webp', 0.92);
+  else dataUrl = canvas.toDataURL('image/png');
+  const entryName = String(rawPath).split(/[\\/]/).pop() || '';
+  try { canvas.width = 0; canvas.height = 0; } catch (_) {}
+  return { entryName, imageDataUrl: dataUrl, width: nw, height: nh };
 }
 
 // کامپوننت فریم ایزوله‌شده با حذف درز سیاه زیرپیکسلی، پاس دوم وضوح بالا (HiDPI) و لایه استودیو ویرایش
@@ -113,6 +164,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
   isSharpenFilterActive,
   pageAnnotations,
   onCommitPageAnnotations,
+  onTransferItemsToPage,
   onImageLoad,
   onFrameRendered,
   onContextMenu,
@@ -122,6 +174,8 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
 }) {
   const pageNum = index + 1;
   const rawPath = item?.path || item?.filePath || '';
+  // مرحلهٔ ۵۰ §۲: اشتراکِ استودیو برای overflowِ visibleِ قاب (Bleed).
+  const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const [retryCount, setRetryCount] = useState(0);
   const [hasError, setHasError] = useState(false);
 
@@ -188,6 +242,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
     <div
       id={`comic-page-${pageNum}`}
       data-page={pageNum}
+      data-page-number={pageNum}
       data-index={index}
       className="comic-page-item"
       style={{
@@ -197,8 +252,10 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
         height: fitToScreen ? 'auto' : (knownHeight ? `${knownHeight}px` : 'auto'),
         minHeight: fitToScreen ? '0' : (knownHeight ? `${knownHeight}px` : '450px'),
         marginBottom: isLastItem ? '0px' : `${pageGap}px`,
-        contain: (isSeamlessMode || frameHasOverflowSticky) ? 'layout style' : 'layout paint',
-        overflow: (isSeamlessMode || frameHasOverflowSticky) ? 'visible' : 'hidden',
+        // مرحلهٔ ۵۰ §۲: قاب، overflow: visible می‌گیرد تا بومِ
+        // حاشیه‌دارِ لایه (Bleed) بیرونِ کاغذ دیده شود (وقتی استودیو فعال است).
+        contain: (isSeamlessMode || frameHasOverflowSticky || isAnnotationActive) ? 'layout style' : 'layout paint',
+        overflow: (isSeamlessMode || frameHasOverflowSticky || isAnnotationActive) ? 'visible' : 'hidden',
       }}
       onContextMenu={(e) => {
         // مرحله ۱۳: مختصاتِ عمودیِ کلیک نسبت به بالایِ همین صفحه.
@@ -304,6 +361,7 @@ const ComicPageFrame = React.memo(function ComicPageFrame({
           rotation={rotation}
           items={pageAnnotations}
           onCommitPageItems={onCommitPageAnnotations}
+          onTransferItemsToPage={onTransferItemsToPage}
           isNearViewport={isNearViewport}
           zoomLevel={frameZoomLevel || 1}
         />
@@ -347,6 +405,29 @@ export default function VerticalViewer() {
   const [annotationsByPage, setAnnotationsByPage] = useState({});
   const [undoStack, setUndoStack] = useState([]);
   const [redoStack, setRedoStack] = useState([]);
+  // مرحلهٔ ۵۰ §۲: آینهٔ refیِ annotationsByPage برای هندلرِ انتقالِ
+  // بین‌صفحه‌ای (آینهٔ PdfViewer/EpubViewer).
+  const annotationsByPageRef = useRef({});
+  annotationsByPageRef.current = annotationsByPage;
+  // مرحلهٔ ۴۴ §۴: وضعیتِ ذخیرهٔ CBZ (آینهٔ showSaveStatusی PdfViewer —
+  // بنرِ شناور ندارد؛ پیام‌ها با Toast می‌آیند و تولبار از همین
+  // pdfSaveState، دکمه‌ها را غیرفعال/سبز می‌کند).
+  const [isExportingCbz, setIsExportingCbz] = useState(false);
+  const [cbzSaveState, setCbzSaveState] = useState('idle');
+  const cbzSaveTimerRef = useRef(null);
+  const showCbzSaveStatus = useCallback((state, ms) => {
+    if (cbzSaveTimerRef.current) clearTimeout(cbzSaveTimerRef.current);
+    setCbzSaveState(state);
+    if (ms > 0) {
+      cbzSaveTimerRef.current = setTimeout(() => {
+        setCbzSaveState('idle');
+        cbzSaveTimerRef.current = null;
+      }, ms);
+    }
+  }, []);
+  useEffect(() => () => {
+    if (cbzSaveTimerRef.current) clearTimeout(cbzSaveTimerRef.current);
+  }, []);
   const [isScrollIdle, setIsScrollIdle] = useState(true);
 
   // مرحله ۱۵ — پیشرفتِ ری‌رندر: مجموعهٔ فریم‌هایِ بارگذاری‌شدهٔ
@@ -448,6 +529,9 @@ export default function VerticalViewer() {
     jumpToPage(n);
   }, [itemsCount, pageHudDraft, jumpToPage]);
   const currentFilePath = resolveActiveBookKey(comicData, null);
+  // مرحلهٔ ۴۴ §۴: دکمه‌هایِ ذخیره فقط وقتی فایلِ آرشیوِ CBZ/ZIP باز است
+  // (پوشهٔ عکس و RAR/CBR — که JSZip نمی‌خواند — دکمه ندارند).
+  const isCbzArchive = comicData?.type === 'zip' && typeof currentFilePath === 'string' && /\.(cbz|zip)$/i.test(currentFilePath);
 
   // مرحلهٔ ۴۰ §۴: حالتِ نمایش (عمودی/افقیِ صفحه‌ای).
   const comicViewMode = useReaderStore((state) => state.comicViewMode || 'vertical');
@@ -874,6 +958,27 @@ export default function VerticalViewer() {
             coreApi.savePageAnnotations(currentFilePath, pageNum, items).catch(() => {});
           }));
         }
+        // مرحلهٔ ۴۴ §۴: بارگذاریِ خودکارِ مانیفستِ جاسازی‌شده — فقط
+        // وقتی دیتابیسِ محلی (با آینهٔ محلی) برایِ این فایل، هیچ
+        // حاشیه‌نویسی‌ای ندارد؛ دیتابیس مقدم است و هرگز رونویسی نمی‌شود.
+        const mergedHasAny = Object.values(merged.pages || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+        if (!mergedHasAny && coreApi.isAvailable()) {
+          coreApi.getEmbeddedCbzAnnotations(currentFilePath).then((emb) => {
+            if (!isMounted) return;
+            if (!emb || !emb.success || !emb.hasManifest) return;
+            const embPages = emb.annotationsByPage && typeof emb.annotationsByPage === 'object' ? emb.annotationsByPage : {};
+            const embHasAny = Object.values(embPages).some((arr) => Array.isArray(arr) && arr.length > 0);
+            if (!embHasAny) return;
+            setAnnotationsByPage(embPages);
+            Object.entries(embPages).forEach(([pageNum, items]) => {
+              if (Array.isArray(items) && items.length > 0) {
+                coreApi.savePageAnnotations(currentFilePath, pageNum, items).catch(() => {});
+                annotationLocalBackup.writePageBackup(currentFilePath, pageNum, items);
+              }
+            });
+            showToast('حاشیه‌نویسی‌های ذخیره‌شده در فایل بازیابی شد.', { type: 'info' });
+          }).catch(() => {});
+        }
       })
       .catch(() => {});
 
@@ -910,16 +1015,64 @@ export default function VerticalViewer() {
     [currentFilePath]
   );
 
+  // مرحلهٔ ۵۰ §۲ (ب): انتقالِ بین‌صفحه‌ایِ حاشیه‌نویسی — آینهٔ
+  // PdfViewer: یک تراکنشِ واحد برای هر دو صفحه + دقیقاً یک ورودیِ
+  // Undo (با پرچمِ transfer تا Undo/Redo هر دو صفحه را با هم برگردانند).
+  const handleTransferItemsToPage = useCallback(
+    (sourcePage, targetPage, movedItems, remainingSourceItems) => {
+      const src = Number(sourcePage);
+      const tgt = Number(targetPage);
+      if (!Number.isFinite(src) || !Number.isFinite(tgt) || src === tgt) return;
+      if (!Array.isArray(movedItems) || movedItems.length === 0) return;
+      const srcKey = String(src);
+      const tgtKey = String(tgt);
+      const prevSourceItems = annotationsByPageRef.current[srcKey] || [];
+      const prevTargetItems = annotationsByPageRef.current[tgtKey] || [];
+      const nextSourceItems = Array.isArray(remainingSourceItems) ? remainingSourceItems : prevSourceItems;
+      const nextTargetItems = [...prevTargetItems, ...movedItems];
+      setUndoStack((u) => [
+        ...u.slice(-29),
+        {
+          pageNum: src,
+          prevItems: prevSourceItems,
+          nextItems: nextSourceItems,
+          transfer: {
+            targetPage: tgt,
+            targetPrevItems: prevTargetItems,
+            targetNextItems: nextTargetItems,
+          },
+        },
+      ]);
+      setRedoStack([]);
+      setAnnotationsByPage((prev) => ({
+        ...prev,
+        [srcKey]: nextSourceItems,
+        [tgtKey]: nextTargetItems,
+      }));
+      if (currentFilePath && coreApi.isAvailable()) {
+        coreApi.savePageAnnotations(currentFilePath, src, nextSourceItems).catch(() => {});
+        coreApi.savePageAnnotations(currentFilePath, tgt, nextTargetItems).catch(() => {});
+      }
+      annotationLocalBackup.writePageBackup(currentFilePath, src, nextSourceItems);
+      annotationLocalBackup.writePageBackup(currentFilePath, tgt, nextTargetItems);
+    },
+    [currentFilePath]
+  );
+
   const handleUndoAnnotation = useCallback(() => {
     setUndoStack((prevUndo) => {
       if (prevUndo.length === 0) return prevUndo;
       const lastAction = prevUndo[prevUndo.length - 1];
       const pageKey = String(lastAction.pageNum);
 
-      setAnnotationsByPage((prevMap) => ({
-        ...prevMap,
-        [pageKey]: lastAction.prevItems,
-      }));
+      // مرحلهٔ ۵۰ §۲ (ب): Undoی انتقال، هر دو صفحه را با هم برمی‌گرداند.
+      setAnnotationsByPage((prevMap) => {
+        const nextMap = { ...prevMap, [pageKey]: lastAction.prevItems };
+        if (lastAction.transfer) {
+          nextMap[String(lastAction.transfer.targetPage)] = lastAction.transfer.targetPrevItems;
+        }
+        return nextMap;
+      });
       setRedoStack((r) => [...r, lastAction]);
 
       if (currentFilePath && coreApi.isAvailable()) {
@@ -930,8 +1083,20 @@ export default function VerticalViewer() {
             lastAction.prevItems
           )
           .catch(() => {});
+        if (lastAction.transfer) {
+          coreApi
+            .savePageAnnotations(
+              currentFilePath,
+              lastAction.transfer.targetPage,
+              lastAction.transfer.targetPrevItems
+            )
+            .catch(() => {});
+        }
       }
       annotationLocalBackup.writePageBackup(currentFilePath, lastAction.pageNum, lastAction.prevItems);
+      if (lastAction.transfer) {
+        annotationLocalBackup.writePageBackup(currentFilePath, lastAction.transfer.targetPage, lastAction.transfer.targetPrevItems);
+      }
       return prevUndo.slice(0, -1);
     });
   }, [currentFilePath]);
@@ -942,10 +1107,14 @@ export default function VerticalViewer() {
       const nextAction = prevRedo[prevRedo.length - 1];
       const pageKey = String(nextAction.pageNum);
 
-      setAnnotationsByPage((prevMap) => ({
-        ...prevMap,
-        [pageKey]: nextAction.nextItems,
-      }));
+      // مرحلهٔ ۵۰ §۲ (ب): Redoی انتقال، هر دو صفحه را با هم جلو می‌برد.
+      setAnnotationsByPage((prevMap) => {
+        const nextMap = { ...prevMap, [pageKey]: nextAction.nextItems };
+        if (nextAction.transfer) {
+          nextMap[String(nextAction.transfer.targetPage)] = nextAction.transfer.targetNextItems;
+        }
+        return nextMap;
+      });
       setUndoStack((u) => [...u, nextAction]);
 
       if (currentFilePath && coreApi.isAvailable()) {
@@ -956,8 +1125,20 @@ export default function VerticalViewer() {
             nextAction.nextItems
           )
           .catch(() => {});
+        if (nextAction.transfer) {
+          coreApi
+            .savePageAnnotations(
+              currentFilePath,
+              nextAction.transfer.targetPage,
+              nextAction.transfer.targetNextItems
+            )
+            .catch(() => {});
+        }
       }
       annotationLocalBackup.writePageBackup(currentFilePath, nextAction.pageNum, nextAction.nextItems);
+      if (nextAction.transfer) {
+        annotationLocalBackup.writePageBackup(currentFilePath, nextAction.transfer.targetPage, nextAction.transfer.targetNextItems);
+      }
       return prevRedo.slice(0, -1);
     });
   }, [currentFilePath]);
@@ -967,6 +1148,111 @@ export default function VerticalViewer() {
     handleCommitPageAnnotations(pageNum, []);
     showToast(`یادداشت‌های صفحه ${pageNum} پاک شد`, { type: 'info' });
   }, [activePageIndex, handleCommitPageAnnotations, showToast]);
+
+  // مرحلهٔ ۴۴ §۴: ذخیرهٔ CBZِ حاشیه‌نویسی‌شده — آینهٔ
+  // handleExportAnnotatedPdfی PdfViewer با همان دو mode و همان پیام‌ها؛
+  // فقط آماده‌سازی فرق دارد: هر صفحهٔ دارایِ حاشیه‌نویسی، با
+  // bakeCbzPageImage پخته می‌شود و مانیفستِ کامل هم فرستاده می‌شود.
+  const handleExportAnnotatedCbz = useCallback(async (mode = 'save-as') => {
+    if (isExportingCbz) return;
+    if (!coreApi.isAvailable()) {
+      showCbzSaveStatus('error', 6000);
+      showToast('خروجی فقط در نسخهٔ دسکتاپ در دسترس است.', { type: 'warning' });
+      return;
+    }
+    if (!isCbzArchive) {
+      showCbzSaveStatus('error', 6000);
+      showToast('ذخیرهٔ مستقیم فقط برای فایل‌های CBZ و ZIP است.', { type: 'warning' });
+      return;
+    }
+    const saveMode = mode === 'in-place' ? 'in-place' : 'save-as';
+    const pages = annotationsByPage || {};
+    const annotatedCount = Object.values(pages).reduce(
+      (n, items) => n + (Array.isArray(items) ? items.length : 0),
+      0
+    );
+    if (annotatedCount === 0 && saveMode !== 'in-place') {
+      showCbzSaveStatus('info', 4500);
+      showToast('هنوز حاشیه‌نویسی‌ای روی این فایل نیست.', { type: 'info' });
+      return;
+    }
+    setIsExportingCbz(true);
+    showCbzSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', 0);
+    showToast('در حالِ آماده‌سازیِ خروجی…', { type: 'info' });
+    try {
+      const bakedPages = {};
+      let totalItems = 0;
+      let bakedCount = 0;
+      let skippedCount = 0;
+      const pageNumbers = Object.keys(pages)
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && Array.isArray(pages[n]) && pages[n].length > 0)
+        .sort((a, b) => a - b);
+      for (const pageNum of pageNumbers) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const itemsForPage = pages[pageNum];
+        totalItems += itemsForPage.length;
+        const item = items[pageNum - 1];
+        const rawPath = item?.path || item?.filePath || '';
+        if (!rawPath) { skippedCount++; continue; }
+        try {
+          const baked = await bakeCbzPageImage(rawPath, itemsForPage, rotation);
+          if (!baked) { skippedCount++; continue; }
+          bakedPages[pageNum] = baked;
+          bakedCount++;
+        } catch (_) { skippedCount++; }
+      }
+      if (annotatedCount > 0 && bakedCount === 0) {
+        showCbzSaveStatus('info', 4500);
+        showToast('حاشیه‌نویسیِ قابلِ خروجی پیدا نشد.', { type: 'info' });
+        return;
+      }
+      const result = await coreApi.exportAnnotatedCbz({
+        cbzPath: currentFilePath,
+        mode: saveMode,
+        pages: bakedPages,
+        annotationsByPage: pages,
+      });
+      if (result && result.canceled) {
+        showCbzSaveStatus('info', 4500);
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
+        return;
+      }
+      if (result && result.success) {
+        const savedName = String((result && result.outputPath) || currentFilePath || '').split(/[\\/]/).pop() || '';
+        const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + ')' : '';
+        const skippedSuffix = skippedCount > 0 ? ` (${skippedCount} صفحه رد شد)` : '';
+        if (result.restoredClean) {
+          showCbzSaveStatus('saved-inplace', 4500);
+          showToast('فایل به حالتِ بدونِ حاشیه‌نویسی برگشت.' + savedSuffix, { type: 'success' });
+        } else if (saveMode === 'in-place') {
+          showCbzSaveStatus('saved-inplace', 4500);
+          showToast(
+            `روی همین فایل ذخیره شد: ${totalItems} حاشیه‌نویسی در ${bakedCount} صفحه.${skippedSuffix}`,
+            { type: 'success' }
+          );
+        } else {
+          showCbzSaveStatus('saved-as', 4500);
+          showToast(
+            `فایل با ${totalItems} حاشیه‌نویسی در ${bakedCount} صفحه ذخیره شد.${skippedSuffix}`,
+            { type: 'success' }
+          );
+        }
+      } else if (result && result.locked) {
+        showCbzSaveStatus('error', 6000);
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', { type: 'error' });
+      } else {
+        showCbzSaveStatus('error', 6000);
+        showToast((result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      showCbzSaveStatus('error', 6000);
+      showToast('آماده‌سازیِ خروجی انجام نشد: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+    } finally {
+      setIsExportingCbz(false);
+    }
+  }, [annotationsByPage, currentFilePath, isCbzArchive, isExportingCbz, rotation, showToast, showCbzSaveStatus]);
 
   // مرحله ۳ ـ بخش الف (ممیزی §۲.۶): گیتِ وارونه اصلاح شد تا دقیقاً
   // هم‌تراز با PdfViewer باشد: وقتی استودیو روشن است، فقط تولبار
@@ -1273,7 +1559,7 @@ export default function VerticalViewer() {
   // کانتینر، padding ندارد، پس فرمول، همان pageOffsetTop +
   // pageHeight*yRatio است (با مختصاتِ واقعیِ DOM).
   useEffect(() => {
-    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== currentFilePath) return;
+    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== currentFilePath) { clearBookmarkJumpTarget(); return; }
     const page = bookmarkJumpTarget.page;
     if (page < 1 || page > itemsCount) { clearBookmarkJumpTarget(); return; }
     if (isHorizontalPaged) {
@@ -1389,6 +1675,7 @@ export default function VerticalViewer() {
           isSharpenFilterActive={enableHiDpiCrispPass && safeZoom <= 1.5 && !isAnnotationActive}
           pageAnnotations={frameAnnotations}
           onCommitPageAnnotations={handleCommitPageAnnotations}
+          onTransferItemsToPage={handleTransferItemsToPage}
           pageFilter={pageFilter}
           frameZoomLevel={safeZoom}
           onImageLoad={recordImageDimensions}
@@ -1450,6 +1737,9 @@ export default function VerticalViewer() {
         onUndo={handleUndoAnnotation}
         onRedo={handleRedoAnnotation}
         onClearPage={handleClearCurrentPageAnnotations}
+        onExportAnnotatedPdf={isCbzArchive ? handleExportAnnotatedCbz : undefined}
+        isExportingPdf={isExportingCbz}
+        pdfSaveState={cbzSaveState}
       />
 
       {isHorizontalPaged && itemsCount > 0 ? (
@@ -1477,6 +1767,7 @@ export default function VerticalViewer() {
           <div
             style={{
               position: 'relative',
+              direction: 'rtl',
               width: frameWidth || '100%',
               margin: '0 auto',
               display: 'flex',
@@ -1523,6 +1814,7 @@ export default function VerticalViewer() {
         <div
           style={{
             position: 'relative',
+            direction: 'rtl',
             width: `${Math.round(safeZoom * 100)}%`,
             margin: '0 auto',
             display: 'flex',
@@ -1567,6 +1859,7 @@ export default function VerticalViewer() {
                 isSharpenFilterActive={enableHiDpiCrispPass && isNearCenter && safeZoom <= 1.5 && !isAnnotationActive}
                 pageAnnotations={pageAnnots}
                 onCommitPageAnnotations={handleCommitPageAnnotations}
+                onTransferItemsToPage={handleTransferItemsToPage}
                 pageFilter={pageFilter}
                 frameZoomLevel={safeZoom}
                 onImageLoad={recordImageDimensions}

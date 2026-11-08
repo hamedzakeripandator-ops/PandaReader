@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import useSettingsStore from '../../store/useSettingsStore';
+import useSettingsStore, { SCROLLBAR_PRESETS } from '../../store/useSettingsStore';
 import useReaderStore from '../../store/useReaderStore';
 import useAppStore from '../../store/useAppStore';
 import KeybindRecorder from './KeybindRecorder';
@@ -16,28 +16,35 @@ import annotationLocalBackup from '../../services/annotationLocalBackup';
 // می‌شود و عنوان/دسته، فقط در یک جا تعریف شده است.
 
 export default function SettingsView() {
-  const {
-    shortcuts,
-    preferences,
-    updateShortcut,
-    resetShortcutsToDefault,
-    updatePreference,
-    setHeroSliderVariant,
-    // مرحله 41: پیش‌فرض‌های اختصاصی CBZ و EPUB و رنگ پس‌زمینهٔ
-    // اطراف صفحهٔ مطالعه (مقادیر پیش‌فرض، همان قرارداد استور).
-    cbzDefaultZoom = 165,
-    cbzDefaultViewMode = 'horizontal-paged',
-    epubDefaultZoom = 100,
-    epubDefaultViewMode = 'vertical',
-    readerBackdropColor = '#2b3038',
-    setCbzDefaultZoom,
-    setCbzDefaultViewMode,
-    setEpubDefaultZoom,
-    setEpubDefaultViewMode,
-    setReaderBackdropColor,
-  } = useSettingsStore();
+  // مرحلهٔ ۴۴ §۵ (OPT-02): اشتراکِ هدفمندِ استورها — هر کلید با
+  // سلکتورِ جدا خوانده می‌شود تا تغییرِ کلیدهایِ نامربوط، این پنل را
+  // ری‌رندر نکند. مقدارهایِ پیش‌فرض (مرحلهٔ ۴۱) همان قراردادِ
+  // پیشین‌اند و با ?? حفظ شده‌اند تا اگر استور هنوز کلیدی را
+  // نداشت، رفتار عوض نشود.
+  const shortcuts = useSettingsStore((s) => s.shortcuts);
+  const preferences = useSettingsStore((s) => s.preferences);
+  const updateShortcut = useSettingsStore((s) => s.updateShortcut);
+  const resetShortcutsToDefault = useSettingsStore((s) => s.resetShortcutsToDefault);
+  const updatePreference = useSettingsStore((s) => s.updatePreference);
+  const setHeroSliderVariant = useSettingsStore((s) => s.setHeroSliderVariant);
+  const cbzDefaultZoom = useSettingsStore((s) => s.cbzDefaultZoom ?? 165);
+  const cbzDefaultViewMode = useSettingsStore((s) => s.cbzDefaultViewMode ?? 'horizontal-paged');
+  const epubDefaultZoom = useSettingsStore((s) => s.epubDefaultZoom ?? 100);
+  const epubDefaultViewMode = useSettingsStore((s) => s.epubDefaultViewMode ?? 'vertical');
+  const readerBackdropColor = useSettingsStore((s) => s.readerBackdropColor ?? '#2b3038');
+  // مرحلهٔ ۵۲ §۳: گرادیانِ اسکرول‌بارِ صفحات (آینهٔ سطحِ استور؛
+  // پیش‌فرض‌ها همان قراردادِ مرحلهٔ ۴۱ با ?? حفظ شده‌اند).
+  const scrollbarPresetId = useSettingsStore((s) => s.scrollbarPresetId ?? 'neon-cyan-purple');
+  const scrollbarColorStart = useSettingsStore((s) => s.scrollbarColorStart ?? '#22d3ee');
+  const scrollbarColorEnd = useSettingsStore((s) => s.scrollbarColorEnd ?? '#a78bfa');
+  const setScrollbarGradient = useSettingsStore((s) => s.setScrollbarGradient);
+  const setCbzDefaultZoom = useSettingsStore((s) => s.setCbzDefaultZoom);
+  const setCbzDefaultViewMode = useSettingsStore((s) => s.setCbzDefaultViewMode);
+  const setEpubDefaultZoom = useSettingsStore((s) => s.setEpubDefaultZoom);
+  const setEpubDefaultViewMode = useSettingsStore((s) => s.setEpubDefaultViewMode);
+  const setReaderBackdropColor = useSettingsStore((s) => s.setReaderBackdropColor);
 
-  const { setZoomLevel } = useReaderStore();
+  const setZoomLevel = useReaderStore((s) => s.setZoomLevel);
   const showToast = useAppStore((state) => state.showToast);
 
   const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader' | 'formats' | 'storage'
@@ -52,6 +59,12 @@ export default function SettingsView() {
   const [epubZoomDraft, setEpubZoomDraft] = useState(null);
   const [hexDraft, setHexDraft] = useState(null);
   const [hexError, setHexError] = useState('');
+  // مرحلهٔ ۵۲ §۳: پیش‌نویس‌هایِ محلیِ دو ورودیِ HEX گرادیانِ
+  // اسکرول‌بار؛ مثلِ hexDraft مرحلهٔ ۴۱، مقدارِ میانیِ ناقص فقط
+  // در پیش‌نویس می‌ماند و استور فقط مقدارِ معتبر می‌گیرد.
+  const [sbStartHexDraft, setSbStartHexDraft] = useState(null);
+  const [sbEndHexDraft, setSbEndHexDraft] = useState(null);
+  const [sbHexError, setSbHexError] = useState('');
   const [lastBackup, setLastBackup] = useState(() => {
     try {
       const raw = window.localStorage.getItem('comicReader.lastBackup');
@@ -211,6 +224,70 @@ export default function SettingsView() {
     if (hexDraft != null && !isValidHex(hexDraft)) {
       setHexDraft(null);
       setHexError('کد HEX معتبر نیست؛ مقدار قبلی برگردانده شد.');
+    }
+  };
+
+  // مرحلهٔ ۵۲ §۳: نرمال‌سازیِ کد HEX ورودیِ گرادیانِ اسکرول‌بار:
+  // اگر # ندارد، اضافه می‌شود؛ حروفِ بزرگ، کوچک می‌شوند؛ مقدارِ
+  // نامعتبر، null برمی‌گرداند و مقدارِ جاری دست نمی‌خورد.
+  const normalizeScrollbarHex = (raw) => {
+    if (typeof raw !== 'string') return null;
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const withHash = trimmed.startsWith('#') ? trimmed : '#' + trimmed;
+    return /^#[0-9a-fA-F]{6}$/.test(withHash) ? withHash.toLowerCase() : null;
+  };
+  // مقدارهایِ نمایشیِ ورودی‌هایِ رنگ؛ اگر مقدارِ استور معتبر نباشد،
+  // به پیش‌فرضِ قرارداد برمی‌گردد تا <input type="color"> خراب نشود.
+  const sbStartValue = isValidHex(scrollbarColorStart) ? scrollbarColorStart : '#22d3ee';
+  const sbEndValue = isValidHex(scrollbarColorEnd) ? scrollbarColorEnd : '#a78bfa';
+  const sbGradient = (start, end) => 'linear-gradient(180deg, ' + start + ' 0%, ' + end + ' 100%)';
+  const handleScrollbarPresetSelect = (preset) => {
+    if (!preset) return;
+    setSbStartHexDraft(null);
+    setSbEndHexDraft(null);
+    setSbHexError('');
+    if (setScrollbarGradient) setScrollbarGradient(preset.id, preset.start, preset.end);
+  };
+  const handleScrollbarColorPicker = (which, raw) => {
+    // input[type="color"] همیشه مقدارِ معتبرِ #rrggbb می‌دهد؛
+    // ویرایشِ رنگ، پریست را 'custom' می‌کند.
+    const normalized = normalizeScrollbarHex(raw);
+    if (!normalized) return;
+    if (which === 'start') setSbStartHexDraft(null);
+    else setSbEndHexDraft(null);
+    setSbHexError('');
+    if (setScrollbarGradient) {
+      if (which === 'start') setScrollbarGradient('custom', normalized, sbEndValue);
+      else setScrollbarGradient('custom', sbStartValue, normalized);
+    }
+  };
+  const handleScrollbarHexChange = (which, raw) => {
+    if (which === 'start') setSbStartHexDraft(raw);
+    else setSbEndHexDraft(raw);
+    const normalized = normalizeScrollbarHex(raw);
+    if (normalized) {
+      setSbHexError('');
+      if (which === 'start') setSbStartHexDraft(null);
+      else setSbEndHexDraft(null);
+      if (setScrollbarGradient) {
+        if (which === 'start') setScrollbarGradient('custom', normalized, sbEndValue);
+        else setScrollbarGradient('custom', sbStartValue, normalized);
+      }
+    } else if (raw.trim().length >= 7) {
+      setSbHexError('کد HEX معتبر نیست؛ باید به شکل #RRGGBB با 6 رقم باشد.');
+    } else {
+      setSbHexError('');
+    }
+    // مقدارِ نامعتبر: فقط پیش‌نویسِ محلی نگه داشته می‌شود تا کاربر
+    // تایپش را کامل کند؛ استور و مقدارِ جاری دست نمی‌خورند.
+  };
+  const handleScrollbarHexBlur = (which) => {
+    const draft = which === 'start' ? sbStartHexDraft : sbEndHexDraft;
+    if (draft != null && !normalizeScrollbarHex(draft)) {
+      if (which === 'start') setSbStartHexDraft(null);
+      else setSbEndHexDraft(null);
+      setSbHexError('کد HEX معتبر نیست؛ مقدار قبلی برگردانده شد.');
     }
   };
 
@@ -522,6 +599,114 @@ export default function SettingsView() {
               <span style={styles.palettePage} />
             </span>
             <span style={styles.prefSub}>پیش‌نمایش: برگهٔ سفید روی رنگ انتخاب‌شدهٔ فعلی</span>
+          </div>
+        </div>
+
+        {/* مرحلهٔ ۵۲ §۳: رنگ و گرادیانِ اسکرول‌بارِ صفحات — در تبِ
+            «تنظیمات ریدر و ظاهر» است، چون اسکرول‌بار مثلِ رنگِ
+            پس‌زمینهٔ اطرافِ صفحه، ظاهرِ محیطِ مطالعه است. */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>رنگ و گرادیان اسکرول‌بار صفحات</h3>
+          <p style={styles.cardDesc}>
+            رنگِ شستیِ اسکرول‌بار در همهٔ صفحاتِ برنامه را عوض کن؛ یک گرادیانِ آماده انتخاب کن یا گرادیانِ خودت را بساز. تغییر، در لحظه در همهٔ اسکرول‌بارها اعمال و ذخیره می‌شود.
+          </p>
+
+          <div style={styles.sbPresetGrid}>
+            {SCROLLBAR_PRESETS.map((preset) => {
+              const isActive = scrollbarPresetId === preset.id;
+              return (
+                <div
+                  key={preset.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleScrollbarPresetSelect(preset)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleScrollbarPresetSelect(preset); } }}
+                  style={{ ...styles.sbPresetCard, ...(isActive ? styles.sbPresetCardActive : {}) }}
+                  aria-label={preset.name}
+                >
+                  <span style={styles.sbTrack}>
+                    <span style={{ ...styles.sbThumb, background: sbGradient(preset.start, preset.end) }} />
+                  </span>
+                  <span style={styles.sbPresetName}>{preset.name}</span>
+                  <span style={styles.monoValue} dir="ltr">{preset.start}</span>
+                  <span style={styles.monoValue} dir="ltr">{preset.end}</span>
+                  {isActive && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'block', flexShrink: 0 }}>
+                        <circle cx="12" cy="12" r="9" />
+                        <polyline points="20 6 9 17 4 12" strokeWidth="2.5" />
+                      </svg>
+                      <span style={{ fontSize: 11, color: '#67e8f9' }}>فعال</span>
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={styles.sbCustomBox}>
+            <div>
+              <div style={styles.prefTitle}>ساخت گرادیان سفارشیِ من</div>
+              <div style={styles.prefSub}>
+                دو رنگ را انتخاب کن؛ پیش‌نمایشِ بزرگ، همان شستیِ واقعی را نشان می‌دهد. با ساختنِ گرادیانِ سفارشی، پریستِ فعال «سفارشی» می‌شود.
+              </div>
+            </div>
+
+            <div style={styles.sbColorRow}>
+              <span style={styles.prefTitle}>رنگ بالای اسکرول‌بار</span>
+              <input
+                type="color"
+                value={sbStartValue}
+                onChange={(e) => handleScrollbarColorPicker('start', e.target.value)}
+                style={styles.colorInput}
+                aria-label="انتخاب رنگ بالای اسکرول‌بار"
+              />
+              <input
+                type="text"
+                value={sbStartHexDraft ?? scrollbarColorStart}
+                onChange={(e) => handleScrollbarHexChange('start', e.target.value)}
+                onBlur={() => handleScrollbarHexBlur('start')}
+                style={styles.hexInput}
+                dir="ltr"
+                placeholder="#22d3ee"
+                aria-label="کد HEX رنگ بالای اسکرول‌بار"
+              />
+            </div>
+
+            <div style={styles.sbColorRow}>
+              <span style={styles.prefTitle}>رنگ پایین اسکرول‌بار</span>
+              <input
+                type="color"
+                value={sbEndValue}
+                onChange={(e) => handleScrollbarColorPicker('end', e.target.value)}
+                style={styles.colorInput}
+                aria-label="انتخاب رنگ پایین اسکرول‌بار"
+              />
+              <input
+                type="text"
+                value={sbEndHexDraft ?? scrollbarColorEnd}
+                onChange={(e) => handleScrollbarHexChange('end', e.target.value)}
+                onBlur={() => handleScrollbarHexBlur('end')}
+                style={styles.hexInput}
+                dir="ltr"
+                placeholder="#a78bfa"
+                aria-label="کد HEX رنگ پایین اسکرول‌بار"
+              />
+            </div>
+
+            {sbHexError && (<span style={styles.hexError}>{sbHexError}</span>)}
+
+            <div style={styles.sbPreviewRow}>
+              <span style={styles.sbTrackLarge}>
+                <span style={{ ...styles.sbThumbLarge, background: sbGradient(sbStartValue, sbEndValue) }} />
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <span style={styles.prefSub}>پیش‌نمایشِ زنده: شستیِ اسکرول‌بار با گرادیانِ فعلی</span>
+                <span style={styles.monoValue} dir="ltr">{sbStartValue}</span>
+                <span style={styles.monoValue} dir="ltr">{sbEndValue}</span>
+                {scrollbarPresetId === 'custom' && (<span style={{ fontSize: 11, color: '#67e8f9' }}>گرادیانِ سفارشی فعال است</span>)}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1181,5 +1366,94 @@ const styles = {
     fontFamily: 'var(--font-fa)',
     fontSize: '11.5px',
     color: '#f87171',
+  },
+  // مرحلهٔ ۵۲ §۳: استایل‌های کارتِ گرادیانِ اسکرول‌بار (همان توکن‌های
+  // بقیهٔ کارت‌ها: panel/panel2/border/text/muted/accent). پیش‌نمایشِ
+  // کپسولی، شکلِ شستیِ واقعی را دارد: ریلِ تیرهٔ گرد با شستیِ
+  // گرادیانیِ باریک در وسط.
+  sbPresetGrid: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '14px',
+  },
+  sbPresetCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '6px',
+    flex: '1 1 120px',
+    maxWidth: '148px',
+    padding: '12px 10px',
+    borderRadius: '14px',
+    border: '1px solid var(--border)',
+    background: 'rgba(255,255,255,0.03)',
+    cursor: 'pointer',
+    boxSizing: 'border-box',
+  },
+  sbPresetCardActive: {
+    border: '2px solid #22d3ee',
+    background: 'rgba(34,211,238,0.08)',
+    boxShadow: '0 0 0 2px rgba(34,211,238,0.25)',
+  },
+  sbPresetName: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    color: 'var(--text)',
+    textAlign: 'center',
+  },
+  sbTrack: {
+    width: 28,
+    height: 72,
+    borderRadius: 999,
+    background: 'rgba(10, 14, 20, 0.55)',
+    border: '1px solid var(--border)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  sbThumb: {
+    width: 12,
+    height: 48,
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  sbTrackLarge: {
+    width: 36,
+    height: 120,
+    borderRadius: 999,
+    background: 'rgba(10, 14, 20, 0.55)',
+    border: '1px solid var(--border)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  sbThumbLarge: {
+    width: 16,
+    height: 84,
+    borderRadius: 999,
+    flexShrink: 0,
+  },
+  sbCustomBox: {
+    padding: '14px 16px',
+    borderRadius: '12px',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+  },
+  sbColorRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    flexWrap: 'wrap',
+  },
+  sbPreviewRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '14px',
+    flexWrap: 'wrap',
   },
 };

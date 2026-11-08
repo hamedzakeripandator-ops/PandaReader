@@ -13,6 +13,11 @@ import { BOOKMARK_TEMPLATE_MAP, computeViewportCenterYRatio, resolveBookmarkImag
 
 const EMPTY_BOOKMARKS = Object.freeze([]);
 
+// مرحلهٔ ۴۴ §۵ (OPT-03): آرایهٔ خالیِ منجمدِ مشترک برایِ سلکتورهایِ
+// `|| []` (epubChapters و savedPresets) — مثلِ EMPTY_BOOKMARKS که
+// پیش‌تر برایِ بوک‌مارک‌ها آمد.
+const EMPTY_ARRAY = Object.freeze([]);
+
 // مرحلهٔ ۴۱ §۵: نشانگرِ دایره‌ایِ آکاردئون‌ها — یک فلشِ برداریِ
 // ChevronDown که با باز/بسته شدن می‌چرخد (بدونِ کاراکترِ متنی).
 // نکته: ماژولِ Icons (SvgBase) مقدارِ strokeWidth را سخت‌کد «2»
@@ -133,7 +138,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   const pdfOutline = useReaderStore((state) => state.pdfOutline);
   const pdfOutlineFile = useReaderStore((state) => state.pdfOutlineFile);
   const pdfOutlineStatus = useReaderStore((state) => state.pdfOutlineStatus);
-  const epubChapters = useReaderStore((state) => state.epubChapters || []);
+  const epubChapters = useReaderStore((state) => state.epubChapters || EMPTY_ARRAY);
   // مرحلهٔ ۴۲: زومِ زنده، حالتِ نمایشِ زنده و شمارِ کلِ صفحه‌ها از
   // استورِ ریدر — کارت‌هایِ CBZ/EPUB مقدارِ فعلی را نشان می‌دهند،
   // نه پیش‌فرضِ تنظیمات.
@@ -174,7 +179,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
   // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتالِ فایلِ جاری.
   const bookmarkList = useBookmarkStore((state) => state.bookmarksByFile?.[normalizeBookKey(filePath)] || EMPTY_BOOKMARKS);
   const bookmarkPreferences = useBookmarkStore((state) => state.preferences || {});
-  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || []);
+  const savedPresets = useBookmarkStore((state) => state.preferences?.savedPresets || EMPTY_ARRAY);
   const addBookmark = useBookmarkStore((state) => state.addBookmark);
   const setCurrentView = useAppStore((state) => state.setCurrentView);
   const loadBookmarksForFile = useBookmarkStore((state) => state.loadBookmarksForFile);
@@ -714,6 +719,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
 
       {/* کانتینر اسکرول‌پذیر سراسری پنل راست */}
       <div style={styles.scrollableBody}>
+        <div style={styles.scrollableBodyInner}>
         {/* ===================================================================
             ۱. کارت بالا: کاور (با قابلیت تغییر کاور) + عنوان + اکشن‌های کتابخانه و پین
         =================================================================== */}
@@ -787,6 +793,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               <span>{isInLibrary ? 'در کتابخانه' : 'افزودن به کتابخانه'}</span>
             </button>
 
+            {/* مرحله ۴۸ §۴: دکمهٔ پین، آیکونِ Pin (نه Bookmark) — مثلِ
+                ComicCard؛ وقتی پین است، توپر با رنگِ جاری (فیروزه‌ای). */}
             <button
               type="button"
               onClick={handleTogglePinClick}
@@ -796,9 +804,9 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 borderColor: isPinnedInLib ? 'var(--accent)' : 'var(--border)',
                 color: isPinnedInLib ? 'var(--accent)' : 'var(--muted)',
               }}
-              title={isPinnedInLib ? 'برداشتن پین از صدر کتابخانه' : 'پین کردن در صدر کتابخانه'}
+              title={isPinnedInLib ? 'حذف از پین‌شده‌ها' : 'پین کردن کتاب'}
             >
-              <Icons.Bookmark size={16} filled={isPinnedInLib} />
+              <Icons.Pin size={16} filled={isPinnedInLib} fillColor={isPinnedInLib ? 'currentColor' : 'none'} />
             </button>
 
             <button
@@ -850,6 +858,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
             </div>
             {isBookmarksSectionOpen && (
             <div style={styles.bookmarkSectionBody}>
+              <div style={{ direction: 'rtl' }}>
             {sortedBookmarks.length === 0 ? (
               <div style={styles.emptyNotice}>هنوز بوک‌مارکی برای این کتاب نساخته‌اید.</div>
             ) : (
@@ -1003,6 +1012,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               )}
               </div>
             </div>
+              </div>
             </div>
             )}
           </div>
@@ -1039,6 +1049,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
               <span style={styles.pageCountTag}>{flatOutline.length} سرفصل</span>
             </div>
             <div style={styles.outlineScrollList}>
+              <div style={styles.outlineScrollListInner}>
               {flatOutline.map((entry, idx) => {
                 const jumpPage = firstJumpablePage(entry);
                 const isActive = entry === activeOutlineEntry;
@@ -1083,6 +1094,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   </div>
                 );
               })}
+              </div>
             </div>
           </div>
         )}
@@ -1124,7 +1136,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 <Icons.ChevronLeft size={14} />
               </button>
             </div>
-            <div ref={epubChapterListRef} style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 320, overflowY: 'auto' }}>
+            <div ref={epubChapterListRef} style={{ maxHeight: 320, overflowY: 'auto', direction: 'ltr' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, direction: 'rtl' }}>
               {epubChapters.map((ch, idx) => {
                 const isActive = idx === activeEpubChapterIndex;
                 return (
@@ -1149,6 +1162,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                   </button>
                 );
               })}
+              </div>
             </div>
           </div>
         )}
@@ -1177,6 +1191,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
 
                   {showChapterMenu && (
                     <div style={styles.chapterDropdown}>
+                      <div style={styles.chapterDropdownInner}>
                       {chapterGroups.map((group, gIdx) => {
                         const isCurrentChap = group.title === activeChapterTitle;
                         return (
@@ -1206,6 +1221,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                           </div>
                         );
                       })}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1218,6 +1234,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
           </div>
 
           <div style={styles.pageScrollList} ref={scrollContainerRef}>
+            <div style={styles.pageScrollListInner}>
             {isRightSidebarOpen && processedPages.length > 0 ? (
               processedPages.map((p) => (
                 <PageListRow
@@ -1239,6 +1256,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 {isPdfMode ? 'در حال بارگذاری فهرست صفحات PDF...' : 'فایلی باز نشده است'}
               </div>
             )}
+            </div>
           </div>
         </div>
 
@@ -1378,7 +1396,8 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                 </span>
               </button>
               {!folderListCollapsed && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              <div style={{ maxHeight: 220, overflowY: 'auto', direction: 'ltr' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, direction: 'rtl' }}>
                 {comicData.folderFiles.map((f) => {
                   const isImageKind = f.kind === 'image';
                   const isCurrent = isImageKind ? f.pageIndex === currentPage : normalizeBookKey(f.path || '') === normalizeBookKey(comicData?.filePath || '');
@@ -1404,6 +1423,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
                     </button>
                   );
                 })}
+                </div>
               </div>
               )}
             </div>
@@ -1594,6 +1614,7 @@ export default function RightPanel({ onLoadComic, onOpenFolder, onMouseEnter, on
             </div>
           </div>
         )}
+        </div>
       </div>
     </aside>
   );
@@ -1638,7 +1659,18 @@ const styles = {
     height: '100%',
     overflowY: 'auto',
     overflowX: 'hidden',
+    direction: 'ltr',
     paddingLeft: '2px',
+  },
+  // مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — فرزندِ درونیِ راست‌به‌چپِ بدنهٔ
+  // اسکرول‌خورِ پنلِ راست؛ پوستهٔ بیرونی چپ‌به‌راست است تا نوارِ
+  // اسکرول در لبهٔ راست بماند.
+  scrollableBodyInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    width: '100%',
+    direction: 'rtl',
   },
   topCard: {
     display: 'flex',
@@ -1813,11 +1845,17 @@ const styles = {
     maxHeight: '300px',
     overflowY: 'auto',
     overflowX: 'hidden',
+    direction: 'ltr',
+    marginTop: '8px',
+    paddingLeft: '2px',
+  },
+  // مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — فرزندِ درونیِ راست‌به‌چپِ فهرستِ
+  // سرفصل‌هایِ PDF.
+  outlineScrollListInner: {
     display: 'flex',
     flexDirection: 'column',
     gap: '2px',
-    marginTop: '8px',
-    paddingLeft: '2px',
+    direction: 'rtl',
   },
   outlineRow: {
     display: 'flex',
@@ -1899,10 +1937,16 @@ const styles = {
     width: '195px',
     maxHeight: '220px',
     overflowY: 'auto',
+    direction: 'ltr',
     boxShadow: '0 10px 28px rgba(0,0,0,0.85)',
+  },
+  // مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — فرزندِ درونیِ راست‌به‌چپِ منویِ
+  // کشوییِ فصل‌ها.
+  chapterDropdownInner: {
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
+    direction: 'rtl',
   },
   chapterDropdownItem: {
     display: 'flex',
@@ -1943,9 +1987,15 @@ const styles = {
   pageScrollList: {
     flex: 1,
     overflowY: 'auto',
+    direction: 'ltr',
+  },
+  // مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — فرزندِ درونیِ راست‌به‌چپِ فهرستِ
+  // صفحه‌ها (refیِ اسکرولِ به صفحهٔ فعال رویِ پوستهٔ بیرونی می‌ماند).
+  pageScrollListInner: {
     display: 'flex',
     flexDirection: 'column',
     gap: '4px',
+    direction: 'rtl',
   },
   chapterStickyDivider: {
     display: 'flex',
@@ -2352,6 +2402,7 @@ const styles = {
   bookmarkSectionBody: {
     maxHeight: '38vh',
     overflowY: 'auto',
+    direction: 'ltr',
   },
   bookmarkPanel: {
     border: '1px solid var(--border)',

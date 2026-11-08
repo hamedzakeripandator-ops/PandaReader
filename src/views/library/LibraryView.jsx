@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import useLibraryStore from '../../store/useLibraryStore';
+import useLibraryStore, { resolveHeroSliderItems } from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import ComicCard from './ComicCard';
 import KineticHeroSlider from './KineticHeroSlider';
@@ -27,27 +27,69 @@ const FOLDER_COLORS = [
 // ارتفاعِ ردیف را عوض نکند و پرشِ اسکرول صفر شود (اسکلتِ ثابت، چون
 // بخشِ توضیحاتِ کارت همیشه ۳۷ پیکسل عنوان + ردیفِ برچسب است، هرگز
 // دقیق درنمی‌آمد).
+// مرحله ۴۸ ـ اصلاحِ تلهٔ اسکلت: دیده‌شدن فقط یک‌طرفه است (latch).
+// پیش از این، هر اعلانِ IntersectionObserver — حتی یک false گذرا
+// هنگامِ جابه‌جاییِ گره‌های DOM در مرتب‌سازیِ دوباره پس از پین/آنپین —
+// بی‌قیدوشرط isVisible را عوض می‌کرد و کارتِ از قبل رندرشده را پشتِ
+// اسکلت پنهان می‌کرد (عنوان، بجِ فرمت، شمارهٔ صفحه و دکمه‌های پین/علاقه
+// و برچسبِ پوشه همه با هم ناپدید می‌شدند). حالا false نادیده گرفته
+// می‌شود و کارتی که یک‌بار دیده شده، در seenCardPaths می‌ماند: مانتِ
+// دوبارهٔ همان مسیر، بی‌درنگ و بدونِ حتی یک فریم اسکلت، کارت را
+// برمی‌گرداند. اسکلت فقط برای کارتی می‌ماند که واقعاً هرگز دیده نشده
+// و بیرون از دید است؛ تنبلیِ بارگذاری (lazy) برای کارت‌هایِ ندیده
+// دقیقاً مثلِ قبل حفظ می‌شود.
+const seenCardPaths = new Set();
+const SEEN_CARD_PATHS_MAX = 2000;
+
+function normalizeSeenPath(filePath) {
+  if (!filePath || typeof filePath !== 'string') return '';
+  return filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+}
+
+function markCardPathSeen(key) {
+  if (!key) return;
+  if (seenCardPaths.has(key)) return;
+  seenCardPaths.add(key);
+  while (seenCardPaths.size > SEEN_CARD_PATHS_MAX) {
+    const oldest = seenCardPaths.keys().next().value;
+    if (oldest === undefined) break;
+    seenCardPaths.delete(oldest);
+  }
+}
+
 function LazyLibraryCard({ item, onOpenComic, onRemove }) {
   const slotRef = useRef(null);
   const measuredHeightRef = useRef(0);
-  const [isVisible, setIsVisible] = useState(false);
+  const pathKey = normalizeSeenPath(item?.path || item?.filePath);
+  // مرحله ۴۸: کارتِ یک‌بار دیده‌شده از همان رندرِ اول مرئی است؛
+  // کارتِ هرگز ندیده با اسکلت شروع می‌کند تا تنبلی حفظ شود.
+  const [isVisible, setIsVisible] = useState(
+    () => !pathKey || seenCardPaths.has(pathKey)
+  );
 
   useEffect(() => {
     const el = slotRef.current;
     if (!el || typeof IntersectionObserver === 'undefined') {
+      if (pathKey) markCardPathSeen(pathKey);
       setIsVisible(true);
       return;
     }
     const observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry) setIsVisible(entry.isIntersecting);
+        // مرحله ۴۸: فقط true پذیرفته می‌شود. false گذرا (مثلاً هنگامِ
+        // جابه‌جاییِ گره در مرتب‌سازیِ دوباره پس از پین) هرگز کارتِ
+        // دیده‌شده را پشتِ اسکلت نمی‌برد.
+        if (entry && entry.isIntersecting) {
+          if (pathKey) markCardPathSeen(pathKey);
+          setIsVisible(true);
+        }
       },
       { root: null, rootMargin: '400px 0px', threshold: 0 }
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [pathKey]);
 
   // مرحله ۴ ـ بخش ب: قفلِ ارتفاعِ اسکلت. تا وقتی کارت مرئی است،
   // ارتفاعِ واقعیِ slot خوانده و در ref نگه داشته می‌شود (ResizeObserver
@@ -75,6 +117,9 @@ function LazyLibraryCard({ item, onOpenComic, onRemove }) {
 
   const lockedHeight = measuredHeightRef.current;
 
+  // مرحله ۴۸: با latch بالا، این شاخهٔ اسکلت فقط برای کارتی می‌رسد که
+  // واقعاً هرگز دیده نشده و بیرون از دید است؛ کارتِ دیده‌شده هرگز
+  // دوباره اسکلت نمی‌شود.
   return (
     <div ref={slotRef}>
       {isVisible ? (
@@ -114,6 +159,10 @@ export default function LibraryView({ onOpenComic }) {
 
   const recentItems = useLibraryStore((state) => state.recentItems);
   const favorites = useLibraryStore((state) => state.favorites);
+  // مرحلهٔ ۵۰ §۵ — منبعِ اسلایدرِ هیرو.
+  const heroSliderSource = useLibraryStore((state) => state.heroSliderSource || 'auto');
+  const heroSliderFolderId = useLibraryStore((state) => state.heroSliderFolderId || null);
+  const customSliderBookPaths = useLibraryStore((state) => state.customSliderBookPaths || []);
   const addToLibrary = useLibraryStore((state) => state.addToLibrary);
   const removeFromLibrary = useLibraryStore((state) => state.removeFromLibrary);
 
@@ -132,23 +181,25 @@ export default function LibraryView({ onOpenComic }) {
   const [folderModal, setFolderModal] = useState(null); // { mode: 'create'|'edit', id, name, color }
   const [dragOverFolderId, setDragOverFolderId] = useState(null);
 
-  // ۱. آیتم‌های اسلایدر Kinetic (اولویت با آیتم‌های پین‌شده و اخیراً خوانده‌شده)
-  const sliderItems = useMemo(() => {
-    const pinnedList = effectiveLibrary.filter((i) => Boolean(i.isPinned));
-    const recentList = Array.isArray(recentItems) ? recentItems : [];
-    const combinedMap = new Map();
-
-    [...pinnedList, ...recentList, ...effectiveLibrary].forEach((item) => {
-      const rawP = item?.path || item?.filePath;
-      if (!rawP) return;
-      const norm = rawP.trim().replace(/[\\/]+/g, '\\').toLowerCase();
-      if (!combinedMap.has(norm)) {
-        combinedMap.set(norm, item);
-      }
-    });
-
-    return Array.from(combinedMap.values()).slice(0, 7);
-  }, [effectiveLibrary, recentItems]);
+  // ۱. آیتم‌های اسلایدر Kinetic — مرحلهٔ ۵۰ §۵: بر اساسِ منبعِ
+  // انتخاب‌شده حل می‌شود (resolveHeroSliderItems در استور؛ همان
+  // منطقی که تست‌ها می‌خوانند). حالتِ auto دقیقاً رفتارِ قبلی است
+  // (پین‌شده‌ها، بعد اخیر، بعد کتابخانه — سقفِ ۷ در اسلایدر).
+  // حالت‌هایِ پوشه و دستی هیچ سقفی ندارند: لیست دقیقاً به‌اندازهٔ
+  // کتاب‌هایِ واقعیِ منبع است. مسیرِ کتابِ حذف‌شده کنار می‌رود و
+  // هرگز اسلایدِ خالی نمی‌سازد.
+  const sliderItems = useMemo(
+    () =>
+      resolveHeroSliderItems({
+        source: heroSliderSource,
+        folderId: heroSliderFolderId,
+        customPaths: customSliderBookPaths,
+        library: effectiveLibrary,
+        recentItems,
+        favorites,
+      }),
+    [effectiveLibrary, recentItems, favorites, heroSliderSource, heroSliderFolderId, customSliderBookPaths]
+  );
 
   // ۲. محاسبه تعداد آیتم‌های هر پوشه
   const folderCounts = useMemo(() => {
@@ -204,6 +255,10 @@ export default function LibraryView({ onOpenComic }) {
       }))
       .filter(({ item, score }) => {
         if (q && score <= 0) return false;
+        // مرحله ۴۷ §۲: کارتِ بدونِ مسیرِ یکتا نه قابلِ باز شدن است و
+        // نه قابلِ پین؛ رندرِ آن فقط کلیدِ تکراری و کارتِ اشتباه
+        // می‌سازد، پس از گرید کنار گذاشته می‌شود.
+        if (!item.path && !item.filePath) return false;
         const path = (item.path || item.filePath || '').toLowerCase();
 
       // فیلتر بر اساس پوشه انتخاب‌شده
@@ -344,8 +399,15 @@ export default function LibraryView({ onOpenComic }) {
       {/* =====================================================================
           ۱. اسلایدر Kinetic Typography + Split Navigation
       ===================================================================== */}
-      {sliderItems.length > 0 && (
-        <KineticHeroSlider items={sliderItems} onOpenComic={onOpenComic} />
+      {/* مرحلهٔ ۵۰ §۵: در حالت‌هایِ دستی/پوشه، اسلایدر حتی وقتی
+          خالی است رندر می‌شود تا بنرِ راهنما و منویِ منبع دیده شوند؛
+          capSlides فقط در حالتِ خودکار، سقفِ ۷تاییِ قبلی را نگه می‌دارد. */}
+      {(sliderItems.length > 0 || heroSliderSource !== 'auto') && (
+        <KineticHeroSlider
+          items={sliderItems}
+          onOpenComic={onOpenComic}
+          capSlides={heroSliderSource === 'auto'}
+        />
       )}
 
       {/* =====================================================================
@@ -682,7 +744,7 @@ export default function LibraryView({ onOpenComic }) {
           <div style={styles.cardsGrid}>
             {displayedLibrary.map((item) => (
               <LazyLibraryCard
-                key={item.path || item.filePath || item.name}
+                key={item.path || item.filePath}
                 item={item}
                 onOpenComic={onOpenComic}
                 onRemove={handleRemoveFromLib}

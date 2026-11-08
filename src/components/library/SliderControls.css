@@ -1,15 +1,19 @@
 /* ============================================================================
-   src/components/library/SliderControls.css — مرحلهٔ ۳۵ §۶
+   src/components/library/SliderControls.css — مرحلهٔ ۵۱ §۱
    ردیفِ افقیِ وسط‌چینِ کنترلِ موجِ صوتی: [دکمه قبلی] [نوار canvas]
    [دکمه بعدی] با فاصلهٔ 14px و جهتِ ltr؛ فلش‌ها فقط SVG با استایلِ
    شیشه‌ایِ .eq-nav؛ مقیاسِ 0.72 در عرضِ زیرِ 480px.
+   مرحلهٔ ۵۱ §۱ — هم‌ترازیِ عمودی: ردیف 64px است و بوم و دکمه‌ها
+   رویِ خطِ وسطِ y = 32 هم‌تراز می‌شوند؛ دکمه‌ها margin صفر و
+   align-self وسط دارند تا موج بالاتر یا پایین‌تر از دکمه‌ها ننشیند.
    ============================================================================ */
 
 .eq-controls {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 14px;
+  height: 64px;
   direction: ltr;
 }
 
@@ -25,6 +29,8 @@
   align-items: center;
   justify-content: center;
   padding: 0;
+  margin: 0;
+  align-self: center;
   outline: none;
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
@@ -46,6 +52,7 @@
 .eq-canvas-wrap {
   display: flex;
   align-items: center;
+  align-self: center;
   transform-origin: center;
 }
 

@@ -453,6 +453,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   rotation,
   pageAnnotations,
   onCommitPageAnnotations,
+  onTransferItemsToPage,
   onPageRatioMeasured,
   onContextMenu,
   onHiDpiSettled,
@@ -1056,6 +1057,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
             pageNumber={pageNumber}
             items={pageAnnotations}
             onCommitPageItems={onCommitPageAnnotations}
+            onTransferItemsToPage={onTransferItemsToPage}
             rotation={rotation}
             isNearViewport={distanceFromActive <= 1}
             zoomLevel={renderZoomLevel || 1}
@@ -1193,7 +1195,7 @@ export default function PdfViewer({ filePath }) {
   // اسکرولِ دقیق، آنی (auto) است تا با اسکرولِ نرمِ پرشِ صفحه،
   // حرکتِ دوتایی و لرزش نسازد.
   useEffect(() => {
-    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== filePath) return;
+    if (!bookmarkJumpTarget || bookmarkJumpTarget.filePath !== filePath) { clearBookmarkJumpTarget(); return; }
     pendingBookmarkJumpRef.current = bookmarkJumpTarget;
     jumpToPage(bookmarkJumpTarget.page);
     clearBookmarkJumpTarget();
@@ -1630,24 +1632,81 @@ export default function PdfViewer({ filePath }) {
     [filePath]
   );
 
+  // مرحلهٔ ۵۰ §۲ (ب): انتقالِ بین‌صفحه‌ایِ حاشیه‌نویسی — آیتم‌هایی که
+  // با درگ روی صفحهٔ دیگری فرود آمدند، در یک تراکنشِ واحد از مبدأ
+  // حذف و به مقصد اضافه می‌شوند و دقیقاً یک ورودیِ Undo ثبت می‌شود
+  // (با پرچمِ transfer تا Undo/Redo هر دو صفحه را با هم برگردانند).
+  const handleTransferItemsToPage = useCallback(
+    (sourcePage, targetPage, movedItems, remainingSourceItems) => {
+      const src = Number(sourcePage);
+      const tgt = Number(targetPage);
+      if (!Number.isFinite(src) || !Number.isFinite(tgt) || src === tgt) return;
+      if (!Array.isArray(movedItems) || movedItems.length === 0) return;
+      const srcKey = String(src);
+      const tgtKey = String(tgt);
+      const prevSourceItems = annotationsByPageRef.current[srcKey] || [];
+      const prevTargetItems = annotationsByPageRef.current[tgtKey] || [];
+      const nextSourceItems = Array.isArray(remainingSourceItems) ? remainingSourceItems : prevSourceItems;
+      const nextTargetItems = [...prevTargetItems, ...movedItems];
+      setUndoStack((u) => [
+        ...u.slice(-29),
+        {
+          pageNum: src,
+          prevItems: prevSourceItems,
+          nextItems: nextSourceItems,
+          transfer: {
+            targetPage: tgt,
+            targetPrevItems: prevTargetItems,
+            targetNextItems: nextTargetItems,
+          },
+        },
+      ]);
+      setRedoStack([]);
+      setAnnotationsByPage((prev) => ({
+        ...prev,
+        [srcKey]: nextSourceItems,
+        [tgtKey]: nextTargetItems,
+      }));
+      if (filePath && coreApi.isAvailable()) {
+        coreApi.savePageAnnotations(filePath, src, nextSourceItems).catch(() => {});
+        coreApi.savePageAnnotations(filePath, tgt, nextTargetItems).catch(() => {});
+      }
+      annotationLocalBackup.writePageBackup(filePath, src, nextSourceItems);
+      annotationLocalBackup.writePageBackup(filePath, tgt, nextTargetItems);
+    },
+    [filePath]
+  );
+
   const handleUndoAnnotation = useCallback(() => {
     setUndoStack((prevUndo) => {
       if (prevUndo.length === 0) return prevUndo;
       const lastAction = prevUndo[prevUndo.length - 1];
       const pageKey = String(lastAction.pageNum);
 
-      setAnnotationsByPage((prevMap) => ({
-        ...prevMap,
-        [pageKey]: lastAction.prevItems,
-      }));
+      // مرحلهٔ ۵۰ §۲ (ب): Undoی انتقال، هر دو صفحه را با هم برمی‌گرداند.
+      setAnnotationsByPage((prevMap) => {
+        const nextMap = { ...prevMap, [pageKey]: lastAction.prevItems };
+        if (lastAction.transfer) {
+          nextMap[String(lastAction.transfer.targetPage)] = lastAction.transfer.targetPrevItems;
+        }
+        return nextMap;
+      });
       setRedoStack((r) => [...r, lastAction]);
 
       if (filePath && coreApi.isAvailable()) {
         coreApi
           .savePageAnnotations(filePath, lastAction.pageNum, lastAction.prevItems)
           .catch(() => {});
+        if (lastAction.transfer) {
+          coreApi
+            .savePageAnnotations(filePath, lastAction.transfer.targetPage, lastAction.transfer.targetPrevItems)
+            .catch(() => {});
+        }
       }
       annotationLocalBackup.writePageBackup(filePath, lastAction.pageNum, lastAction.prevItems);
+      if (lastAction.transfer) {
+        annotationLocalBackup.writePageBackup(filePath, lastAction.transfer.targetPage, lastAction.transfer.targetPrevItems);
+      }
       return prevUndo.slice(0, -1);
     });
   }, [filePath]);
@@ -1658,18 +1717,30 @@ export default function PdfViewer({ filePath }) {
       const nextAction = prevRedo[prevRedo.length - 1];
       const pageKey = String(nextAction.pageNum);
 
-      setAnnotationsByPage((prevMap) => ({
-        ...prevMap,
-        [pageKey]: nextAction.nextItems,
-      }));
+      // مرحلهٔ ۵۰ §۲ (ب): Redoی انتقال، هر دو صفحه را با هم جلو می‌برد.
+      setAnnotationsByPage((prevMap) => {
+        const nextMap = { ...prevMap, [pageKey]: nextAction.nextItems };
+        if (nextAction.transfer) {
+          nextMap[String(nextAction.transfer.targetPage)] = nextAction.transfer.targetNextItems;
+        }
+        return nextMap;
+      });
       setUndoStack((u) => [...u, nextAction]);
 
       if (filePath && coreApi.isAvailable()) {
         coreApi
           .savePageAnnotations(filePath, nextAction.pageNum, nextAction.nextItems)
           .catch(() => {});
+        if (nextAction.transfer) {
+          coreApi
+            .savePageAnnotations(filePath, nextAction.transfer.targetPage, nextAction.transfer.targetNextItems)
+            .catch(() => {});
+        }
       }
       annotationLocalBackup.writePageBackup(filePath, nextAction.pageNum, nextAction.nextItems);
+      if (nextAction.transfer) {
+        annotationLocalBackup.writePageBackup(filePath, nextAction.transfer.targetPage, nextAction.transfer.targetNextItems);
+      }
       return prevRedo.slice(0, -1);
     });
   }, [filePath]);
@@ -3927,6 +3998,7 @@ export default function PdfViewer({ filePath }) {
                   searchHighlights={searchHighlightsByPage.get(pageNum) || null}
                   pageFilter={pageFilter}
                   onCommitPageAnnotations={handleCommitPageAnnotations}
+                  onTransferItemsToPage={handleTransferItemsToPage}
                   onPageRatioMeasured={handlePageRatioMeasured}
                   onContextMenu={handlePageContextMenu}
                   pageBookmarks={pageBookmarkMap[pageNum] || EMPTY_PAGE_BOOKMARKS}
@@ -4083,6 +4155,11 @@ const styles = {
     flexDirection: 'column',
     alignItems: 'center',
     boxSizing: 'border-box',
+    // مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — فرزندِ درونیِ کانتینرِ اسکرول
+    // راست‌به‌چپ است تا چیدمانِ فارسی سرِ جایش بماند؛ خودِ کانتینر
+    // (styles.scrollContainer) از پیش چپ‌به‌راست است و منطقِ
+    // scrollLeft دست نمی‌خورد.
+    direction: 'rtl',
   },
   pageWrapper: {
     width: '100%',
@@ -4102,6 +4179,9 @@ const styles = {
     // مرحله ۱۶: contain: paint، بیرون‌زدگیِ مارکر را می‌بُرید؛ با
     // layout style، مارکرِ بیرونِ کادر دیده می‌شود.
     contain: 'layout style',
+    // مرحلهٔ ۵۰ §۲: overflow صریحِ visible تا بومِ حاشیه‌دارِ (Bleed)
+    // لایهٔ حاشیه‌نویسی بیرونِ کاغذ دیده شود.
+    overflow: 'visible',
     boxSizing: 'border-box',
   },
   pageImage: {

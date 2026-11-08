@@ -444,6 +444,13 @@ export const DEFAULT_PREFERENCES = {
   epubDefaultZoom: 100,
   epubDefaultViewMode: 'vertical',
   readerBackdropColor: '#2b3038',
+  // مرحلهٔ ۵۲ §۳: گرادیانِ اسکرول‌بارِ صفحات (پیش‌فرض، همان گرادیانِ
+  // فیروزه‌ای به بنفشِ مرحلهٔ ۴۵). در preferences ماندگار می‌شود
+  // (localStorage + دیتابیس با SAVE_SETTING، مثلِ بقیهٔ کلیدها)
+  // و رویِ فیلدهایِ هم‌نامِ سطحِ استور هم آینه می‌شود.
+  scrollbarPresetId: 'neon-cyan-purple',
+  scrollbarColorStart: '#22d3ee',
+  scrollbarColorEnd: '#a78bfa',
 };
 
 export const DEFAULT_PROFILE = {
@@ -494,6 +501,23 @@ const sanitizeFormatViewMode = (value, fallback) =>
   value === 'vertical' || value === 'horizontal-paged' ? value : fallback;
 const sanitizeBackdropColor = (value, fallback) =>
   typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+// مرحلهٔ ۵۲ §۳: کاتالوگِ گرادیان‌هایِ آمادهٔ اسکرول‌بار — تنها مرجعِ
+// پریست‌ها؛ SettingsView هم همین لیست را import می‌کند تا شناسه‌ها
+// و رنگ‌ها در استور و رابط، دقیقاً یکی باشند.
+export const SCROLLBAR_PRESETS = [
+  { id: 'neon-cyan-purple', name: 'نئون سایبرپانک (پیش‌فرض)', start: '#22d3ee', end: '#a78bfa' },
+  { id: 'emerald-ocean', name: 'زمرد اقیانوسی', start: '#34d399', end: '#0284c7' },
+  { id: 'golden-coral-sunset', name: 'غروب طلایی و مرجانی', start: '#fbbf24', end: '#f43f5e' },
+  { id: 'aurora-pink-violet', name: 'شفق قطبی (صورتی به بنفش)', start: '#f472b6', end: '#7c3aed' },
+  { id: 'silver-navy-classic', name: 'نقره‌ای و سرمه‌ای کلاسیک', start: '#94a3b8', end: '#334155' },
+];
+// مرحلهٔ ۵۲ §۳: اعتبارسنجیِ پریست و رنگ‌هایِ گرادیان؛ مقدارِ نامعتبر،
+// به مقدارِ جاری (fallback) برمی‌گردد و هرگز استور را خراب نمی‌کند.
+// رنگ‌ها به حروفِ کوچک نرمال می‌شوند تا مقایسهٔ برابری، پایدار بماند.
+const sanitizeScrollbarPresetId = (value, fallback) =>
+  SCROLLBAR_PRESETS.some((p) => p.id === value) || value === 'custom' ? value : fallback;
+const sanitizeScrollbarColor = (value, fallback) =>
+  typeof value === 'string' && /^#[0-9a-fA-F]{6}$/.test(value) ? value.toLowerCase() : fallback;
 // آینهٔ سطحِ استور از preferences (منبعِ ماندگار): هر جا preferences
 // عوض شود، این پنج فیلد هم همان‌جا همگام می‌شوند.
 const syncFormatPrefs = (prefs) => ({
@@ -502,6 +526,13 @@ const syncFormatPrefs = (prefs) => ({
   epubDefaultZoom: clampFormatZoom(prefs?.epubDefaultZoom, 50, 250, 100),
   epubDefaultViewMode: sanitizeFormatViewMode(prefs?.epubDefaultViewMode, 'vertical'),
   readerBackdropColor: sanitizeBackdropColor(prefs?.readerBackdropColor, '#2b3038'),
+  // مرحلهٔ ۵۲ §۳: آینهٔ سطحِ استورِ گرادیانِ اسکرول‌بار؛ چون این تابع
+  // در همهٔ مسیرهایِ مقداردهی (initSettings ،updatePreferences
+  // ،previewPreferences ،resetPreferences ،importSettingsJson)
+  // صدا زده می‌شود، آینه همیشه با preferences همگام می‌ماند.
+  scrollbarPresetId: sanitizeScrollbarPresetId(prefs?.scrollbarPresetId, 'neon-cyan-purple'),
+  scrollbarColorStart: sanitizeScrollbarColor(prefs?.scrollbarColorStart, '#22d3ee'),
+  scrollbarColorEnd: sanitizeScrollbarColor(prefs?.scrollbarColorEnd, '#a78bfa'),
 });
 
 const loadSavedState = () => {
@@ -961,6 +992,32 @@ const useSettingsStore = create((set, get) => ({
     const v = sanitizeBackdropColor(color, get().readerBackdropColor ?? '#2b3038');
     if (get().readerBackdropColor === v) return;
     get().updatePreferences({ readerBackdropColor: v });
+  },
+
+  // مرحلهٔ ۵۲ §۳: گرادیانِ اسکرول‌بارِ صفحات. انتخابِ یک پریست، هر
+  // سه مقدار (presetId و دو رنگ) را با هم می‌گذارد؛ ویرایشِ رنگِ
+  // سفارشی، presetId را 'custom' می‌کند (فراخواننده همین مقدار را
+  // می‌فرستد). از همان مسیرِ updatePreferences می‌گذرد، پس هم در
+  // localStorage و هم با SAVE_SETTING برایِ هر کلید در kv_store
+  // ماندگار می‌شود. مقدارِ نامعتبر، بی‌صدا نادیده گرفته می‌شود
+  // (مقدارِ جاری می‌ماند) و تغییرِ تکراری، هیچ ذخیره‌ای نمی‌کند.
+  setScrollbarGradient: (presetId, startColor, endColor) => {
+    const current = get();
+    const vPreset = sanitizeScrollbarPresetId(presetId, current.scrollbarPresetId ?? 'neon-cyan-purple');
+    const vStart = sanitizeScrollbarColor(startColor, current.scrollbarColorStart ?? '#22d3ee');
+    const vEnd = sanitizeScrollbarColor(endColor, current.scrollbarColorEnd ?? '#a78bfa');
+    if (
+      current.scrollbarPresetId === vPreset &&
+      current.scrollbarColorStart === vStart &&
+      current.scrollbarColorEnd === vEnd
+    ) {
+      return;
+    }
+    get().updatePreferences({
+      scrollbarPresetId: vPreset,
+      scrollbarColorStart: vStart,
+      scrollbarColorEnd: vEnd,
+    });
   },
 
   updatePreferences: (partialPrefs) => {

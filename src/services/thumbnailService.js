@@ -754,4 +754,16 @@ export const thumbnailService = {
   },
 };
 
+// مرحله ۴۸ — peekCachedCover نامِ مستعارِ همگامِ peekCover است، نه
+// یک خواندنِ تازه: peekCover از پیش همگام بود (خواندنِ Map کشِ رم،
+// بعد getCover همگامِ استور) و همان قرارداد را دارد — ورودیِ رشتهٔ
+// مسیر، خروجیِ نشانیِ کاور یا null، بدونِ وعده و بدونِ انتظار.
+// برای همین تکثیر نشد و فقط نامِ مستعار اضافه شد تا ComicCard با
+// نامِ روشن‌تری صدا بزند.
+thumbnailService.peekCachedCover = (filePath) => thumbnailService.peekCover(filePath);
+
+export function peekCachedCover(filePath) {
+  return thumbnailService.peekCover(filePath);
+}
+
 export default thumbnailService;

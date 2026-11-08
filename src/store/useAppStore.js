@@ -104,10 +104,11 @@ const useAppStore = create((set, get) => ({
 
   // =========================================================================
   // استیت‌های استودیو ویرایش و حاشیه‌نویسی (فقط با دکمه TopBar فعال می‌شود)
-  // ابزارها: 'select' | 'box' | 'highlighter' | 'pen' | 'arrow' | 'text' | 'sticky' | 'eraser'
+  // ابزارها: 'select' | 'hand' | 'box' | 'highlighter' | 'pen' | 'arrow' | 'text' | 'sticky' | 'eraser'
   // =========================================================================
   isAnnotationActive: false,
   annotationTool: 'box',
+  selectSubMode: 'box', // مرحله 44 §3: زیرحالتِ انتخاب — 'box' | 'lasso'
   // پولیش: جهتِ تولبار ('horizontal' | 'vertical') با خواندنِ اولیه از
   // localStorage؛ guard دارد تا در محیطِ بدونِ storage هم کار کند.
   toolbarOrientation: (() => {
@@ -308,6 +309,10 @@ const useAppStore = create((set, get) => ({
         ? { selectedAnnotationId: null, selectedAnnotationIds: [], selectedAnnotationPage: null, selectedAnnotationTool: null }
         : {}),
     })),
+
+  // مرحله 44 §3: زیرحالتِ انتخاب — فقط 'box' یا 'lasso' پذیرفته می‌شود.
+  setSelectSubMode: (mode) =>
+    set({ selectSubMode: mode === 'lasso' ? 'lasso' : 'box' }),
 
   // پولیش: تغییرِ جهتِ تولبار با اعتبارسنجی + پایداری در localStorage
   // (نوشتن با try/catch تا اگر storage در دسترس نبود، state همچنان عوض

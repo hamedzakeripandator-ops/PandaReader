@@ -236,6 +236,76 @@ export const coreApi = {
     }
   },
 
+  // مرحلهٔ ۴۴ §۴: خروجیِ CBZِ حاشیه‌نویسی‌شده (ذخیرهٔ مستقیم در آرشیو).
+  // عمداً بدونِ withTimeout است (مثلِ exportAnnotatedPdf): دیالوگِ
+  // ذخیره در main باز می‌شود و زمانِ انتخابِ کاربر، نباید تایم‌اوتِ
+  // کاذب بسازد. قراردادِ payload با preload و ipcHandlers یکی است:
+  // { cbzPath, mode, pages, annotationsByPage } که pages همان
+  // { [pageNumber]: { entryName, imageDataUrl, width, height } } است.
+  exportAnnotatedCbz: async (payload) => {
+    const api = getApi();
+    if (!api?.exportAnnotatedCbz) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!payload?.cbzPath || payload?.pages == null || typeof payload.pages !== 'object') {
+      return { success: false, error: 'دادهٔ خروجیِ CBZ کامل نیست.' };
+    }
+    try {
+      return await api.exportAnnotatedCbz(payload);
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ساختِ CBZِ حاشیه‌نویسی‌شده' };
+    }
+  },
+
+  // مرحلهٔ ۴۴ §۴: خروجیِ EPUBِ حاشیه‌نویسی‌شده (اورلیِ پخته + مانیفست).
+  // قراردادِ payload با preload و ipcHandlers یکی است:
+  // { epubPath, mode, chapters, annotationsByPage, highlights, bookmarks }
+  // که chapters همان [{ chapterId, chapterIndex, href, overlayPng, highlightPng }] است.
+  exportAnnotatedEpub: async (payload) => {
+    const api = getApi();
+    if (!api?.exportAnnotatedEpub) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!payload?.epubPath || !Array.isArray(payload?.chapters)) {
+      return { success: false, error: 'دادهٔ خروجیِ EPUB کامل نیست.' };
+    }
+    try {
+      return await api.exportAnnotatedEpub(payload);
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ساختِ EPUBِ حاشیه‌نویسی‌شده' };
+    }
+  },
+
+
+  // مرحلهٔ ۴۶ §۲: خروجیِ HTMLِ مستقلِ گزارشِ آماربندی (گزارشِ آمادهٔ نمایش).
+  // عمداً بدونِ withTimeout است (مثلِ exportAnnotatedPdf): دیالوگِ
+  // ذخیره در main باز می‌شود و زمانِ انتخابِ کاربر، نباید تایم‌اوتِ کاذب بسازد.
+  // قراردادِ payload با preload و ipcHandlers یکی است: { html, defaultFileName }؛
+  // ورودیِ ProfileView همان exportStatsHtml(html, fileName) است.
+  exportStatsHtml: async (html, fileName) => {
+    const api = getApi();
+    if (!api?.exportStatsHtml) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!html || typeof html !== 'string' || !fileName || typeof fileName !== 'string') {
+      return { success: false, error: 'دادهٔ خروجیِ HTML کامل نیست.' };
+    }
+    try {
+      return await api.exportStatsHtml({ html, defaultFileName: fileName });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در ذخیرهٔ گزارشِ HTML' };
+    }
+  },
+  // مرحلهٔ ۴۴ §۴: خواندنِ مانیفستِ جاسازی‌شدهٔ CBZ برایِ بارگذاریِ
+  // خودکار (فقط وقتی دیتابیسِ محلی خالی است؛ تصمیم در ویوور گرفته
+  // می‌شود). تایم‌اوتِ ۳۰ ثانیه‌ای چون خواندنِ کاملِ آرشیو لازم است.
+  getEmbeddedCbzAnnotations: async (filePath) => {
+    const api = getApi();
+    if (!api?.getEmbeddedCbzAnnotations) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    if (!filePath || typeof filePath !== 'string') {
+      return { success: false, error: 'مسیرِ فایل مشخص نشده است.' };
+    }
+    try {
+      return await withTimeout(api.getEmbeddedCbzAnnotations(filePath), 30000, { success: false, error: 'مهلت زمانی خواندنِ CBZ به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در خواندنِ CBZ' };
+    }
+  },
+
   // مرحله ۸ ـ بخش الف: بررسیِ محافظتِ PDF هنگامِ ورود به استودیو.
   // مرحله ۸ ـ اصلاحِ نهایی: تایم‌اوت، ۱۰ ثانیه به ۶۰ ثانیه رسید؛
   // پروب حالا در ورکرِ جدا اجرا می‌شود و پروسهٔ اصلی قفل نیست،
@@ -380,6 +450,18 @@ export const coreApi = {
       return await withTimeout(api.pruneMissingFiles(), 90000, { success: false, error: 'مهلت زمانی هرسِ فایل‌ها به پایان رسید.' });
     } catch (err) {
       return { success: false, error: err?.message || 'خطا در هرسِ فایل‌های حذف‌شده' };
+    }
+  },
+
+  // مرحلهٔ ۵۲ §۱: همگام‌سازیِ دسته‌ایِ فایل‌هایِ حذف‌شده؛ مسیرِ
+  // ترجیحیِ استور (با همان مهلتِ ۹۰ ثانیه‌ایِ هرس).
+  syncMissingFiles: async (payload) => {
+    const api = getApi();
+    if (!api?.syncMissingFiles) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.syncMissingFiles(payload || {}), 90000, { success: false, error: 'مهلت زمانی همگام‌سازیِ فایل‌های حذف‌شده به پایان رسید.' });
+    } catch (err) {
+      return { success: false, error: err?.message || 'خطا در همگام‌سازیِ فایل‌های حذف‌شده' };
     }
   },
 

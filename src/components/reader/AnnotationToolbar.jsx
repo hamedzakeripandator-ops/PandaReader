@@ -14,7 +14,8 @@
 // مستندسازی است؛ کدِ این فایل در این گام، دست نخورده است (چون
 // از قبل هم هیچ ارجاعی به لایه نداشت).
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { Hand as HandLucide } from 'lucide-react';
 import useAppStore from '../../store/useAppStore';
 import useSettingsStore from '../../store/useSettingsStore';
 import Icons from '../common/Icons';
@@ -27,6 +28,8 @@ const TOOLS = [
   // ورودی، تلهٔ activeId را هم رفع می‌کند (قبلاً 'select' در TOOLS
   // نبود و activeId به 'pen' برمی‌گشت).
   { id: 'select', label: 'انتخاب (V)', shortcut: 'V', Icon: Icons.MousePointer },
+  // مرحله 44 §3: ابزارِ دست — آیکونِ Hand در Icons.jsx نیست، پس مستقیم از lucide-react می‌آید.
+  { id: 'hand', label: 'ابزار دست (حرکت در صفحه)', Icon: HandLucide },
   { id: 'pen', label: 'قلم (P)', shortcut: 'P', Icon: Icons.PenTool },
   { id: 'box', label: 'کادربندی (B)', shortcut: 'B', Icon: Icons.Square },
   // فاز ۳: ابزار فلش — فیلد Icon با قرارداد موجود تولبار یکدست است
@@ -240,6 +243,9 @@ export function AnnotationToolbar({
   const isAnnotationActive = useAppStore((s) => Boolean(s.isAnnotationActive));
   const annotationTool = useAppStore((s) => s.annotationTool || 'pen');
   const setAnnotationTool = useAppStore((s) => s.setAnnotationTool);
+  // مرحله 44 §3: زیرحالتِ انتخاب + تغییرِ آن (برای چیپ‌های کنارِ دکمهٔ select).
+  const selectSubMode = useAppStore((s) => s.selectSubMode || 'box');
+  const setSelectSubMode = useAppStore((s) => s.setSelectSubMode);
   const annotationColor = useAppStore((s) => s.annotationColor || '#22d3ee');
   const setAnnotationColor = useAppStore((s) => s.setAnnotationColor);
   // مرحلهٔ ۳۹ §۳: سیستمِ رنگِ سفارشیِ استور.
@@ -346,6 +352,22 @@ export function AnnotationToolbar({
   // ثابتِ دراور (با اندازه‌گیریِ دکمه در لحظهٔ باز شدن)، پالتِ شخصی،
   // و refهای دکمه/پنل/ورودیِ رنگ برای بستن با کلیکِ بیرونی.
   const [colorDrawerOpen, setColorDrawerOpen] = useState(false);
+  // مرحله ۴۸ §۵: پاپ‌اورِ زیرحالتِ انتخاب — وضعیتِ باز بودن، موقعیتِ
+  // ثابت (با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن، دقیقاً مثلِ
+  // دراورِ پالت)، و refهای دکمه/پنل برای بستن با کلیکِ بیرونی.
+  // چیپ‌های متنیِ پهنِ کنارِ دکمهٔ select (مرحله ۴۴) حذف شدند و دو
+  // گزینه (کادری/کمند) با آیکونِ SVG به این پاپ‌اور رفتند.
+  const [selectPopoverOpen, setSelectPopoverOpen] = useState(false);
+  const [selectPopoverPos, setSelectPopoverPos] = useState(null);
+  const selectBtnRef = useRef(null);
+  const selectPopoverRef = useRef(null);
+  const selectPopoverOpenRef = useRef(false);
+  // تابعِ ساده (هوک نیست) تا در افکت‌ها و هندلرها بدونِ وابستگی
+  // به closureی تازه صدا زده شود؛ ref، آینهٔ همگامِ وضعیت است.
+  const closeSelectPopover = () => {
+    selectPopoverOpenRef.current = false;
+    setSelectPopoverOpen(false);
+  };
   // مرحلهٔ ۳۹ §۳: تمپلیتِ فعال در نوارِ سریع + ساختِ تمپلیتِ تازه +
   // پیش‌نویسِ کدِ هگزِ انتخابگرِ پیشرفته.
   const [activeTemplateId, setActiveTemplateId] = useState(null);
@@ -363,7 +385,7 @@ export function AnnotationToolbar({
   // نگهبانِ گیر نکردنِ حالتِ عبورند (اگر پایانِ ژست از لایه نرسید).
   const [isGesturePassThrough, setIsGesturePassThrough] = useState(false);
   useEffect(() => {
-    const onGestureStart = () => { setColorDrawerOpen(false); setIsGesturePassThrough(true); };
+    const onGestureStart = () => { setColorDrawerOpen(false); closeSelectPopover(); setIsGesturePassThrough(true); };
     const onGestureEnd = () => setIsGesturePassThrough(false);
     window.addEventListener('annotation-gesture-start', onGestureStart);
     window.addEventListener('annotation-gesture-end', onGestureEnd);
@@ -444,6 +466,48 @@ export function AnnotationToolbar({
       window.removeEventListener('resize', close);
     };
   }, [colorDrawerOpen]);
+  // مرحلهٔ ۵۱ §۴: اگر ابزار با هر مسیری (کلیک، کلیدِ میانبر، یا
+  // فراخوانندهٔ دیگرِ setAnnotationTool) به دست یا پاک‌کن عوض شد،
+  // دراورِ رنگ بسته می‌شود؛ این دو ابزار هرگز دراور ندارند. setState
+  // با همان مقدارِ فعلی، ری‌رندر نمی‌سازد، پس گاردِ برابری لازم نیست.
+  useEffect(() => {
+    if (annotationTool === 'hand' || annotationTool === 'eraser') setColorDrawerOpen(false);
+  }, [annotationTool]);
+  // مرحله ۴۸ §۵: بستنِ پاپ‌اورِ انتخاب با کلیکِ بیرونی — دقیقاً مثلِ
+  // دراورِ پالت: هر mousedownی که نه روی دکمهٔ select باشد و نه روی
+  // خودِ پاپ‌اور، آن را می‌بندد (کلیک روی دکمه، خودش toggle می‌کند).
+  useEffect(() => {
+    if (!selectPopoverOpen) return undefined;
+    const onDown = (e) => {
+      const target = e && e.target;
+      if (!target) return;
+      if (selectBtnRef.current && selectBtnRef.current.contains(target)) return;
+      if (selectPopoverRef.current && selectPopoverRef.current.contains(target)) return;
+      closeSelectPopover();
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [selectPopoverOpen]);
+  // مرحله ۴۸ §۵: بستنِ پاپ‌اور با اسکرول/تغییرِ اندازه (مختصاتِ ثابت
+  // کهنه می‌شود) و با Escape — دقیقاً مثلِ دراورِ پالت.
+  useEffect(() => {
+    if (!selectPopoverOpen) return undefined;
+    const close = () => closeSelectPopover();
+    const onKey = (e) => { if (e.key === 'Escape') closeSelectPopover(); };
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [selectPopoverOpen]);
+  // مرحله ۴۸ §۵: بستنِ پاپ‌اور با عوض شدنِ ابزارِ فعال — پاپ‌اور فقط
+  // برای ابزارِ select معنا دارد.
+  useEffect(() => {
+    if (annotationTool !== 'select') closeSelectPopover();
+  }, [annotationTool]);
 
   // معماریِ قطعی — هوک‌های جدید، همه این‌جا و قبل از returnِ
   // زودهنگام: هاورِ Done و هگزِ کاربر (§۵)، عرضِ پنجره برای
@@ -943,6 +1007,14 @@ export function AnnotationToolbar({
   // که عمداً می‌ماند (مخصوصِ text/sticky است).
   const activeOrSelectedTool = selectedAnnotationTool || annotationTool;
   const hideStrokeControls = ['text', 'sticky', 'box', 'image'].includes(activeOrSelectedTool);
+  // مرحلهٔ ۵۱ §۴: دست و پاک‌کن، رنگ/ضخامت/شفافیت ندارند — دست فقط
+  // صفحه را جابه‌جا می‌کند و پاک‌کن با شعاعِ ثابتِ ۱۴ و خطِ قرمزِ
+  // ثابت رندر می‌شود و هیچ‌یک از annotationColor/annotationOpacity/
+  // annotationStrokeWidth را نمی‌خواند (به لایه مراجعه کنید)؛ پس
+  // بلوکِ رنگ، دکمه‌های ضخامت و اسلایدرِ شفافیت برای این دو ابزار
+  // پنهان می‌شوند. چون شرط، فقط روی annotationTool است، برگشت به
+  // هر ابزارِ ترسیمی، همهٔ کنترل‌ها را دقیقاً مثلِ قبل برمی‌گرداند.
+  const hideColorControls = annotationTool === 'hand' || annotationTool === 'eraser';
   const DRAWING_TOOL_IDS = ['select', 'pen', 'box', 'arrow', 'highlighter', 'eraser'];
 
   // پولیشِ قطعی: قفلِ ابزارها کاملاً حذف شده است — هیچ دکمهٔ ابزاری
@@ -1077,14 +1149,46 @@ export function AnnotationToolbar({
     window.addEventListener('pointercancel', onUp, true);
   };
 
+  // مرحله 44 §3: استایلِ چیپِ زیرحالتِ انتخاب (باکسی فیروزه‌ای، کمند بنفش).
+  const selectChipStyle = (isActive, accent) => ({
+    border: 'none',
+    cursor: 'pointer',
+    padding: '6px 8px',
+    borderRadius: 9,
+    fontSize: 11,
+    whiteSpace: 'nowrap',
+    background: isActive ? accent.bg : 'transparent',
+    color: isActive ? accent.fg : 'rgba(255,255,255,0.6)',
+    outline: isActive ? `1.5px solid ${accent.line}` : '1px solid rgba(255,255,255,0.14)',
+    outlineOffset: -1,
+  });
+
+  // مرحله ۴۸ §۵: آیکون‌های SVG دو گزینهٔ پاپ‌اورِ انتخاب — دکمه‌های
+  // متنیِ مرحله ۴۴ هیچ آیکونی نداشتند (فقط متن بودند)، پس هر دو
+  // آیکون این‌جا با SVG کشیده شدند: کادرِ خط‌چین برای انتخابِ باکسی،
+  // حلقهٔ کمند با دنباله برای انتخابِ آزاد.
+  const SelectBoxIcon = ({ size = 18 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2" strokeDasharray="4.5 3.5" />
+    </svg>
+  );
+  const SelectLassoIcon = ({ size = 18 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="10" cy="10" r="6" />
+      <path d="M14.4 14.4 20 20" />
+    </svg>
+  );
+
   const toolsButtons = (
     <>
       {/* ابزارها */}
       {displayTools.map(({ id, label, Icon, danger }) => {
         const active = activeId === id;
         return (
+          <Fragment key={id}>
           <button
             key={id}
+            ref={id === 'select' ? selectBtnRef : null}
             data-tool-btn="1"
             data-tool-id={id}
             aria-label={label}
@@ -1100,7 +1204,7 @@ export function AnnotationToolbar({
               hideToolGlow();
               hideTooltip();
             }}
-            onClick={() => {
+            onClick={(e) => {
               // Stage 8 Part A (Axis 4): a click that ends a tool drag
               // must not select the tool underneath the pointer.
               if (Date.now() < suppressToolClickUntilRef.current) return;
@@ -1120,6 +1224,19 @@ export function AnnotationToolbar({
               if (id !== activeId || panelClosed) setPanelClosed(false);
               hideTooltip();
               setAnnotationTool(id);
+              // مرحلهٔ ۵۱ §۴: کلیک روی دست یا پاک‌کن، دراورِ رنگ را
+              // فوری می‌بندد (اگر از ابزارِ قبلی باز مانده باشد)؛ این
+              // دو ابزار، رنگ/ضخامت/شفافیت ندارند و دراور هرگز برای
+              // آن‌ها باز نمی‌شود (به گاردِ toggleColorDrawer و افکتِ
+              // بستن با تغییرِ ابزار هم مراجعه کنید).
+              if (id === 'hand' || id === 'eraser') setColorDrawerOpen(false);
+              // مرحله ۴۸ §۵: پاپ‌اورِ زیرحالتِ انتخاب — کلیک روی ابزارِ
+              // select (تازه‌فعال‌شده یا از قبل فعال)، پاپ‌اور را باز
+              // می‌کند؛ کلیکِ دوباره روی selectِ فعال، آن را می‌بندد.
+              if (id === 'select') {
+                if (selectPopoverOpenRef.current) closeSelectPopover();
+                else openSelectPopover(e.currentTarget);
+              }
             }}
             onDoubleClick={() => {
               // بستن/باز کردن با دوبار کلیک، فقط برای ابزاری که
@@ -1194,6 +1311,10 @@ export function AnnotationToolbar({
               <Icon size={18} />
             </span>
           </button>
+          {/* مرحله ۴۸ §۵: چیپ‌های متنیِ پهنِ زیرحالتِ انتخاب از این‌جا
+              حذف شدند — دو گزینه با آیکونِ SVG به پاپ‌اورِ شناورِ
+              select رفتند (به selectPopover در پایینِ فایل مراجعه کنید). */}
+          </Fragment>
         );
       })}
     </>
@@ -1221,7 +1342,51 @@ export function AnnotationToolbar({
     setAnnotationColor(hex);
     broadcastSelectedPropertyPatch({ color: hex });
   };
+  // مرحله ۴۸ §۵: باز کردنِ پاپ‌اورِ زیرحالتِ انتخاب — موقعیتِ ثابت،
+  // با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن (دقیقاً مثلِ
+  // toggleColorDrawer): عمودی → کنارِ دکمه با قانونِ آینه‌ایِ §۱؛
+  // افقی → پایینِ دکمه با چرخشِ هوشمند به بالا اگر جا نباشد.
+  const openSelectPopover = (btnEl) => {
+    const rect = btnEl
+      ? btnEl.getBoundingClientRect()
+      : (selectBtnRef.current ? selectBtnRef.current.getBoundingClientRect() : null);
+    const POP_W = 248;
+    const POP_H = 132;
+    if (!rect) {
+      setSelectPopoverPos(isVertical
+        ? { top: '50%', left: 10, transform: 'translate(0, -50%)', above: false }
+        : { top: 80, left: '50%', transform: 'translateX(-50%)', above: false });
+    } else if (isVertical) {
+      const cy = rect.top + rect.height / 2;
+      const fitsLeft = rect.left - 10 >= POP_W;
+      const fitsRight = viewportW - rect.right - 10 >= POP_W;
+      const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
+      if (openRight) {
+        setSelectPopoverPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - POP_W)), transform: 'translate(0, -50%)', above: false });
+      } else {
+        setSelectPopoverPos({ top: cy, left: Math.max(rect.left - 10, POP_W), transform: 'translate(-100%, -50%)', above: false });
+      }
+    } else {
+      const cx = Math.max(POP_W / 2 + 8, Math.min(rect.left + rect.width / 2, window.innerWidth - POP_W / 2 - 8));
+      const spaceBelow = viewportH - rect.bottom;
+      const spaceAbove = rect.top;
+      if (spaceBelow < POP_H + 12 && spaceAbove > spaceBelow) {
+        setSelectPopoverPos({ top: rect.top - 10, left: cx, transform: 'translateX(-50%) translateY(-100%)', above: true });
+      } else {
+        setSelectPopoverPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)', above: false });
+      }
+    }
+    selectPopoverOpenRef.current = true;
+    setSelectPopoverOpen(true);
+  };
+
   const toggleColorDrawer = () => {
+    // مرحلهٔ ۵۱ §۴: برای دست و پاک‌کن، دراورِ رنگ هرگز باز نمی‌شود؛
+    // اگر به‌هر دلیل صدا زده شد، فقط می‌بندد.
+    if (annotationTool === 'hand' || annotationTool === 'eraser') {
+      setColorDrawerOpen(false);
+      return;
+    }
     if (colorDrawerOpen) {
       setColorDrawerOpen(false);
       return;
@@ -1513,7 +1678,8 @@ export function AnnotationToolbar({
 
       {divider}
 
-      {/* رنگ‌ها */}
+      {/* رنگ‌ها — مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است */}
+      {!hideColorControls && (
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
         {activeTemplate && (
           <button
@@ -1632,8 +1798,9 @@ export function AnnotationToolbar({
           </svg>
         </button>
       </div>
+      )}
 
-      {!hideStrokeControls && (
+      {!hideStrokeControls && !hideColorControls && (
         <>
       {divider}
 
@@ -1689,7 +1856,9 @@ export function AnnotationToolbar({
           broadcastSelectedPropertyPatch({ opacity }) برای اعمالِ زنده
           روی تمامِ آیتم‌های انتخاب‌شده (شنوندهٔ لایه، opacity را
           می‌پذیرد و بعد از مرحلهٔ ۳، به همهٔ انتخاب‌شده‌ها گسترش
-          می‌دهد). محدوده ۱۵٪ تا ۱۰۰٪ با گامِ ۵٪، مثلِ TASK. */}
+          می‌دهد). محدوده ۱۵٪ تا ۱۰۰٪ با گامِ ۵٪، مثلِ TASK.
+          مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن، کلِ بلوک پنهان است. */}
+      {!hideColorControls && (
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
         <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>
           شفافیت:
@@ -1726,6 +1895,7 @@ export function AnnotationToolbar({
           {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
         </span>
       </div>
+      )}
       {/* مرحلهٔ ۳۵ §۵: تطبیقِ خودکارِ اندازهٔ استیکی‌نوت با زوم +
           تنظیمِ دستیِ مقیاسِ استیکی. تاگل، مقیاسِ رندرِ معکوسِ زوم
           را فعال می‌کند؛ دکمه‌های − و +، مقیاسِ دستیِ استیکیِ
@@ -2071,17 +2241,21 @@ export function AnnotationToolbar({
   );
   // مرحله ۵ ـ بخش الف — دکمهٔ «خروجی PDF با حاشیه‌نویسی‌ها» دقیقاً
   // قبل از Done (منطقهٔ اقدام‌های پایانی): فقط وقتی onExportAnnotatedPdf
-  // داده شده (یعنی در PdfViewer؛ در VerticalViewer که کمیکِ تصویری است،
-  // این prop نمی‌آید و دکمه اصلاً رندر نمی‌شود). هنگامِ پردازش، غیرفعال
-  // و کم‌رنگ است تا کلیکِ تکراری، خروجیِ تکراری نسازد. توجه: برخلافِ
+  // داده شده است — در PdfViewer و (از مرحله 44 §4) در EpubViewer و
+  // VerticalViewer؛ دکمه، نوعِ فایل را نمی‌سنجد و فقط بودنِ prop را
+  // چک می‌کند؛ منطقِ ذخیره در خودِ ویوور است، نه در تولبار. هنگامِ
+  // پردازش، غیرفعال و کم‌رنگ است تا کلیکِ تکراری، خروجیِ تکراری نسازد. توجه: برخلافِ
+
   // Done که دو onMouseEnter دارد (دومی، اولی را خنثی می‌کند و تولتیپِ
   // آن هیچ‌وقت نشان داده نمی‌شود)، اینجا هر دو کار در یک هندلر انجام
   // می‌شود تا هم تولتیپ بیاید و هم هاور.
-  // مرحله ۵ ـ بخش ب — دو دکمهٔ ذخیرهٔ دوگانه، دقیقاً قبل از Done
+  // مرحله 5 ـ بخش ب — دو دکمهٔ ذخیرهٔ دوگانه، دقیقاً قبل از Done
   // (منطقهٔ اقدام‌های پایانی): فقط وقتی onExportAnnotatedPdf داده
-  // شده (یعنی در PdfViewer؛ در VerticalViewer که کمیکِ تصویری است،
-  // این prop نمی‌آید و هیچ‌کدام رندر نمی‌شوند). هنگامِ پردازش، هر
-  // دو غیرفعال و کم‌رنگ‌اند تا کلیکِ تکراری، خروجیِ تکراری نسازد.
+  // شده است — در PdfViewer و (از مرحله 44 §4) در EpubViewer و
+  // VerticalViewer؛ هر دو دکمه، نوعِ فایل را نمی‌سنجند و فقط بودنِ
+  // prop را چک می‌کنند. هنگامِ پردازش، هر دو غیرفعال و کم‌رنگ‌اند
+  // تا کلیکِ تکراری، خروجیِ تکراری نسازد.
+
   //  • «ذخیره روی همین فایل» (کهربایی، آیکونِ Save): بدونِ دیالوگ،
   //    روی خودِ فایلِ بازشده می‌نشیند؛ پایهٔ خامِ `.orig.bak`
   //    جلوی پختِ دوباره را می‌گیرد.
@@ -2641,6 +2815,95 @@ export function AnnotationToolbar({
     </div>
   );
 
+  // مرحله ۴۸ §۵: پاپ‌اورِ شناورِ زیرحالتِ انتخاب — همان شیشه و
+  // انیمیشنِ submenuInی زیرمنوهای باکس/فلش و همان مکانیکِ موقعیتِ
+  // ثابتِ دراورِ پالت (position: fixed + اندازه‌گیریِ دکمه). دو
+  // گزینه با آیکونِ SVG و نشانِ فعال (پس‌زمینهٔ رنگی + outline +
+  // تیکِ SVG)؛ انتخابِ گزینه، پاپ‌اور را می‌بندد.
+  const selectSubModeOptions = [
+    { id: 'box', label: 'انتخاب کادری (مستطیلی)', accent: { bg: 'rgba(34,211,238,0.22)', fg: '#67e8f9', line: '#22d3ee' }, Icon: SelectBoxIcon },
+    { id: 'lasso', label: 'انتخاب آزاد (کمند)', accent: { bg: 'rgba(167,139,250,0.22)', fg: '#c4b5fd', line: '#a78bfa' }, Icon: SelectLassoIcon },
+  ];
+  const selectPopover = selectPopoverOpen && selectPopoverPos && (
+    <div
+      dir="rtl"
+      style={{
+        position: 'fixed',
+        top: selectPopoverPos.top,
+        left: selectPopoverPos.left,
+        transform: selectPopoverPos.transform,
+        zIndex: 40,
+        // کانتینرِ بیرونی، فقط موقعیت نگه می‌دارد (مثلِ دراورِ پالت).
+        pointerEvents: 'none',
+      }}
+    >
+      <div
+        ref={selectPopoverRef}
+        role="menu"
+        aria-label="حالت انتخاب"
+        style={{
+          width: 248,
+          maxHeight: 'calc(100vh - 40px)',
+          pointerEvents: 'auto',
+          transformOrigin: selectPopoverPos.above ? '50% 100%' : '50% 0',
+          overflowY: 'auto',
+          scrollbarWidth: 'none',
+          padding: 8,
+          borderRadius: 14,
+          background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
+          border: '1px solid rgba(255,255,255,0.12)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
+          userSelect: 'none',
+          animation: 'submenuIn 0.2s ease',
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerMove={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6, padding: '2px 6px' }}>
+          حالت انتخاب
+        </div>
+        {selectSubModeOptions.map((opt) => {
+          const active = selectSubMode === opt.id;
+          const OptIcon = opt.Icon;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={active}
+              aria-label={opt.label}
+              title={opt.label}
+              onClick={() => { setSelectSubMode(opt.id); closeSelectPopover(); }}
+              style={{
+                ...btnBase,
+                ...selectChipStyle(active, opt.accent),
+                display: 'flex',
+                width: '100%',
+                alignItems: 'center',
+                gap: 8,
+                height: 38,
+                padding: '0 10px',
+                borderRadius: 10,
+                fontSize: 12,
+                fontFamily: 'inherit',
+                textAlign: 'right',
+              }}
+            >
+              <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+                <OptIcon size={18} />
+              </span>
+              <span style={{ flex: 1 }}>{opt.label}</span>
+              {active && <Icons.Check size={14} />}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <>
       {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
@@ -2806,6 +3069,7 @@ export function AnnotationToolbar({
         </div>
       )}
       {colorDrawer}
+      {selectPopover}
       {toolDrag && dragGhostTool && (
         <div
           style={{

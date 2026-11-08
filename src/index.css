@@ -118,14 +118,24 @@
   --radius-lg: 20px;
   --radius-md: 14px;
   --radius-sm: 10px;
+
+  /* مرحلهٔ ۵۲ §۳: رنگ‌هایِ گرادیانِ اسکرول‌بارِ صفحات؛ مقدارِ پیش‌فرض،
+     همان گرادیانِ فیروزه‌ای به بنفشِ مرحلهٔ ۴۵ است و App.jsx با
+     setProperty رویِ همین دو متغیر، گرادیان را زنده عوض می‌کند. */
+  --cr-sb-start: #22d3ee;
+  --cr-sb-end: #a78bfa;
 }
 
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+}
+
+/* رفتارِ اسکرولِ سراسری: فوری — پرش‌هایِ نرمِ عمدیِ جاوااسکریپت که
+   behavior صریح دارند، از این قانون اثر نمی‌گیرند و نرم می‌مانند. */
+html, body, * {
+  scroll-behavior: auto !important;
 }
 
 body {
@@ -209,23 +219,52 @@ textarea {
   transform: scale(0.96);
 }
 
-/* اسکرول‌بار یکپارچه و باریک */
+/* اسکرول‌بارِ کپسولیِ سراسری — مرحله ۴۵: شستیِ گرادیانیِ فیروزه‌ای به بنفش،
+   بدونِ transition رویِ شستی تا هنگامِ درگ، بازترسیم عقب نماند.
+   مرحلهٔ ۵۲ §۳: گرادیان، دیگر هاردکد نیست؛ هر سه حالت از متغیرهایِ
+   --cr-sb-start و --cr-sb-end می‌خوانند که App.jsx آن‌ها را از
+   تنظیمات می‌گذارد. */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(10, 15, 19, 0.5);
+  background: rgba(10, 14, 20, 0.55);
+  border-radius: 999px;
+  margin: 6px 2px;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
+  background: linear-gradient(180deg, var(--cr-sb-start, #22d3ee) 0%, var(--cr-sb-end, #a78bfa) 100%);
+  border-radius: 999px !important;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  min-height: 48px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--accent);
+  background: linear-gradient(180deg, var(--cr-sb-start, #22d3ee) 0%, var(--cr-sb-end, #a78bfa) 100%);
+  border: 1px solid transparent;
+  background-clip: content-box;
+  filter: brightness(1.18);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: linear-gradient(180deg, var(--cr-sb-start, #22d3ee) 0%, var(--cr-sb-end, #a78bfa) 100%);
+  border: 1px solid transparent;
+  background-clip: content-box;
+  filter: brightness(0.92);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* انیمیشن چرخش آیکون‌های لودینگ */

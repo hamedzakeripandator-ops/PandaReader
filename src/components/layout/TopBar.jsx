@@ -116,6 +116,15 @@ export default function TopBar({
 
   const effectiveReaderMode = Boolean(isReaderActive || (currentView === 'reader' && hasComic));
 
+  // مرحله ۴۹ §۱: گیتِ سختِ حالتِ مطالعه برایِ ابزارهایِ مخصوصِ ریدر.
+  // برخلافِ effectiveReaderMode که propِ isReaderActive را هم
+  // می‌پذیرد، این گیت فقط به currentView و hasComic تکیه می‌کند تا
+  // اگر prop روزی ناهماهنگ شد، ابزارهایِ ریدر بیرونِ حالتِ مطالعه
+  // ظاهر نشوند. در عمل، App مقدارِ isReaderActive را برابرِ همین
+  // شرط می‌فرستد، پس هر دو گیت یک نتیجه می‌دهند؛ ولی گیتِ ابزارها
+  // عمداً رویِ همین شرطِ محلی بسته شده است.
+  const isReadingMode = Boolean(currentView === 'reader' && hasComic);
+
   const searchShortcutLabel = shortcuts?.focusSearch?.label || 'Ctrl + F';
   const openFileShortcutLabel = shortcuts?.openFile?.label || 'Ctrl + O';
 
@@ -487,6 +496,12 @@ export default function TopBar({
         showToast('استودیو ویرایش بسته شد', { type: 'info' });
         return;
       }
+      // مرحله ۴۹ §۱: نگهبانِ حالتِ مطالعه — باز کردنِ استودیو فقط
+      // در ریدر؛ اگر مسیری غیر از دکمه (مثلاً شورت‌کاتی در آینده)
+      // این هندلر را بیرونِ ریدر صدا بزند، هیچ‌کاری نمی‌کند.
+      if (useAppStore.getState().currentView !== 'reader' || !useReaderStore.getState().comicData) {
+        return;
+      }
       const filePath = useReaderStore.getState().comicData?.filePath || '';
       const isPdf = typeof filePath === 'string' && /\.pdf$/i.test(filePath);
       // Non-PDF, or a previous memory-only choice for this file: the
@@ -757,10 +772,12 @@ export default function TopBar({
     return Array.from(combinedMap.values()).slice(0, 7);
   }, [searchQuery, isSearchFocused]);
 
+  // مرحله ۴۹ §۱: پرشِ صفحه فقط در حالتِ مطالعه پیشنهاد می‌شود؛
+  // بیرونِ ریدر، تایپِ عدد فقط جستجو در کتابخانه است.
   const pageJumpNumber = useMemo(() => {
-    if (!hasComic || totalPages < 1) return null;
+    if (!isReadingMode || totalPages < 1) return null;
     return parsePageJumpQuery(searchQuery, totalPages);
-  }, [searchQuery, hasComic, totalPages]);
+  }, [searchQuery, isReadingMode, totalPages]);
 
   const executePageJump = useCallback(
     (targetPageNum) => {
@@ -816,12 +833,12 @@ export default function TopBar({
   // getState خوانده می‌شود تا نوار، با هر کلید، دوباره رندر نشود
   // و گزینه، جزوِ ناوبریِ ArrowUp/Down نیست.
   const isCurrentPdf =
-    effectiveReaderMode &&
+    isReadingMode &&
     typeof currentFilePath === 'string' &&
     /\.pdf$/i.test(currentFilePath);
   // مرحلهٔ ۴۰ §۵: جستجویِ TopBar برایِ EPUB هم کار می‌کند.
   const isCurrentEpub =
-    effectiveReaderMode &&
+    isReadingMode &&
     typeof currentFilePath === 'string' &&
     /\.epub$/i.test(currentFilePath);
   const showSearchInCurrentFile = Boolean((isCurrentPdf || isCurrentEpub) && searchQuery.trim().length > 0);
@@ -988,7 +1005,7 @@ export default function TopBar({
           <div style={styles.logoIcon}>
             <Icons.BookOpen size={15} />
           </div>
-          <span style={styles.brandText}>ComicReader</span>
+          <span style={styles.brandText}>PandaReader</span>
         </div>
 
         {/* فضای خالی درگ پنجره (کاملاً جدا از کادر سرچ) */}
@@ -1047,7 +1064,7 @@ export default function TopBar({
               }}
               onKeyDown={handleKeyDown}
               placeholder={
-                hasComic && totalPages > 0
+                isReadingMode && totalPages > 0
                   ? `تایپ نام کمیک یا شماره صفحه (۱ تا ${totalPages}) + Enter...`
                   : 'جستجو در نام کمیک‌ها، کتابخانه و تاریخچه...'
               }
@@ -1176,7 +1193,7 @@ export default function TopBar({
             <span>فایل جدید</span>
           </button>
 
-          {hasComic && comicType !== 'epub' && (
+          {isReadingMode && comicType !== 'epub' && (
             <button
               type="button"
               onClick={handleToggleAreaZoom}
@@ -1195,7 +1212,7 @@ export default function TopBar({
             </button>
           )}
 
-          {hasComic && comicType !== 'pdf' && comicType !== 'epub' && (
+          {isReadingMode && comicType !== 'pdf' && comicType !== 'epub' && (
             <button
               type="button"
               onClick={() => setComicViewMode(isHorizontalPaged ? 'vertical' : 'horizontal-paged')}
@@ -1214,7 +1231,7 @@ export default function TopBar({
             </button>
           )}
 
-          {hasComic && (
+          {isReadingMode && (
             <button
               type="button"
               onClick={handleToggleAnnotationStudio}

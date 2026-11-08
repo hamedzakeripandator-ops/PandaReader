@@ -42,6 +42,25 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
   const [isDraggingSlider, setIsDraggingSlider] = useState(false);
   const [initialBriefShow, setInitialBriefShow] = useState(false);
 
+  // مرحله ۴۹ §۲: سرکوبِ موقتِ اتوهاید وسطِ ژستِ حاشیه‌نویسی.
+  // پرچمِ window.__isAnnotationGestureActive را کارگرِ A در
+  // AnnotationLayer.jsx می‌گذارد؛ اینجا فقط خوانده می‌شود و هرگز
+  // گذاشته نمی‌شود. تا وقتی ژست فعال است، داک باز نمی‌شود.
+  const [isGestureSuppressed, setIsGestureSuppressed] = useState(false);
+  const isGestureSuppressedRef = useRef(false);
+  const lastPointerPosRef = useRef({ x: -1, y: -1 });
+  const gestureSyncTimerRef = useRef(null);
+  const gesturePollTimerRef = useRef(null);
+  const prevGestureSuppressedRef = useRef(false);
+
+  const syncGestureFlag = useCallback(() => {
+    const active = typeof window !== 'undefined' && window.__isAnnotationGestureActive === true;
+    if (active !== isGestureSuppressedRef.current) {
+      isGestureSuppressedRef.current = active;
+      setIsGestureSuppressed(active);
+    }
+  }, []);
+
   const dockRef = useRef(null);
   const pulseTimerRef = useRef(null);
   const hideDelayTimerRef = useRef(null);
@@ -60,6 +79,10 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
   // ۲. سنسور مجاورت لبه پایین صفحه + مخفی شدن آنی با کلیک در وسط صفحه (فیلتر لرزش ماوس <= 6px)
   useEffect(() => {
     const handleWindowMouseMove = (e) => {
+      lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+      // مرحله ۴۹ §۲: وسطِ ژستِ حاشیه‌نویسی، سنسورِ لبهٔ پایین
+      // چیزی را باز نمی‌کند.
+      if (isGestureSuppressedRef.current) return;
       const distFromBottom = window.innerHeight - e.clientY;
       const centerDist = Math.abs(e.clientX - window.innerWidth / 2);
       const nearZone = distFromBottom <= 64 && centerDist <= 260;
@@ -127,10 +150,68 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
     };
   }, [isNearBottomEdge, isLocalHovered, isDraggingSlider]);
 
+  // مرحله ۴۹ §۲: همگام‌سازیِ پرچم با تأخیرِ صفر — هندلرِ کارگرِ A
+  // اول پرچم را می‌گذارد/پاک می‌کند، بعد این خوانش انجام می‌شود.
+  useEffect(() => {
+    const scheduleSync = () => {
+      if (gestureSyncTimerRef.current) clearTimeout(gestureSyncTimerRef.current);
+      gestureSyncTimerRef.current = setTimeout(syncGestureFlag, 0);
+    };
+    window.addEventListener('pointerdown', scheduleSync, { passive: true });
+    window.addEventListener('pointerup', scheduleSync, { passive: true });
+    window.addEventListener('pointercancel', scheduleSync, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', scheduleSync);
+      window.removeEventListener('pointerup', scheduleSync);
+      window.removeEventListener('pointercancel', scheduleSync);
+      if (gestureSyncTimerRef.current) {
+        clearTimeout(gestureSyncTimerRef.current);
+        gestureSyncTimerRef.current = null;
+      }
+    };
+  }, [syncGestureFlag]);
+
+  // مرحله ۴۹ §۲: تا وقتی سرکوب فعال است، هر ۱۵۰ میلی‌ثانیه پرچم
+  // دوباره خوانده می‌شود تا اگر رویدادِ pointerup از دست رفت،
+  // pointerEvents برایِ همیشه رویِ none نماند.
+  useEffect(() => {
+    if (!isGestureSuppressed) return undefined;
+    gesturePollTimerRef.current = setInterval(syncGestureFlag, 150);
+    return () => {
+      if (gesturePollTimerRef.current) {
+        clearInterval(gesturePollTimerRef.current);
+        gesturePollTimerRef.current = null;
+      }
+    };
+  }, [isGestureSuppressed, syncGestureFlag]);
+
+  // مرحله ۴۹ §۲: اگر پرچم وقتی پاک شد که نشانگر از قبل در ناحیهٔ
+  // لبهٔ پایین بود، داک باید بتواند دوباره باز شود؛ سنسورِ
+  // mousemove تا حرکتِ بعدیِ ماوس چیزی نمی‌گوید، پس ناحیه را با
+  // آخرین موقعیتِ ذخیره‌شده دوباره می‌سنجیم.
+  useEffect(() => {
+    const wasSuppressed = prevGestureSuppressedRef.current;
+    prevGestureSuppressedRef.current = isGestureSuppressed;
+    if (!wasSuppressed || isGestureSuppressed) return;
+    const pos = lastPointerPosRef.current;
+    if (pos.x < 0 || typeof window === 'undefined') return;
+    const distFromBottom = window.innerHeight - pos.y;
+    const centerDist = Math.abs(pos.x - window.innerWidth / 2);
+    if (distFromBottom <= 64 && centerDist <= 260) {
+      if (hideDelayTimerRef.current) {
+        clearTimeout(hideDelayTimerRef.current);
+        hideDelayTimerRef.current = null;
+      }
+      setIsNearBottomEdge(true);
+    }
+  }, [isGestureSuppressed]);
+
   useEffect(() => {
     return () => {
       if (pulseTimerRef.current) clearTimeout(pulseTimerRef.current);
       if (hideDelayTimerRef.current) clearTimeout(hideDelayTimerRef.current);
+      if (gesturePollTimerRef.current) clearInterval(gesturePollTimerRef.current);
+      if (gestureSyncTimerRef.current) clearTimeout(gestureSyncTimerRef.current);
     };
   }, []);
 
@@ -172,8 +253,12 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
     Math.max(0, ((zoomLevel - minZoom) / (maxZoom - minZoom)) * 100)
   );
 
+  // مرحله ۴۹ §۲: وسطِ ژستِ حاشیه‌نویسی، داک هرگز باز نمی‌شود؛ با
+  // false شدنِ effectiveShow، pointerEvents در استایلِ داک هم
+  // خودبه‌خود none می‌شود.
   const effectiveShow =
-    isLocalHovered || isNearBottomEdge || isDraggingSlider || initialBriefShow;
+    !isGestureSuppressed &&
+    (isLocalHovered || isNearBottomEdge || isDraggingSlider || initialBriefShow);
 
   const handleZoomChange = (e) => {
     const val = parseFloat(e.target.value);
@@ -214,6 +299,9 @@ export default function BottomControls({ onMouseEnter, onMouseLeave }) {
     <div
       ref={dockRef}
       onMouseEnter={(e) => {
+        // مرحله ۴۹ §۲: نگهبانِ دومِ داک — اگر هاور از قبل شروع شده
+        // بود، وسطِ ژست چیزی باز نمی‌شود.
+        if (isGestureSuppressedRef.current) return;
         if (hideDelayTimerRef.current) {
           clearTimeout(hideDelayTimerRef.current);
           hideDelayTimerRef.current = null;

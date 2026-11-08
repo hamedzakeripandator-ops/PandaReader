@@ -21,6 +21,7 @@ import Icons from '../common/Icons';
 import { coreApi } from '../../services/coreApi';
 import { readingActivity } from '../../services/readingActivity';
 import annotationLocalBackup from '../../services/annotationLocalBackup';
+import { renderPageOverlay, buildPageGeometry } from '../../utils/annotationPdfExport';
 import AnnotationLayer from './AnnotationLayer';
 import AnnotationToolbar from './AnnotationToolbar';
 import BookmarkMarker from './BookmarkMarker';
@@ -82,6 +83,11 @@ const LINE_HEIGHTS = [1.5, 1.7, 1.9, 2.1, 2.4];
 // تازه در هر رندر، مقایسهٔ سطحیِ memoیِ لایهٔ Konva را می‌شکست.
 const EMPTY_PAGE_ANNOTATIONS = Object.freeze([]);
 
+// مرحلهٔ ۴۴ §۵ (OPT-03): آرایهٔ خالیِ منجمدِ مشترک برایِ سلکتورهایِ
+// `|| []` (favoriteColors و pageBookmarkList) — مثلِ
+// EMPTY_PAGE_ANNOTATIONS که در مرحلهٔ ۴۳ برایِ حاشیه‌نویسی آمد.
+const EMPTY_ARRAY = Object.freeze([]);
+
 function readLs(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -124,6 +130,11 @@ export function epubDefaultZoomToFontSize(epubDefaultZoom) {
 // script/style/link/iframe/object/embed/form و رویدادهایِ on* و
 // hrefهایِ javascript: پیش از dangerouslySetInnerHTML.
 function sanitizeEpubHtmlClient(html) {
+  // مرحلهٔ ۴۴ §۴: اورلیِ پخته‌شدهٔ خودِ برنامه، هرگز دوباره در
+  // خواننده نمایش داده نمی‌شود (وگرنه حاشیه‌نویسیِ زنده رویِ تصویرِ
+  // پخته‌شده، دو بار دیده می‌شد)؛ مانیفست، مرجعِ بازیابی است.
+  html = String(html || '').replace(/<!--cr-baked-epub-overlay-begin-->[\s\S]*?<!--cr-baked-epub-overlay-end-->/g, '');
+  html = html.replace(/<div\b[^>]*cr-baked-epub-overlay[^>]*>[\s\S]*?<\/div\s*>/gi, '');
   try {
     const doc = new DOMParser().parseFromString(`<div>${html || ''}</div>`, 'text/html');
     doc.querySelectorAll('script, style, link, iframe, object, embed, form, meta, base, title').forEach((el) => el.remove());
@@ -279,7 +290,7 @@ export default function EpubViewer({ filePath }) {
   const epubSearchRequestId = useReaderStore((state) => state.epubSearchRequestId || 0);
   const epubSearchQueryFromStore = useReaderStore((state) => state.epubSearchQuery || '');
   // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه در منوهایِ هایلایت.
-  const favoriteColors = useAppStore((s) => s.favoriteColors || []);
+  const favoriteColors = useAppStore((s) => s.favoriteColors || EMPTY_ARRAY);
   // مرحلهٔ ۳۸ §۸: زومِ امن برای لایهٔ حاشیه‌نویسی (در EPUB امروز ۱
   // می‌ماند، چون زومِ EPUB اندازهٔ فونت است؛ سیم‌کشی برای سازگاری
   // و آینده است).
@@ -363,6 +374,29 @@ export default function EpubViewer({ filePath }) {
   const [selMenu, setSelMenu] = useState(null);
   const [markMenu, setMarkMenu] = useState(null);
   const [annotationsByPage, setAnnotationsByPage] = useState({});
+  // مرحلهٔ ۴۴ §۴: وضعیتِ ذخیرهٔ EPUB (آینهٔ showSaveStatusی PdfViewer —
+  // بنرِ شناور ندارد؛ پیام‌ها با Toast می‌آیند و تولبار از همین
+  // pdfSaveState، دکمه‌ها را غیرفعال/سبز می‌کند).
+  const [isExportingEpub, setIsExportingEpub] = useState(false);
+  const [epubSaveState, setEpubSaveState] = useState('idle');
+  const epubSaveTimerRef = useRef(null);
+  // مرحلهٔ ۴۴ §۴: مانیفستِ جاسازی‌شدهٔ کتابِ جاری (از loadEpubBook) +
+  // شمارندهٔ نسخه برایِ بیدار کردنِ افکت‌هایِ بازیابی پس از رسیدنِ آن.
+  const embeddedEpubRef = useRef(null);
+  const [embeddedEpubVersion, setEmbeddedEpubVersion] = useState(0);
+  const showEpubSaveStatus = useCallback((state, ms) => {
+    if (epubSaveTimerRef.current) clearTimeout(epubSaveTimerRef.current);
+    setEpubSaveState(state);
+    if (ms > 0) {
+      epubSaveTimerRef.current = setTimeout(() => {
+        setEpubSaveState('idle');
+        epubSaveTimerRef.current = null;
+      }, ms);
+    }
+  }, []);
+  useEffect(() => () => {
+    if (epubSaveTimerRef.current) clearTimeout(epubSaveTimerRef.current);
+  }, []);
   // مرحلهٔ ۳۸ §۸: پشته‌های Undo/Redo به‌ازای هر فصل (کلید = شمارهٔ فصل).
   const [undoStacks, setUndoStacks] = useState({});
   const [redoStacks, setRedoStacks] = useState({});
@@ -391,7 +425,7 @@ export default function EpubViewer({ filePath }) {
   }, [chapters, tocQuery]);
   const fontFamily = (FONT_OPTIONS.find((f) => f.id === fontId) || FONT_OPTIONS[0]).family;
 
-  const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(filePath)] || []);
+  const pageBookmarkList = useBookmarkStore((state) => state.bookmarksByFile[normalizeBookKey(filePath)] || EMPTY_ARRAY);
   const bookmarkPreferences = useBookmarkStore((state) => state.preferences);
   const loadBookmarksForFile = useBookmarkStore((state) => state.loadBookmarksForFile);
   const loadBookmarkPreferences = useBookmarkStore((state) => state.loadPreferences);
@@ -469,6 +503,11 @@ export default function EpubViewer({ filePath }) {
       }
       const list = Array.isArray(res.chapters) ? res.chapters : [];
       setBook({ title: res.title || '', creator: res.creator || '', coverUrl: res.coverUrl || null, chapters: list });
+      // مرحلهٔ ۴۴ §۴: مانیفستِ جاسازی‌شدهٔ کتاب (اگر بود) برایِ
+      // بازیابیِ خودکار نگه داشته می‌شود؛ تصمیمِ «دیتابیس خالی است؟»
+      // در افکت‌هایِ حاشیه‌نویسی/هایلایت/بوک‌مارک گرفته می‌شود.
+      embeddedEpubRef.current = res.embeddedAnnotations || null;
+      if (res.embeddedAnnotations) setEmbeddedEpubVersion((v) => v + 1);
       setEpubChapters(list.map((c) => ({ id: c.id, title: c.title })));
       if (typeof setTotalPages === 'function') setTotalPages(list.length);
       epubFileMtimeRef.current = Number(res.sourceMtimeMs) || 0;
@@ -491,6 +530,18 @@ export default function EpubViewer({ filePath }) {
           setFontSize(epubDefaultZoomToFontSize(useSettingsStore.getState().epubDefaultZoom));
         }
       } catch (_) {}
+      // مرحلهٔ ۴۴ §۴: هایلایت‌ها از دیتابیس؛ اگر خالی بود و مانیفستِ
+      // جاسازی‌شده هایلایت داشت، همان‌ها بازیابی و به دیتابیس برمی‌گردند.
+      coreApi.getEpubHighlights(filePath).then((list) => {
+        if (!isMounted) return;
+        if (Array.isArray(list) && list.length > 0) { setHighlights(list); return; }
+        const embeddedHl = res.embeddedAnnotations && Array.isArray(res.embeddedAnnotations.highlights) ? res.embeddedAnnotations.highlights : [];
+        if (embeddedHl.length > 0) {
+          setHighlights(embeddedHl);
+          coreApi.saveEpubHighlights(filePath, embeddedHl).catch(() => {});
+          showToast('هایلایت‌های ذخیره‌شده در فایل بازیابی شد.', { type: 'info' });
+        } else if (Array.isArray(list)) setHighlights(list);
+      }).catch(() => {});
       setBookLoading(false);
     }).catch((err) => {
       if (!isMounted) return;
@@ -498,9 +549,6 @@ export default function EpubViewer({ filePath }) {
       setBookLoading(false);
     });
     try { readingActivity.begin(filePath); } catch (_) {}
-    coreApi.getEpubHighlights(filePath).then((list) => {
-      if (isMounted && Array.isArray(list)) setHighlights(list);
-    }).catch(() => {});
     return () => {
       isMounted = false;
       loadedEpubFileRef.current = null;
@@ -981,6 +1029,10 @@ export default function EpubViewer({ filePath }) {
   useEffect(() => {
     if (!filePath) return undefined;
     let isMounted = true;
+    // مرحلهٔ ۴۴ §۴: اگر حاشیه‌نویسیِ زنده در استیت هست (اجرایِ دومِ
+    // همین افکت پس از رسیدنِ مانیفستِ جاسازی‌شده)، چیزی بازنویسی نمی‌شود.
+    const liveHasAny = Object.values(annotationsByPageRef.current || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+    if (liveHasAny) return undefined;
     if (!coreApi.isAvailable()) {
       setAnnotationsByPage(annotationLocalBackup.restoreBackupsAsPages(filePath));
       return undefined;
@@ -996,19 +1048,56 @@ export default function EpubViewer({ filePath }) {
           coreApi.savePageAnnotations(filePath, pageNum, items).catch(() => {});
         });
       }
+      // مرحلهٔ ۴۴ §۴: بازیابیِ خودکار از مانیفستِ جاسازی‌شده — فقط
+      // وقتی دیتابیسِ محلی (با آینهٔ محلی) برایِ این کتاب، هیچ
+      // حاشیه‌نویسی‌ای ندارد؛ دیتابیس مقدم است و هرگز رونویسی نمی‌شود.
+      const mergedHasAny = Object.values(merged.pages || {}).some((arr) => Array.isArray(arr) && arr.length > 0);
+      if (!mergedHasAny) {
+        const embedded = embeddedEpubRef.current && embeddedEpubRef.current.annotationsByPage;
+        if (embedded && typeof embedded === 'object') {
+          const embHasAny = Object.values(embedded).some((arr) => Array.isArray(arr) && arr.length > 0);
+          if (embHasAny) {
+            setAnnotationsByPage(embedded);
+            annotationsByPageRef.current = embedded;
+            Object.entries(embedded).forEach(([pageNum, items]) => {
+              if (Array.isArray(items) && items.length > 0) {
+                coreApi.savePageAnnotations(filePath, pageNum, items).catch(() => {});
+                annotationLocalBackup.writePageBackup(filePath, pageNum, items);
+              }
+            });
+            showToast('حاشیه‌نویسی‌های ذخیره‌شده در فایل بازیابی شد.', { type: 'info' });
+          }
+        }
+      }
     }).catch(() => {});
     return () => { isMounted = false; };
-  }, [filePath]);
+  }, [filePath, embeddedEpubVersion]);
 
   // بوک‌مارک‌ها (با همان تأخیرِ ۴۰۰ میلی‌ثانیه‌ایِ PdfViewer).
   useEffect(() => {
     if (!filePath) return undefined;
     const timerId = setTimeout(() => {
-      loadBookmarksForFile(filePath);
       loadBookmarkPreferences();
+      loadBookmarksForFile(filePath).then(() => {
+        // مرحلهٔ ۴۴ §۴: بازیابیِ بوک‌مارک‌هایِ جاسازی‌شده — فقط وقتی
+        // فهرستِ فعلی (دیتابیس + آینهٔ محلی) خالی است؛ هر بوک‌مارک
+        // با شناسهٔ تازه وارد می‌شود و در دیتابیس هم ذخیره می‌شود.
+        try {
+          const key = normalizeBookKey(filePath);
+          const current = useBookmarkStore.getState().bookmarksByFile?.[key] || [];
+          const embeddedBm = embeddedEpubRef.current && Array.isArray(embeddedEpubRef.current.bookmarks) ? embeddedEpubRef.current.bookmarks : [];
+          if (current.length === 0 && embeddedBm.length > 0) {
+            (async () => {
+              for (const bm of embeddedBm) {
+                try { await addBookmark({ filePath, page: Number(bm.page) || 1, yRatio: bm.yRatio, name: bm.name || '', side: bm.side, template: bm.template }); } catch (_) {}
+              }
+            })();
+          }
+        } catch (_) {}
+      }).catch(() => {});
     }, 400);
     return () => clearTimeout(timerId);
-  }, [filePath, loadBookmarksForFile, loadBookmarkPreferences]);
+  }, [filePath, loadBookmarksForFile, loadBookmarkPreferences, embeddedEpubVersion]);
 
   // اعمالِ هایلایت‌هایِ فصلِ جاری روی DOM.
   useEffect(() => {
@@ -1076,6 +1165,108 @@ export default function EpubViewer({ filePath }) {
   const handleClearChapterAnnotations = useCallback(() => {
     handleCommitPageAnnotations(chapterIndex + 1, []);
   }, [handleCommitPageAnnotations, chapterIndex]);
+
+  // مرحلهٔ ۴۴ §۴: ذخیرهٔ EPUBِ حاشیه‌نویسی‌شده — آینهٔ
+  // handleExportAnnotatedPdfی PdfViewer با همان دو mode و همان پیام‌ها.
+  // برایِ هر فصلِ دارایِ حاشیه‌نویسیِ گرافیکی، تصویرِ لایهٔ شفافِ PNG
+  // با renderPageOverlay ساخته می‌شود؛ مختصاتِ ذخیره‌سازی کسریِ
+  // خالص‌اند، پس هندسهٔ کانونیِ ۱۰۰۰×۱۴۰۰ برایِ همهٔ فصل‌ها دقیق است
+  // (اورلی در فصل با object-fit:fill کش می‌آید). هایلایت‌هایِ متنی و
+  // بوک‌مارک‌ها فقط در مانیفست می‌روند، نه در تصویر.
+  const handleExportAnnotatedEpub = useCallback(async (mode = 'save-as') => {
+    if (isExportingEpub) return;
+    if (!coreApi.isAvailable()) {
+      showEpubSaveStatus('error', 6000);
+      showToast('خروجی فقط در نسخهٔ دسکتاپ در دسترس است.', { type: 'warning' });
+      return;
+    }
+    if (!filePath || !/\.epub$/i.test(filePath)) {
+      showEpubSaveStatus('error', 6000);
+      showToast('ذخیرهٔ مستقیم فقط برای فایل‌های EPUB است.', { type: 'warning' });
+      return;
+    }
+    const saveMode = mode === 'in-place' ? 'in-place' : 'save-as';
+    const pages = annotationsByPageRef.current || {};
+    const graphicCount = Object.values(pages).reduce(
+      (n, items) => n + (Array.isArray(items) ? items.length : 0),
+      0
+    );
+    const hlCount = (highlights || []).length;
+    if (graphicCount === 0 && hlCount === 0 && saveMode !== 'in-place') {
+      showEpubSaveStatus('info', 4500);
+      showToast('هنوز حاشیه‌نویسی‌ای روی این فایل نیست.', { type: 'info' });
+      return;
+    }
+    setIsExportingEpub(true);
+    showEpubSaveStatus(saveMode === 'in-place' ? 'saving-inplace' : 'saving-as', 0);
+    showToast('در حالِ آماده‌سازیِ خروجی…', { type: 'info' });
+    try {
+      const bakedChapters = [];
+      let bakedCount = 0;
+      const pageKeys = Object.keys(pages)
+        .map(Number)
+        .filter((n) => Number.isFinite(n) && Array.isArray(pages[n]) && pages[n].length > 0)
+        .sort((a, b) => a - b);
+      const geometry = buildPageGeometry({ width: 1000, height: 1400, transform: [1, 0, 0, -1, 0, 1400], rotate: 0, view: [0, 0, 1000, 1400] }, 0);
+      for (const pageNum of pageKeys) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const itemsForPage = pages[pageNum];
+        const rendered = await renderPageOverlay(itemsForPage, geometry);
+        if (!rendered || (!rendered.overlayPng && !rendered.highlightPng)) continue;
+        const chapter = chapters[pageNum - 1];
+        if (!chapter) continue;
+        bakedChapters.push({ chapterId: chapter.id, chapterIndex: pageNum - 1, href: chapter.href, overlayPng: rendered.overlayPng || null, highlightPng: rendered.highlightPng || null });
+        bakedCount++;
+      }
+      let bookmarks = [];
+      try { bookmarks = useBookmarkStore.getState().bookmarksByFile?.[normalizeBookKey(filePath)] || []; } catch (_) {}
+      const result = await coreApi.exportAnnotatedEpub({
+        epubPath: filePath,
+        mode: saveMode,
+        chapters: bakedChapters,
+        annotationsByPage: pages,
+        highlights: highlights || [],
+        bookmarks,
+      });
+      if (result && result.canceled) {
+        showEpubSaveStatus('info', 4500);
+        showToast('ذخیرهٔ فایل لغو شد.', { type: 'info' });
+        return;
+      }
+      if (result && result.success) {
+        const savedName = String((result && result.outputPath) || filePath || '').split(/[\\/]/).pop() || '';
+        const savedTime = new Date().toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const savedSuffix = savedName ? ' (' + savedName + '، ' + savedTime + ')' : '';
+        if (result.restoredClean) {
+          showEpubSaveStatus('saved-inplace', 4500);
+          showToast('فایل به حالتِ بدونِ حاشیه‌نویسی برگشت.' + savedSuffix, { type: 'success' });
+        } else if (saveMode === 'in-place') {
+          showEpubSaveStatus('saved-inplace', 4500);
+          showToast(
+            `روی همین فایل ذخیره شد: ${graphicCount} حاشیه‌نویسی در ${bakedCount} فصل.` + savedSuffix,
+            { type: 'success' }
+          );
+        } else {
+          showEpubSaveStatus('saved-as', 4500);
+          showToast(
+            `فایل با ${graphicCount} حاشیه‌نویسی در ${bakedCount} فصل ذخیره شد.` + savedSuffix,
+            { type: 'success' }
+          );
+        }
+      } else if (result && result.locked) {
+        showEpubSaveStatus('error', 6000);
+        showToast('فایل در برنامهٔ دیگری باز است؛ آن را ببندید و دوباره تلاش کنید. فایلِ اصلی دست نخورده است.', { type: 'error' });
+      } else {
+        showEpubSaveStatus('error', 6000);
+        showToast((result && result.error) || 'ذخیرهٔ حاشیه‌نویسی‌ها انجام نشد.', { type: 'error' });
+      }
+    } catch (err) {
+      showEpubSaveStatus('error', 6000);
+      showToast('آماده‌سازیِ خروجی انجام نشد: ' + (err && err.message ? err.message : String(err)), { type: 'error' });
+    } finally {
+      setIsExportingEpub(false);
+    }
+  }, [filePath, chapters, highlights, isExportingEpub, showToast, showEpubSaveStatus]);
 
   const handleContentMouseUp = () => {
     const sel = window.getSelection();
@@ -1241,8 +1432,9 @@ export default function EpubViewer({ filePath }) {
         onUndo={handleUndoAnnotation}
         onRedo={handleRedoAnnotation}
         onClearPage={handleClearChapterAnnotations}
-        isExportingPdf={false}
-        pdfSaveState="idle"
+        onExportAnnotatedPdf={/\.epub$/i.test(filePath || '') ? handleExportAnnotatedEpub : undefined}
+        isExportingPdf={isExportingEpub}
+        pdfSaveState={epubSaveState}
       />
 
       {/* مرحلهٔ ۳۹ §۴: داکِ عمودیِ تاشو و شناورِ EPUB — در حالتِ بسته،
@@ -1274,11 +1466,9 @@ export default function EpubViewer({ filePath }) {
       )}
       {dockMounted && (
         <div
-          dir="rtl"
           style={{
             position: 'absolute', top: dockPos.y, left: dockPos.x, zIndex: 45,
-            width: 264, maxHeight: 'calc(100% - 110px)', overflowY: 'auto',
-            display: 'flex', flexDirection: 'column', gap: 12,
+            width: 264, maxHeight: 'calc(100% - 110px)', overflowY: 'auto', direction: 'ltr',
             padding: 14, borderRadius: 16,
             background: 'rgba(13, 19, 26, 0.94)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)',
             border: '1px solid rgba(34, 211, 238, 0.3)',
@@ -1290,6 +1480,8 @@ export default function EpubViewer({ filePath }) {
             pointerEvents: dockOpen ? 'auto' : 'none',
           }}
         >
+          {/* مرحلهٔ ۴۴ §۵: قفلِ اسکرول‌بار — پوستهٔ بیرونی چپ‌به‌راست است تا نوارِ اسکرول در لبهٔ راست بماند؛ محتوایِ درونی راست‌به‌چپ. */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, direction: 'rtl' }}>
           <div
             onMouseDown={(e) => startDockDrag(e, 264)}
             title="برای جابه‌جاییِ پنل بکشید"
@@ -1344,7 +1536,8 @@ export default function EpubViewer({ filePath }) {
                   </div>
                 </div>
               )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+              <div style={{ maxHeight: 220, overflowY: 'auto', direction: 'ltr' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, direction: 'rtl' }}>
                 {tocFilteredChapters.map((ch) => {
                   const idx = chapters.indexOf(ch);
                   return (
@@ -1368,6 +1561,7 @@ export default function EpubViewer({ filePath }) {
                 {tocFilteredChapters.length === 0 && (
                   <div style={{ fontSize: 12, color: 'var(--muted)', padding: '6px 4px' }}>فصلی با این نام پیدا نشد.</div>
                 )}
+                </div>
               </div>
             </div>
           )}
@@ -1472,6 +1666,7 @@ export default function EpubViewer({ filePath }) {
           <span style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>
               {`هایلایت‌هایِ این فصل: ${chapterHighlightCount}`}
             </span>
+          </div>
         </div>
       )}
 
@@ -1543,7 +1738,8 @@ export default function EpubViewer({ filePath }) {
             <div style={{ fontSize: 12, color: 'var(--muted)', padding: '2px 4px' }}>در حالِ جستجو در فصل‌ها…</div>
           )}
           {epubSearchResults.length > 0 && (
-            <div style={{ maxHeight: 220, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ maxHeight: 220, overflowY: 'auto', direction: 'ltr' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, direction: 'rtl' }}>
               {epubSearchResults.map((r) => (
                 <button
                   key={r.chapterIndex}
@@ -1555,6 +1751,7 @@ export default function EpubViewer({ filePath }) {
                   <span style={{ fontSize: 11.5, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '100%' }}>{r.snippet}</span>
                 </button>
               ))}
+              </div>
             </div>
           )}
           {epubSearchQuery.trim() && !epubSearchScanning && epubSearchResults.length === 0 && (
@@ -1570,11 +1767,11 @@ export default function EpubViewer({ filePath }) {
           {chapterTransitionNotice}
         </div>
       )}
-      <div ref={contentRef} data-reader-scroll-container="true" onWheel={handleContentWheel} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '28px 80px 24px', direction: 'rtl', background: readerBackdropColor }}>
+      <div ref={contentRef} data-reader-scroll-container="true" onWheel={handleContentWheel} style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '28px 80px 24px', direction: 'ltr', background: readerBackdropColor }}>
         {chapterLoading ? (
-          <div style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
+          <div style={{ textAlign: 'center', direction: 'rtl', color: 'var(--muted)', fontSize: 14, padding: 32 }}>در حالِ بارگذاریِ فصل…</div>
         ) : (
-          <div data-bookmark-page={chapterIndex + 1} style={{ position: 'relative', maxWidth: effectiveMaxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)', animation: flipDirection === 1 ? 'epub-flip-next 340ms cubic-bezier(0.22, 1, 0.36, 1)' : flipDirection === -1 ? 'epub-flip-prev 340ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined, willChange: 'transform, opacity' }}>
+          <div data-bookmark-page={chapterIndex + 1} data-page-number={chapterIndex + 1} style={{ position: 'relative', overflow: 'visible', direction: 'rtl', maxWidth: effectiveMaxWidth, margin: '0 auto', background: theme.paper, color: theme.text, borderRadius: 12, padding: '32px 36px', boxShadow: '0 8px 32px rgba(0,0,0,0.35)', animation: flipDirection === 1 ? 'epub-flip-next 340ms cubic-bezier(0.22, 1, 0.36, 1)' : flipDirection === -1 ? 'epub-flip-prev 340ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined, willChange: 'transform, opacity' }}>
             <div
               ref={chapterElRef}
               className="epub-chapter-content"

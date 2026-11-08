@@ -22,6 +22,7 @@ import React, {
 } from 'react';
 import { Stage, Layer, Shape, Group, Line, Rect, Text, Path, Circle, Transformer } from 'react-konva';
 import useAppStore from '../../store/useAppStore';
+import Icons from '../common/Icons';
 // Cycle-fix (2026-10-25): این فایل، AnnotationToolbar را نه ایمپورت
 // می‌کند و نه re-export می‌کند (قبلاً هر دو را داشت و PdfViewer،
 // تولبار را از طریقِ لایه می‌گرفت). لایه، تولبار را اصلاً رندر
@@ -54,11 +55,27 @@ import {
   getStrokeBounds,
   // فاز ۵: توابعِ انتخاب، مارکی و جابه‌جایی
   getItemBounds,
-  findTopAnnotationAtPoint,
-  rectsIntersect,
+  // مرحلهٔ ۵۰ §۳: کرانهٔ دیداریِ واقعی + مقیاسِ استیکی (تک‌منبع در انجین)
+  getVisualRenderedBBox,
+  computeStickyScale,
+  findBestHitAnnotationItem,
+  findHitsAtPointSorted,
+  cycleHitAtPoint,
+  isPointInRect,
   marqueeRect,
+  selectItemsInBox,
+  selectItemsInLasso,
+  isTinyLasso,
   getUnionBounds,
   moveAnnotationByDelta,
+  // مرحله ۴۸ §۵: helperهای خالصِ انتخاب (فیلترِ کمند، فیلترِ کهنه،
+  // جابه‌جاییِ گروهی، تصمیمِ راست‌کلیک، هندسهٔ هاد).
+  filterLassoPoints,
+  filterStaleSelectedIds,
+  moveSelectedItems,
+  decideRightClickAction,
+  computeSelectionHudGeometry,
+  LASSO_MIN_POINT_DIST,
   normalizeOpacityValue,
   toPureRgbCss,
   toRgbaWithAlpha,
@@ -67,6 +84,39 @@ import {
   detectCaretLineDirection,
   normalizeMixedBidiText,
 } from '../../utils/bidiTextEngine';
+
+// مرحلهٔ ۴۹ — پرچمِ ژستِ حاشیه‌نویسی (قرارداد با کارگر D):
+// حینِ هر ژستِ select (مارکی/کمند/جابه‌جایی/هندل/پن) و رسم، true است
+// تا App.jsx و BottomControls هات‌اسپات و پنهان‌شدنِ خودکار را سرکوب
+// کنند. این لایه فقط پرچم را می‌گذارد و برمی‌دارد؛ هیچ‌جا آن را
+// نمی‌خواند. در سطحِ ماژول تعریف شده‌اند تا از TDZ و ترتیبِ تعریفِ
+// کال‌بک‌ها مستقل باشند.
+const setAnnotationGestureActive = () => {
+  try {
+    if (typeof window !== 'undefined') window.__isAnnotationGestureActive = true;
+  } catch (_) { /* در دسترس نیست: پرچم اختیاری است */ }
+};
+const clearAnnotationGestureActive = () => {
+  try {
+    if (typeof window !== 'undefined') window.__isAnnotationGestureActive = false;
+  } catch (_) { /* در دسترس نیست: پرچم اختیاری است */ }
+};
+
+// مرحلهٔ ۵۰ §۱/§۲ — بازهٔ مجازِ مختصاتِ ذخیره‌سازی (فضای 0..1000):
+// افق [-۲۰۰، ۱۲۰۰] و عمود [-۸۰، ۱۰۸۰]. هیچ کلمپی به [0,1000] در مسیرِ
+// ذخیرهٔ لایه نیست؛ کلمپِ انجین (clientToSvgPoint) را کارگرِ §۳ اصلاح
+// می‌کند (به گزارش مراجعه کنید).
+const STORAGE_X_MIN = -200;
+const STORAGE_X_MAX = 1200;
+const STORAGE_Y_MIN = -80;
+const STORAGE_Y_MAX = 1080;
+// رکوردِ تازه‌ترین انتخابِ بین‌صفحه‌ایِ همین ژستِ مارکی (مشترکِ همهٔ
+// نمونه‌های لایه): گیرندهٔ رویداد آن را پر می‌کند و نهایی‌سازیِ مارکیِ
+// صفحهٔ مبدأ، آن را با انتخابِ خودش اجتماع می‌دهد.
+// { page, ids, gestureId, at } یا null.
+let lastCrossPageSelection = null;
+// شمارندهٔ عمقِ تحویلِ رویدادِ pointerdown از Bleed (جلوگیری از حلقه).
+let forwardingPointerDepth = 0;
 
 // ============================================================================
 // بخش ۱: ریاضیات
@@ -493,13 +543,17 @@ const CommittedBox = React.memo(function CommittedBox({ item, onErase }) {
   // Konva کادرِ Shape را فقط از width/heightی اتریبیوت می‌گیرد و
   // sceneFunc را اندازه نمی‌گیرد (به گزارشِ اسکن، §۳٫۲ مراجعه
   // کنید)؛ پس بدونِ این تابع، Transformerِ باکسِ ابری به نقطه
-  // تبدیل می‌شد. این تابع، کادرِ واقعیِ مستطیل را برمی‌گرداند.
-  // توجه: بیرون‌زدگیِ کمانِ ابری (حدودِ bulb/2) بیرونِ این کادر
-  // می‌ماند — دقیقاً طبقِ فرمولِ TASK — پس دستگیره‌ها روی خودِ
-  // مستطیل‌اند، نه روی نوکِ کمان‌ها.
+  // تبدیل می‌شد.
+  // مرحلهٔ ۵۰ §۳: این کادر حالا کرانهٔ دیداریِ واقعی است (مماس بر
+  // لبهٔ بیرونیِ کمان‌ها: قلهٔ بزیه + نیمِ استروک)، نه مستطیلِ خام —
+  // چون در تک‌انتخاب، Transformer تنها کادرِ visible است (P2) و
+  // باید دقیقاً هم‌اندازهٔ شکل باشد. اثرِ جانبیِ شناخته‌شده: بهرهٔ
+  // درگِ دستگیره کمی عوض می‌شود (کادرِ مبنا بزرگ‌تر است) ولی دادهٔ
+  // ذخیره‌شده عوض نمی‌شود، چون transformItemByNode از scaleی نود
+  // به width/height می‌رسد، نه از selfRect.
   const cloudSelfRectFunc = useCallback(
-    () => ({ x: item.x, y: item.y, width: item.width, height: item.height }),
-    [item.x, item.y, item.width, item.height]
+    () => getVisualRenderedBBox(item),
+    [item.x, item.y, item.width, item.height, item.strokeWidth, item.boxStyle]
   );
 
   const cloudHitFunc = useCallback(
@@ -1610,6 +1664,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   pageNumber,
   items: rawItems = [],
   onCommitPageItems,
+  // مرحلهٔ ۵۰ §۲ (ب): انتقالِ بین‌صفحه‌ای — والد (PdfViewer/
+  // VerticalViewer) با این پراپ، آیتم‌های جابه‌جاشده را در یک تراکنشِ
+  // واحد از مبدأ حذف و به مقصد اضافه می‌کند و یک ورودیِ Undo ثبت
+  // می‌کند. اگر والد آن را ندهد (مثلاً EpubViewer)، جابه‌جایی مثلِ
+  // قبل فقط در همان صفحه کامیت می‌شود.
+  onTransferItemsToPage,
   // Refinement Final: زاویهٔ چرخشِ صفحه (۰/۹۰/۱۸۰/۲۷۰) که PdfViewer
   // از useReaderStore می‌خواند و به لایه می‌دهد. پیش‌فرض ۰ است تا
   // لایهٔ قدیمیِ بدونِ این prop، دقیقاً مثلِ قبل کار کند.
@@ -1644,6 +1704,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const selectedAnnotationId = useAppStore((s) => s.selectedAnnotationId);
   const selectedAnnotationIds = useAppStore((s) => s.selectedAnnotationIds || []);
   const selectedAnnotationPage = useAppStore((s) => s.selectedAnnotationPage);
+  // مرحله 44 §3: زیرحالتِ انتخابِ فعال + پرچمِ ابزارِ دست (برای
+  // listeningِ لایه و draggableِ شکل‌ها).
+  const selectSubMode = useAppStore((s) => s.selectSubMode || 'box');
+  const isHandTool = isAnnotationActive && annotationTool === 'hand';
 
   const containerRef = useRef(null);
   const stageRef = useRef(null);
@@ -1659,6 +1723,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     stageRef.current = null;
     layerRef.current = null;
     draftLayerRef.current = null;
+    clearAnnotationGestureActive();
   }, []);
   // فاز ۱ بهینه‌سازی — رنگِ هر دو لایه با هم: هر جا آیتمِ داخلِ لایهٔ
   // ایستا عوض می‌شود (درگ، ترنسفورم، کامیت، ویرایشِ هندل)، هر دو لایه
@@ -1700,6 +1765,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // فاز ۲: مارکی بدونِ setState — ابعاد در ref، نود در لایهٔ درفت.
   const marqueeBoxRef = useRef(null); // { x, y, width, height } در فضای یکنواخت
   const marqueeRectRef = useRef(null);
+  // مرحله 44 §3: ژستِ کمند — نقاطِ چندضلعی (فضای یکنواخت) + نودِ Lineِ پیش‌نمایش.
+  const lassoPointsRef = useRef(null);
+  const lassoLineRef = useRef(null);
   // فاز ۲: کشِ Rect ژست برای extractPoints (در handleDown پر و در
   // handleUp پاک می‌شود؛ اسکرول/ریسایز هم آن را باطل می‌کند).
   const activeGestureRectRef = useRef(null);
@@ -1708,6 +1776,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // می‌شود، نه با prop — این state فقط برای اینکه effectِ اتصال،
   // نودهای فعلی را هم نگه دارد و در صورتِ نیاز در دسترس باشند.
   const [selectedNodes, setSelectedNodes] = useState([]);
+  // مرحله ۴۸ §۵: قفلِ انتخاب (selectionLocked) — وقتی ۱+ شکل با
+  // مارکی/کمند (با pointerup یا راست‌کلیک) انتخاب می‌شوند، قفل
+  // می‌شود: درگ روی بوم، انتخاب را جابه‌جا می‌کند (نه مارکیِ تازه)
+  // و هادِ شناورِ اکشن بالای کادرِ انتخاب ظاهر می‌شود. خروج با
+  // تأییدِ هاد، Enter/Escape، راست‌کلیک، یا کلیکِ خالیِ کوتاه.
+  // ref، آینهٔ همگام است تا هندلرهای Konva (closureی قدیمی)
+  // مقدارِ تازه را ببینند؛ state فقط برای رندرِ هاد است.
+  const [selectionLocked, setSelectionLockedState] = useState(false);
+  const selectionLockedRef = useRef(false);
+  const setSelectionLocked = useCallback((value) => {
+    const next = Boolean(value);
+    selectionLockedRef.current = next;
+    setSelectionLockedState(next);
+  }, []);
   // فاز ۲: پیش‌نمایشِ درگِ هندل‌های فلش دیگر state ندارد (صفر
   // ری‌رندر در هر فریم): در حینِ درگ، فلشِ اصلی مخفی است و یک
   // Shapeِ دائمی در لایهٔ درفت، از رویِ lastPreview رسم می‌شود؛
@@ -1746,9 +1828,72 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // بدونِ setState در هر حرکت، به آن‌ها دسترسی داشته باشند.
   const isMarqueeRef = useRef(null); // { startPt } یا null
   const manualMoveRef = useRef(null); // { startPt, lastPt, originals: Map<id, item> } یا null
+  // مرحلهٔ ۴۹ — کادرهای انتخابِ تکی و گروهی: نودهای Groupِ کادرها
+  // در selectionBoxRefs نگه داشته می‌شوند تا حینِ manualMove، با
+  // همان دلتای نودهای آیتم جابه‌جا شوند (بدونِ ری‌رندرِ ری‌اکت)؛
+  // کادرها در Groupای با موقعیتِ (0,0) رندر می‌شوند و فرزندانشان
+  // مختصاتِ مطلق دارند، پس position برابرِ دلتای ژست است.
+  const selectionBoxRefs = useRef(new Map()); // id یا 'union' -> نودِ Group
+  const syncSelectionBoxOffsets = (dx, dy) => {
+    for (const node of selectionBoxRefs.current.values()) {
+      if (node) node.position({ x: dx, y: dy });
+    }
+  };
+  const resetSelectionBoxOffsets = () => {
+    for (const node of selectionBoxRefs.current.values()) {
+      if (node) node.position({ x: 0, y: 0 });
+    }
+  };
+  // مرحلهٔ ۴۹ — چرخهٔ کلیک روی آیتم‌های هم‌پوشان: آخرین نقطهٔ کلیک
+  // + آیتمِ انتخاب‌شده در آن نقطه + زمان، تا کلیکِ دوباره روی همان
+  // نقطه (در ۱۵۰۰ میلی‌ثانیه) به آیتمِ زیرین برسد.
+  const clickCycleRef = useRef(null); // { x, y, lastId, time } یا null
   // مرحلهٔ ۳۸ §۶: نشستِ pan در حالتِ select — { container,
   // startClientX/Y, startScrollLeft/Top, onMove, onEnd } یا null.
   const panSessionRef = useRef(null);
+  // مرحله ۴۸ §۵ (گاردریل ۲): آینهٔ handleUpInner برای شنوندهٔ
+  // window-levelی pointerup — تا رها کردنِ اشاره‌گر بیرونِ بوم هم
+  // ژستِ select را تمام کند (به افکتِ پایینِ فایل مراجعه کنید).
+  const handleUpInnerRef = useRef(null);
+  // مرحلهٔ ۵۰ §۲ (ب): آینهٔ onTransferItemsToPage برای handleUpInner.
+  const onTransferItemsToPageRef = useRef(onTransferItemsToPage);
+  // مرحلهٔ ۵۰ §۱: ردیابیِ سراسریِ ژستِ select — شنوندهٔ windowِ
+  // pointermove فقط در حینِ ژست ثبت است و در پایانِ ژست (pointerup،
+  // pointercancel، راست‌کلیک، Escape، unmount) برداشته می‌شود.
+  const windowSelectMoveRef = useRef(null); // هندلرِ pointermove یا null
+  const lastPointerClientRef = useRef(null); // { clientX, clientY } یا null
+  const marqueeGestureIdRef = useRef(0); // شمارندهٔ ژستِ مارکی
+  const marqueeStartClientRef = useRef(null); // { clientX, clientY } شروعِ مارکی
+  const crossPageDispatchRef = useRef(null); // آخرین clientRectِ فرستاده‌شده
+  // مرحلهٔ ۵۰ §۱: اسکرولِ خودکارِ لبه — حلقهٔ requestAnimationFrame
+  // فقط وقتی dir غیرِ صفر است زنده است و با cancelAnimationFrame
+  // در همهٔ مسیرهای پایانِ ژست متوقف می‌شود.
+  const autoScrollRafRef = useRef(null);
+  const autoScrollDirRef = useRef(0); // ‎-1 بالا، 1 پایین، 0 خاموش
+  // مرحلهٔ ۵۰ §۲: حاشیهٔ بوم (Bleed) — در هر رندر از روی size تازه می‌شود.
+  const bleedRef = useRef({ x: 0, y: 0 });
+  // مرحلهٔ ۵۰ §۱ (پیشگیریِ ۱): توقفِ قطعیِ ردیابیِ سراسری و اسکرولِ
+  // خودکار — در همهٔ مسیرهای پایانِ ژست صدا زده می‌شود.
+  const stopAutoScroll = () => {
+    if (autoScrollRafRef.current != null) {
+      try { cancelAnimationFrame(autoScrollRafRef.current); } catch (_) {}
+      autoScrollRafRef.current = null;
+    }
+    autoScrollDirRef.current = 0;
+  };
+  const stopSelectWindowTracking = () => {
+    const fn = windowSelectMoveRef.current;
+    if (fn) {
+      windowSelectMoveRef.current = null;
+      try { window.removeEventListener('pointermove', fn, true); } catch (_) {}
+    }
+    stopAutoScroll();
+  };
+  // مرحلهٔ ۵۰ §۱: آزادسازیِ قطعیِ ردیابیِ سراسری در unmount.
+  useEffect(() => () => {
+    stopSelectWindowTracking();
+    clearAnnotationGestureActive();
+  }, []);
 
   // مرحلهٔ ۴۳ فازِ سوم (F9): اگر کامپوننت وسطِ ژستِ pan آنمانت شود،
   // onEnd هرگز صدا زده نمی‌شود و سه لیسنرِ window می‌مانند؛ این
@@ -1771,6 +1916,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   const lastEventTimeRef = useRef(0);     // فیکس #۱: جلوگیری از اجرای مضاعف
 
   const toolRef = useRef(annotationTool);
+  const selectSubModeRef = useRef(selectSubMode);
   const colorRef = useRef(annotationColor);
   const widthRef = useRef(annotationStrokeWidth);
   const opacityRef = useRef(annotationOpacity);
@@ -1787,6 +1933,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   hasStartDotRef.current = annotationHasStartDot;
   hasEndArrowRef.current = annotationHasEndArrow;
   toolRef.current = annotationTool;
+  selectSubModeRef.current = selectSubMode;
   colorRef.current = annotationColor;
   widthRef.current = annotationStrokeWidth;
   opacityRef.current = annotationOpacity;
@@ -1831,20 +1978,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   stickyManualScaleRef.current = stickyManualScale;
   // ضریبِ تطبیقیِ معکوسِ زوم: در زوم‌های بالای ۱، استیکی‌نوت
   // نسبت به صفحه کوچک‌تر می‌شود تا روی تصویرِ زوم‌شده ظریف بماند.
-  const adaptiveZoomScale = useMemo(() => {
-    const z = Number(zoomLevel) || 1;
-    if (!zoomAdaptiveAnnotations || z <= 1.0) return 1.0;
-    return Math.max(0.28, 1 / Math.pow(z, 0.82));
-  }, [zoomLevel, zoomAdaptiveAnnotations]);
-  const stickyScaleFor = useCallback((it) => {
-    const manual = Number(it?.customScale) || 1;
-    return adaptiveZoomScale * manual;
-  }, [adaptiveZoomScale]);
+  // مرحلهٔ ۵۰ §۳: فرمولِ مقیاسِ استیکی (تطبیقِ زوم × customScale) به
+  // انجین منتقل شد (computeStickyScale) تا تک‌منبع باشد؛ اینجا فقط
+  // پوششِ نازک است. امضا و رفتار دقیقاً مثلِ قبل است
+  // (adaptiveZoomScaleی قبلی = max(0.28, 1/z^0.82) برای z>1، وگرنه ۱).
+  const stickyScaleFor = useCallback((it) => computeStickyScale(it, {
+    zoomLevel,
+    zoomAdaptiveAnnotations,
+  }), [zoomLevel, zoomAdaptiveAnnotations]);
   const [overflowPinDrag, setOverflowPinDrag] = useState(null);
   const overflowPinSuppressClickRef = useRef(null);
   aspectRef.current = aspect;
   pageRef.current = pageNumber;
   commitFnRef.current = onCommitPageItems;
+  onTransferItemsToPageRef.current = onTransferItemsToPage;
 
   // کالبدشکافیِ ناحیه‌های مردهٔ جزئی — اندازه‌گیریِ «چیدمان» (layout)،
   // نه «کادرِ محاط» (bounding):
@@ -1973,8 +2120,17 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // پیکسلِ CSS، کفِ کیفی بر سقفِ ۲۲۰۰ غلبه می‌کند (در جدولِ گزارش
   // آمده است). هیت‌گراف هم حداکثر ۱ می‌گیرد تا در HiDPI یک‌چهارم شود
   // (دقتِ کلیک کم نمی‌شود، چون هیت‌تست به وضوحِ کامل نیاز ندارد).
+  // مرحلهٔ ۵۰ §۲ (الف): حاشیهٔ بوم (Bleed) — بومِ Stage از هر طرف
+  // کمی بزرگ‌تر از کاغذ است تا آیتمِ کشیده‌شده به حاشیه دیده شود و
+  // مارکی/کمند در فضای بینِ صفحات ادامه یابد. دستگاهِ مختصاتِ صفحه
+  // (0..size.w و 0..size.h) عوض نمی‌شود؛ فقط مبدأِ Stage جابه‌جا است.
+  const STAGE_BLEED_X = Math.round(Math.min(220, Math.max(90, size.w * 0.22)));
+  const STAGE_BLEED_Y = Math.round(Math.min(120, Math.max(48, size.h * 0.08)));
+  bleedRef.current = { x: STAGE_BLEED_X, y: STAGE_BLEED_Y };
   const rawDpr = typeof window !== 'undefined' ? (window.devicePixelRatio || 1) : 1;
-  const maxDim = Math.max(size.w || 1, size.h || 1);
+  // مرحلهٔ ۵۰ §۲ (پیشگیریِ ۲): بافرِ بوم با احتسابِ Bleed در سقفِ
+  // ۲۲۰۰ پیکسل محدود می‌شود (ابعادِ بزرگ‌شدهٔ Stage).
+  const maxDim = Math.max((size.w || 1) + STAGE_BLEED_X * 2, (size.h || 1) + STAGE_BLEED_Y * 2);
   // مرحلهٔ ۳۸ §۴: سقفِ بافرِ Konva از ۳۸۴۰ به ۲۲۰۰ پیکسل — در زومِ
   // ۳۵۰٪، حافظهٔ گرافیکیِ Stage حدودِ ۷۰٪ کمتر است.
   const maxBackingStorePx = 2200;
@@ -2248,6 +2404,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // هاور/درگِ select با نوشتنِ مستقیم روی DOM عوض می‌شوند (بدون
   // setState، تا هر pointermove ری‌رندرِ کامل نسازد) و با هر تغییرِ
   // ابزار/رنگ، همین افکت مقدارِ پایه را بازمی‌گرداند.
+  // مرحلهٔ ۵۱ §۴: پایهٔ select، crosshair است (نه grab)؛ move فقط
+  // با نوشتنِ مستقیم روی DOM در هاور/جابه‌جایی می‌آید و grab/grabbing
+  // فقط مالِ ابزارِ دست است.
   const baseCursor = useMemo(() => {
     if (!isAnnotationActive) return 'default';
     switch (annotationTool) {
@@ -2258,7 +2417,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       case 'eraser': return eraserCursor();
       case 'box':
       case 'arrow': return 'crosshair';
-      case 'select': return 'grab';
+      case 'hand': return 'grab';
+      case 'select': return 'crosshair';
       default: return 'default';
     }
   }, [isAnnotationActive, annotationTool, annotationColor]);
@@ -2359,10 +2519,492 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     if (mid) mid.position({ x: base.mx, y: base.my });
   };
 
+  // ==========================================================================
+  // مرحلهٔ ۵۰ §۱/§۲ — helperهای ژستِ بدونِ قطع، اسکرولِ خودکار،
+  // سلکتِ بین‌صفحه‌ای و بومِ حاشیه‌دار (Bleed). همه فقط ref می‌خوانند
+  // (بدونِ setState در هر فریم) و فقط از هندلرهای رویداد صدا زده
+  // می‌شوند؛ ترتیبِ تعریف‌شان روبه‌عقب است (بدونِ ارجاعِ روبه‌جلو).
+  // ==========================================================================
+
+  // بازهٔ مجازِ مختصاتِ یکنواخت در بومِ توسعه‌یافته (Bleed):
+  // افق [-BLEED_X/scaleX, 1000 + BLEED_X/scaleX] و عمود
+  // [-BLEED_Y/scaleY, 1000*aspect + BLEED_Y/scaleY] — بازهٔ ذخیره‌سازیِ
+  // [-۲۰۰، ۱۲۰۰] در افق و [-۸۰، ۱۰۸۰] در عمود را کامل پوشش می‌دهد.
+  const getBleedUniformBounds = () => {
+    const bleed = bleedRef.current || { x: 0, y: 0 };
+    const sx = scaleRef.current?.scaleX || 1;
+    const sy = scaleRef.current?.scaleY || 1;
+    const aspectNow = aspectRef.current || 1;
+    return {
+      minX: -(bleed.x || 0) / sx,
+      maxX: 1000 + (bleed.x || 0) / sx,
+      minY: -(bleed.y || 0) / sy,
+      maxY: 1000 * aspectNow + (bleed.y || 0) / sy,
+    };
+  };
+
+  // پیشگیریِ ۲ (§۱): مختصاتِ رسم را به بازهٔ بومِ توسعه‌یافته محدود
+  // کن تا Infinity/NaN هرگز واردِ نقاطِ شکل نشود؛ مقدارِ غیرِ متناهی
+  // با مرکزِ صفحه (۵۰۰) جایگزین می‌شود.
+  const clampUniformPoint = (pt) => {
+    if (!pt) return null;
+    const b = getBleedUniformBounds();
+    const x = Number.isFinite(pt.x) ? Math.max(b.minX, Math.min(b.maxX, pt.x)) : 500;
+    const y = Number.isFinite(pt.y) ? Math.max(b.minY, Math.min(b.maxY, pt.y)) : 500;
+    return { x, y };
+  };
+
+  // تبدیلِ مختصاتِ کلاینت → یکنواخت، با همان ریاضیِ extractPoints
+  // (کشِ Rectِ ژست + چرخشِ معکوس)، ولی برای هر نقطهٔ دلخواهِ صفحه:
+  // بومِ حاشیه‌دار، ابعادِ بزرگ‌شده (SW/SH) دارد و مبدأش در گوشهٔ
+  // Bleed است؛ پس پس از چرخشِ معکوس، Bleed کم می‌شود. بدونِ کلمپ —
+  // نقطهٔ بیرونِ صفحه (مثلاً در صفحهٔ همسایه) باید مقدارِ واقعی‌اش
+  // را بدهد تا انتقالِ بین‌صفحه‌ای حساب شود؛ فقط NaN حذف می‌شود.
+  const clientToUniform = (clientX, clientY) => {
+    const stage = stageRef.current;
+    if (!stage || typeof clientX !== 'number' || typeof clientY !== 'number') return null;
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const { scaleX: sx, scaleY: sy } = scaleRef.current || { scaleX: 1, scaleY: 1 };
+    const bleed = bleedRef.current || { x: 0, y: 0 };
+    const SW = (sizeRef.current?.w || 0) + (bleed.x || 0) * 2;
+    const SH = (sizeRef.current?.h || 0) + (bleed.y || 0) * 2;
+    const content = stage.content;
+    const cached = activeGestureRectRef.current;
+    const sizeNow = sizeRef.current || {};
+    const rect = (cached && cached.w === sizeNow.w && cached.h === sizeNow.h)
+      ? cached.rect
+      : (content ? content.getBoundingClientRect() : null);
+    if (!rect) return null;
+    let bx = clientX - rect.left;
+    let by = clientY - rect.top;
+    if (bx < -2 || by < -2 || bx > rect.width + 2 || by > rect.height + 2) {
+      const fresh = content ? content.getBoundingClientRect() : null;
+      if (fresh) {
+        bx = clientX - fresh.left;
+        by = clientY - fresh.top;
+      }
+    }
+    const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
+    let lx = bx;
+    let ly = by;
+    if (rot === 90) {
+      lx = by;
+      ly = (SH || 0) - bx;
+    } else if (rot === 180) {
+      lx = (SW || 0) - bx;
+      ly = (SH || 0) - by;
+    } else if (rot === 270) {
+      lx = (SW || 0) - by;
+      ly = bx;
+    }
+    lx -= (bleed.x || 0);
+    ly -= (bleed.y || 0);
+    const x = lx / sx;
+    const y = ly / sy;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  };
+
+  // تبدیلِ وارون: یکنواخت → کلاینت (برای مرکزِ آیتم‌های جابه‌جاشده
+  // در تشخیصِ انتقالِ بین‌صفحه‌ای).
+  const uniformToClient = (ux, uy) => {
+    const stage = stageRef.current;
+    if (!stage || !Number.isFinite(ux) || !Number.isFinite(uy)) return null;
+    const { scaleX: sx, scaleY: sy } = scaleRef.current || { scaleX: 1, scaleY: 1 };
+    const bleed = bleedRef.current || { x: 0, y: 0 };
+    const SW = (sizeRef.current?.w || 0) + (bleed.x || 0) * 2;
+    const SH = (sizeRef.current?.h || 0) + (bleed.y || 0) * 2;
+    const content = stage.content;
+    const rect = content ? content.getBoundingClientRect() : null;
+    if (!rect) return null;
+    const lx = ux * sx + (bleed.x || 0);
+    const ly = uy * sy + (bleed.y || 0);
+    const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
+    let bx = lx;
+    let by = ly;
+    if (rot === 90) {
+      bx = (SH || 0) - ly;
+      by = lx;
+    } else if (rot === 180) {
+      bx = (SW || 0) - lx;
+      by = (SH || 0) - ly;
+    } else if (rot === 270) {
+      bx = ly;
+      by = (SW || 0) - lx;
+    }
+    return { clientX: rect.left + bx, clientY: rect.top + by };
+  };
+
+  // مرحلهٔ ۵۰ §۲ (پیشگیریِ ۱): کلیکِ ناحیهٔ Bleed که روی هیچ آیتمِ
+  // بیرونِ صفحه‌ای فرود نیامده، به مقصدِ درست تحویل داده می‌شود تا
+  // کلیکِ کاغذِ صفحهٔ همسایه دزدیده نشود:
+  // (الف) اگر نقطه روی کاغذِ صفحهٔ دیگری است، رویداد مستقیم به
+  // Stageِ همان صفحه می‌رود (با علامتِ __forwardedFromBleed تا گاردِ
+  // گیرنده، آن را پس نفرستد و حلقه نسازد)؛
+  // (ب) وگرنه عنصرِ زیرِ Stage خوانده می‌شود و اگر Stageِ لایهٔ
+  // دیگری بود، کلیک نادیده گرفته می‌شود (همان رفتارِ امروز در فضای
+  // بینِ صفحات) وگرنه رویداد به همان عنصر تحویل داده می‌شود.
+  const forwardPointerDownToElementBelow = (nativeEvent) => {
+    try {
+      if (!nativeEvent || typeof nativeEvent.clientX !== 'number') return;
+      if (typeof document === 'undefined') return;
+      const cx = nativeEvent.clientX;
+      const cy = nativeEvent.clientY;
+      let target = null;
+      let targetIsStage = false;
+      const pageEls = document.querySelectorAll('[data-page-number]');
+      for (const el of pageEls) {
+        const n = Number(el.getAttribute('data-page-number'));
+        if (!Number.isFinite(n) || n === Number(pageRef.current)) continue;
+        const r = el.getBoundingClientRect();
+        if (r && cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) {
+          target = el.querySelector('.konvajs-content');
+          targetIsStage = true;
+          break;
+        }
+      }
+      if (!target) {
+        const container = stageRef.current?.container?.();
+        if (!container) return;
+        const prevVisibility = container.style.visibility;
+        container.style.visibility = 'hidden';
+        let below = null;
+        try { below = document.elementFromPoint(cx, cy); } catch (_) { below = null; }
+        container.style.visibility = prevVisibility;
+        if (!below || below === container || container.contains(below)) return;
+        if (below.closest && below.closest('.konvajs-content')) return;
+        target = below;
+      }
+      if (!target) return;
+      const forwarded = new PointerEvent('pointerdown', {
+        bubbles: true,
+        cancelable: true,
+        clientX: cx,
+        clientY: cy,
+        button: nativeEvent.button ?? 0,
+        buttons: nativeEvent.buttons ?? 1,
+        pointerId: nativeEvent.pointerId ?? 0,
+        pointerType: nativeEvent.pointerType || 'mouse',
+        isPrimary: nativeEvent.isPrimary !== false,
+      });
+      if (targetIsStage) {
+        try { forwarded.__forwardedFromBleed = true; } catch (_) {}
+      }
+      forwardingPointerDepth += 1;
+      try { target.dispatchEvent(forwarded); } finally { forwardingPointerDepth -= 1; }
+    } catch (_) { /* امن: کلیک نادیده گرفته می‌شود */ }
+  };
+
+  // ارسالِ رویدادِ مارکیِ بین‌صفحه‌ای (throttle با ۴ پیکسل): مستطیلِ
+  // دیداری از مختصاتِ کلاینتِ شروع و جاری ساخته می‌شود (نه از باکسِ
+  // کلمپ‌شده)، تا وقتی اشاره‌گر واردِ صفحهٔ همسایه شد، مستطیل واقعاً
+  // به آن صفحه برسد. فقط وقتی مارکی از کاغذِ خودِ صفحه بیرون زده.
+  const dispatchCrossPageMarquee = () => {
+    if (!isMarqueeRef.current) return;
+    const start = marqueeStartClientRef.current;
+    const last = lastPointerClientRef.current;
+    if (!start || !last) return;
+    const rect = {
+      left: Math.min(start.clientX, last.clientX),
+      top: Math.min(start.clientY, last.clientY),
+      right: Math.max(start.clientX, last.clientX),
+      bottom: Math.max(start.clientY, last.clientY),
+    };
+    const pageEl = containerRef.current;
+    if (pageEl) {
+      const pr = pageEl.getBoundingClientRect();
+      if (rect.top >= pr.top && rect.bottom <= pr.bottom && rect.left >= pr.left && rect.right <= pr.right) return;
+    }
+    const prev = crossPageDispatchRef.current;
+    if (prev && Math.abs(prev.left - rect.left) <= 4 && Math.abs(prev.top - rect.top) <= 4 &&
+        Math.abs(prev.right - rect.right) <= 4 && Math.abs(prev.bottom - rect.bottom) <= 4) return;
+    crossPageDispatchRef.current = rect;
+    try {
+      window.dispatchEvent(new CustomEvent('annotation:cross-page-marquee', {
+        detail: { clientRect: rect, sourcePage: Number(pageRef.current), gestureId: marqueeGestureIdRef.current },
+      }));
+    } catch (_) { /* رویداد اختیاری است */ }
+  };
+
+  // درگِ هندلِ فلش از روی یک نقطهٔ یکنواخت (همان منطقِ handleMove،
+  // بدونِ تغییر — فقط به تابعِ مشترک منتقل شده تا شنوندهٔ سراسریِ
+  // pointermove هم از همان مسیر برود).
+  const applyArrowHandleMove = (rawPt) => {
+    const edit = arrowHandleEditRef.current;
+    if (!edit) return;
+    const pt = clampUniformPoint(rawPt);
+    if (!pt) return;
+    edit.moved = true;
+    const init = edit.initialItem;
+    let next;
+    if (edit.handle === 'start') {
+      next = { ...init, startX: pt.x, startY: pt.y };
+    } else if (edit.handle === 'end') {
+      next = { ...init, endX: pt.x, endY: pt.y };
+    } else {
+      const midX = (Number(init.startX) + Number(init.endX)) / 2;
+      const midY = (Number(init.startY) + Number(init.endY)) / 2;
+      const distToMid = Math.hypot(pt.x - midX, pt.y - midY);
+      if (distToMid < 6 / (scaleRef.current?.scaleX || 1)) {
+        next = { ...init, arrowStyle: 'straight', cx: null, cy: null };
+      } else {
+        next = { ...init, arrowStyle: 'curved', cx: 2 * pt.x - midX, cy: 2 * pt.y - midY };
+      }
+    }
+    edit.lastPreview = next;
+    if (arrowPreviewShapeRef.current) arrowPreviewShapeRef.current.visible(true);
+    const nMidX = (Number(next.startX) + Number(next.endX)) / 2;
+    const nMidY = (Number(next.startY) + Number(next.endY)) / 2;
+    const nCurved = next.arrowStyle === 'curved' &&
+      Number.isFinite(Number(next.cx)) && Number.isFinite(Number(next.cy));
+    const apexX = nCurved ? (nMidX + Number(next.cx)) / 2 : nMidX;
+    const apexY = nCurved ? (nMidY + Number(next.cy)) / 2 : nMidY;
+    const hn = arrowHandleNodeRefs.current;
+    const sN = hn.get('start');
+    const eN = hn.get('end');
+    const mN = hn.get('mid');
+    if (sN) sN.setAttrs({ x: next.startX, y: next.startY });
+    if (eN) eN.setAttrs({ x: next.endX, y: next.endY });
+    if (mN) mN.setAttrs({ x: apexX, y: apexY });
+    draftLayerRef.current?.batchDraw();
+  };
+
+  // به‌روزرسانیِ زندهٔ ژستِ select از روی یک نقطهٔ یکنواخت — همان
+  // منطقِ handleMove (کمند/مارکی/جابه‌جاییِ دستی)، با دو تفاوتِ
+  // مرحلهٔ ۵۰: (۱) مارکی/کمند به بازهٔ بومِ توسعه‌یافته کلمپ
+  // می‌شوند (پیشگیریِ ۲)؛ (۲) مارکی، رویدادِ بین‌صفحه‌ای می‌فرستد.
+  // جابه‌جاییِ دستی عمداً کلمپ نمی‌شود: دلتای واقعی برای انتقالِ
+  // بین‌صفحه‌ای لازم است (فقط NaN سد می‌شود).
+  const applySelectGestureMove = (rawCur, clientX, clientY) => {
+    if (typeof clientX === 'number' && typeof clientY === 'number') {
+      lastPointerClientRef.current = { clientX, clientY };
+    }
+    if (lassoPointsRef.current) {
+      const cur = clampUniformPoint(rawCur);
+      if (!cur) return;
+      lassoPointsRef.current = filterLassoPoints(lassoPointsRef.current.concat([cur]), LASSO_MIN_POINT_DIST);
+      if (lassoPointsRef.current.length > 800) {
+        const thinned = lassoPointsRef.current.filter((_, i) => i % 2 === 0);
+        thinned.push(cur);
+        lassoPointsRef.current = thinned;
+      }
+      if (lassoLineRef.current) {
+        const flat = [];
+        for (const pt of lassoPointsRef.current) flat.push(pt.x, pt.y);
+        lassoLineRef.current.setAttrs({ points: flat, visible: true });
+      }
+      draftLayerRef.current?.batchDraw();
+      return;
+    }
+    if (isMarqueeRef.current) {
+      const cur = clampUniformPoint(rawCur);
+      if (!cur) return;
+      const box = marqueeRect(isMarqueeRef.current.startPt, cur);
+      marqueeBoxRef.current = box;
+      if (marqueeRectRef.current) {
+        marqueeRectRef.current.setAttrs({
+          x: box.x, y: box.y, width: box.width, height: box.height,
+          visible: box.width > 4 || box.height > 4,
+        });
+      }
+      draftLayerRef.current?.batchDraw();
+      dispatchCrossPageMarquee();
+      return;
+    }
+    if (manualMoveRef.current) {
+      if (!rawCur || !Number.isFinite(rawCur.x) || !Number.isFinite(rawCur.y)) return;
+      const cur = rawCur;
+      const mm = manualMoveRef.current;
+      mm.lastPt = cur;
+      const dx = cur.x - mm.startPt.x;
+      const dy = cur.y - mm.startPt.y;
+      for (const id of mm.originals.keys()) {
+        const node = itemNodeRefs.current.get(id);
+        if (node) node.position({ x: dx, y: dy });
+      }
+      syncSelectionBoxOffsets(dx, dy);
+      const mmAdornerBase = arrowHandleBaseRef.current;
+      if (mmAdornerBase && mm.originals.has(mmAdornerBase.id)) {
+        syncAdornerHandlesWithGroupDrag(dx, dy);
+      }
+      // مرحلهٔ ۵۱ §۴: حینِ جابه‌جاییِ دستیِ select، کرسر move است،
+      // نه grabbing؛ grabbing فقط مالِ ابزارِ دست است.
+      setStageCursor('move');
+      drawBothLayers();
+      return;
+    }
+  };
+
+  // اسکرولِ خودکارِ لبه (§۱٫۲): وقتی در حینِ مارکی/کمند/جابه‌جایی،
+  // ماوس به ۴۸ پیکسل از لبهٔ بالایی/پایینیِ کانتینرِ اسکرول رسید،
+  // حلقهٔ requestAnimationFrame کانتینر را نرم اسکرول می‌کند؛ با
+  // جابه‌جاییِ صفحه زیرِ اشاره‌گرِ ثابت، ژست با همان مختصاتِ کلاینتِ
+  // آخر دوباره اعمال می‌شود تا انتخاب در همان نما به صفحهٔ بعد برسد.
+  const computeAutoScrollDir = (clientX, clientY) => {
+    const container = findReaderScrollContainer();
+    if (!container) return 0;
+    const rect = container.getBoundingClientRect();
+    if (clientY - rect.top < 48) return -1;
+    if (rect.bottom - clientY < 48) return 1;
+    return 0;
+  };
+  const autoScrollTick = () => {
+    autoScrollRafRef.current = null;
+    const dir = autoScrollDirRef.current;
+    const last = lastPointerClientRef.current;
+    if (dir === 0 || !last) { autoScrollDirRef.current = 0; return; }
+    if (!isMarqueeRef.current && !lassoPointsRef.current && !manualMoveRef.current) {
+      autoScrollDirRef.current = 0;
+      return;
+    }
+    const container = findReaderScrollContainer();
+    if (!container) { autoScrollDirRef.current = 0; return; }
+    const rect = container.getBoundingClientRect();
+    const dist = dir < 0 ? last.clientY - rect.top : rect.bottom - last.clientY;
+    const closeness = Math.max(0, Math.min(1, 1 - Math.max(0, dist) / 48));
+    const speed = 5 + closeness * 13;
+    container.scrollTop += dir * speed;
+    const pt = clientToUniform(last.clientX, last.clientY);
+    if (pt) applySelectGestureMove(pt, last.clientX, last.clientY);
+    if (!isMarqueeRef.current && !lassoPointsRef.current && !manualMoveRef.current) {
+      autoScrollDirRef.current = 0;
+      return;
+    }
+    const nextDir = computeAutoScrollDir(last.clientX, last.clientY);
+    if (nextDir === 0) { autoScrollDirRef.current = 0; return; }
+    autoScrollDirRef.current = nextDir;
+    autoScrollRafRef.current = requestAnimationFrame(autoScrollTick);
+  };
+  const maybeAutoScroll = (clientX, clientY) => {
+    if (!isMarqueeRef.current && !lassoPointsRef.current && !manualMoveRef.current) {
+      stopAutoScroll();
+      return;
+    }
+    if (typeof clientX !== 'number' || typeof clientY !== 'number') return;
+    const dir = computeAutoScrollDir(clientX, clientY);
+    if (dir === 0) { stopAutoScroll(); return; }
+    autoScrollDirRef.current = dir;
+    if (autoScrollRafRef.current == null) {
+      autoScrollRafRef.current = requestAnimationFrame(autoScrollTick);
+    }
+  };
+
+  // مرحلهٔ ۵۰ §۱: ثبتِ شنوندهٔ سراسریِ pointermove در شروعِ ژستِ
+  // select (در handleDown) — مختصات با clientToUniform نسبت به همین
+  // صفحه حساب می‌شود، پس مارکی/کمند/جابه‌جایی در فضای بینِ صفحات و
+  // حاشیه‌های بیرونِ کاغذ هم بدونِ قطع ادامه می‌یابد و فقط با
+  // pointerupی واقعیِ window یا راست‌کلیک تکمیل می‌شود. اگر رویداد
+  // رویِ خودِ Stage باشد، هندلرِ Konva آن را پوشش می‌دهد و این
+  // شنونده رد می‌شود تا به‌روزرسانی مضاعف نشود.
+  const registerWindowSelectMove = () => {
+    if (windowSelectMoveRef.current) return;
+    const onWindowSelectMove = (ev) => {
+      if (!ev || typeof ev.clientX !== 'number' || typeof ev.clientY !== 'number') return;
+      lastPointerClientRef.current = { clientX: ev.clientX, clientY: ev.clientY };
+      try {
+        const content = stageRef.current?.content;
+        if (content && ev.target && typeof content.contains === 'function' && content.contains(ev.target)) return;
+      } catch (_) { /* ادامه بده */ }
+      if (arrowHandleEditRef.current) {
+        const pt = clientToUniform(ev.clientX, ev.clientY);
+        if (pt) applyArrowHandleMove(pt);
+        return;
+      }
+      if (!isMarqueeRef.current && !lassoPointsRef.current && !manualMoveRef.current) return;
+      const pt = clientToUniform(ev.clientX, ev.clientY);
+      if (!pt) return;
+      applySelectGestureMove(pt, ev.clientX, ev.clientY);
+      maybeAutoScroll(ev.clientX, ev.clientY);
+    };
+    windowSelectMoveRef.current = onWindowSelectMove;
+    window.addEventListener('pointermove', onWindowSelectMove, true);
+  };
+
+  // تشخیصِ انتقالِ بین‌صفحه‌ای در پایانِ manualMove: نقطهٔ فرودِ
+  // ماوس با عنصرهای [data-page-number] سنجیده می‌شود؛ اگر روی صفحهٔ
+  // دیگری فرود آمد، آیتم‌های جابه‌جاشده با جابه‌جاییِ نسبیِ
+  // (نقطهٔ فرود در مقصد − نقطهٔ فرود در مبدأ) به فضای ذخیره‌سازیِ
+  // 0..1000ی صفحهٔ مقصد برده می‌شوند. خروجی null یعنی «بدونِ انتقال».
+  // محدودیتِ شناخته‌شده: نگاشتِ نقطهٔ فرود در صفحهٔ مقصد، چرخشِ
+  // ۹۰/۲۷۰ را در نظر نمی‌گیرد (کادرِ [data-page-number] چرخیده نیست)؛
+  // در آن حالت، صفحهٔ مقصد درست تشخیص داده می‌شود ولی جای دقیقِ
+  // فرود ممکن است جابه‌جا باشد.
+  const detectCrossPageTransfer = (nextUniformItems, mm, nativeEvent) => {
+    try {
+      if (typeof document === 'undefined') return null;
+      const movedIds = [...mm.originals.keys()];
+      if (movedIds.length === 0) return null;
+      const moved = nextUniformItems.filter((it) => it && mm.originals.has(it.id));
+      if (moved.length === 0) return null;
+      let clientX = Number(nativeEvent?.clientX);
+      let clientY = Number(nativeEvent?.clientY);
+      if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+        const ub = getUnionBounds(moved, { stickyScaleFor });
+        if (!ub) return null;
+        const c = uniformToClient(ub.x + ub.width / 2, ub.y + ub.height / 2);
+        if (!c) return null;
+        clientX = c.clientX;
+        clientY = c.clientY;
+      }
+      const els = document.querySelectorAll('[data-page-number]');
+      let targetPage = null;
+      let targetRect = null;
+      for (const el of els) {
+        const n = Number(el.getAttribute('data-page-number'));
+        if (!Number.isFinite(n) || n === Number(pageRef.current)) continue;
+        const r = el.getBoundingClientRect();
+        if (r && clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+          targetPage = n;
+          targetRect = r;
+          break;
+        }
+      }
+      if (targetPage == null || !targetRect) return null;
+      const aspectNow = aspectRef.current || 1;
+      const targetDrop = {
+        x: ((clientX - targetRect.left) / Math.max(1, targetRect.width)) * 1000,
+        y: ((clientY - targetRect.top) / Math.max(1, targetRect.height)) * 1000 * aspectNow,
+      };
+      const sourceDrop = clientToUniform(clientX, clientY);
+      if (!sourceDrop) return null;
+      const shiftX = targetDrop.x - sourceDrop.x;
+      const shiftY = targetDrop.y - sourceDrop.y;
+      const movedTargetStorage = moved.map((it) => {
+        const shifted = moveAnnotationByDelta(it, shiftX, shiftY);
+        const { _bbox, ...clean } = shifted;
+        return uniformToStorage(clean, aspectNow);
+      });
+      return { targetPage, movedTargetStorage };
+    } catch (_) { return null; }
+  };
+
+  // تبدیلِ لیستِ یکنواخت به ذخیره‌سازی با حفظِ هویتِ storage برای
+  // آیتم‌های بی‌تغییر (همان منطقِ commit) — برای لیستِ باقی‌ماندهٔ
+  // مبدأ در انتقالِ بین‌صفحه‌ای.
+  const uniformListToStorage = (list) => {
+    const prevUniform = uniformItemsRef.current || [];
+    const prevStorage = itemsRef.current || [];
+    const uniformById = new Map(prevUniform.map((u) => [u.id, u]));
+    const storageById = new Map(prevStorage.map((s) => [s.id, s]));
+    return list.map((it) => {
+      if (it && uniformById.get(it.id) === it && storageById.has(it.id)) {
+        return storageById.get(it.id);
+      }
+      const { _bbox, ...clean } = it;
+      return uniformToStorage(clean, aspectRef.current);
+    });
+  };
+
+
+  // مرحلهٔ ۴۹: با draggable={false}، درگِ نیتیوِ Konva دیگر آتش
+  // نمی‌شود؛ این دو هندلر فقط به‌عنوانِ دفاعِ دوم مانده‌اند و مسیرِ
+  // اصلیِ جابه‌جایی، manualMoveی Stage است.
   const handleItemDragMove = useCallback((e) => {
     const node = e.target;
     if (!node) return;
-    setStageCursor('grabbing');
+    // مرحلهٔ ۵۱ §۴: درگِ آیتم فقط در حالتِ select رخ می‌دهد
+    // (draggable همیشه false است)؛ کرسر move است، نه grabbing.
+    setStageCursor('move');
     const dx = node.x();
     const dy = node.y();
     const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
@@ -2418,6 +3060,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   };
   const handleItemDragEnd = useCallback((e, item) => {
     notifyGestureEnd();
+    clearAnnotationGestureActive();
     const node = e.target;
     if (!node) return;
     // بازمعماریِ قطعی — دفاعِ دوم در برابرِ حبابِ درگِ هندل: اگر
@@ -2455,13 +3098,73 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       restoreStageCursor();
       return;
     }
-    const nextItems = uniformItems.map((it) =>
-      idsToMove.includes(it.id) ? moveAnnotationByDelta(it, dx, dy) : it
-    );
+    // مرحله ۴۸ §۵ (گاردریل ۴): جابه‌جاییِ گروهی از مسیرِ
+    // moveSelectedItemsی انجین — دقیقاً یک دلتا به‌ازای هر آیتم؛
+    // نودها قبل از کامیت reset شده‌اند، پس دلتا با آفستِ نود جمع نمی‌شود.
+    const nextItems = moveSelectedItems(uniformItems, idsToMove, dx, dy);
     commit(nextItems);
     drawBothLayers();
     restoreStageCursor();
   }, [commit, uniformItems]);
+
+  // مرحله ۴۸ §۵: خروج از انتخابِ قفل‌شده — پاک کردنِ انتخابِ استور
+  // + باز کردنِ قفل + تخلیهٔ Transformer (تا قاب روی فضای خالی
+  // نماند). در همهٔ مسیرهای خروج (هاد، Enter/Escape، راست‌کلیک،
+  // فیلترِ کهنه) همین تابع صدا زده می‌شود.
+  const exitSelection = useCallback(() => {
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    if (typeof state.clearSelection === 'function') state.clearSelection();
+    setSelectionLocked(false);
+    resetSelectionBoxOffsets();
+    clickCycleRef.current = null;
+    if (transformerRef.current) {
+      transformerRef.current.nodes([]);
+      setSelectedNodes([]);
+    }
+    drawBothLayers();
+    restoreStageCursor();
+  }, [setSelectionLocked]);
+
+  // مرحله ۴۸ §۵: حذفِ شکل‌های انتخاب‌شده از هاد — همان مسیرِ
+  // Deleteی صفحه‌کلید (یک ورودیِ Undo + پاک شدنِ انتخاب + باز
+  // شدنِ قفل)، ولی برای دکمهٔ هاد.
+  const deleteSelectedAnnotations = useCallback(() => {
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const ids = state.selectedAnnotationIds || [];
+    if (ids.length === 0) return;
+    if (state.selectedAnnotationPage != null &&
+        Number(state.selectedAnnotationPage) !== Number(pageNumber)) return;
+    const remaining = uniformItems.filter((it) => !ids.includes(it.id));
+    if (remaining.length === uniformItems.length) return;
+    if (transformerRef.current) {
+      transformerRef.current.nodes([]);
+      setSelectedNodes([]);
+    }
+    commit(remaining);
+    if (typeof state.clearSelection === 'function') state.clearSelection();
+    setSelectionLocked(false);
+    drawBothLayers();
+    restoreStageCursor();
+  }, [commit, uniformItems, pageNumber, setSelectionLocked]);
+
+  // مرحله ۴۸ §۵: کپی/تکثیرِ شکل‌های انتخاب‌شده از هاد — هر آیتم با
+  // همان moveAnnotationByDeltaی جابه‌جایی (۲۴ واحد به راست و پایین)
+  // کپی می‌شود و idی تازه می‌گیرد؛ بعد از کامیت، کپی‌ها انتخاب
+  // می‌شوند و قفل می‌ماند (هاد بالای کپی‌ها می‌ماند).
+  const duplicateSelectedAnnotations = useCallback(() => {
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const ids = state.selectedAnnotationIds || [];
+    if (ids.length === 0) return;
+    const selected = uniformItems.filter((it) => ids.includes(it.id));
+    if (selected.length === 0) return;
+    const copies = selected.map((it) => ({ ...moveAnnotationByDelta(it, 24, 24), id: uid('copy') }));
+    commit([...uniformItems, ...copies]);
+    if (typeof state.setSelectedAnnotations === 'function') {
+      state.setSelectedAnnotations(copies.map((it) => it.id), pageNumber);
+    }
+    setSelectionLocked(true);
+    drawBothLayers();
+  }, [commit, uniformItems, pageNumber, setSelectionLocked]);
 
   // پولیشِ انقلابی — هندل‌های برداریِ فلش (PowerPoint-style).
   // مختصاتِ هندل‌ها در فضای Stage (پیکسلِ صفحه) است، چون هندل‌ها
@@ -2606,11 +3309,54 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       }
       commit(remaining);
       if (typeof state.clearSelection === 'function') state.clearSelection();
+      // مرحله ۴۸ §۵: حذف با Delete هم قفلِ انتخاب را باز می‌کند تا
+      // هادِ شناور روی انتخابِ حذف‌شده نماند.
+      setSelectionLocked(false);
       drawBothLayers();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [commit, uniformItems, pageNumber]);
+
+  // مرحله ۴۸ §۵ (گاردریل ۵): فیلترِ فوریِ selectedIdsی کهنه —
+  // وقتی آیتم‌های همین صفحه عوض می‌شوند (حذف، Undo، تغییرِ صفحه)،
+  // idهایی که دیگر در آیتم‌های صفحه نیستند فوراً از انتخاب بیرون
+  // می‌روند. فقط وقتی انتخاب مالِ همین صفحه است
+  // (selectedAnnotationPage برابرِ pageNumber) — چون به‌ازای هر
+  // صفحه یک نمونهٔ لایه mount است و نمونهٔ صفحهٔ دیگر هرگز نباید
+  // انتخابِ آن صفحه را دست بزند. نگهبانِ برابری (valid.length ===
+  // ids.length) جلوی حلقهٔ اثر را می‌گیرد؛ اگر هیچ idی معتبری
+  // نماند، انتخاب کامل پاک و قفل باز می‌شود.
+  useEffect(() => {
+    if (!isAnnotationActive) return;
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const ids = state.selectedAnnotationIds || [];
+    if (ids.length === 0) {
+      // فقط idی تکیِ جا مانده (بدونِ لیست) هم پاک می‌شود — اگر
+      // مالِ همین صفحه باشد و آیتمش دیگر نباشد.
+      if (state.selectedAnnotationId != null &&
+          state.selectedAnnotationPage != null &&
+          Number(state.selectedAnnotationPage) === Number(pageNumber) &&
+          !uniformItems.some((it) => it.id === state.selectedAnnotationId) &&
+          typeof state.clearSelection === 'function') {
+        state.clearSelection();
+      }
+      return;
+    }
+    if (state.selectedAnnotationPage == null) return;
+    if (Number(state.selectedAnnotationPage) !== Number(pageNumber)) return;
+    const valid = filterStaleSelectedIds(ids, uniformItems);
+    if (valid.length === ids.length) return;
+    if (valid.length === 0) {
+      if (typeof state.clearSelection === 'function') state.clearSelection();
+      setSelectionLocked(false);
+      if (transformerRef.current) transformerRef.current.nodes([]);
+      setSelectedNodes([]);
+    } else if (typeof state.setSelectedAnnotations === 'function') {
+      state.setSelectedAnnotations(valid, pageNumber);
+    }
+    drawBothLayers();
+  }, [uniformItems, pageNumber, selectedAnnotationIds, selectedAnnotationPage, isAnnotationActive, setSelectionLocked]);
 
   // فاز ۴: باز کردنِ ویرایشگرِ متن برای آیتمِ موجود (دوبارکلیک).
   // فونت/رنگ/شفافیت از خودِ آیتم می‌آید، نه از استورِ فعلی، تا
@@ -2663,6 +3409,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     draftPointsRef.current = [];
     draftStyleRef.current = null;
     lastRawPointRef.current = null;
+    // مرحله 44 §3: پاک‌سازیِ پیش‌نمایشِ کمند (اگر ژست، نیمه‌کاره رها شد).
+    lassoPointsRef.current = null;
+    if (lassoLineRef.current) lassoLineRef.current.visible(false);
     // فاز ۲: پاک‌سازی پیش‌نویس باکس
     draftBoxRef.current = null;
     if (draftBoxShapeRef.current) {
@@ -2761,7 +3510,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     const stage = stageRef.current;
     if (!stage || !nativeEvent) return [];
     const { scaleX: sx, scaleY: sy } = scaleRef.current;
-    const { w: SW, h: SH } = sizeRef.current || {};
+    // مرحلهٔ ۵۰ §۲: ابعادِ محلیِ Stageِ حاشیه‌دار (صفحه + Bleed از هر طرف).
+    const bleedNow = bleedRef.current || { x: 0, y: 0 };
+    const SW = (sizeRef.current?.w || 0) + (bleedNow.x || 0) * 2;
+    const SH = (sizeRef.current?.h || 0) + (bleedNow.y || 0) * 2;
 
     const coalesced = (nativeEvent.getCoalescedEvents && typeof nativeEvent.getCoalescedEvents === 'function')
       ? nativeEvent.getCoalescedEvents()
@@ -2821,6 +3573,12 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         ly = bx;
       }
       // هر زاویهٔ دیگری (از جمله ۰): بدونِ تبدیل (رفتارِ قبلی).
+      // مرحلهٔ ۵۰ §۲: مبدأِ محلیِ Stageِ حاشیه‌دار، گوشهٔ Bleed است؛
+      // با کم کردنِ Bleed به مبدأِ صفحه برمی‌گردد (دستگاهِ مختصاتِ
+      // صفحه عوض نمی‌شود). مقدارِ غیرِ متناهی هرگز به نقاطِ شکل نمی‌رسد.
+      lx -= (bleedNow.x || 0);
+      ly -= (bleedNow.y || 0);
+      if (!Number.isFinite(lx) || !Number.isFinite(ly)) continue;
       out.push({
         x: lx / sx,
         y: ly / sy,
@@ -2851,7 +3609,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       : null;
     if (pos) {
       const { scaleX: sx, scaleY: sy } = scaleRef.current;
-      const { w: SW, h: SH } = sizeRef.current || {};
+      // مرحلهٔ ۵۰ §۲: ابعادِ بزرگ‌شدهٔ Stageِ حاشیه‌دار + کم کردنِ Bleed.
+      const bleedNow = bleedRef.current || { x: 0, y: 0 };
+      const SW = (sizeRef.current?.w || 0) + (bleedNow.x || 0) * 2;
+      const SH = (sizeRef.current?.h || 0) + (bleedNow.y || 0) * 2;
       const rot = ((Number(rotationRef.current) || 0) % 360 + 360) % 360;
       let lx = pos.x;
       let ly = pos.y;
@@ -2865,6 +3626,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         lx = (SW || 0) - pos.y;
         ly = pos.x;
       }
+      lx -= (bleedNow.x || 0);
+      ly -= (bleedNow.y || 0);
       // Forensic Step 4 — NaN Guard: اگر مقیاس یا ابعاد، نامعتبر
       // باشند (مثلاً تقسیم بر صفر)، خروجی Infinity/NaN می‌شود و
       // مرورگر، left/topی NaNpx را نادیده می‌گیرد — کارت، در جای
@@ -2965,6 +3728,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
   const handleDown = useCallback((e) => {
     if (!isAnnotationActive) return;
+    // مرحلهٔ ۵۰ §۲: رویدادِ تحویل‌شده از Bleedِ صفحهٔ همسایه (با علامتِ
+    // __forwardedFromBleed) مستقیم پردازش می‌شود؛ ورودِ دوبارهٔ بدونِ
+    // علامت در حینِ تحویل، نادیده گرفته می‌شود تا حلقه نسازد.
+    if (forwardingPointerDepth > 0 && !getNative(e)?.__forwardedFromBleed) return;
     // Forensic Step 4 — رفتارِ هوشمندِ کلیکِ بیرونی (جایگزینِ
     // قانونِ گامِ قبل که کلیکِ بیرونی را کاملاً نادیده می‌گرفت):
     // اگر ویرایشگرِ متن باز است، هر pointerdown روی Stage، اول
@@ -2988,6 +3755,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     }
     if (activeStickyEditorRef.current) return;
     const native = getNative(e);
+    // مرحله ۴۸ §۵: راست‌کلیک هرگز ژستِ رسم/انتخاب شروع نمی‌کند —
+    // تکمیل با راست‌کلیک از مسیرِ onContextMenuی Stage انجام
+    // می‌شود (به handleStageContextMenu مراجعه کنید).
+    if (native && native.button === 2) return;
     if (!shouldProcessEvent(native)) return; // فیکس #۱
     // فاز ۵: capture فقط برای ابزارهای غیرِ select انجام می‌شود،
     // چون capture روی stage.content می‌تواند dragِ نودهای Konva
@@ -2997,7 +3768,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // دقیقاً طبقِ TASK. قبلاً بوم، اشاره‌گر را capture می‌کرد و
     // همین، در ترکیب با mount شدنِ textarea با autoFocus در همان
     // ژست، فوکوس را ناپایدار می‌کرد. select از قبل مستثنا بود.
-    if (toolRef.current !== 'select' && toolRef.current !== 'text') capturePointer(native);
+    if (toolRef.current !== 'select' && toolRef.current !== 'text' && toolRef.current !== 'hand') capturePointer(native);
 
     // فاز ۲: کشِ Rect ژست برای کلِ این ژست — همان Rectای که
     // extractPoints می‌خواند (بومِ contentِ Stage؛ وگرنه کانتینرِ
@@ -3014,6 +3785,69 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
     const pts = extractPoints(native);
     if (pts.length === 0) return;
+    // مرحلهٔ ۵۰ §۲ (پیشگیریِ ۱): کلیکِ بیرونِ کاغذ (در ناحیهٔ Bleed
+    // یا فضای بینِ صفحات) که روی هیچ آیتمِ بیرونِ صفحه‌ای فرود
+    // نیامده، ژست شروع نمی‌کند؛ رویداد به مقصدِ درست (کاغذِ صفحهٔ
+    // همسایه یا عنصرِ زیرِ Stage) تحویل داده می‌شود. ابزارِ hand
+    // مستثناست (pan در سطحِ اسکرول است).
+    if (toolRef.current !== 'hand') {
+      const firstPt = pts[0];
+      const pageH = 1000 * (aspectRef.current || 1);
+      if (firstPt && (firstPt.x < 0 || firstPt.x > 1000 || firstPt.y < 0 || firstPt.y > pageH) &&
+          !isMarqueeRef.current && !lassoPointsRef.current && !manualMoveRef.current &&
+          !arrowHandleEditRef.current && !isDrawingRef.current) {
+        const overflowItems = uniformItems.filter((it) => {
+          const b = getVisualRenderedBBox(it, { stickyScaleFor });
+          return b && (b.x < 0 || b.y < 0 || b.x + b.width > 1000 || b.y + b.height > pageH);
+        });
+        const overflowHit = overflowItems.length > 0
+          ? findBestHitAnnotationItem(overflowItems, firstPt, 16, { stickyScaleFor })
+          : null;
+        if (!overflowHit) {
+          forwardPointerDownToElementBelow(native);
+          return;
+        }
+      }
+    }
+
+    // مرحله 44 §3: ابزارِ دست — کشیدن در هر نقطه (حتی روی شکل‌ها)
+    // مستقیماً کانتینرِ اسکرول را حرکت می‌دهد؛ هیچ شکلی انتخاب یا
+    // جابه‌جا نمی‌شود. panSessionRef فقط از همین شاخه ساخته می‌شود
+    // (باگ 2) و لایهٔ Konva در این حالت listening={false} است (باگ 1).
+    if (toolRef.current === 'hand') {
+      const scrollContainer = findReaderScrollContainer();
+      if (scrollContainer) {
+        const session = {
+          container: scrollContainer,
+          startClientX: native.clientX,
+          startClientY: native.clientY,
+          startScrollLeft: scrollContainer.scrollLeft,
+          startScrollTop: scrollContainer.scrollTop,
+        };
+        session.onMove = (ev) => {
+          const dx = ev.clientX - session.startClientX;
+          const dy = ev.clientY - session.startClientY;
+          session.container.scrollLeft = session.startScrollLeft - dx;
+          session.container.scrollTop = session.startScrollTop - dy;
+        };
+        session.onEnd = () => {
+          if (panSessionRef.current !== session) return;
+          panSessionRef.current = null;
+          window.removeEventListener('pointermove', session.onMove, true);
+          window.removeEventListener('pointerup', session.onEnd, true);
+          window.removeEventListener('pointercancel', session.onEnd, true);
+          restoreStageCursor();
+        };
+        panSessionRef.current = session;
+        setStageCursor('grabbing');
+        notifyGestureStart();
+        setAnnotationGestureActive();
+        window.addEventListener('pointermove', session.onMove, true);
+        window.addEventListener('pointerup', session.onEnd, true);
+        window.addEventListener('pointercancel', session.onEnd, true);
+      }
+      return;
+    }
 
     // فاز ۵: ابزارِ انتخاب — مهم‌ترین شاخهٔ جدید.
     // این شاخه قبل از باکس/فلش/قلم می‌آید، چون بدونِ آن، کلیک با
@@ -3045,6 +3879,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // تشخیصِ هندل از طریقِ classifyArrowHandleAtPoint (همان ریاضیِ
       // قبل — فقط به تابعِ مشترک منتقل شده تا هاورِ select در handleMove
       // هم دقیقاً همان طبقه‌بندی را ببیند).
+      // مرحله ۴۸ §۵ (گاردریل ۳): کلیک روی دستگیرهٔ Transformer
+      // (تغییرِ اندازه/چرخش) هرگز مارکی یا جابه‌جاییِ دستی شروع
+      // نمی‌کند — Konva خودش آن درگ را مدیریت می‌کند. بدونِ این
+      // گارد، pointerdownی Stage روی دستگیره، manualMove را هم
+      // شروع می‌کرد و با ترنسفورم می‌جنگید.
+      const downTarget = e && e.target;
+      let onTransformerHandle = false;
+      let walkNode = downTarget;
+      while (walkNode) {
+        if (walkNode === transformerRef.current) { onTransformerHandle = true; break; }
+        if (typeof walkNode.getClassName === 'function' && walkNode.getClassName() === 'Transformer') { onTransformerHandle = true; break; }
+        walkNode = typeof walkNode.getParent === 'function' ? walkNode.getParent() : null;
+      }
+      if (onTransformerHandle) return;
       const handleHit = classifyArrowHandleAtPoint(pt);
       if (handleHit) {
         const hitHandle = handleHit.handle;
@@ -3082,6 +3930,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         setArrowHandleDraggingKind(hitHandle);
         setStageCursor('crosshair');
         notifyGestureStart();
+        setAnnotationGestureActive();
+        registerWindowSelectMove();
         // فاز ۲: مخفی‌کردنِ فلشِ اصلی حینِ درگِ هندل تا پیش‌نمایشِ
         // درفت، شبح نسازد. در handleUp با visible=true برمی‌گردد،
         // حتی اگر کامیتی نباشد. فقط یک رنگِ ایستا در شروعِ ژست،
@@ -3091,52 +3941,105 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         layerRef.current?.batchDraw();
         return;
       }
-      // Refinement Step 2: هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا
-      // کلیکِ مستقیم روی شکل، بلافاصله انتخاب شود. capturePointer
-      // برای select عمداً صدا زده نمی‌شود (بالای همین تابع) تا drag
-      // در همان کلیکِ اول کار کند، نه از کلیکِ دوم.
-      const hit = findTopAnnotationAtPoint(uniformItems, pt, 16);
+      // مرحلهٔ ۴۹ — هیت‌تستِ دقیق و قفلِ اولویتِ انتخاب‌شده.
+      // ترتیبِ تازه در حالتِ select:
+      // (۱) اگر Shift نیست و اشاره‌گر روی یک آیتمِ از قبل
+      // انتخاب‌شده فرود آمد، انتخاب هرگز عوض نمی‌شود و آیتمِ
+      // دیگری انتخاب نمی‌شود؛ manualMove روی همان انتخابِ فعلی
+      // شروع می‌شود (درگِ گروهی). کلیکِ دوباره روی همان نقطه
+      // (در ۱۵۰۰ میلی‌ثانیه) به آیتمِ زیرین می‌رسد (چرخهٔ کلیک).
+      // (۲) در غیرِ این صورت، نزدیک‌ترین آیتمِ برخوردی انتخاب
+      // می‌شود (findBestHit: نزدیک‌ترین فاصلهٔ هندسی) و درگِ همان
+      // ژست با manualMove شروع می‌شود — برای همهٔ ابزارها، نه فقط
+      // فلش — چون draggableی نیتیو در مرحلهٔ ۴۹ خاموش است.
+      // (۳) Shift+کلیک: چرخه‌ای تاگل می‌کند (آیتمِ زیرین را هم
+      // می‌شود تاگل کرد).
       const isShift = Boolean(native.shiftKey);
-
+      const selectedItems = uniformItems.filter((it) => currentIds.includes(it.id));
+      const nowMs = Date.now();
+      const lastCycle = clickCycleRef.current;
+      const sameCyclePoint = Boolean(lastCycle) &&
+        Math.hypot(pt.x - lastCycle.x, pt.y - lastCycle.y) <= 4 &&
+        nowMs - lastCycle.time < 1500;
+      const cycleFromId = sameCyclePoint ? lastCycle.lastId : null;
+      if (!isShift && selectedItems.length > 0) {
+        const selectedHit = findBestHitAnnotationItem(selectedItems, pt, 16, { stickyScaleFor });
+        if (selectedHit) {
+          // کلیکِ دوباره روی همان نقطه با ۲+ برخورد: چرخه به
+          // آیتمِ زیرین می‌رسد و همان آیتم، تکی انتخاب می‌شود؛
+          // درگِ همان ژست هم روی همان آیتمِ تازه شروع می‌شود.
+          if (sameCyclePoint) {
+            const nextHit = cycleHitAtPoint(uniformItems, pt, lastCycle.lastId, 16, { stickyScaleFor });
+            if (nextHit && nextHit.id !== selectedHit.id) {
+              clickCycleRef.current = { x: pt.x, y: pt.y, lastId: nextHit.id, time: nowMs };
+              if (typeof setSelectedAnnotation === 'function') {
+                setSelectedAnnotation(nextHit.id, pageNumber, nextHit.tool);
+              }
+              if (typeof syncToolbar === 'function') syncToolbar(nextHit);
+              setSelectionLocked(false);
+              const nextOriginals = new Map([[nextHit.id, nextHit]]);
+              manualMoveRef.current = { startPt: pt, lastPt: pt, originals: nextOriginals };
+              notifyGestureStart();
+              setAnnotationGestureActive();
+              registerWindowSelectMove();
+              setStageCursor('move');
+              return;
+            }
+          }
+          clickCycleRef.current = { x: pt.x, y: pt.y, lastId: selectedHit.id, time: nowMs };
+          const originals = new Map(selectedItems.map((it) => [it.id, it]));
+          manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          notifyGestureStart();
+          setAnnotationGestureActive();
+          registerWindowSelectMove();
+          setStageCursor('move');
+          return;
+        }
+      }
+      // هیت‌تستِ درجا با تلرانسِ ۱۶ (طبقِ TASK) تا کلیکِ مستقیم
+      // روی شکل، بلافاصله انتخاب شود. capturePointer برای select
+      // عمداً صدا زده نمی‌شود (بالای همین تابع) تا drag در همان
+      // کلیکِ اول کار کند، نه از کلیکِ دوم. چرخهٔ کلیک: اگر همین
+      // نقطه تازه کلیک شده بود، آیتمِ بعدیِ زیرین انتخاب می‌شود.
+      const hit = cycleHitAtPoint(uniformItems, pt, cycleFromId, 16, { stickyScaleFor });
       if (hit) {
+        clickCycleRef.current = { x: pt.x, y: pt.y, lastId: hit.id, time: nowMs };
         if (isShift) {
           // Shift+کلیک: تاگل، بدونِ sync (مثلِ الگوی قدیمی).
           if (typeof toggleSelectedAnnotation === 'function') {
             toggleSelectedAnnotation(hit.id, pageNumber, hit.tool);
           }
-        } else if (!currentIds.includes(hit.id)) {
+          return;
+        }
+        if (!currentIds.includes(hit.id)) {
           // کلیکِ تکی روی آیتمِ جدید: انتخابِ تکی + همگام‌سازیِ
           // فوریِ تولبار با ویژگی‌های آیتم.
           if (typeof setSelectedAnnotation === 'function') {
             setSelectedAnnotation(hit.id, pageNumber, hit.tool);
           }
           if (typeof syncToolbar === 'function') syncToolbar(hit);
+          // مرحله ۴۸ §۵: انتخابِ تکی با کلیک، قفلِ مارکی/کمند را
+          // باز می‌کند (قفل فقط مالِ انتخابِ مارکی/کمند است) تا
+          // کاربر دوباره بتواند مارکی بکشد؛ Shift+تاگل، قفل را
+          // دست نمی‌زند.
+          setSelectionLocked(false);
         }
-        // §۵ تسک — جابه‌جاییِ بدنهٔ فلش: چون Groupِ فلش دیگر
-        // draggable نیست (Konva درگش نمی‌کند)، کلیک و درگِ روی
-        // بدنهٔ فلش باید manualMove را شروع کند — وگرنه فلش اصلاً
-        // جابه‌جا نمی‌شد (شاخهٔ hit، قبلاً فقط انتخاب می‌کرد و
-        // برمی‌گشت؛ manualMove فقط از فضای خالیِ داخلِ کادرِ
-        // اجتماع شروع می‌شد). غیرِ فلش‌ها دست نخورده‌اند و مثلِ
-        // قبل با Konva درگ می‌شوند. اگر فلش از قبل انتخاب‌شده بود،
-        // کلِ انتخابِ فعلی حرکت می‌کند (مثلِ مسیرِ فضای خالی)؛
-        // اگر تازه انتخاب شد، فقط همین فلش.
-        if (!isShift && hit.tool === 'arrow') {
-          const moveIds = currentIds.includes(hit.id) ? currentIds : [hit.id];
-          const originals = new Map(
-            uniformItems.filter((it) => moveIds.includes(it.id)).map((it) => [it.id, it])
-          );
-          if (originals.size > 0) {
-            manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
-            notifyGestureStart();
-            setStageCursor('grabbing');
-          }
+        // مرحلهٔ ۴۹: جابه‌جاییِ همان ژست با manualMoveی واحد —
+        // برای همهٔ ابزارها (نه فقط فلش)، چون Groupها دیگر
+        // draggable نیستند. اگر آیتم از قبل انتخاب‌شده بود، کلِ
+        // انتخابِ فعلی حرکت می‌کند؛ اگر تازه انتخاب شد، فقط همین
+        // آیتم.
+        const moveIds = currentIds.includes(hit.id) ? currentIds : [hit.id];
+        const originals = new Map(
+          uniformItems.filter((it) => moveIds.includes(it.id)).map((it) => [it.id, it])
+        );
+        if (originals.size > 0) {
+          manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          notifyGestureStart();
+          setAnnotationGestureActive();
+          registerWindowSelectMove();
+          setStageCursor('move');
         }
-        // اگر آیتم از قبل انتخاب‌شده بود (بدونِ Shift)، انتخاب
-        // دست نخورده می‌ماند تا dragِ گروهی گروه را حرکت دهد
-        // (غیرِ فلش: Konva روی همان نود؛ فلش: manualMoveی بالا،
-        // چون Groupِ فلش دیگر draggable نیست)؛ sync هم
-        // دوباره انجام نمی‌شود تا تولبارِ چندانتخابی به‌هم نریزد.
         return;
       }
 
@@ -3148,25 +4051,57 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       // اگر کلیک داخلِ کادرِ اجتماعِ انتخابِ فعلی بود، مارکی
       // شروع نمی‌شود؛ در عوض، جابه‌جاییِ دستیِ گروهی آماده
       // می‌شود تا کاربر بتواند گروه را از فضای خالیِ داخلِ کادر
-      // هم بکشد (الگوی tldraw در لایهٔ قدیمی).
-      const selectedItems = uniformItems.filter((it) => currentIds.includes(it.id));
+      // هم بکشد (الگوی tldraw در لایهٔ قدیمی). در مرحلهٔ ۴۹ این
+      // مسیر، درگ از داخلِ کادرهای تکی و کادرِ اجتماع را هم
+      // پوشش می‌دهد (کادرها listening={false} هستند و کلیک از
+      // آن‌ها به Stage می‌رسد).
       if (selectedItems.length > 0) {
-        const ub = getUnionBounds(selectedItems);
-        if (ub && pt.x >= ub.x - 10 && pt.x <= ub.x + ub.width + 10 &&
-            pt.y >= ub.y - 10 && pt.y <= ub.y + ub.height + 10) {
+        const ub = getUnionBounds(selectedItems, { stickyScaleFor });
+        if (ub && isPointInRect(pt, ub, 10)) {
           const originals = new Map(selectedItems.map((it) => [it.id, it]));
-          manualMoveRef.current = { startPt: pt, lastPt: pt, originals };
+          // مرحله ۴۸ §۵: lockedEmptyClick یعنی این manualMove از
+          // فضای خالی شروع شده؛ کلیکِ کوتاهِ آن در handleUp،
+          // انتخاب را پاک می‌کند (به‌جای جابه‌جاییِ صفر).
+          manualMoveRef.current = { startPt: pt, lastPt: pt, originals, lockedEmptyClick: selectionLockedRef.current };
           notifyGestureStart();
-          setStageCursor('grabbing');
+          setAnnotationGestureActive();
+          registerWindowSelectMove();
+          setStageCursor('move');
           return;
         }
       }
-      // مرحلهٔ ۳۸ §۶: درگِ روی فضایِ خالی، به‌جای مارکی، پیمایشِ
-      // صفحه (pan) است — Shift+درگ، مارکیِ قدیمی را حفظ می‌کند.
-      if (isShift) {
-        // Shift+درگ روی خالی: مارکیِ موقتِ قدیمی.
-        isMarqueeRef.current = { startPt: pt };
+      // مرحله ۴۸ §۵ (قفلِ خودکار): وقتی انتخاب قفل است، درگ از هر
+      // نقطهٔ خالیِ بوم (حتی بیرونِ کادرِ اجتماع) انتخاب را جابه‌جا
+      // می‌کند و هرگز مارکیِ تازه شروع نمی‌شود. کلیکِ کوتاهِ خالی
+      // (کمتر از ۶ واحد) در handleUp، انتخاب را پاک و قفل را باز می‌کند.
+      if (selectionLockedRef.current && selectedItems.length > 0) {
+        const lockedOriginals = new Map(selectedItems.map((it) => [it.id, it]));
+        manualMoveRef.current = { startPt: pt, lastPt: pt, originals: lockedOriginals, lockedEmptyClick: true };
         notifyGestureStart();
+        setAnnotationGestureActive();
+        registerWindowSelectMove();
+        setStageCursor('move');
+        return;
+      }
+      // مرحله 44 §3: درگِ روی فضایِ خالی در حالتِ select، دیگر pan
+      // نیست (pan فقط با ابزارِ hand انجام می‌شود — به شاخهٔ hand در
+      // بالای همین تابع مراجعه کنید)؛ اینجا بر اساسِ زیرحالتِ انتخاب،
+      // مارکیِ باکسی یا کمند شروع می‌شود. Shift+درگ، مثلِ قبل، مارکیِ
+      // باکسیِ قدیمی را حفظ می‌کند.
+      if (isShift || selectSubModeRef.current !== 'lasso') {
+        // درگِ ساده، انتخابِ فعلی را اول پاک می‌کند (مثلِ رفتارِ قبلیِ
+        // pan)؛ Shift+درگ، انتخاب را تا پایانِ ژست نگه می‌دارد.
+        if (!isShift && typeof clearSelection === 'function') clearSelection();
+        clickCycleRef.current = null;
+        isMarqueeRef.current = { startPt: pt };
+        marqueeGestureIdRef.current += 1;
+        marqueeStartClientRef.current = native && typeof native.clientX === 'number'
+          ? { clientX: native.clientX, clientY: native.clientY }
+          : null;
+        crossPageDispatchRef.current = null;
+        notifyGestureStart();
+        setAnnotationGestureActive();
+        registerWindowSelectMove();
         marqueeBoxRef.current = { x: pt.x, y: pt.y, width: 0, height: 0 };
         // نودِ مارکی، از قبل visible={false} است و ۰×۰ هم طبقِ قانونِ
         // «بزرگ‌تر از ۴×۴» پنهان می‌ماند؛ پس در شروع، draw لازم نیست.
@@ -3175,42 +4110,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         }
         return;
       }
-      // درگِ ساده روی فضای خالی: پاک کردنِ انتخاب + شروعِ نشستِ pan.
-      // listenerها روی window با capture وصل می‌شوند تا اشاره‌گر،
-      // حتی بیرونِ کادرِ Stage هم دنبال شود؛ ارجاعِ همان توابع، در
-      // خودِ نشست ذخیره می‌شود تا حذفشان دقیق باشد (ری‌رندرِ وسطِ
-      // ژست، ارجاعِ تازه نسازد).
+      // کمندِ آزاد (زیرحالتِ lasso، بدونِ Shift): نقطهٔ شروع، اولین
+      // نقطهٔ چندضلعی است؛ بقیهٔ نقاط در handleMove اضافه می‌شوند و
+      // بستنِ مسیر + انتخاب، در handleUp انجام می‌شود.
       if (typeof clearSelection === 'function') clearSelection();
-      const scrollContainer = findReaderScrollContainer();
-      if (scrollContainer) {
-        const session = {
-          container: scrollContainer,
-          startClientX: native.clientX,
-          startClientY: native.clientY,
-          startScrollLeft: scrollContainer.scrollLeft,
-          startScrollTop: scrollContainer.scrollTop,
-        };
-        session.onMove = (ev) => {
-          const dx = ev.clientX - session.startClientX;
-          const dy = ev.clientY - session.startClientY;
-          session.container.scrollLeft = session.startScrollLeft - dx;
-          session.container.scrollTop = session.startScrollTop - dy;
-        };
-        session.onEnd = () => {
-          if (panSessionRef.current !== session) return;
-          panSessionRef.current = null;
-          window.removeEventListener('pointermove', session.onMove, true);
-          window.removeEventListener('pointerup', session.onEnd, true);
-          window.removeEventListener('pointercancel', session.onEnd, true);
-          restoreStageCursor();
-        };
-        panSessionRef.current = session;
-        setStageCursor('grabbing');
-        notifyGestureStart();
-        window.addEventListener('pointermove', session.onMove, true);
-        window.addEventListener('pointerup', session.onEnd, true);
-        window.addEventListener('pointercancel', session.onEnd, true);
+      clickCycleRef.current = null;
+      lassoPointsRef.current = [{ x: pt.x, y: pt.y }];
+      if (lassoLineRef.current) {
+        lassoLineRef.current.setAttrs({ points: [pt.x, pt.y], visible: true });
       }
+      notifyGestureStart();
+      setAnnotationGestureActive();
+      registerWindowSelectMove();
+      setStageCursor('crosshair');
+      draftLayerRef.current?.batchDraw();
       return;
     }
 
@@ -3337,6 +4250,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       };
       isDrawingRef.current = true;
       notifyGestureStart();
+      setAnnotationGestureActive();
       // ریست pending قبلی
       pendingCommitRef.current = null;
       if (pendingTimeoutRef.current) {
@@ -3366,6 +4280,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       };
       isDrawingRef.current = true;
       notifyGestureStart();
+      setAnnotationGestureActive();
       // ریست pending قبلی (مثل باکس)
       pendingCommitRef.current = null;
       if (pendingTimeoutRef.current) {
@@ -3387,6 +4302,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
       eraserPtsRef.current = flat;
       isDrawingRef.current = true;
       notifyGestureStart();
+      setAnnotationGestureActive();
       setEraserVisible(true);
       return;
     }
@@ -3412,6 +4328,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
 
     isDrawingRef.current = true;
     notifyGestureStart();
+    setAnnotationGestureActive();
 
     const node = draftShapeRef.current;
     if (node) {
@@ -3440,47 +4357,8 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     // همین‌جا با همان pts0، پیش‌نمایش را زنده می‌کنیم و
     // برمی‌گردیم — نه مارکی، نه manualMove، نه رسم.
     if (arrowHandleEditRef.current) {
-      const edit = arrowHandleEditRef.current;
       if (pts0.length > 0) {
-        const pt = pts0[pts0.length - 1];
-        edit.moved = true;
-        const init = edit.initialItem;
-        let next;
-        if (edit.handle === 'start') {
-          next = { ...init, startX: pt.x, startY: pt.y };
-        } else if (edit.handle === 'end') {
-          next = { ...init, endX: pt.x, endY: pt.y };
-        } else {
-          const midX = (Number(init.startX) + Number(init.endX)) / 2;
-          const midY = (Number(init.startY) + Number(init.endY)) / 2;
-          const distToMid = Math.hypot(pt.x - midX, pt.y - midY);
-          if (distToMid < 6 / (scaleRef.current?.scaleX || 1)) {
-            next = { ...init, arrowStyle: 'straight', cx: null, cy: null };
-          } else {
-            next = { ...init, arrowStyle: 'curved', cx: 2 * pt.x - midX, cy: 2 * pt.y - midY };
-          }
-        }
-        edit.lastPreview = next;
-        // فاز ۲: بدونِ setState — پیش‌نمایشِ درفت + ۳ دایرهٔ Adorner،
-        // مستقیم در سطحِ Konva به‌روز می‌شوند و فقط لایهٔ درفت
-        // batchDraw می‌شود (صفر ری‌رندرِ ری‌اکت در هر فریم). قلهٔ
-        // هندلِ وسط، دقیقاً همان فرمولِ رندر است: روی فلشِ صاف،
-        // نقطهٔ میانیِ وتر و روی فلشِ خمیده، (M + C) / 2.
-        if (arrowPreviewShapeRef.current) arrowPreviewShapeRef.current.visible(true);
-        const nMidX = (Number(next.startX) + Number(next.endX)) / 2;
-        const nMidY = (Number(next.startY) + Number(next.endY)) / 2;
-        const nCurved = next.arrowStyle === 'curved' &&
-          Number.isFinite(Number(next.cx)) && Number.isFinite(Number(next.cy));
-        const apexX = nCurved ? (nMidX + Number(next.cx)) / 2 : nMidX;
-        const apexY = nCurved ? (nMidY + Number(next.cy)) / 2 : nMidY;
-        const hn = arrowHandleNodeRefs.current;
-        const sN = hn.get('start');
-        const eN = hn.get('end');
-        const mN = hn.get('mid');
-        if (sN) sN.setAttrs({ x: next.startX, y: next.startY });
-        if (eN) eN.setAttrs({ x: next.endX, y: next.endY });
-        if (mN) mN.setAttrs({ x: apexX, y: apexY });
-        draftLayerRef.current?.batchDraw();
+        applyArrowHandleMove(pts0[pts0.length - 1]);
       }
       return;
     }
@@ -3495,46 +4373,24 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         // را نشستِ pan (روی window) جلو می‌برد و کرسرِ grabbing
         // هم همان‌جا تنظیم شده است.
         if (panSessionRef.current) return;
-        if (isMarqueeRef.current) {
-          const box = marqueeRect(isMarqueeRef.current.startPt, cur);
-          marqueeBoxRef.current = box;
-          // قانونِ نمایشیِ قدیمی حفظ می‌شود: مارکیِ کوچک‌تر از ۴×۴
-          // اصلاً دیده نمی‌شود (ولی ابعادش در ref هست تا handleUp،
-          // میکروکلیک را تشخیص دهد).
-          if (marqueeRectRef.current) {
-            marqueeRectRef.current.setAttrs({
-              x: box.x, y: box.y, width: box.width, height: box.height,
-              visible: box.width > 4 || box.height > 4,
-            });
+        // مرحلهٔ ۵۰ §۱: ژستِ select (کمند/مارکی/جابه‌جایی) از مسیرِ
+        // واحدِ applySelectGestureMove به‌روز می‌شود تا شنوندهٔ
+        // سراسریِ pointermove هم همان منطق را ببیند.
+        if (lassoPointsRef.current || isMarqueeRef.current || manualMoveRef.current) {
+          if (native0 && typeof native0.clientX === 'number') {
+            lastPointerClientRef.current = { clientX: native0.clientX, clientY: native0.clientY };
           }
-          draftLayerRef.current?.batchDraw();
-          return;
-        }
-        if (manualMoveRef.current) {
-          const mm = manualMoveRef.current;
-          mm.lastPt = cur;
-          const dx = cur.x - mm.startPt.x;
-          const dy = cur.y - mm.startPt.y;
-          // پیش‌نمایشِ زنده با موقعیتِ نودها (نه با تغییرِ آیتم‌ها):
-          // آیتم‌ها فقط در handleUp کامیت می‌شوند، پس در حینِ
-          // حرکت، هیچ ورودیِ Undo ساخته نمی‌شود.
-          for (const id of mm.originals.keys()) {
-            const node = itemNodeRefs.current.get(id);
-            if (node) node.position({ x: dx, y: dy });
+          applySelectGestureMove(cur, native0?.clientX, native0?.clientY);
+          if (native0 && typeof native0.clientX === 'number') {
+            maybeAutoScroll(native0.clientX, native0.clientY);
           }
-          // معماریِ Adorner: هندل‌های اورلی هم با همان دلتا زنده
-          // جابه‌جا می‌شوند (مثلِ درگِ نودی).
-          const mmAdornerBase = arrowHandleBaseRef.current;
-          if (mmAdornerBase && mm.originals.has(mmAdornerBase.id)) {
-            syncAdornerHandlesWithGroupDrag(dx, dy);
-          }
-          setStageCursor('grabbing');
-          drawBothLayers();
           return;
         }
         // کرسرِ هاور در حالتِ select — نوشتنِ مستقیم روی DOM (بدون
         // setState) تا هر pointermove، ری‌رندرِ کامل نسازد. روی هندلِ
-        // فلش crosshair، روی آیتم move، روی فضای خالی grab.
+        // فلش crosshair، روی آیتم یا داخلِ کادرِ اجتماعِ انتخاب move،
+        // روی فضای خالی crosshair؛ grab/grabbing فقط مالِ ابزارِ دست
+        // است و در حالتِ select هرگز دیده نمی‌شود (مرحلهٔ ۵۱ §۴).
         // (مارکی و manualMove بالاتر return می‌کنند و درگِ هندل هم
         // بالاتر return می‌کند، پس این‌جا فقط هاورِ آزاد است.)
         if (toolRef.current === 'select') {
@@ -3553,13 +4409,32 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               } catch (_) { /* ignore */ }
               n = typeof n.getParent === 'function' ? n.getParent() : null;
             }
-            setStageCursor(overItem ? 'move' : 'grab');
+            // داخلِ کادرِ اجتماعِ انتخابِ فعلی (حتی روی فضای خالیِ
+            // داخلِ کادر) هم move است — همان‌جایی که کلیک، جابه‌جاییِ
+            // دستیِ گروهی را شروع می‌کند. آیتم‌های انتخاب‌شده از
+            // تازه‌ترین لیست (uniformItemsRef) و شناسه‌ها از استور
+            // خوانده می‌شوند تا closureی کهنه نباشد.
+            let insideSelectionBox = false;
+            if (!overItem) {
+              const hoverState = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+              const hoverIds = hoverState.selectedAnnotationIds || [];
+              if (hoverIds.length > 0) {
+                const hoverItems = (uniformItemsRef.current || []).filter((it) => hoverIds.includes(it.id));
+                if (hoverItems.length > 0) {
+                  const hoverBox = getUnionBounds(hoverItems, { stickyScaleFor });
+                  if (hoverBox && isPointInRect(cur, hoverBox, 10)) insideSelectionBox = true;
+                }
+              }
+            }
+            setStageCursor(overItem || insideSelectionBox ? 'move' : 'crosshair');
           }
         }
       }
     }
     if (!isDrawingRef.current || !isAnnotationActive) return;
-    const pts = pts0;
+    // مرحلهٔ ۵۰ §۱ (پیشگیریِ ۲): نقطه‌های رسم به بازهٔ بومِ توسعه‌یافته
+    // محدود می‌شوند تا Infinity/NaN واردِ نقاطِ شکل نشود.
+    const pts = pts0.map((p) => clampUniformPoint(p)).filter(Boolean);
     if (pts.length === 0) return;
 
     // فاز ۲: به‌روزرسانی پیش‌نویس باکس
@@ -3625,9 +4500,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   }, [isAnnotationActive, getNative, shouldProcessEvent, extractPoints, pushFilteredPoints, redrawDraft]);
 
   const handleUpInner = useCallback((e) => {
-    // مرحلهٔ ۳۸ §۶: پایانِ نشستِ pan در حالتِ select (معمولاً
-    // listenerِ pointerupی window زودتر تمامش کرده است؛ این‌جا
+    // مرحله 44 §3: پایانِ نشستِ pan در حالتِ hand (معمولاً
+    // listenerِ pointerupِ window زودتر تمامش کرده است؛ این‌جا
     // فقط برایِ وقتی است که آن listener جا مانده باشد).
+
     if (panSessionRef.current) {
       const session = panSessionRef.current;
       panSessionRef.current = null;
@@ -3666,10 +4542,60 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     }
     // فاز ۵: مارکی و جابه‌جاییِ دستی، قبل از محافظِ isDrawingRef
     // بررسی می‌شوند (دلیلش در handleMove نوشته شده است).
-    if (isMarqueeRef.current || manualMoveRef.current) {
+    if (isMarqueeRef.current || manualMoveRef.current || lassoPointsRef.current) {
       const nativeSel = getNative(e);
       const ptsSel = nativeSel ? extractPoints(nativeSel) : [];
       const curPt = ptsSel.length > 0 ? ptsSel[ptsSel.length - 1] : null;
+
+      // مرحله ۴۸ §۵: نهایی‌سازیِ کمندِ آزاد — این شاخه در مرحله ۴۴
+      // به‌اشتباه داخلِ `if (isMarqueeRef.current)` تودرتو شده بود و
+      // چون کمند هرگز isMarqueeRef را تنظیم نمی‌کند، روی pointerup
+      // هرگز اجرا نمی‌شد (کمند رسم می‌شد ولی هیچ انتخابی ثبت
+      // نمی‌کرد و پیش‌نمایشش می‌ماند). حالا شاخهٔ مستقل و هم‌ترازِ
+      // مارکی است.
+      if (lassoPointsRef.current) {
+      const lassoPts = lassoPointsRef.current;
+      lassoPointsRef.current = null;
+      if (lassoLineRef.current) lassoLineRef.current.visible(false);
+      const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+      // باگ 4 — گاردِ کلیکِ ریز: کمتر از 3 نقطه، یا قطرِ چندضلعی
+      // کمتر از 5 پیکسلِ صفحه (با مقیاسِ زومِ فعلی)، فقط انتخاب را
+      // پاک می‌کند؛ pointInPolygon اصلاً اجرا نمی‌شود.
+      const { scaleX: lsx, scaleY: lsy } = scaleRef.current || { scaleX: 1, scaleY: 1 };
+      const screenPts = lassoPts.map((pt) => ({ x: pt.x * (lsx || 1), y: pt.y * (lsy || 1) }));
+      if (isTinyLasso(screenPts, 5)) {
+        if (typeof state.clearSelection === 'function') state.clearSelection();
+      } else {
+        // باگ 3 — مقایسه در یک دستگاهِ مختصاتِ واحد: چندضلعی و
+        // آیتم‌ها، هر دو به فضایِ ذخیره‌سازیِ 0..1000 برده می‌شوند
+        // (yِ یکنواخت، بر aspect تقسیم می‌شود) تا در زومِ 50٪/300٪
+        // هم انتخاب دقیق بماند.
+        const aspectNow = aspectRef.current || 1;
+        const storagePolygon = lassoPts.map((pt) => ({ x: pt.x, y: pt.y / aspectNow }));
+        const storageItems = uniformItems.map((it) => uniformToStorage(it, aspectNow));
+        const lassoIds = selectItemsInLasso(storageItems, storagePolygon, { stickyScaleFor });
+        const matching = lassoIds
+          .map((id) => uniformItems.find((it) => it.id === id))
+          .filter(Boolean);
+        if (matching.length > 0) {
+          if (typeof state.setSelectedAnnotations === 'function') {
+            state.setSelectedAnnotations(matching.map((it) => it.id), pageNumber);
+          }
+          if (typeof state.syncToolbarWithSelectedItem === 'function') {
+            state.syncToolbarWithSelectedItem(matching[matching.length - 1]);
+          }
+          // مرحله ۴۸ §۵: ورود به قفلِ انتخاب — درگِ بعدی روی بوم،
+          // انتخاب را جابه‌جا می‌کند و هادِ شناور ظاهر می‌شود.
+          setSelectionLocked(true);
+        } else if (typeof state.clearSelection === 'function') {
+          state.clearSelection();
+          setSelectionLocked(false);
+        }
+      }
+      drawBothLayers();
+      restoreStageCursor();
+      return;
+      }
 
       if (isMarqueeRef.current) {
         const startPt = isMarqueeRef.current.startPt;
@@ -3683,13 +4609,36 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
           if (typeof state.clearSelection === 'function') state.clearSelection();
         } else {
-          const matching = uniformItems.filter((it) =>
-            rectsIntersect(getItemBounds(it), box)
-          );
+          // مرحله 44 §3: انتخابِ باکسی از مسیرِ انجین (تقاطعِ
+          // boundingBox) و در فضایِ ذخیره‌سازیِ 0..1000 (باگ 3).
+          const aspectNow = aspectRef.current || 1;
+          const storageBox = {
+            x: box.x,
+            y: box.y / aspectNow,
+            width: box.width,
+            height: box.height / aspectNow,
+          };
+          const storageItems = uniformItems.map((it) => uniformToStorage(it, aspectNow));
+          const matchingIds = selectItemsInBox(storageItems, storageBox, { stickyScaleFor });
+          const matching = matchingIds
+            .map((id) => uniformItems.find((it) => it.id === id))
+            .filter(Boolean);
           const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
           if (matching.length > 0) {
+            // مرحلهٔ ۵۰ §۱: اجتماع با انتخابِ بین‌صفحه‌ایِ همین ژست —
+            // آیتم‌های صفحهٔ همسایه که مارکی آن‌ها را گرفته بود، در
+            // انتخاب می‌مانند (استور تک‌صفحه‌ای است، پس صفحهٔ انتخاب،
+            // صفحهٔ مبدأ می‌ماند و شناسه‌های همسایه هم در لیست‌اند).
+            const crossIds = lastCrossPageSelection &&
+              lastCrossPageSelection.gestureId === marqueeGestureIdRef.current &&
+              lastCrossPageSelection.page !== Number(pageRef.current) &&
+              Date.now() - lastCrossPageSelection.at < 10000
+              ? lastCrossPageSelection.ids
+              : [];
+            const mergedIds = [...new Set([...matching.map((it) => it.id), ...crossIds])];
+            lastCrossPageSelection = null;
             if (typeof state.setSelectedAnnotations === 'function') {
-              state.setSelectedAnnotations(matching.map((it) => it.id), pageNumber);
+              state.setSelectedAnnotations(mergedIds, pageNumber);
             }
             // همگام‌سازیِ تولبار با آخرین آیتمِ برخوردی (الگوی
             // قدیمی)، تا تغییرِ رنگ/ضخامت/فونت بعد از مارکی، روی
@@ -3697,8 +4646,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             if (typeof state.syncToolbarWithSelectedItem === 'function') {
               state.syncToolbarWithSelectedItem(matching[matching.length - 1]);
             }
+            // مرحله ۴۸ §۵: ورود به قفلِ انتخاب (مثلِ کمند).
+            setSelectionLocked(true);
           } else if (typeof state.clearSelection === 'function') {
             state.clearSelection();
+            setSelectionLocked(false);
           }
         }
         drawBothLayers();
@@ -3717,11 +4669,55 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           const node = itemNodeRefs.current.get(id);
           if (node) node.position({ x: 0, y: 0 });
         }
+        // مرحلهٔ ۴۹: کادرهای انتخاب هم به مبنا برمی‌گردند.
+        resetSelectionBoxOffsets();
+        // مرحله ۴۸ §۵ (گاردریل ۴، حسابرسی‌شده — مسیرِ دومِ
+        // جابه‌جاییِ گروهی): دلتا دقیقاً یک بار روی snapshotِ شروعِ
+        // ژست (mm.originals) اعمال می‌شود، نه روی آیتمِ جاری؛
+        // نودها بالاتر reset شده‌اند، پس دلتا با آفستِ نود جمع نمی‌شود.
+        if (mm.lockedEmptyClick && Math.abs(dx) < 6 && Math.abs(dy) < 6) {
+          // کلیکِ کوتاهِ خالی در حالتِ قفل (کمتر از ۶ واحد، همان
+          // آستانهٔ میکروکلیکِ مارکی) یعنی «لغوِ انتخاب»، نه
+          // جابه‌جایی — کامیتی نیست، انتخاب پاک و قفل باز می‌شود.
+          const clickState = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+          if (typeof clickState.clearSelection === 'function') clickState.clearSelection();
+          setSelectionLocked(false);
+          if (transformerRef.current) transformerRef.current.nodes([]);
+          setSelectedNodes([]);
+          drawBothLayers();
+          restoreStageCursor();
+          return;
+        }
         if (dx !== 0 || dy !== 0) {
           const nextItems = uniformItems.map((it) => {
             const orig = mm.originals.get(it.id);
             return orig ? moveAnnotationByDelta(orig, dx, dy) : it;
           });
+          // مرحلهٔ ۵۰ §۲ (ب): انتقالِ بین‌صفحه‌ای — اگر نقطهٔ فرود روی
+          // صفحهٔ دیگری است، آیتم‌ها به صفحهٔ مقصد می‌روند (نه کامیتِ
+          // معمول در مبدأ) و والد، هر دو صفحه را با یک ورودیِ Undo
+          // ذخیره می‌کند. بدونِ پراپِ انتقال (EpubViewer) مثلِ قبل
+          // در مبدأ کامیت می‌شود.
+          const transfer = detectCrossPageTransfer(nextItems, mm, nativeSel);
+          if (transfer && typeof onTransferItemsToPageRef.current === 'function') {
+            const movedIds = new Set(mm.originals.keys());
+            const remainingSource = uniformListToStorage(
+              nextItems.filter((it) => !movedIds.has(it.id))
+            );
+            onTransferItemsToPageRef.current(
+              pageRef.current,
+              transfer.targetPage,
+              transfer.movedTargetStorage,
+              remainingSource
+            );
+            const transferState = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+            if (typeof transferState.setSelectedAnnotations === 'function') {
+              transferState.setSelectedAnnotations([...movedIds], transfer.targetPage);
+            }
+            drawBothLayers();
+            restoreStageCursor();
+            return;
+          }
           commit(nextItems);
         }
         drawBothLayers();
@@ -3908,7 +4904,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
             return !eraserHitsText(epts, it, 14);
           }
           if (it.tool === 'sticky') {
-            return !eraserHitsSticky(epts, it, 14);
+            return !eraserHitsSticky(epts, it, 14, { stickyScaleFor });
           }
           if (Array.isArray(it.points)) {
             return !eraserHitsStroke(epts, it.points, it._bbox, 14);
@@ -3972,8 +4968,216 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     } finally {
       activeGestureRectRef.current = null;
       notifyGestureEnd();
+      clearAnnotationGestureActive();
+      stopSelectWindowTracking();
     }
   }, [handleUpInner]);
+  // آینهٔ تازهٔ handleUpInner برای شنوندهٔ window (به افکتِ پایین
+  // مراجعه کنید) — در هر رندر به‌روز می‌شود تا closureی کهنه نماند.
+  handleUpInnerRef.current = handleUpInner;
+
+  // مرحله ۴۸ §۵: راست‌کلیک در حالتِ select — تکمیلِ دوگانه.
+  // تصمیم از مسیرِ decideRightClickActionی انجین می‌آید:
+  // (الف) حینِ رسمِ مارکی/کمند: مسیر فوراً بسته و انتخاب ثبت
+  // می‌شود و قفلِ انتخاب فعال می‌شود (بدونِ deselect).
+  // (ب) حینِ جابه‌جاییِ دستی یا درگِ هندلِ فلش: ژست نهایی و
+  // انتخاب پاک می‌شود. (ج) وقتی ژستی نیست ولی انتخابی هست:
+  // فقط پاک شدنِ انتخاب. در همهٔ حالت‌ها، رویدادِ نیتیو متوقف
+  // می‌شود تا منوی سراسریِ خواننده (useContextMenu) باز نشود.
+  // گاردریل ۱: بدونِ selectِ فعال یا بیرونِ استودیو، این هندلر
+  // برمی‌گردد و راست‌کلیک دقیقاً مثلِ قبل به منوی سراسری می‌رسد.
+  const handleStageContextMenu = useCallback((e) => {
+    if (!isAnnotationActive) return;
+    if (toolRef.current !== 'select') return;
+    const native = getNative(e);
+    if (native && typeof native.preventDefault === 'function') native.preventDefault();
+    if (native && typeof native.stopPropagation === 'function') native.stopPropagation();
+    if (e && typeof e.cancelBubble !== 'undefined') e.cancelBubble = true;
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const action = decideRightClickAction({
+      hasMarquee: Boolean(isMarqueeRef.current),
+      hasLasso: Boolean(lassoPointsRef.current),
+      hasManualMove: Boolean(manualMoveRef.current),
+      hasArrowHandleEdit: Boolean(arrowHandleEditRef.current),
+      selectedCount: (state.selectedAnnotationIds || []).length,
+    });
+    if (action === 'finish-draw') {
+      handleUpInner(e);
+      stopSelectWindowTracking();
+      clearAnnotationGestureActive();
+      return;
+    }
+    if (action === 'finish-move-deselect' || action === 'finish-handle-deselect') {
+      handleUpInner(e);
+      exitSelection();
+      stopSelectWindowTracking();
+      clearAnnotationGestureActive();
+      return;
+    }
+    if (action === 'deselect') {
+      exitSelection();
+    }
+    stopSelectWindowTracking();
+    clearAnnotationGestureActive();
+  }, [isAnnotationActive, getNative, handleUpInner, exitSelection]);
+
+  // مرحله ۴۸ §۵ (گاردریل ۲): پایانِ ژستِ select روی window — اگر
+  // اشاره‌گر بیرونِ بوم رها شود، شنونده‌های Stage (onPointerUp و
+  // onPointerLeave) ممکن است نرسند؛ این شنوندهٔ سراسری، همان
+  // handleUpInner را صدا می‌زند. نهایی‌سازی، idempotent است (بعد
+  // از اولین بار، refها null می‌شوند)، پس اجرای دوباره از مسیرِ
+  // Stage بی‌اثر است. فقط وقتی ژستِ select فعال است کاری می‌کند؛
+  // رسمِ قلم/باکس/فلش/پاک‌کن دست نخورده می‌ماند (isDrawingRef
+  // این‌جا چک نمی‌شود).
+  useEffect(() => {
+    const onWindowPointerUp = (ev) => {
+      if (!isMarqueeRef.current && !lassoPointsRef.current &&
+          !manualMoveRef.current && !arrowHandleEditRef.current) return;
+      try {
+        if (typeof handleUpInnerRef.current === 'function') handleUpInnerRef.current(ev);
+      } finally {
+        activeGestureRectRef.current = null;
+        notifyGestureEnd();
+        clearAnnotationGestureActive();
+        stopSelectWindowTracking();
+      }
+    };
+    window.addEventListener('pointerup', onWindowPointerUp, true);
+    window.addEventListener('pointercancel', onWindowPointerUp, true);
+    return () => {
+      window.removeEventListener('pointerup', onWindowPointerUp, true);
+      window.removeEventListener('pointercancel', onWindowPointerUp, true);
+    };
+  }, []);
+
+  // مرحلهٔ ۵۰ §۱: گیرندهٔ مارکیِ بین‌صفحه‌ای — وقتی مارکیِ صفحهٔ
+  // دیگری واردِ کاغذِ این صفحه شد، آیتم‌های این صفحه داخلِ مستطیلِ
+  // دیداری هم انتخاب می‌شوند (انتخابِ زنده در حینِ درگ؛ نهایی‌سازیِ
+  // صفحهٔ مبدأ، آن‌ها را با انتخابِ خودش اجتماع می‌دهد). فقط وقتی
+  // استودیو فعال و ابزار select است؛ هم‌پوشانیِ کمتر از ۲۴ پیکسل
+  // نادیده گرفته می‌شود تا با لمسِ لبه، انتخاب پرش نکند.
+  useEffect(() => {
+    const onCrossPageMarquee = (e) => {
+      const detail = e?.detail;
+      if (!detail || typeof detail !== 'object') return;
+      const rect = detail.clientRect;
+      if (!rect || Number(detail.sourcePage) === Number(pageRef.current)) return;
+      const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+      if (!state.isAnnotationActive || state.annotationTool !== 'select') return;
+      if (isMarqueeRef.current || lassoPointsRef.current || manualMoveRef.current || arrowHandleEditRef.current) return;
+      const pageEl = containerRef.current;
+      if (!pageEl) return;
+      const pr = pageEl.getBoundingClientRect();
+      const overlapX = Math.min(rect.right, pr.right) - Math.max(rect.left, pr.left);
+      const overlapY = Math.min(rect.bottom, pr.bottom) - Math.max(rect.top, pr.top);
+      if (overlapX < 24 || overlapY < 24) return;
+      const tl = clientToUniform(rect.left, rect.top);
+      const br = clientToUniform(rect.right, rect.bottom);
+      if (!tl || !br) return;
+      const box = {
+        x: Math.min(tl.x, br.x),
+        y: Math.min(tl.y, br.y),
+        width: Math.abs(br.x - tl.x),
+        height: Math.abs(br.y - tl.y),
+      };
+      if (box.width < 6 || box.height < 6) return;
+      const aspectNow = aspectRef.current || 1;
+      const storageBox = { x: box.x, y: box.y / aspectNow, width: box.width, height: box.height / aspectNow };
+      const uniformList = (itemsRef.current || []).filter(Boolean).map((it) =>
+        toUniformCached(it, aspectNow)
+      );
+      const storageItems = uniformList.map((it) => uniformToStorage(it, aspectNow));
+      const matchingIds = selectItemsInBox(storageItems, storageBox, { stickyScaleFor });
+      if (matchingIds.length === 0) return;
+      const matching = matchingIds
+        .map((id) => uniformList.find((it) => it.id === id))
+        .filter(Boolean);
+      if (matching.length === 0) return;
+      if (typeof state.setSelectedAnnotations === 'function') {
+        state.setSelectedAnnotations(matching.map((it) => it.id), pageNumber);
+      }
+      if (typeof state.syncToolbarWithSelectedItem === 'function') {
+        state.syncToolbarWithSelectedItem(matching[matching.length - 1]);
+      }
+      setSelectionLocked(true);
+      lastCrossPageSelection = {
+        page: Number(pageRef.current),
+        ids: matching.map((it) => it.id),
+        gestureId: detail.gestureId,
+        at: Date.now(),
+      };
+    };
+    window.addEventListener('annotation:cross-page-marquee', onCrossPageMarquee);
+    return () => window.removeEventListener('annotation:cross-page-marquee', onCrossPageMarquee);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // مرحله ۴۸ §۵: خروج از انتخاب با Enter/Escape — Enter یعنی تأیید
+  // و اتمامِ انتخاب، Escape یعنی لغو. اگر ژستِ select در جریان
+  // است (مارکی/کمند/جابه‌جایی/هندل)، Escape اول ژست را لغو می‌کند
+  // (بدونِ کامیت و بدونِ تغییرِ انتخاب)؛ وگرنه انتخاب پاک و قفل
+  // باز می‌شود. وقتی ویرایشگرِ متن/استیکی باز است یا فوکوس در
+  // فیلدِ متنی است، هیچ کاری نمی‌کند.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (window.__isRecordingShortcut ||
+        (typeof document !== 'undefined' &&
+          document.body?.dataset?.recordingShortcut === 'true')) return;
+      if (e.key !== 'Enter' && e.key !== 'Escape') return;
+      const tag = e.target?.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      if (textEditorRef.current || activeStickyEditorRef.current) return;
+      const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+      if (!state.isAnnotationActive) return;
+      if (state.annotationTool !== 'select') return;
+      // لغوِ ژستِ در جریان با Escape (بدونِ کامیت).
+      if (e.key === 'Escape' && (isMarqueeRef.current || lassoPointsRef.current ||
+          manualMoveRef.current || arrowHandleEditRef.current)) {
+        e.preventDefault();
+        if (isMarqueeRef.current) {
+          isMarqueeRef.current = null;
+          marqueeBoxRef.current = null;
+          if (marqueeRectRef.current) marqueeRectRef.current.visible(false);
+        }
+        if (lassoPointsRef.current) {
+          lassoPointsRef.current = null;
+          if (lassoLineRef.current) lassoLineRef.current.visible(false);
+        }
+        if (manualMoveRef.current) {
+          for (const id of manualMoveRef.current.originals.keys()) {
+            const node = itemNodeRefs.current.get(id);
+            if (node) node.position({ x: 0, y: 0 });
+          }
+          resetSelectionBoxOffsets();
+          manualMoveRef.current = null;
+        }
+        if (arrowHandleEditRef.current) {
+          const editId = arrowHandleEditRef.current.id;
+          arrowHandleEditRef.current = null;
+          setArrowHandleDraggingKind(null);
+          const origNode = editId ? itemNodeRefs.current.get(editId) : null;
+          if (origNode) origNode.visible(true);
+          if (arrowPreviewShapeRef.current) arrowPreviewShapeRef.current.visible(false);
+          resetAdornerHandlesToBase();
+        }
+        drawBothLayers();
+        restoreStageCursor();
+        stopSelectWindowTracking();
+        marqueeStartClientRef.current = null;
+        crossPageDispatchRef.current = null;
+        clearAnnotationGestureActive();
+        return;
+      }
+      const ids = state.selectedAnnotationIds || [];
+      if (ids.length === 0) return;
+      if (state.selectedAnnotationPage != null &&
+          Number(state.selectedAnnotationPage) !== Number(pageNumber)) return;
+      e.preventDefault();
+      exitSelection();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pageNumber, exitSelection]);
 
   const handleEraseClick = useCallback((id) => {
     if (toolRef.current !== 'eraser') return;
@@ -4195,6 +5399,53 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     return () => window.removeEventListener('annotation-layer-order', onLayerOrder);
   }, [commit]);
 
+  // مرحله ۴۸ §۵: هادِ شناورِ اکشنِ انتخاب — فقط وقتی انتخاب قفل
+  // است و انتخاب مالِ همین صفحه است. موقعیت: دقیقاً بالای کادرِ
+  // اجتماعِ انتخاب (مرکزِ افقیِ کادر)، با چرخش به پایین اگر بالای
+  // کادر جا نباشد (هندسه از computeSelectionHudGeometryی انجین).
+  // مختصاتِ یکنواخت با scaleX/scaleY به پیکسلِ CSS تبدیل می‌شوند
+  // (مثلِ TextEditorOverlay).
+  const hudSelectedItems = selectionLocked && isAnnotationActive && annotationTool === 'select'
+    ? uniformItems.filter((it) => (selectedAnnotationIds || []).includes(it.id))
+    : [];
+  const hudSelectionPageOk = selectedAnnotationPage == null ||
+    Number(selectedAnnotationPage) === Number(pageNumber);
+  const hudBounds = hudSelectedItems.length > 0 && hudSelectionPageOk
+    ? getUnionBounds(hudSelectedItems, { stickyScaleFor })
+    : null;
+  const hudGeometry = hudBounds
+    ? computeSelectionHudGeometry(hudBounds, { w: size.w, h: size.h, scaleX, scaleY })
+    : null;
+  const showSelectionHud = Boolean(selectionLocked && hudGeometry && hudSelectedItems.length > 0);
+
+  // مرحلهٔ ۴۹ — کادرهای انتخابِ تکی و گروهی: برای هر آیتمِ انتخاب‌شده
+  // یک کادرِ خط‌چینِ فیروزه‌ای از روی getItemBounds، و وقتی ۲+ آیتم
+  // انتخاب است، یک کادرِ اجتماعِ بنفش هم دورِ همه‌شان. Transformer
+  // همچنان فقط روی آیتمِ اصلی است (تغییرِ اندازه)؛ این کادرها فقط
+  // نمایشِ انتخاب‌اند و با manualMove جابه‌جا می‌شوند.
+  const selectionPageOk = selectedAnnotationPage == null ||
+    Number(selectedAnnotationPage) === Number(pageNumber);
+  const selectionBoxItems = isAnnotationActive && annotationTool === 'select' && selectionPageOk
+    ? uniformItems.filter((it) => (selectedAnnotationIds || []).includes(it.id))
+    : [];
+  // مرحلهٔ ۵۰ §۳: کادرِ اجتماع همیشه از لیستِ کاملِ انتخاب ساخته
+  // می‌شود (نه از لیستِ فیلترشدهٔ پایین)، تا آیتمِ اصلی هم در آن باشد.
+  const selectionUnionBounds = selectionBoxItems.length > 1
+    ? getUnionBounds(selectionBoxItems, { stickyScaleFor })
+    : null;
+  // مرحلهٔ ۵۰ §۳ — حذفِ کادرِ دوتایی: باکسِ نقطه‌چینِ تکی فقط برای
+  // آیتم‌هایی رسم می‌شود که Transformer به آن‌ها وصل نیست.
+  // `selectedNodes` (استیتِ آینهٔ نودهای متصل به Transformer) دقیقاً
+  // همان «فعال بودن» است؛ پس تک‌انتخابِ غیرِ فلش فقط Transformer را
+  // دارد و باکسِ نقطه‌چینِ آن آیتم پنهان می‌شود؛ تک‌انتخابِ فلش
+  // (Transformer عمداً وصل نمی‌شود) فقط باکسِ نقطه‌چین را دارد.
+  // اگر Transformer هنوز وصل نشده باشد (یک فریمِ گذرا)، باکسِ
+  // نقطه‌چین به‌عنوانِ جایگزینِ امن می‌ماند — هیچ‌وقت بی‌کادر نمی‌شود.
+  const selectionDashedBoxItems = selectionBoxItems.filter((it) => {
+    const node = itemNodeRefs.current.get(it.id);
+    return !node || !selectedNodes.includes(node);
+  });
+
   if (!isAnnotationActive && uniformItems.length === 0) return null;
   if (stageMode === 'light') {
     // فاز ۳: صفحهٔ دورِ خالی — اصلاً Stage نساز؛ فقط کانتینرِ سبک با
@@ -4242,8 +5493,9 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
   // کرسرِ Stage از baseCursor می‌آید (تعریف‌شده پیش از شرطِ خروج،
   // بالای فایل) — دیگر سه‌حالتهٔ قدیمیِ default/cell/crosshair نیست:
   // قلم/هایلایتر SVGی اختصاصی، متن text، استیکی یادداشتِ +، پاک‌کن
-  // دایره، باکس/فلش crosshair و select در فضای خالی default دارند
-  // (هاور/درگِ select با نوشتنِ مستقیم روی DOM عوض می‌شود).
+  // دایره، باکس/فلش/select روی فضای خالی crosshair دارند
+  // (هاورِ select روی آیتم یا داخلِ کادرِ انتخاب move است و حینِ
+  // جابه‌جایی هم move می‌ماند؛ grab/grabbing فقط مالِ دست است).
   // Refinement Final: دستگیره‌های Transformer بر اساسِ ابزارِ آیتمِ
   // اصلی. اگر آیتمِ اصلی متن باشد، فقط ۴ گوشه نشان داده می‌شود،
   // چون دستگیرهٔ میانی برای متن بی‌اثر است (fontSize از scaleY
@@ -4316,29 +5568,50 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
         touchAction: 'none',
       }}
     >
+      <div
+        style={{
+          // مرحلهٔ ۵۰ §۲ (الف): ظرفِ حاشیه‌دارِ Stage — بزرگ‌تر از کاغذ
+          // تا آیتمِ بیرونِ صفحه دیده شود؛ خودش pointerEvents ندارد تا
+          // رویداد نگیرد (Stageِ داخل، auto است و رویدادها را می‌گیرد).
+          position: 'absolute',
+          left: -STAGE_BLEED_X,
+          top: -STAGE_BLEED_Y,
+          width: size.w + STAGE_BLEED_X * 2,
+          height: size.h + STAGE_BLEED_Y * 2,
+          overflow: 'visible',
+          pointerEvents: 'none',
+        }}
+      >
       <Stage
         ref={stageRef}
-        width={size.w}
-        height={size.h}
+        width={size.w + STAGE_BLEED_X * 2}
+        height={size.h + STAGE_BLEED_Y * 2}
         pixelRatio={appliedPixelRatio}
         // فیکس #۱: فقط Pointer Events — بدون mouse/touch موازی
         onPointerDown={handleDown}
         onPointerMove={handleMove}
         onPointerUp={handleUp}
-        onPointerLeave={handleUp}
+        // مرحلهٔ ۵۰ §۱: onPointerLeave حذف شد — خروجِ اشاره‌گر از بوم،
+        // دیگر ژست را قطع نمی‌کند؛ پایانِ ژست فقط با pointerupِ واقعیِ
+        // window، pointercancel یا راست‌کلیک است (شنونده‌های سراسری).
         onPointerCancel={handleUp}
+        onContextMenu={handleStageContextMenu}
         style={{
           // اعمالِ دومِ کرسر (اعمالِ اول: divِ کانتینرِ بالا؛ اعمالِ
           // سوم: افکتِ stageRef.current.container().style.cursor) تا
           // Konva در هیچ صفحه‌ای آن را به default بازنگرداند.
           cursor: baseCursor,
+          // مرحلهٔ ۵۰ §۲: ظرفِ والد pointerEvents ندارد، پس خودِ Stage
+          // رویداد می‌گیرد؛ ناحیهٔ Bleed با گاردِ handleDown (تحویل به
+          // صفحهٔ همسایه) از دزدیدنِ کلیکِ کاغذِ همسایه منع می‌شود.
+          pointerEvents: 'auto',
         }}
       >
         {/* فاز ۱ بهینه‌سازی — لایهٔ اول: ایستا. فقط آیتم‌های ثبت‌شده و
           Transformer را دارد و هنگامِ رسمِ خطِ جدید، هرگز در هر فریم
           batchDraw نمی‌شود (فقط موقعِ درگ/ترنسفورم/کامیت، همراه با
           لایهٔ درفت، از طریقِ drawBothLayers). */}
-        <Layer ref={layerRef}>
+        <Layer ref={layerRef} listening={!isHandTool} offsetX={-STAGE_BLEED_X} offsetY={-STAGE_BLEED_Y}>
           <Group scaleX={scaleX} scaleY={scaleY}>
             {konvaItems.map((item) => {
               // فاز ۵: هر آیتم در یک Groupِ پوششی قرار می‌گیرد تا
@@ -4348,20 +5621,17 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               // - id={item.id}: برای اینکه handleTransformEnd، نود
               //   را از روی transformer.nodes() هم پیدا کند.
               // - ref: ثبت/حذف در itemNodeRefs (callback ref).
-              // - draggable: وقتی حاشیه‌نویسی فعال است و ابزار
-              //   select است — برای همهٔ آیتم‌ها، نه فقط
-              //   انتخاب‌شده‌ها. دلیل (فاز ۵-مرحله ۳، سناریو ۴):
-              //   Konva در لحظهٔ pointerdown بررسی می‌کند که نود
-              //   draggable هست یا نه؛ اگر فقط آیتم‌های انتخاب‌شده
-              //   draggable باشند، کلیک-درگ روی آیتمِ انتخاب‌نشده
-              //   فقط انتخاب می‌کند و در همان ژست حرکت نمی‌کند
-              //   (کاربر باید دوبار بکشد). با draggable برای همه،
-              //   Stage handleDown اول انتخاب را تنظیم می‌کند و
-              //   بعد Konva همان ژست را drag می‌کند. محافظِ
-              //   Shift+کلیک در handleItemDragMove/End جلوی حرکتِ
-              //   آیتمِ از انتخاب بیرون‌رفته را می‌گیرد، پس این
-              //   تغییر، مارکی را به‌هم نمی‌زند: مارکی فقط روی
-              //   کلیکِ فضای خالی شروع می‌شود، نه روی نود.
+              // - draggable: مرحلهٔ ۴۹ — همیشه false. درگِ نیتیوِ
+              //   Konva خاموش است تا دوگانگیِ درگ از بین برود:
+              //   قبلاً هم Stage manualMove و هم Konva drag روی
+              //   نود فعال بودند و درگِ آیتمِ انتخاب‌شده می‌توانست
+              //   آیتمِ دیگری (همسایهٔ انتخاب‌نشده) را جابه‌جا کند.
+              //   حالا جابه‌جایی فقط از مسیرِ واحدِ Stage-level
+              //   manualMove (روی انتخابِ فعلیِ استور) انجام
+              //   می‌شود و handleDown همان ژستِ اول، انتخاب و
+              //   manualMove را با هم شروع می‌کند، پس درگ در همان
+              //   کلیکِ اول کار می‌کند. مارکی فقط روی کلیکِ فضای
+              //   خالی شروع می‌شود، نه روی نود.
               // - onDragMove: همگام‌سازیِ گروهی در حینِ حرکت.
               // - onDragEnd: کامیتِ یک‌باره (یک Undo) + resetِ نود.
               // - onTransformEnd: همان handleTransformEndی
@@ -4413,7 +5683,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                       itemNodeRefs.current.delete(item.id);
                     }
                   }}
-                  draggable={isAnnotationActive && annotationTool === 'select' && item.tool !== 'arrow'}
+                  draggable={false}
                   onDragStart={notifyGestureStart}
                   onDragMove={handleItemDragMove}
                   onDragEnd={(e) => handleItemDragEnd(e, item)}
@@ -4423,6 +5693,77 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                 </Group>
               );
             })}
+
+            {/* مرحلهٔ ۴۹ — کادرهای انتخابِ تکی و گروهی (به‌ازای هر
+              آیتمِ انتخاب‌شده یک کادرِ خط‌چینِ فیروزه‌ای + چهار نقطهٔ
+              گوشه، و برای چندانتخابی یک کادرِ اجتماعِ بنفش). کادرها
+              listening={false} هستند تا رویداد نگیرند؛ Group در
+              (0,0) است و فرزندان مختصاتِ مطلق دارند تا حینِ
+              manualMove با position برابرِ دلتا جابه‌جا شوند؛ درگ از
+              داخلِ هر کادر (روی خودِ آیتم یا فضای خالیِ داخلِ کادرِ
+              اجتماع) کلِ انتخاب را با هم می‌برد (به handleDown). */}
+            {selectionDashedBoxItems.map((selItem) => {
+              const b = getVisualRenderedBBox(selItem, { stickyScaleFor });
+              if (!b) return null;
+              return (
+                <Group
+                  key={`selbox-${selItem.id}`}
+                  ref={(node) => {
+                    if (node) {
+                      selectionBoxRefs.current.set(selItem.id, node);
+                    } else {
+                      selectionBoxRefs.current.delete(selItem.id);
+                    }
+                  }}
+                  listening={false}
+                >
+                  <Rect
+                    x={b.x}
+                    y={b.y}
+                    width={b.width}
+                    height={b.height}
+                    stroke="#22d3ee"
+                    strokeWidth={1.8}
+                    dash={[5, 4]}
+                    fill="rgba(34, 211, 238, 0.08)"
+                    listening={false}
+                  />
+                  <Rect x={b.x - 3} y={b.y - 3} width={6} height={6} fill="#22d3ee" stroke="#ffffff" strokeWidth={1} listening={false} />
+                  <Rect x={b.x + b.width - 3} y={b.y - 3} width={6} height={6} fill="#22d3ee" stroke="#ffffff" strokeWidth={1} listening={false} />
+                  <Rect x={b.x - 3} y={b.y + b.height - 3} width={6} height={6} fill="#22d3ee" stroke="#ffffff" strokeWidth={1} listening={false} />
+                  <Rect x={b.x + b.width - 3} y={b.y + b.height - 3} width={6} height={6} fill="#22d3ee" stroke="#ffffff" strokeWidth={1} listening={false} />
+                </Group>
+              );
+            })}
+            {selectionUnionBounds && (
+              <Group
+                key="selbox-union"
+                ref={(node) => {
+                  if (node) {
+                    selectionBoxRefs.current.set('union', node);
+                  } else {
+                    selectionBoxRefs.current.delete('union');
+                  }
+                }}
+                listening={false}
+              >
+                <Rect
+                  x={selectionUnionBounds.x}
+                  y={selectionUnionBounds.y}
+                  width={selectionUnionBounds.width}
+                  height={selectionUnionBounds.height}
+                  stroke="#a78bfa"
+                  strokeWidth={2}
+                  dash={[7, 5]}
+                  fill="rgba(167, 139, 250, 0.06)"
+                  listening={false}
+                />
+                <Rect x={selectionUnionBounds.x - 4} y={selectionUnionBounds.y - 4} width={8} height={8} fill="#a78bfa" stroke="#ffffff" strokeWidth={1} listening={false} />
+                <Rect x={selectionUnionBounds.x + selectionUnionBounds.width - 4} y={selectionUnionBounds.y - 4} width={8} height={8} fill="#a78bfa" stroke="#ffffff" strokeWidth={1} listening={false} />
+                <Rect x={selectionUnionBounds.x - 4} y={selectionUnionBounds.y + selectionUnionBounds.height - 4} width={8} height={8} fill="#a78bfa" stroke="#ffffff" strokeWidth={1} listening={false} />
+                <Rect x={selectionUnionBounds.x + selectionUnionBounds.width - 4} y={selectionUnionBounds.y + selectionUnionBounds.height - 4} width={8} height={8} fill="#a78bfa" stroke="#ffffff" strokeWidth={1} listening={false} />
+              </Group>
+            )}
 
             {/* Refinement Step 2: Transformer — داخلِ همان Groupِ مقیاس‌دار
               قرار می‌گیرد تا سیستمِ مختصاتش با نودها یکی باشد.
@@ -4471,7 +5812,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           هنگامِ رسم، فقط همین لایه batchDraw می‌شود تا لایهٔ ایستا
           (صدها شکلِ ثبت‌شده) در هر فریم دوباره رستر نشود. Groupِ
           مقیاس‌دارِ آن هم‌مقیاسِ لایهٔ اول است تا مختصات یکی بماند. */}
-        <Layer ref={draftLayerRef} listening={false}>
+        <Layer ref={draftLayerRef} listening={false} offsetX={-STAGE_BLEED_X} offsetY={-STAGE_BLEED_Y}>
           <Group scaleX={scaleX} scaleY={scaleY}>
             {/* فاز ۲: مستطیلِ مارکیِ دائمی — بدونِ setState: handleDown/
               handleMove/handleUp مستقیم با setAttrs روی همین نود کار
@@ -4486,10 +5827,26 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               y={0}
               width={0}
               height={0}
-              fill="rgba(34, 211, 238, 0.08)"
+              fill="rgba(34, 211, 238, 0.14)"
               stroke="#22d3ee"
               strokeWidth={1}
               dash={[6, 4]}
+              listening={false}
+            />
+
+            {/* مرحله 44 §3: پیش‌نمایشِ زندهٔ کمندِ آزاد — خطِ بستهٔ
+              خط‌چینِ نئونی با داخلِ نیمه‌شفاف؛ نقاط از رویِ
+              lassoPointsRef (فضای یکنواخت) با setAttrs به‌روز
+              می‌شوند، بدونِ setState در هر فریم. */}
+            <Line
+              ref={lassoLineRef}
+              visible={false}
+              points={[]}
+              closed
+              fill="rgba(167, 139, 250, 0.16)"
+              stroke="#a78bfa"
+              strokeWidth={1.5}
+              dash={[8, 5]}
               listening={false}
             />
 
@@ -4630,11 +5987,13 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           </Group>
         </Layer>
       </Stage>
+      </div>
 
       {/* مرحلهٔ ۳۵ §۵: پین‌های DOM برای استیکی‌نوت‌های کاملاً بیرون از
           صفحه — مثلِ بوک‌مارک‌ها، بیرون از کاغذ هم دیده می‌شوند.
           کلیک، کارتِ ویرایشِ همان استیکی را باز می‌کند؛ درگ، آن را
-          با کلمپِ افقیِ [-۱۴۰، ۱۱۴۰] جابه‌جا می‌کند (و برگرداندن به
+          با کلمپِ [-۲۰۰، ۱۲۰۰] در افق و [-۸۰، ۱۰۸۰] در عمود (فضای
+          ذخیره‌سازی) جابه‌جا می‌کند (و برگرداندن به
           داخلِ صفحه، دوباره آن را به بومِ Konva برمی‌گرداند). وقتی
           استودیو غیرفعال است، پین‌ها فقط دیده می‌شوند و کلیک
           نمی‌گیرند. */}
@@ -4664,7 +6023,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
               type="button"
               title={it.text ? String(it.text).slice(0, 60) : 'استیکی‌نوت'}
               onPointerDown={(e) => {
-                if (!isAnnotationActive) return;
+                if (!isAnnotationActive || annotationTool === 'hand') return;
                 try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
                 setOverflowPinDrag({ id: it.id, startX: e.clientX, startY: e.clientY, dx: 0, dy: 0 });
               }}
@@ -4685,8 +6044,11 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                 const dyU = (drag.dy * 1000 * aspect) / (size.h > 0 ? size.h : 1000);
                 const next = {
                   ...uniform,
-                  x: Math.max(-140, Math.min(1140, Number(uniform.x ?? 0) + dxU)),
-                  y: Math.max(0, Math.min(1000 * aspect, Number(uniform.y ?? 0) + dyU)),
+                  // مرحلهٔ ۵۰ §۲: بازهٔ مجازِ ذخیره‌سازی [-۲۰۰، ۱۲۰۰] در
+                  // افق و [-۸۰، ۱۰۸۰] در عمود (در فضای یکنواخت، عمود در
+                  // aspect ضرب می‌شود)؛ بدونِ کلمپ به [0,1000].
+                  x: Math.max(STORAGE_X_MIN, Math.min(STORAGE_X_MAX, Number(uniform.x ?? 0) + dxU)),
+                  y: Math.max(STORAGE_Y_MIN * aspect, Math.min(STORAGE_Y_MAX * aspect, Number(uniform.y ?? 0) + dyU)),
                 };
                 commit(uniformItems.map((u) => (u.id === it.id ? next : u)));
               }}
@@ -4696,6 +6058,7 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                   return;
                 }
                 if (!isAnnotationActive) return;
+                if (annotationTool === 'hand') return;
                 if (annotationTool === 'eraser') { handleEraseClick(it.id); return; }
                 openStickyEditor(it.id);
               }}
@@ -4713,8 +6076,10 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                cursor: isAnnotationActive ? 'grab' : 'default',
-                pointerEvents: isAnnotationActive ? 'auto' : 'none',
+                // مرحلهٔ ۵۱ §۴: پینِ استیکی در حالتِ select، move است،
+                // نه grab؛ grab فقط برای ابزارهای ترسیمیِ دیگر می‌ماند.
+                cursor: !isAnnotationActive || annotationTool === 'hand' ? 'default' : annotationTool === 'select' ? 'move' : 'grab',
+                pointerEvents: isAnnotationActive && annotationTool !== 'hand' ? 'auto' : 'none',
                 padding: 0,
                 boxShadow: '0 2px 8px rgba(0,0,0,0.45)',
               }}
@@ -4752,6 +6117,107 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
           setActiveStickyEditorId(null);
         }}
       />
+      {/* مرحله ۴۸ §۵: هادِ شناورِ اکشنِ انتخاب (قفلِ خودکار) —
+          کپسول بالای کادرِ انتخاب با سه دکمهٔ SVG (بدونِ ایموجی):
+          تأیید و اتمام (سبز)، حذفِ انتخاب‌شده‌ها با شمارنده، و
+          کپی/تکثیر. کلیک روی هاد به Stage نمی‌رسد. */}
+      {showSelectionHud && (
+        <div
+          dir="rtl"
+          role="toolbar"
+          aria-label="اقدام‌های انتخاب"
+          style={{
+            position: 'absolute',
+            left: hudGeometry.left,
+            top: hudGeometry.top,
+            zIndex: 120,
+            display: 'flex',
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            padding: '5px 6px',
+            borderRadius: 999,
+            background: 'rgba(8, 12, 16, 0.94)',
+            border: '1px solid rgba(34, 211, 238, 0.4)',
+            boxShadow: '0 8px 28px rgba(0,0,0,0.55)',
+            userSelect: 'none',
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            title="تأیید و اتمام انتخاب"
+            onClick={exitSelection}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              border: 'none',
+              cursor: 'pointer',
+              padding: '6px 10px',
+              borderRadius: 999,
+              fontSize: 12,
+              fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+              background: 'rgba(22, 163, 74, 0.22)',
+              color: '#4ade80',
+              outline: '1.5px solid #22c55e',
+              outlineOffset: -1,
+            }}
+          >
+            <Icons.Check size={14} />
+            <span>تأیید و اتمام انتخاب</span>
+          </button>
+          <button
+            type="button"
+            title={`حذف ${hudSelectedItems.length.toLocaleString('fa-IR')} شکلِ انتخاب‌شده`}
+            onClick={deleteSelectedAnnotations}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              border: 'none',
+              cursor: 'pointer',
+              padding: '6px 10px',
+              borderRadius: 999,
+              fontSize: 12,
+              fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+              background: 'rgba(244, 63, 94, 0.18)',
+              color: '#fda4af',
+              outline: '1px solid rgba(244,63,94,0.5)',
+              outlineOffset: -1,
+            }}
+          >
+            <Icons.Trash size={14} />
+            <span>حذف انتخاب‌شده‌ها ({hudSelectedItems.length.toLocaleString('fa-IR')})</span>
+          </button>
+          <button
+            type="button"
+            title="کپی / تکثیرِ شکل‌های انتخاب‌شده"
+            onClick={duplicateSelectedAnnotations}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 5,
+              border: 'none',
+              cursor: 'pointer',
+              padding: '6px 10px',
+              borderRadius: 999,
+              fontSize: 12,
+              fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+              background: 'rgba(34, 211, 238, 0.14)',
+              color: '#67e8f9',
+              outline: '1px solid rgba(34,211,238,0.4)',
+              outlineOffset: -1,
+            }}
+          >
+            <Icons.Copy size={14} />
+            <span>کپی / تکثیر</span>
+          </button>
+        </div>
+      )}
     </div>
   );
 });

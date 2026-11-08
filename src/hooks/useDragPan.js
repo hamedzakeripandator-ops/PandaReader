@@ -17,6 +17,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 //   پس در حالتِ استودیو، فقط دکمهٔ وسط، پنینگ می‌کند.
 // - هرگز رویِ دکمه‌ها، نشانگرهایِ بوک‌مارک (.bm-marker) و لینک‌ها
 //   شروع نمی‌شود؛ کلیکِ رویِ آن‌ها، کارِ خودش را می‌کند.
+// - هرگز رویِ نوارِ اسکرول‌بارِ سمتِ راستِ کانتینر شروع نمی‌شود؛
+//   کلیکِ آن‌جا مالِ خودِ مرورگر است و درگِ شستی، با پنینگ
+//   تداخل می‌کند و شستی عقب می‌ماند (مرحله ۴۵).
 // - آستانهٔ ۴ پیکسل: تا پیش از رد شدن از ۴ پیکسل، هیچ اسکرولی
 //   انجام نمی‌شود تا کلیک‌هایِ عادی، سالم بمانند.
 // - حرکت، با rAF ادغام می‌شود (۶۰ فریم) و پس از رها کردن، یک
@@ -77,6 +80,17 @@ export default function useDragPan({
     (e) => {
       const container = containerRef && containerRef.current;
       if (!container) return;
+      // گاردِ لبهٔ اسکرول‌بار: کلیک رویِ نوارِ اسکرول‌بارِ سمتِ راستِ
+      // کانتینر، مالِ خودِ مرورگر است، نه درگ؛ اگر هوک فعال شود،
+      // درگِ شستی با پنینگ تداخل می‌کند و شستی عقب می‌ماند.
+      // شرطِ اول (clientX) مستقل از هدفِ رویداد است و هر کلیکی را
+      // در ۱۶ پیکسلِ لبهٔ راست می‌گیرد. شرطِ دوم (offsetX) فقط
+      // وقتی اعمال می‌شود که هدف، خودِ کانتینر باشد؛ چون offsetX
+      // نسبت به هدف سنجیده می‌شود و رویِ فرزندِ پهنِ زوم‌شده،
+      // بی‌جهت پنینگ را می‌بست.
+      const containerRect = container.getBoundingClientRect();
+      if (e.clientX >= containerRect.right - 16) return;
+      if (e.target === container && e.offsetX > container.clientWidth) return;
       if (isAreaZoomActive) return;
       const isMiddle = e.button === 1;
       const isLeft = e.button === 0;

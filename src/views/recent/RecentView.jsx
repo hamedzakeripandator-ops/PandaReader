@@ -85,6 +85,34 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, select
     return resolveCoverUrl(item?.cover) || thumbnailService.peekCover(filePath);
   });
   const [isHovered, setIsHovered] = useState(false);
+
+  // مرحلهٔ ۵۰ §۵ — عضویتِ این کتاب در فهرستِ دستیِ اسلایدرِ هیرو.
+  const heroSliderSource = useLibraryStore((state) => state.heroSliderSource || 'auto');
+  const toggleBookInHeroSlider = useLibraryStore((state) => state.toggleBookInHeroSlider);
+  const showToast = useAppStore((state) => state.showToast);
+  const inHeroSlider = useLibraryStore(
+    useCallback(
+      (state) => {
+        if (!filePath) return false;
+        const norm = filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
+        return (state.customSliderBookPaths || []).includes(norm);
+      },
+      [filePath]
+    )
+  );
+  const handleToggleHeroSlider = (e) => {
+    e.stopPropagation();
+    if (!filePath) return;
+    const added = toggleBookInHeroSlider(item);
+    showToast(
+      added
+        ? heroSliderSource === 'custom'
+          ? `«${title}» به اسلایدر اضافه شد`
+          : `«${title}» به فهرستِ اسلایدر اضافه شد — برایِ نمایش، منبعِ اسلایدر را رویِ «انتخاب دستی» بگذار`
+        : `«${title}» از اسلایدر حذف شد`,
+      { type: added ? 'success' : 'info' }
+    );
+  };
   const recompressedForRef = useRef(null);
 
   // مرحلهٔ ۳۹ §۲: اگر تامبنیلِ ذخیره‌شده بزرگ است (بالایِ ۴۸KB)، یک
@@ -216,6 +244,20 @@ function RecentListRow({ item, onOpenComic, onShowInFolder, onRemoveItem, select
 
       {/* دکمه‌های اکشن سطر با آیکون‌های وکتور */}
       <div style={styles.itemActions}>
+        <button
+          type="button"
+          onClick={handleToggleHeroSlider}
+          style={{
+            ...styles.iconActionBtn,
+            // مرحلهٔ ۵۲ §۲ — پس‌زمینه همیشه تیره است تا آیکون سفید خوانا بماند؛ هرگز سفید یا فیروزه‌ای روشن نمی‌شود.
+            color: inHeroSlider ? '#34d399' : '#ffffff',
+            borderColor: inHeroSlider ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255, 255, 255, 0.14)',
+            backgroundColor: inHeroSlider ? 'rgba(12, 16, 23, 0.92)' : 'rgba(12, 16, 23, 0.88)',
+          }}
+          title={inHeroSlider ? 'حذف از اسلایدر بالا' : 'نمایش در اسلایدر بالا'}
+        >
+          <Icons.Layers size={14} />
+        </button>
         <button
           type="button"
           onClick={(e) => onShowInFolder(e, filePath)}
@@ -380,6 +422,7 @@ export default function RecentView({ onOpenComic }) {
 
   return (
     <div style={styles.container}>
+      <div style={styles.containerInner}>
       {/* هدر بالای تاریخچه */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -576,6 +619,7 @@ export default function RecentView({ onOpenComic }) {
       {statModal && (
         <div style={styles.statsModalOverlay} onClick={() => setStatModal(null)}>
           <div style={styles.statsModalCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.statsModalCardInner}>
             <h4 style={{ margin: '0 0 12px', fontSize: 15 }}>{statModal.id ? 'ویرایشِ آماربندی' : 'ساختِ آماربندی جدید'}</h4>
             <input
               type="text"
@@ -613,9 +657,11 @@ export default function RecentView({ onOpenComic }) {
               <button type="button" onClick={handleSaveStatModal} style={styles.statsPrimaryBtn}>ذخیرهٔ آماربندی</button>
               <button type="button" onClick={() => setStatModal(null)} style={styles.statsBarBtn}>انصراف</button>
             </div>
+            </div>
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -628,8 +674,17 @@ const styles = {
     flexDirection: 'column',
     gap: '18px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },
+  // مرحله ۴۴: قفلِ جهت — پوسته ltr، محتوایِ درونی rtl تا نوارِ اسکرول در سمتِ راست بماند
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '18px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
   },
   header: {
     display: 'flex',
@@ -995,7 +1050,11 @@ const styles = {
   },
   statsModalCard: {
     width: '100%', maxWidth: 520, maxHeight: '85vh', overflowY: 'auto', backgroundColor: 'var(--panel)',
-    borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 16, padding: 18, color: 'var(--text)',
+    borderWidth: '1px', borderStyle: 'solid', borderColor: 'var(--border)', borderRadius: 16, padding: 18, color: 'var(--text)', direction: 'ltr',
+  },
+  // مرحله ۴۴: قفلِ جهت — پوسته ltr، محتوایِ درونی rtl تا نوارِ اسکرول در سمتِ راست بماند
+  statsModalCardInner: {
+    direction: 'rtl',
   },
   statsField: {
     width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid var(--border)',

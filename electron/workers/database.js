@@ -60,6 +60,11 @@ const defaultDB = {
   history: {},
   library: [],
   libraryFolders: [],
+  favoriteFolders: [],
+  // مرحله ۴۹ (C): پرچمِ مهاجرتِ یک‌بارهٔ پوشه‌هایِ علاقه‌مندی از
+  // folderIdِ قدیمی (گزینهٔ الف)؛ پس از یک بار اجرا، true می‌ماند تا
+  // پوشهٔ مهاجرت‌شدهٔ حذف‌شده، در بوتِ بعدی دوباره ساخته نشود.
+  favoriteFolderMigrationDone: false,
   favorites: [],
   annotations: {},
   bookmarks: {},
@@ -180,6 +185,11 @@ function migrateSchema(parsed) {
     ? parsed.libraryFolders.filter((f) => f && f.id && f.name)
     : [];
   const validFolderIds = new Set(libraryFolders.map((f) => f.id));
+  // مرحله ۴۹ (C): فهرستِ مستقلِ پوشه‌هایِ علاقه‌مندی‌ها.
+  const favoriteFolders = Array.isArray(parsed.favoriteFolders)
+    ? parsed.favoriteFolders.filter((f) => f && f.id && f.name)
+    : [];
+  const validFavoriteFolderIds = new Set(favoriteFolders.map((f) => f.id));
 
   const library = Array.isArray(parsed.library) ? parsed.library : [];
   const favorites = Array.isArray(parsed.favorites) ? parsed.favorites : [];
@@ -203,12 +213,69 @@ function migrateSchema(parsed) {
 
   favorites.forEach((item) => {
     const norm = normalizePath(item.path || item.filePath);
+    // مرحله ۴۹ (C): پوشهٔ علاقه‌مندی، فقط با شناسهٔ پوشهٔ
+    // علاقه‌مندیِ موجود معتبر است؛ پوشهٔ حذف‌شده، بی‌پوشه می‌شود.
+    // فیلدِ قدیمیِ folderId فقط اعتبارسنجی می‌شود و نگه داشته
+    // می‌شود (حفظ‌شده ولی نادیده‌گرفته‌شده) تا بازگشت به مرحلهٔ ۴۸
+    // ممکن بماند؛ مهاجرتِ آن به favoriteFolderId، در بلوکِ یک‌بارهٔ
+    // پایین انجام می‌شود.
+    item.favoriteFolderId =
+      item.favoriteFolderId && validFavoriteFolderIds.has(item.favoriteFolderId)
+        ? item.favoriteFolderId
+        : null;
+    item.folderId = item.folderId && validFolderIds.has(item.folderId) ? item.folderId : null;
     if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.cover)) {
       item.cover = cleanCoverCache[norm].cover;
     } else if (!isPermanentCover(item.cover)) {
       item.cover = cleanCoverCache[norm]?.cover || null;
     }
   });
+
+  // مرحله ۴۹ (C): مهاجرتِ یک‌بارهٔ پوشه‌بندیِ علاقه‌مندی‌ها (گزینهٔ
+  // الف — امن‌تر): علاقه‌مندی‌هایی که هنوز favoriteFolderId ندارند
+  // ولی folderIdِ قدیمی‌شان به یک پوشهٔ موجودِ کتابخانه اشاره می‌کند،
+  // همان پوشه را در سیستمِ مستقلِ علاقه‌مندی‌ها می‌گیرند. برایِ هر
+  // پوشهٔ کتابخانه، حداکثر یک پوشهٔ علاقه‌مندیِ هم‌نام/هم‌رنگ ساخته
+  // می‌شود (شناسهٔ قطعیِ مشتق‌شده، تا اجرایِ دوباره، تکراری نسازد) و
+  // پوشه‌هایِ دستیِ هم‌نامِ موجود، دوباره ساخته نمی‌شوند. پس از این
+  // اجرا، پرچمِ favoriteFolderMigrationDone در db.json می‌ماند تا
+  // حذفِ بعدیِ پوشهٔ مهاجرت‌شده، در بوتِ بعد بازسازی نشود. پوشهٔ
+  // کتابخانهٔ حذف‌شده (folderIdِ نامعتبر)، مهاجرتی ندارد و کتاب،
+  // بی‌پوشه می‌ماند؛ folderIdِ قدیمی هم دست نمی‌خورد.
+  let favoriteFolderMigrationDone = parsed.favoriteFolderMigrationDone === true;
+  if (!favoriteFolderMigrationDone) {
+    const libFolderById = new Map(libraryFolders.map((f) => [f.id, f]));
+    const favByLibId = new Map();
+    const favByNameColor = new Map();
+    favoriteFolders.forEach((f) => {
+      if (f.migratedFromLibraryFolderId) favByLibId.set(f.migratedFromLibraryFolderId, f);
+      favByNameColor.set(`${(f.name || '').trim()}|${f.color || ''}`, f);
+    });
+    favorites.forEach((item) => {
+      if (item.favoriteFolderId) return;
+      const legacyId = item.folderId;
+      if (!legacyId || !libFolderById.has(legacyId)) return;
+      const libFolder = libFolderById.get(legacyId);
+      const nameColorKey = `${(libFolder.name || '').trim()}|${libFolder.color || ''}`;
+      let target = favByLibId.get(legacyId) || favByNameColor.get(nameColorKey);
+      if (!target) {
+        target = {
+          id: `favfolder_migrated_${legacyId}`,
+          name: libFolder.name,
+          color: libFolder.color || '#22d3ee',
+          icon: libFolder.icon || 'Folder',
+          createdAt: new Date().toISOString(),
+          migratedFromLibraryFolderId: legacyId,
+        };
+        favoriteFolders.push(target);
+        validFavoriteFolderIds.add(target.id);
+        favByLibId.set(legacyId, target);
+        favByNameColor.set(nameColorKey, target);
+      }
+      item.favoriteFolderId = target.id;
+    });
+    favoriteFolderMigrationDone = true;
+  }
 
   Object.keys(history).forEach((normKey) => {
     if (cleanCoverCache[normKey]?.isCustom && isPermanentCover(cleanCoverCache[normKey]?.cover)) {
@@ -372,6 +439,8 @@ function migrateSchema(parsed) {
     history,
     library: sortLibraryItems(library),
     libraryFolders,
+    favoriteFolders,
+    favoriteFolderMigrationDone,
     favorites,
     annotations,
     bookmarks,
@@ -534,7 +603,14 @@ function readDB() {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
     if (!raw || raw.trim().length === 0) throw new Error('Empty DB file');
     const parsed = JSON.parse(raw);
+    const hadFavMigrationFlag = parsed.favoriteFolderMigrationDone === true;
     cachedDbInstance = migrateSchema(parsed);
+    // مرحله ۴۹ (C): اگر مهاجرتِ یک‌بارهٔ پوشه‌هایِ علاقه‌مندی همین‌جا
+    // اجرا شد، همان لحظه رویِ دیسک نوشته می‌شود تا بوتِ بعدی، پوشهٔ
+    // مهاجرت‌شدهٔ حذف‌شده را دوباره نسازد.
+    if (!hadFavMigrationFlag && cachedDbInstance.favoriteFolderMigrationDone) {
+      writeDB(cachedDbInstance, true);
+    }
     runCoverMigrationOnce(cachedDbInstance);
     return cachedDbInstance;
   } catch (primaryError) {
@@ -1410,17 +1486,72 @@ function driveRootExists(filePath) {
   }
 }
 
-// مرحله ۱۰: هرسِ کتاب‌هایی که فایلِ اصلی‌شان از دیسک رفته است.
-// برای هر مسیرِ یکتا در history/library/favorites/annotations:
-// اگر فایل هست → می‌ماند؛ اگر مسیر، مطلق نیست → دست نمی‌خورد؛
-// اگر ریشهٔ درایو نیست → «ردشده» (درایوِ قطع‌شده) و می‌ماند؛
-// در غیرِ این صورت، از هر سه جدول + annotations + coverCache +
-// فایل‌های کاور حذف می‌شود. فقط یک بار writeDB انجام می‌شود.
-function pruneMissingFiles(db, dryRun = false) {
+// مرحلهٔ ۵۲ §۱: مسیرهایِ دستیِ اسلایدرِ هیرو (از تنظیماتِ
+// heroSliderConfig). فایلِ فقط-اسلایدری، در هیچ جدولِ کاربری نیست؛
+// ولی کاورش باید حفظ شود و عضویتش در اسلایدر هم دست نمی‌خورد.
+// وقتی SQLite آماده است، kv_store مرجعِ تنظیمات است و آینهٔ JSON
+// ممکن است عقب باشد؛ پس همان کلید از kv هم خوانده می‌شود.
+function collectCustomSliderNorms(db) {
+  const norms = new Set();
+  const addList = (list) => {
+    (Array.isArray(list) ? list : []).forEach((p) => {
+      const n = normalizePath(p);
+      if (n) norms.add(n);
+    });
+  };
+  try {
+    const fromSettings = db.settings && db.settings.heroSliderConfig;
+    if (fromSettings && typeof fromSettings === 'object') addList(fromSettings.customSliderBookPaths);
+  } catch (_) {}
+  try {
+    if (sqliteReady) {
+      const raw = sqliteGetKv('setting:heroSliderConfig');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') addList(parsed.customSliderBookPaths);
+      }
+    }
+  } catch (_) {}
+  return norms;
+}
+
+// مرحلهٔ ۵۲ §۱: همگام‌سازیِ هوشمندِ فایل‌هایِ حذف‌شده (جایگزینِ
+// هرسِ قدیمیِ مرحلهٔ ۱۰ که کتاب را از همه‌جا — از جمله کتابخانه و
+// علاقه‌مندی‌ها — پاک می‌کرد).
+//   - فایلِ موجود: می‌ماند؛ اگر پرچمِ isMissing داشت، پرچم برداشته
+//     می‌شود (فایل برگشته است).
+//   - فایلِ رفته (و درایوش وصل است): از Recent/history + بوک‌مارک‌ها
+//     + حاشیه‌نویسی‌ها + epub_highlights + epub_text_cache پاک می‌شود؛
+//     در هر دو موتور (جدول‌هایِ SQLite و آینهٔ JSON) و در یک گذرِ
+//     دسته‌ای.
+//   - همان فایل، در کتابخانه و علاقه‌مندی‌ها می‌ماند با isMissing:true
+//     (و در اسلایدر هم می‌ماند؛ resolveHeroSliderItems آن را نگه
+//     می‌دارد) تا کاربر با بجِ هشدار ببیندش و با دکمهٔ سطل، خودش
+//     حذفش کند.
+//   - کاور (ورودیِ coverCache + فایل‌هایِ covers/) فقط وقتی آزاد
+//     می‌شود که فایل در هیچ‌کدام از library/favorites/
+//     customSliderBookPaths نباشد.
+//   - onlyPaths (آرایهٔ اختیاری): فقط همان مسیرها بررسی می‌شوند؛
+//     باز هم یک پیامِ دسته‌ای است، نه حلقهٔ IPC.
+//   - dryRun=true: هیچ چیز تغییر نمی‌کند؛ فقط پیش‌نمایش برمی‌گردد
+//     (برایِ PREVIEW_PRUNE_MISSING_FILES).
+// فقط یک بار writeDB انجام می‌شود و حذف‌هایِ SQLite در یک تراکنشِ
+// واحد می‌نشینند.
+function syncMissingFiles(db, dryRun = false, onlyPaths = null) {
+  const onlyNorms = new Set();
+  if (Array.isArray(onlyPaths)) {
+    onlyPaths.forEach((p) => {
+      const n = normalizePath(p);
+      if (n) onlyNorms.add(n);
+    });
+  }
+  const scoped = onlyNorms.size > 0;
+
   const candidates = new Map();
   const consider = (rawPath, fallbackNorm) => {
     const norm = normalizePath(rawPath) || fallbackNorm;
     if (!norm || candidates.has(norm)) return;
+    if (scoped && !onlyNorms.has(norm)) return;
     candidates.set(norm, rawPath || fallbackNorm || '');
   };
   Object.entries(db.history || {}).forEach(([normKey, h]) => {
@@ -1428,11 +1559,54 @@ function pruneMissingFiles(db, dryRun = false) {
   });
   (db.library || []).forEach((item) => consider(item && (item.path || item.filePath), ''));
   (db.favorites || []).forEach((item) => consider(item && (item.path || item.filePath), ''));
+  Object.keys(db.annotations || {}).forEach((norm) => consider(norm, norm));
+  Object.keys(db.bookmarks || {}).forEach((norm) => consider(norm, norm));
+  Object.keys(db.epubHighlights || {}).forEach((norm) => consider(norm, norm));
+  if (db.epubTextCache && typeof db.epubTextCache === 'object') {
+    Object.keys(db.epubTextCache).forEach((norm) => consider(norm, norm));
+  }
+  // کلیدهایِ فقط-SQLite (کشِ متنِ EPUB در JSON آینه ندارد).
+  if (sqliteReady && sqliteStmts.listTextCacheKeys) {
+    try {
+      sqliteStmts.listTextCacheKeys.all().forEach((row) => {
+        if (row && row.file_key) consider(row.file_key, row.file_key);
+      });
+    } catch (_) {}
+  }
+
+  const sliderNorms = collectCustomSliderNorms(db);
+  const libraryNorms = new Set();
+  (db.library || []).forEach((item) => {
+    const n = normalizePath(item && (item.path || item.filePath));
+    if (n) libraryNorms.add(n);
+  });
+  const favoriteNorms = new Set();
+  (db.favorites || []).forEach((item) => {
+    const n = normalizePath(item && (item.path || item.filePath));
+    if (n) favoriteNorms.add(n);
+  });
 
   const removed = [];
   const skipped = [];
+  const missingPaths = [];
+  const returnedPaths = [];
+  const coversFreedPaths = [];
+  let purgedFromRecent = 0;
+  let keptWithWarning = 0;
   let coverFilesDeleted = 0;
   let coverBytesFreed = 0;
+  let changed = false;
+  // نرم‌هایِ حذف‌شده از SQLite (در یک تراکنشِ واحد، پس از حلقه).
+  const sqliteDeleteNorms = [];
+
+  const setMissingFlag = (list, norm, value) => {
+    (list || []).forEach((item) => {
+      if (normalizePath(item && (item.path || item.filePath)) !== norm) return;
+      if (item.isMissing === value) return;
+      if (!dryRun) item.isMissing = value;
+      changed = true;
+    });
+  };
 
   for (const [norm, rawPath] of candidates.entries()) {
     const probePath = rawPath || norm;
@@ -1442,61 +1616,97 @@ function pruneMissingFiles(db, dryRun = false) {
     }
     let exists = false;
     try { exists = fs.existsSync(probePath); } catch (_) { exists = false; }
-    if (exists) continue;
+    if (exists) {
+      // فایل برگشته است: پرچمِ هشدار برداشته می‌شود.
+      const wasMissing =
+        (db.library || []).some((it) => normalizePath(it.path || it.filePath) === norm && it.isMissing === true) ||
+        (db.favorites || []).some((it) => normalizePath(it.path || it.filePath) === norm && it.isMissing === true);
+      if (wasMissing) {
+        returnedPaths.push(probePath);
+        setMissingFlag(db.library, norm, false);
+        setMissingFlag(db.favorites, norm, false);
+      }
+      continue;
+    }
     if (!driveRootExists(probePath)) {
       skipped.push({ path: probePath, reason: 'drive-offline' });
       continue;
     }
-    if (dryRun) {
-      const coverRes = statCoverFilesForNorm(db, norm);
-      coverFilesDeleted += coverRes.deleted;
-      coverBytesFreed += coverRes.freedBytes;
-      removed.push({ path: probePath, name: path.basename(probePath) });
-      continue;
-    }
-    // فایل، واقعاً رفته است: از همهٔ جدول‌ها حذف شود.
-    if (db.history && db.history[norm]) delete db.history[norm];
-    db.library = (db.library || []).filter((item) => normalizePath(item.path || item.filePath) !== norm);
-    db.favorites = (db.favorites || []).filter((item) => normalizePath(item.path || item.filePath) !== norm);
-    if (db.annotations && db.annotations[norm]) delete db.annotations[norm];
-    const coverRes = deleteCoverFilesForNorm(db, norm);
-    coverFilesDeleted += coverRes.deleted;
-    coverBytesFreed += coverRes.freedBytes;
-    if (db.coverCache) delete db.coverCache[norm];
-    removed.push({ path: probePath, name: path.basename(probePath) });
-  }
+    // فایل، واقعاً رفته است.
+    missingPaths.push(probePath);
+    const inLibrary = libraryNorms.has(norm);
+    const inFavorites = favoriteNorms.has(norm);
+    const inSlider = sliderNorms.has(norm);
+    const hadHistory = Boolean(db.history && db.history[norm]);
+    if (hadHistory) purgedFromRecent += 1;
+    if (inLibrary || inFavorites) keptWithWarning += 1;
 
-  // annotationsای که در هیچ جدولی نیستند ولی کلیدشان هم در
-  // candidates نبود (مثلاً فقط حاشیه‌نویسی دارد): اگر فایلشان
-  // روی دیسکِ در دسترس نیست، آن‌ها هم هرس می‌شوند.
-  Object.keys(db.annotations || {}).forEach((norm) => {
-    if (candidates.has(norm)) return;
-    const probePath = norm;
-    if (!path.isAbsolute(probePath) || !driveRootExists(probePath)) return;
-    let exists = false;
-    try { exists = fs.existsSync(probePath); } catch (_) { exists = false; }
-    if (!exists) {
-      if (dryRun) {
+    if (dryRun) {
+      if (!inLibrary && !inFavorites && !inSlider) {
         const coverRes = statCoverFilesForNorm(db, norm);
         coverFilesDeleted += coverRes.deleted;
         coverBytesFreed += coverRes.freedBytes;
-        removed.push({ path: probePath, name: path.basename(probePath) });
-        return;
+        coversFreedPaths.push(norm);
       }
-      delete db.annotations[norm];
+      removed.push({ path: probePath, name: path.basename(probePath) });
+      continue;
+    }
+
+    // (الف) پاک‌سازیِ کامل از Recent/history + بوک‌مارک + حاشیه‌نویسی
+    // + هایلایتِ EPUB + کشِ متنِ EPUB — آینهٔ JSON.
+    if (db.history && db.history[norm]) delete db.history[norm];
+    if (db.bookmarks && db.bookmarks[norm]) delete db.bookmarks[norm];
+    if (db.annotations && db.annotations[norm]) delete db.annotations[norm];
+    if (db.epubHighlights && db.epubHighlights[norm]) delete db.epubHighlights[norm];
+    if (db.epubTextCache && db.epubTextCache[norm]) delete db.epubTextCache[norm];
+    // (ب) همان حذف‌ها در SQLite (در یک تراکنشِ واحد، پس از حلقه).
+    if (sqliteReady) sqliteDeleteNorms.push(norm);
+    changed = true;
+
+    // (پ) پرچمِ هشدار رویِ ردیف‌هایِ نگه‌داشته‌شدهٔ کتابخانه و
+    // علاقه‌مندی‌ها (حذف نمی‌شوند).
+    if (inLibrary) setMissingFlag(db.library, norm, true);
+    if (inFavorites) setMissingFlag(db.favorites, norm, true);
+
+    // (ت) کاور فقط وقتی آزاد می‌شود که فایل در هیچ‌کدام از
+    // library/favorites/customSliderBookPaths نباشد.
+    if (!inLibrary && !inFavorites && !inSlider) {
       const coverRes = deleteCoverFilesForNorm(db, norm);
       coverFilesDeleted += coverRes.deleted;
       coverBytesFreed += coverRes.freedBytes;
       if (db.coverCache) delete db.coverCache[norm];
-      removed.push({ path: probePath, name: path.basename(probePath) });
+      coversFreedPaths.push(norm);
     }
-  });
+    removed.push({ path: probePath, name: path.basename(probePath) });
+  }
 
-  if (!dryRun && removed.length > 0) {
+  if (!dryRun && sqliteReady && sqliteDeleteNorms.length > 0 && sqliteDb) {
+    try {
+      const run = sqliteDb.transaction(() => {
+        for (const norm of sqliteDeleteNorms) {
+          try { if (sqliteStmts.deleteHistory) sqliteStmts.deleteHistory.run(norm); } catch (_) {}
+          try { if (sqliteStmts.deleteAnnotationsForFile) sqliteStmts.deleteAnnotationsForFile.run(norm); } catch (_) {}
+          try { if (sqliteStmts.deleteBookmarksForFile) sqliteStmts.deleteBookmarksForFile.run(norm); } catch (_) {}
+          try { if (sqliteStmts.deleteHighlightsForFile) sqliteStmts.deleteHighlightsForFile.run(norm); } catch (_) {}
+          try { if (sqliteStmts.deleteTextCacheForFile) sqliteStmts.deleteTextCacheForFile.run(norm); } catch (_) {}
+        }
+      });
+      run();
+    } catch (_) {}
+  }
+
+  if (!dryRun && changed) {
     try { sweepOrphanCoverFiles(db); } catch (_) {}
     writeDB(db);
   }
   return {
+    checked: candidates.size,
+    purgedFromRecent,
+    keptWithWarning,
+    coversFreed: coverFilesDeleted,
+    missingPaths,
+    returnedPaths,
+    coversFreedPaths,
     removed,
     skipped,
     removedCount: removed.length,
@@ -1505,6 +1715,13 @@ function pruneMissingFiles(db, dryRun = false) {
     coverBytesFreed,
   };
 }
+
+// سازگاریِ قدیمی: هرسِ مرحلهٔ ۱۰ حالا همان همگام‌سازیِ امنِ
+// مرحلهٔ ۵۲ §۱ است (کتاب از کتابخانه/علاقه‌مندی‌ها حذف نمی‌شود).
+function pruneMissingFiles(db, dryRun = false) {
+  return syncMissingFiles(db, dryRun);
+}
+
 
 // مرحله ۱۳: بوک‌مارک‌هایِ دیجیتال و تفکیکِ پاک‌سازیِ کاورها.
 // توجه: BOOKMARK_TEMPLATE_IDS بالاتر، پیش از migrateSchema تعریف شده
@@ -1691,9 +1908,9 @@ function getCoverStats(db) {
 //   هایلایتِ EPUB، تنظیماتِ بوک‌مارک/رنگ/آماربندی) از SQLite پاسخ
 //   می‌گیرند و هم‌زمان آینهٔ درون‌حافظه‌ایِ db.json را هم به‌روز
 //   می‌کنند تا FLUSH_SYNC هنگامِ خروج، یک عکسِ تازه از db.json
-//   بنویسد و مسیرِ JSON (کتابخانه، کاورها، بکاپ، تنظیمات) بی‌تغییر
-//   بماند. اکشن‌هایِ دیگر (کتابخانه، کاور، بکاپ، پروفایل، تنظیماتِ
-//   عمومی) رویِ همان مسیرِ JSON می‌مانند.
+//   بنویسد و مسیرِ JSON (کتابخانه، کاورها، بکاپ) بی‌تغییر
+//   بماند. اکشن‌هایِ دیگر (کتابخانه، کاور، بکاپ، پروفایل) رویِ
+//   همان مسیرِ JSON می‌مانند.
 // - مهاجرت، یک‌باره و اتمیک است: اگر کلیدِ migration_from_json_v1_done
 //   در kv_store نبود و db.json رویِ دیسک بود، همهٔ داده‌ها در یک
 //   تراکنشِ واحد منتقل می‌شوند و پیش از آن، یک کپیِ پشتیبان
@@ -1727,6 +1944,9 @@ const SQLITE_ROUTED_ACTIONS = new Set([
   'SAVE_CUSTOM_COLOR_SYSTEM',
   'GET_EPUB_CHAPTER_TEXT',
   'SAVE_EPUB_CHAPTER_TEXT',
+  // مرحلهٔ ۴۴ §۵ (OPT-06): تنظیماتِ عمومی هم از SQLite می‌خوانند و می‌نویسند.
+  'SAVE_SETTING',
+  'GET_SETTINGS',
 ]);
 
 // آینه را «کثیف» علامت بزن تا FLUSH_SYNC هنگامِ خروج، عکسِ تازهٔ
@@ -1790,6 +2010,9 @@ function sqliteHistoryRowToEntry(row) {
     totalPages: Number(row.total_pages) || 1,
     percentage: Number(row.progress) || 0,
     updatedAt: row.last_read ? new Date(row.last_read).toISOString() : null,
+    // مرحله ۴۷ §۲: وضعیتِ پین از ستونِ history خوانده می‌شود تا
+    // بازسازیِ آینه از SQLite، آن را صفر نکند.
+    pinned: Number(row.pinned) || 0,
   };
 }
 
@@ -1995,6 +2218,7 @@ CREATE TABLE IF NOT EXISTS kv_store (
 `);
     sqliteStmts = {
       upsertHistory: sqliteDb.prepare('INSERT OR REPLACE INTO history (file_key, name, path, type, current_page, total_pages, progress, cover, last_read, pinned, favorite, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
+      updateHistoryPinned: sqliteDb.prepare('UPDATE history SET pinned = ? WHERE file_key = ?'),
       getHistory: sqliteDb.prepare('SELECT * FROM history WHERE file_key = ?'),
       deleteHistory: sqliteDb.prepare('DELETE FROM history WHERE file_key = ?'),
       clearHistory: sqliteDb.prepare('DELETE FROM history'),
@@ -2027,9 +2251,14 @@ CREATE TABLE IF NOT EXISTS kv_store (
       countByBook: sqliteDb.prepare('SELECT COUNT(*) AS n FROM reading_by_book'),
       getKv: sqliteDb.prepare('SELECT value_json FROM kv_store WHERE key = ?'),
       setKv: sqliteDb.prepare('INSERT OR REPLACE INTO kv_store (key, value_json, updated_at) VALUES (?, ?, ?)'),
+      listSettingKv: sqliteDb.prepare("SELECT key, value_json FROM kv_store WHERE key LIKE 'setting:%'"),
       upsertChapterText: sqliteDb.prepare('INSERT OR REPLACE INTO epub_text_cache (file_key, chapter_index, mtime, plain_text) VALUES (?, ?, ?, ?)'),
       getChapterText: sqliteDb.prepare('SELECT mtime, plain_text FROM epub_text_cache WHERE file_key = ? AND chapter_index = ?'),
       countTextCache: sqliteDb.prepare('SELECT COUNT(*) AS n FROM epub_text_cache'),
+      // مرحلهٔ ۵۲ §۱: حذف‌هایِ دسته‌ایِ همگام‌سازیِ فایل‌هایِ رفته.
+      deleteHighlightsForFile: sqliteDb.prepare('DELETE FROM epub_highlights WHERE file_key = ?'),
+      deleteTextCacheForFile: sqliteDb.prepare('DELETE FROM epub_text_cache WHERE file_key = ?'),
+      listTextCacheKeys: sqliteDb.prepare('SELECT DISTINCT file_key FROM epub_text_cache'),
     };
     const alreadyMigrated = sqliteGetKv(SQLITE_MIGRATION_KEY) === '1';
     if (!alreadyMigrated && fs.existsSync(DB_FILE)) {
@@ -2058,6 +2287,15 @@ function migrateJsonToSqlite(jsonDb) {
     if (!fs.existsSync(SQLITE_MIGRATED_BAK)) fs.copyFileSync(DB_FILE, SQLITE_MIGRATED_BAK);
   } catch (_) {}
   const src = (jsonDb && typeof jsonDb === 'object') ? jsonDb : {};
+  // مرحله ۴۷ §۲: وضعیتِ پینِ کتابخانه، مرجعِ ستونِ pinned در مهاجرت
+  // است؛ پیش از این، همهٔ ردیف‌ها با ۰ نوشته می‌شدند.
+  const pinnedPaths = new Set();
+  for (const item of Array.isArray(src.library) ? src.library : []) {
+    if (item?.isPinned) {
+      const n = normalizePath(item.path || item.filePath);
+      if (n) pinnedPaths.add(n);
+    }
+  }
   const run = sqliteDb.transaction(() => {
     for (const [norm, h] of Object.entries(src.history || {})) {
       if (!h || typeof h !== 'object') continue;
@@ -2071,7 +2309,7 @@ function migrateJsonToSqlite(jsonDb) {
         Number(h.percentage) || 0,
         typeof h.cover === 'string' ? h.cover : null,
         Date.parse(h.updatedAt) || 0,
-        0,
+        pinnedPaths.has(norm) ? 1 : 0,
         0,
         JSON.stringify(h)
       );
@@ -2227,6 +2465,20 @@ function handleSqliteAction(action, payload, db, sendReply) {
       } else {
         resolvedCover = null;
       }
+      // مرحله ۴۷ §۲: وضعیتِ پین (و علاقه‌مندی) از ردیفِ موجود یا
+      // کتابخانه خوانده می‌شود تا ذخیرهٔ پیشرفت، آن را با ۰
+      // بازنویسی نکند؛ پیش از این، هر SAVE_PROGRESS پین را صفر می‌کرد.
+      let prevPinned = 0;
+      let prevFavorite = 0;
+      try {
+        const prevRow = sqliteStmts.getHistory.get(norm);
+        if (prevRow) {
+          prevPinned = Number(prevRow.pinned) || 0;
+          prevFavorite = Number(prevRow.favorite) || 0;
+        }
+      } catch (_) {}
+      const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
+      if (prevPinned === 0 && libItem?.isPinned) prevPinned = 1;
       const historyEntry = {
         filePath,
         normPath: norm,
@@ -2236,9 +2488,9 @@ function handleSqliteAction(action, payload, db, sendReply) {
         totalPages: validTotal,
         percentage,
         updatedAt: now,
+        pinned: Boolean(prevPinned),
       };
       db.history[norm] = historyEntry;
-      const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
       if (libItem) {
         libItem.lastPage = validPage;
         libItem.totalPages = validTotal;
@@ -2264,8 +2516,8 @@ function handleSqliteAction(action, payload, db, sendReply) {
         percentage,
         resolvedCover,
         Date.parse(now) || 0,
-        0,
-        0,
+        prevPinned,
+        prevFavorite,
         JSON.stringify(historyEntry)
       );
       sqliteTouchMirror();
@@ -2679,6 +2931,50 @@ function handleSqliteAction(action, payload, db, sendReply) {
       break;
     }
 
+    case 'SAVE_SETTING': {
+      const { key, value } = payload;
+      if (key) {
+        db.settings = db.settings || {};
+        db.settings[key] = value;
+        const settingRaw = JSON.stringify(value);
+        sqliteSetKv('setting:' + key, settingRaw === undefined ? 'null' : settingRaw);
+        sqliteTouchMirror();
+        sendReply({ type: 'done', action, success: true, settings: db.settings });
+      }
+      break;
+    }
+
+    case 'GET_SETTINGS': {
+      // مرحلهٔ ۴۴ §۵ (OPT-06): تنظیمات از kv_store خوانده می‌شوند؛
+      // کلیدی که هنوز در kv_store نیست، از آینهٔ JSON خوانده و همان‌جا
+      // به SQLite مهاجرت می‌کند تا تنظیماتِ قدیمی گم نشوند. کلیدهایِ
+      // فقط-kv هم (مثلاً پس از خاموشیِ ناگهانی پیش از فلاشِ آینه) رویِ
+      // نتیجه سوار می‌شوند؛ kv مرجع است و آینه همگام می‌شود تا
+      // FLUSH_SYNC همان را در db.json بنویسد.
+      const settings = JSON.parse(JSON.stringify(defaultDB.settings));
+      db.settings = db.settings || {};
+      Object.entries(db.settings).forEach(([k, v]) => {
+        const raw = sqliteGetKv('setting:' + k);
+        if (raw === null || raw === undefined) {
+          try { sqliteSetKv('setting:' + k, JSON.stringify(v)); } catch (_) {}
+          settings[k] = v;
+        } else {
+          try { settings[k] = JSON.parse(raw); } catch (_) { settings[k] = v; }
+        }
+      });
+      try {
+        for (const row of sqliteStmts.listSettingKv.all()) {
+          const k = String(row.key || '').slice('setting:'.length);
+          if (!k) continue;
+          try { settings[k] = JSON.parse(row.value_json); } catch (_) {}
+        }
+      } catch (_) {}
+      db.settings = settings;
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, settings });
+      break;
+    }
+
     case 'GET_BOOKMARK_PREFERENCES': {
       let preferences = null;
       try {
@@ -2849,6 +3145,9 @@ parentPort.on('message', (request) => {
           resolvedCover = null;
         }
 
+        // مرحله ۴۷ §۲: وضعیتِ پین در ورودیِ تازهٔ تاریخچه حفظ می‌شود
+        // تا ذخیرهٔ پیشرفت، آن را از آینه پاک نکند.
+        const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
         const historyEntry = {
           filePath,
           normPath: norm,
@@ -2857,12 +3156,12 @@ parentPort.on('message', (request) => {
           currentPage: validPage,
           totalPages: validTotal,
           percentage,
-          updatedAt: now
+          updatedAt: now,
+          pinned: Boolean(existingHist?.pinned ?? libItem?.isPinned)
         };
 
         db.history[norm] = historyEntry;
 
-        const libItem = db.library.find((item) => normalizePath(item.path || item.filePath) === norm);
         if (libItem) {
           libItem.lastPage = validPage;
           libItem.totalPages = validTotal;
@@ -3183,24 +3482,66 @@ parentPort.on('message', (request) => {
           };
         } else {
           const hist = db.history[norm];
-          const cachedCov = coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
+          // مرحله ۴۷ §۲: ورودیِ حداقلی، کاور و فیلدهایِ غنیِ ارسالی از
+          // رندرر را هم می‌گیرد؛ پیش از این، کاورِ ارسالی نادیده
+          // گرفته می‌شد و ورودی با cover: null ساخته می‌شد که پس از
+          // ری‌لود، کارت را خالی نشان می‌داد.
+          const incomingCover = isPermanentCover(comic.cover) ? comic.cover : null;
+          const cachedCov = incomingCover || coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
+          const totalPages =
+            Number(comic.totalPages || comic.items?.length) ||
+            Number(hist?.totalPages) ||
+            1;
+          const lastPage = Math.max(
+            1,
+            Math.min(
+              totalPages,
+              Number(comic.lastPage || comic.currentPage) ||
+                Number(hist?.currentPage) ||
+                1
+            )
+          );
+          const percentage =
+            typeof comic.percentage === 'number'
+              ? comic.percentage
+              : typeof comic.progress === 'number'
+              ? comic.progress
+              : Number(hist?.percentage) || 0;
           db.library.unshift({
             path: targetPath,
             normPath: norm,
             name: comic.name || comic.fileName || hist?.fileName || path.basename(targetPath),
             cover: isPermanentCover(cachedCov) ? cachedCov : null,
+            type: comic.type || (norm.endsWith('.pdf') ? 'pdf' : 'zip'),
+            fileSize: comic.fileSize || '',
             folderId: comic.folderId || null,
+            hasCustomCover: Boolean(comic.hasCustomCover),
             isPinned: true,
             pinnedAt: now,
             addedAt: now,
-            lastPage: hist?.currentPage || 1,
-            totalPages: hist?.totalPages || 1,
-            percentage: hist?.percentage || 0,
-            lastReadAt: hist?.updatedAt || null
+            lastPage,
+            currentPage: lastPage,
+            totalPages,
+            percentage,
+            progress: percentage,
+            lastReadAt: hist?.updatedAt || comic.lastReadAt || null
           });
         }
 
         db.library = sortLibraryItems(db.library);
+        // مرحله ۴۷ §۲: همگام‌سازیِ پین با جدولِ history در SQLite.
+        // ستونِ pinned از اول در اسکیما هست (CREATE TABLE history)؛
+        // فقط وقتی ردیفی برایِ این فایل وجود دارد به‌روز می‌شود — برایِ
+        // کتابِ هرگز خوانده‌نشده ردیفی نیست و مرجعِ پین، همان
+        // کتابخانهٔ JSON می‌ماند.
+        if (db.history[norm]) {
+          db.history[norm].pinned = nextPinned;
+        }
+        if (sqliteReady && sqliteStmts.updateHistoryPinned) {
+          try {
+            sqliteStmts.updateHistoryPinned.run(nextPinned ? 1 : 0, norm);
+          } catch (_) {}
+        }
         writeDB(db);
         sendReply({
           type: 'done',
@@ -3277,6 +3618,8 @@ parentPort.on('message', (request) => {
             item.folderId = null;
           }
         });
+        // مرحله ۴۹ (C): حذفِ پوشهٔ کتابخانه، علاقه‌مندی‌ها را دست
+        // نمی‌زند؛ favoriteFolderIdِ همان کتاب‌ها مستقل می‌ماند.
         writeDB(db);
         sendReply({
           type: 'done',
@@ -3324,6 +3667,9 @@ parentPort.on('message', (request) => {
           }
         });
 
+        // مرحله ۴۹ (C): انتسابِ پوشهٔ کتابخانه، علاقه‌مندی‌ها را دست
+        // نمی‌زند؛ favoriteFolderIdِ همان کتاب‌ها مستقل می‌ماند.
+
         db.library = sortLibraryItems(db.library);
         writeDB(db);
         sendReply({
@@ -3331,6 +3677,133 @@ parentPort.on('message', (request) => {
           action,
           success: true,
           library: db.library
+        });
+        break;
+      }
+
+      // =====================================================================
+      // مرحله ۴۹ (C): پوشه‌هایِ مستقلِ علاقه‌مندی‌ها — دقیقاً هم‌ارزِ
+      // اکشن‌هایِ پوشهٔ کتابخانه، رویِ db.favoriteFolders و
+      // favoriteFolderId؛ هیچ‌کدام، libraryFolders یا folderId را
+      // دست نمی‌زنند.
+      // =====================================================================
+      case 'GET_FAVORITE_FOLDERS': {
+        sendReply({
+          type: 'done',
+          action,
+          favoriteFolders: db.favoriteFolders || [],
+        });
+        break;
+      }
+
+      case 'CREATE_FAVORITE_FOLDER': {
+        const { name, color = '#22d3ee', icon = 'Folder' } = payload;
+        const cleanName = (name || '').trim();
+        if (!cleanName) {
+          sendReply({ type: 'error', action, message: 'نام پوشه نمی‌تواند خالی باشد.' });
+          return;
+        }
+
+        db.favoriteFolders = Array.isArray(db.favoriteFolders) ? db.favoriteFolders : [];
+        const newFolder = {
+          id: `favfolder_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          name: cleanName,
+          color,
+          icon,
+          createdAt: new Date().toISOString(),
+        };
+
+        db.favoriteFolders.push(newFolder);
+        writeDB(db);
+        sendReply({
+          type: 'done',
+          action,
+          success: true,
+          folder: newFolder,
+          favoriteFolders: db.favoriteFolders,
+        });
+        break;
+      }
+
+      case 'RENAME_FAVORITE_FOLDER': {
+        const { folderId, name, color } = payload;
+        db.favoriteFolders = Array.isArray(db.favoriteFolders) ? db.favoriteFolders : [];
+        const target = db.favoriteFolders.find((f) => f.id === folderId);
+        if (target) {
+          if (name && name.trim()) target.name = name.trim();
+          if (color) target.color = color;
+          target.updatedAt = new Date().toISOString();
+          writeDB(db);
+        }
+        sendReply({
+          type: 'done',
+          action,
+          success: Boolean(target),
+          favoriteFolders: db.favoriteFolders,
+        });
+        break;
+      }
+
+      case 'DELETE_FAVORITE_FOLDER': {
+        const { folderId } = payload;
+        db.favoriteFolders = (db.favoriteFolders || []).filter((f) => f.id !== folderId);
+        // علاقه‌مندی‌هایِ داخلِ پوشهٔ حذف‌شده بی‌پوشه می‌شوند؛ خودِ
+        // کتاب‌ها حذف نمی‌شوند و پوشه‌هایِ کتابخانه دست نمی‌خورند.
+        (db.favorites || []).forEach((item) => {
+          if (item.favoriteFolderId === folderId) {
+            item.favoriteFolderId = null;
+          }
+        });
+        writeDB(db);
+        sendReply({
+          type: 'done',
+          action,
+          success: true,
+          favoriteFolders: db.favoriteFolders,
+          favorites: db.favorites,
+        });
+        break;
+      }
+
+      case 'ASSIGN_TO_FAVORITE_FOLDER': {
+        const { filePath, filePaths, folderId = null, comic = {} } = payload;
+        const targets = Array.isArray(filePaths)
+          ? filePaths
+          : filePath
+          ? [filePath]
+          : [];
+
+        targets.forEach((rawP) => {
+          const norm = normalizePath(rawP);
+          if (!norm) return;
+          const idx = (db.favorites || []).findIndex(
+            (item) => normalizePath(item.path || item.filePath) === norm
+          );
+          if (idx >= 0) {
+            db.favorites[idx].favoriteFolderId = folderId || null;
+          } else {
+            const hist = db.history[norm];
+            const cachedCov = coverEntryToUrl(db.coverCache[norm]) || hist?.cover || null;
+            db.favorites.unshift({
+              path: rawP,
+              normPath: norm,
+              name: comic.name || comic.fileName || hist?.fileName || path.basename(rawP),
+              cover: isPermanentCover(cachedCov) ? cachedCov : null,
+              favoriteFolderId: folderId || null,
+              lastPage: hist?.currentPage || 1,
+              totalPages: hist?.totalPages || 1,
+              percentage: hist?.percentage || 0,
+              favoritedAt: new Date().toISOString(),
+            });
+          }
+        });
+
+        writeDB(db);
+        sendReply({
+          type: 'done',
+          action,
+          success: true,
+          favorites: db.favorites,
         });
         break;
       }
@@ -3562,6 +4035,10 @@ parentPort.on('message', (request) => {
             normPath: norm,
             name: comic.name || comic.fileName || path.basename(filePath),
             cover: cachedCover,
+            // مرحله ۴۹ (C): علاقه‌مندیِ تازه، بدونِ پوشهٔ علاقه‌مندی
+            // شروع می‌شود؛ پوشهٔ کتاب در کتابخانه ارث برده نمی‌شود.
+            // فقط favoriteFolderIdِ همراهِ فراخوان گرفته می‌شود.
+            favoriteFolderId: comic?.favoriteFolderId || null,
             lastPage: hist?.currentPage || comic.lastPage || 1,
             totalPages: hist?.totalPages || comic.totalPages || 1,
             percentage: hist?.percentage || 0,
@@ -3577,7 +4054,12 @@ parentPort.on('message', (request) => {
       }
 
       case 'GET_FAVORITES': {
-        sendReply({ type: 'done', action, favorites: db.favorites });
+        sendReply({
+          type: 'done',
+          action,
+          favorites: db.favorites,
+          favoriteFolders: db.favoriteFolders || [],
+        });
         break;
       }
 
@@ -3729,8 +4211,18 @@ parentPort.on('message', (request) => {
         break;
       }
 
+      case 'SYNC_AND_CLEAN_MISSING_FILES': {
+        // مرحلهٔ ۵۲ §۱: یک پیامِ دسته‌ای؛ payload.paths اختیاری است
+        // (فقط همان مسیرها بررسی می‌شوند؛ باز هم بدونِ حلقهٔ IPC).
+        const stats = syncMissingFiles(db, false, payload && payload.paths);
+        sendReply({ type: 'done', action, success: true, ...stats });
+        break;
+      }
+
       case 'PRUNE_MISSING_FILES': {
-        const stats = pruneMissingFiles(db);
+        // مرحلهٔ ۵۲ §۱: نامِ قدیمیِ امن‌شده — حالا همان همگام‌سازیِ
+        // §۱ است؛ کتاب از کتابخانه/علاقه‌مندی‌ها حذف نمی‌شود.
+        const stats = syncMissingFiles(db, false);
         sendReply({ type: 'done', action, success: true, ...stats });
         break;
       }
@@ -3877,7 +4369,7 @@ parentPort.on('message', (request) => {
       }
 
       case 'PREVIEW_PRUNE_MISSING_FILES': {
-        const stats = pruneMissingFiles(db, true);
+        const stats = syncMissingFiles(db, true);
         sendReply({ type: 'done', action, success: true, ...stats });
         break;
       }

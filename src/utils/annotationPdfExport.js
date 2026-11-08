@@ -9,8 +9,10 @@
 // اینجا محاسبه می‌شود و main فقط جایگذاری می‌کند.
 //
 // قراردادِ مختصات:
-//  • ورودی: فضای ذخیره‌سازی — x و همهٔ فیلدهای Y در بازهٔ 0..1000،
-//    مبدأ بالا-چپِ «قابِ دیده‌شده» (بعد از چرخشِ CSS).
+//  • ورودی: فضای ذخیره‌سازی — x و همهٔ فیلدهای Y معمولاً در بازهٔ
+//    0..1000، ولی آیتمِ بیرونِ صفحه هم مجاز است (افق [-۲۰۰، ۱۲۰۰] و
+//    عمود [-۸۰، ۱۰۸۰] در مرحلهٔ ۵۰)؛ مبدأ بالا-چپِ «قابِ دیده‌شده»
+//    (بعد از چرخشِ CSS). کسرهای بیرونِ [0,1] هم حفظ می‌شوند.
 //  • کسرها (fx,fy در 0..1) مستقل از aspectاند؛ پس تبدیلِ aspect در
 //    محاسبهٔ کسر حذف می‌شود (همان دلیلی که toPdfPoint نسخهٔ اول هم
 //    مستقیم y/1000 را در ارتفاع ضرب می‌کرد).
@@ -84,10 +86,6 @@ function finiteNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function clamp01(value) {
-  return Math.max(0, Math.min(1, value));
-}
-
 /** hex یا rgb()/rgba() → رشتهٔ rgba با آلفای تازه. */
 function colorWithAlpha(color, alpha) {
   if (typeof color !== 'string') return null;
@@ -155,8 +153,12 @@ const LUCIDE_PIN_PATH =
  * پیکسلِ viewport → نقطهٔ خامِ PDF.
  */
 function fractionsToPdfPoint(fx, fy, viewport, inverseTransform) {
-  const px = clamp01(fx) * viewport.width;
-  const py = clamp01(fy) * viewport.height;
+  // مرحلهٔ ۵۰ §۲: بدونِ clamp به [0,1] — آیتمِ بیرونِ [0,1000] (مثلاً
+  // x=-۱۵۰ یا x=۱۱۵۰) باید با همان مختصاتِ بیرون صادر شود، نه اینکه
+  // سرِ لبهٔ صفحه بچسبد؛ نقطهٔ PDF بیرونِ کادر هم معتبر است و main
+  // آن را همان‌جا می‌نشاند (روی بومِ overlay، بوم خودش برش می‌دهد).
+  const px = fx * viewport.width;
+  const py = fy * viewport.height;
   return applyAffine(inverseTransform, px, py);
 }
 

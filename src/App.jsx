@@ -173,6 +173,35 @@ export default function App() {
   // (از تنظیمات؛ تا وقتی فیلد در استور نیامده، همان پیش‌فرضِ '#2b3038').
   const readerBackdropColor = useSettingsStore((state) => state.readerBackdropColor || '#2b3038');
 
+  // مرحلهٔ ۵۲ §۳: گرادیانِ اسکرول‌بارِ صفحات (از تنظیمات؛ تا وقتی
+  // فیلد در استور نیامده، همان پیش‌فرضِ مرحلهٔ ۴۵). رنگِ پس‌زمینهٔ
+  // ریدر با استایلِ خطی اعمال می‌شود، ولی گرادیانِ اسکرول‌بار در
+  // index.css با var(--cr-sb-start) و var(--cr-sb-end) خوانده
+  // می‌شود؛ پس تنها مسیرِ درست، همین useEffect است که آن دو متغیر
+  // را رویِ documentElement می‌گذارد. مکانیزمِ رقابتیِ دیگری نیست:
+  // :root در index.css فقط مقدارِ پیش‌فرض را می‌دهد.
+  const scrollbarColorStart = useSettingsStore((state) => state.scrollbarColorStart || '#22d3ee');
+  const scrollbarColorEnd = useSettingsStore((state) => state.scrollbarColorEnd || '#a78bfa');
+
+  // مرحلهٔ ۵۲ §۳: اعمالِ زندهٔ گرادیانِ اسکرول‌بار رویِ همهٔ
+  // اسکرول‌بارهایِ برنامه؛ با هر تغییرِ رنگ در تنظیمات، همین افکت
+  // دوباره اجرا می‌شود (initSettings هم که از دیتابیس بخواند، استور
+  // عوض می‌شود و افکت دوباره می‌دود). نگهبانِ برابری، از
+  // setPropertyِ تکراری جلوگیری می‌کند.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const root = document.documentElement;
+    if (!root || !root.style || typeof root.style.setProperty !== 'function') return undefined;
+    if (root.style.getPropertyValue('--cr-sb-start').trim() !== scrollbarColorStart) {
+      root.style.setProperty('--cr-sb-start', scrollbarColorStart);
+    }
+    if (root.style.getPropertyValue('--cr-sb-end').trim() !== scrollbarColorEnd) {
+      root.style.setProperty('--cr-sb-end', scrollbarColorEnd);
+    }
+    return undefined;
+  }, [scrollbarColorStart, scrollbarColorEnd]);
+
+
   const [isDragging, setIsDragging] = useState(false);
   const [loadingFileName, setLoadingFileName] = useState('');
 
@@ -201,6 +230,77 @@ export default function App() {
 
   const isReadingModeRef = useRef(isReadingMode);
   isReadingModeRef.current = isReadingMode;
+
+  // مرحله ۴۹ §۱: بستنِ خودکارِ استودیو با خروج از ریدر (کمربندِ دوم).
+  // لایهٔ اول، خودِ setCurrentView در useAppStore است که با هر
+  // view متفاوت از reader مقدارِ isAnnotationActive را false
+  // می‌کند؛ این افکت فقط مسیری را پوشش می‌دهد که currentView بدونِ
+  // setCurrentView عوض شده باشد. رویِ اولین مونت اجرا نمی‌شود، با
+  // ورود به ریدر کاری نمی‌کند و با هر خروج، حداکثر یک بار صدا می‌زند.
+  const prevViewRef = useRef(currentView);
+  const isFirstViewEffectRef = useRef(true);
+  useEffect(() => {
+    if (isFirstViewEffectRef.current) {
+      isFirstViewEffectRef.current = false;
+      prevViewRef.current = currentView;
+      return;
+    }
+    const prevView = prevViewRef.current;
+    prevViewRef.current = currentView;
+    if (prevView === 'reader' && currentView !== 'reader') {
+      if (useAppStore.getState().isAnnotationActive) {
+        useAppStore.getState().setIsAnnotationActive(false);
+      }
+    }
+  }, [currentView]);
+
+  // مرحلهٔ ۵۲ §۱: ورود به تب‌هایِ کتابخانه/اخیر/علاقه‌مندی‌ها —
+  // یک همگام‌سازیِ دسته‌ایِ فایل‌هایِ رفته (بهترین تلاش؛ استور،
+  // فراخوان‌هایِ پشتِ سرِ هم را تا ۵ ثانیه یکی می‌کند).
+  useEffect(() => {
+    if (currentView === 'library' || currentView === 'recent' || currentView === 'favorites') {
+      try {
+        const syncRes = useLibraryStore.getState().syncMissingFiles?.();
+        if (syncRes && typeof syncRes.catch === 'function') syncRes.catch(() => {});
+      } catch (_) {}
+    }
+  }, [currentView]);
+
+  // مرحله ۴۹ §۲: نگهبانِ ژستِ حاشیه‌نویسی. پرچمِ
+  // window.__isAnnotationGestureActive را کارگرِ A در
+  // AnnotationLayer.jsx می‌گذارد (true از شروعِ درگِ باکس/لسو/جابه‌جایی،
+  // false با pointerup)؛ اینجا فقط خوانده می‌شود و هرگز گذاشته نمی‌شود.
+  // تا وقتی ژست فعال است، هات‌اسپات‌هایِ لبه نباید باز شوند و
+  // pointerEvents آن‌ها none می‌شود.
+  const [isAnnotationGestureActive, setIsAnnotationGestureActive] = useState(false);
+  const isAnnotationGestureActiveRef = useRef(false);
+  const lastPointerPosRef = useRef({ x: -1, y: -1 });
+  const leftHotspotRef = useRef(null);
+  const rightHotspotRef = useRef(null);
+  const gestureSyncTimerRef = useRef(null);
+  const gesturePollTimerRef = useRef(null);
+
+  const syncAnnotationGestureFlag = useCallback(() => {
+    const active = typeof window !== 'undefined' && window.__isAnnotationGestureActive === true;
+    if (active !== isAnnotationGestureActiveRef.current) {
+      isAnnotationGestureActiveRef.current = active;
+      setIsAnnotationGestureActive(active);
+    }
+  }, []);
+
+  // مرحله ۴۹ §۲: تا وقتی ژست فعال است، هر ۱۵۰ میلی‌ثانیه پرچم
+  // دوباره خوانده می‌شود تا اگر رویدادِ pointerup از دست رفت،
+  // pointerEvents برایِ همیشه رویِ none نماند.
+  useEffect(() => {
+    if (!isAnnotationGestureActive) return undefined;
+    gesturePollTimerRef.current = setInterval(syncAnnotationGestureFlag, 150);
+    return () => {
+      if (gesturePollTimerRef.current) {
+        clearInterval(gesturePollTimerRef.current);
+        gesturePollTimerRef.current = null;
+      }
+    };
+  }, [isAnnotationGestureActive, syncAnnotationGestureFlag]);
 
   const cancelAutoZen = useCallback(() => {
     if (autoZenTimerRef.current) {
@@ -672,6 +772,12 @@ export default function App() {
               type: 'error',
             });
           }
+          // مرحلهٔ ۵۲ §۱: باز نشدنِ فایل می‌تواند یعنی فایل از
+          // دیسک رفته است؛ فقط همان مسیرها دسته‌ای بررسی می‌شوند.
+          try {
+            const syncRes = useLibraryStore.getState().syncMissingFiles?.(filePaths);
+            if (syncRes && typeof syncRes.catch === 'function') syncRes.catch(() => {});
+          } catch (_) {}
         }
       } catch (error) {
         console.error('File process error:', error);
@@ -680,6 +786,12 @@ export default function App() {
         setLoadingFileName('');
         isProcessingRef.current = false;
         showToast('خطای سیستمی در خواندن فایل از دیسک', { type: 'error' });
+        // مرحلهٔ ۵۲ §۱: خطایِ خواندن از دیسک هم می‌تواند یعنی
+        // فایل رفته است؛ فقط همان مسیرها دسته‌ای بررسی می‌شوند.
+        try {
+          const syncRes = useLibraryStore.getState().syncMissingFiles?.(filePaths);
+          if (syncRes && typeof syncRes.catch === 'function') syncRes.catch(() => {});
+        } catch (_) {}
       }
     },
     [
@@ -732,6 +844,40 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, []);
 
+  // مرحلهٔ ۴۵ §۱: محوِ اسپلشِ بوت پس از اولین نقاشی.
+  // اسپلش، لایهٔ خواهرِ #root در index.html است (نه فرزندِ آن)، پس
+  // مانتِ ری‌اکت آن را پاک نمی‌کند و این افکت آن را نرم محو می‌کند:
+  // دو requestAnimationFrame یعنی «اولین نقاشی» انجام شده، بعد
+  // opacity در ۲۵۰ میلی‌ثانیه به صفر می‌رسد و لایه از DOM حذف می‌شود.
+  // اگر اسپلش از قبل در DOM نباشد، هیچ خطایی نمی‌دهد.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const splash = document.getElementById('app-boot-splash');
+    if (!splash) return undefined;
+    let rafSecond = 0;
+    let removeTimer = 0;
+    const removeSplash = () => {
+      try {
+        splash.style.transition = 'opacity 250ms ease';
+        splash.style.opacity = '0';
+        splash.style.pointerEvents = 'none';
+      } catch (_) {}
+      removeTimer = window.setTimeout(() => {
+        try {
+          if (splash.parentNode) splash.parentNode.removeChild(splash);
+        } catch (_) {}
+      }, 250);
+    };
+    const rafFirst = window.requestAnimationFrame(() => {
+      rafSecond = window.requestAnimationFrame(removeSplash);
+    });
+    return () => {
+      window.cancelAnimationFrame(rafFirst);
+      if (rafSecond) window.cancelAnimationFrame(rafSecond);
+      if (removeTimer) window.clearTimeout(removeTimer);
+    };
+  }, []);
+
   useEffect(() => {
     const handleNavEvent = (e) => {
       if (e.detail) processFiles(e.detail);
@@ -778,6 +924,10 @@ export default function App() {
 
   // مدیریت هاور سایدبارهای چپ و راست
   const handleLeftMouseEnter = useCallback(() => {
+    // مرحله ۴۹ §۲: وسطِ ژستِ حاشیه‌نویسی، هات‌اسپات باز نمی‌شود.
+    // خوانشِ مستقیمِ پرچم، ورودِ وسطِ درگ را هم می‌گیرد، حتی اگر
+    // state هنوز همگام نشده باشد.
+    if (typeof window !== 'undefined' && window.__isAnnotationGestureActive === true) return;
     cancelAutoZen();
     if (leftCloseTimerRef.current) {
       clearTimeout(leftCloseTimerRef.current);
@@ -810,6 +960,8 @@ export default function App() {
   );
 
   const handleRightMouseEnter = useCallback(() => {
+    // مرحله ۴۹ §۲: وسطِ ژستِ حاشیه‌نویسی، هات‌اسپات باز نمی‌شود.
+    if (typeof window !== 'undefined' && window.__isAnnotationGestureActive === true) return;
     cancelAutoZen();
     if (rightCloseTimerRef.current) {
       clearTimeout(rightCloseTimerRef.current);
@@ -842,6 +994,59 @@ export default function App() {
     },
     [setIsRightSidebarOpen]
   );
+
+  // مرحله ۴۹ §۲: همگام‌سازیِ پرچمِ ژست با تأخیرِ صفر — هندلرِ
+  // کارگرِ A اول پرچم را می‌گذارد/پاک می‌کند، بعد این خوانش انجام
+  // می‌شود (خوانشِ مستقیم در هندلر، مقدارِ کهنه را می‌خواند چون
+  // ترتیبِ ثبتِ شنونده‌ها تضمین‌شده نیست). آخرین موقعیتِ نشانگر هم
+  // برایِ حالتِ لبهٔ پایین ذخیره می‌شود.
+  useEffect(() => {
+    const recordPos = (e) => {
+      lastPointerPosRef.current = { x: e.clientX, y: e.clientY };
+    };
+    const scheduleSync = (e) => {
+      recordPos(e);
+      if (gestureSyncTimerRef.current) clearTimeout(gestureSyncTimerRef.current);
+      gestureSyncTimerRef.current = setTimeout(syncAnnotationGestureFlag, 0);
+    };
+    window.addEventListener('pointerdown', scheduleSync, { passive: true });
+    window.addEventListener('pointerup', scheduleSync, { passive: true });
+    window.addEventListener('pointercancel', scheduleSync, { passive: true });
+    window.addEventListener('mousemove', recordPos, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', scheduleSync);
+      window.removeEventListener('pointerup', scheduleSync);
+      window.removeEventListener('pointercancel', scheduleSync);
+      window.removeEventListener('mousemove', recordPos);
+      if (gestureSyncTimerRef.current) {
+        clearTimeout(gestureSyncTimerRef.current);
+        gestureSyncTimerRef.current = null;
+      }
+    };
+  }, [syncAnnotationGestureFlag]);
+
+  // مرحله ۴۹ §۲: اگر پرچم وقتی پاک شد که نشانگر از قبل داخلِ
+  // هات‌اسپات بود، با برگشتنِ pointerEvents به auto هیچ mouseenter
+  // تازه‌ای نمی‌آید؛ پس هات‌اسپاتِ زیرِ نشانگر را با آخرین موقعیتِ
+  // ذخیره‌شده، صریح باز می‌کنیم.
+  const prevGestureActiveRef = useRef(false);
+  useEffect(() => {
+    const wasActive = prevGestureActiveRef.current;
+    prevGestureActiveRef.current = isAnnotationGestureActive;
+    if (!wasActive || isAnnotationGestureActive) return;
+    const pos = lastPointerPosRef.current;
+    if (pos.x < 0) return;
+    const leftRect = leftHotspotRef.current?.getBoundingClientRect();
+    if (leftRect && pos.x >= leftRect.left && pos.x <= leftRect.right && pos.y >= leftRect.top && pos.y <= leftRect.bottom) {
+      handleLeftMouseEnter();
+      return;
+    }
+    if (!isReadingModeRef.current) return;
+    const rightRect = rightHotspotRef.current?.getBoundingClientRect();
+    if (rightRect && pos.x >= rightRect.left && pos.x <= rightRect.right && pos.y >= rightRect.top && pos.y <= rightRect.bottom) {
+      handleRightMouseEnter();
+    }
+  }, [isAnnotationGestureActive, handleLeftMouseEnter, handleRightMouseEnter]);
 
   // مدیریت کشیدن و رها کردن فایل‌ها (Drag & Drop)
   useEffect(() => {
@@ -1000,7 +1205,14 @@ export default function App() {
 
       <div style={styles.mainLayout}>
         {!isLeftSidebarOpen && (
-          <div onMouseEnter={handleLeftMouseEnter} style={styles.leftHotspot} />
+          <div
+            ref={leftHotspotRef}
+            onMouseEnter={handleLeftMouseEnter}
+            style={{
+              ...styles.leftHotspot,
+              pointerEvents: isAnnotationGestureActive ? 'none' : 'auto',
+            }}
+          />
         )}
 
         <div
@@ -1067,7 +1279,7 @@ export default function App() {
           )}
 
           <ChunkErrorBoundary onReset={() => setCurrentView('home')}>
-            <Suspense fallback={<div style={styles.centerLoadingFallback}>در حال بارگذاری…</div>}>
+            <Suspense fallback={<div style={styles.centerLoadingFallback}><span style={styles.centerLoadingSpinner} aria-hidden="true" /><span>در حال بارگذاری…</span></div>}>
               {renderCenterContent()}
             </Suspense>
           </ChunkErrorBoundary>
@@ -1094,7 +1306,14 @@ export default function App() {
         )}
 
         {isReadingMode && !isRightSidebarOpen && (
-          <div onMouseEnter={handleRightMouseEnter} style={styles.rightHotspot} />
+          <div
+            ref={rightHotspotRef}
+            onMouseEnter={handleRightMouseEnter}
+            style={{
+              ...styles.rightHotspot,
+              pointerEvents: isAnnotationGestureActive ? 'none' : 'auto',
+            }}
+          />
         )}
       </div>
 
@@ -1168,9 +1387,24 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: '10px',
     color: 'var(--muted)',
     fontFamily: 'var(--font-fa)',
     fontSize: '13px',
+  },
+  // مرحلهٔ ۴۵ §۱: حلقهٔ چرخانِ سبک برای fallback مرکزی؛ انیمیشنِ آن
+  // (cr-spin) در index.html تعریف شده تا پیش از لودِ جاوااسکریپت هم
+  // در دسترس باشد و سوییچِ تب در ۰ میلی‌ثانیه بازخورد بدهد.
+  centerLoadingSpinner: {
+    width: '18px',
+    height: '18px',
+    flexShrink: 0,
+    borderRadius: '50%',
+    borderWidth: '2px',
+    borderStyle: 'solid',
+    borderColor: 'rgba(148, 163, 184, 0.25)',
+    borderTopColor: '#22d3ee',
+    animation: 'cr-spin 0.9s linear infinite',
   },
   // مرحله ۳ ـ بخش ب: Fallback مرزِ خطای چانک؛ fixed است تا از هر دو
   // جایِ مرز (مرکز و مودال‌ها) دیده شود، وگرنه در جایگاهِ مودال‌ها

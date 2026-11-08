@@ -747,6 +747,208 @@ function invalidateComicRamCache(appInstance, rawPath) {
   } catch (_) {}
 }
 
+
+// ============================================================================
+// مرحلهٔ ۴۴ §۴: ذخیرهٔ مستقیمِ حاشیه‌نویسی‌ها در داخلِ خودِ فایل‌هایِ CBZ
+// ============================================================================
+// مانیفستِ جاسازی‌شده، همان شکلِ واحدِ epubService.js است
+// (format/version/app/fileType/savedAt/annotationsByPage/highlights/bookmarks)؛
+// دو نسخهٔ کوچکِ build/parse اینجا تکرار شده‌اند تا این فایل، بدونِ
+// سرویسِ EPUB هم برایِ CBZ خودکفا بماند.
+const CBZ_MANIFEST_NAME = 'comic-reader-annotations.json';
+const CBZ_ORIG_PREFIX = '__cr_orig__/';
+const CBZ_MAX_BYTES = 500 * 1024 * 1024;
+const CBZ_MAX_IMAGE_BYTES = 200 * 1024 * 1024;
+
+function cbzCleanAnnotationPages(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, items] of Object.entries(raw)) {
+    const n = Number(key);
+    if (!Number.isFinite(n) || n < 1 || Math.floor(n) !== n) continue;
+    if (!Array.isArray(items) || items.length === 0) continue;
+    const cleanItems = items.filter((it) => it && typeof it === 'object' && !Array.isArray(it));
+    if (cleanItems.length > 0) out[String(n)] = cleanItems;
+  }
+  return out;
+}
+
+function cbzBuildAnnotationManifest(fileType, annotationsByPage) {
+  return {
+    format: 'comic-reader-annotations',
+    version: 1,
+    app: 'my-comic-reader',
+    fileType,
+    savedAt: new Date().toISOString(),
+    annotationsByPage: cbzCleanAnnotationPages(annotationsByPage),
+    highlights: [],
+    bookmarks: [],
+  };
+}
+
+function cbzParseAnnotationManifest(text, fileType) {
+  try {
+    if (typeof text !== 'string' || text.length === 0 || text.length > 20 * 1024 * 1024) return null;
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (parsed.format !== 'comic-reader-annotations') return null;
+    if (parsed.version !== 1) return null;
+    if (fileType && parsed.fileType && parsed.fileType !== fileType) return null;
+    return {
+      annotationsByPage: cbzCleanAnnotationPages(parsed.annotationsByPage),
+      highlights: Array.isArray(parsed.highlights) ? parsed.highlights.filter((it) => it && typeof it === 'object') : [],
+      bookmarks: Array.isArray(parsed.bookmarks) ? parsed.bookmarks.filter((it) => it && typeof it === 'object') : [],
+    };
+  } catch (_) { return null; }
+}
+
+// دیکدِ data URLِ تصویری (base64) به بافر؛ هر چیزِ دیگر → null.
+function cbzDecodeImageDataUrl(dataUrl, maxBytes) {
+  if (typeof dataUrl !== 'string') return null;
+  const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!m) return null;
+  try {
+    const buf = Buffer.from(m[2], 'base64');
+    const cap = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : CBZ_MAX_IMAGE_BYTES;
+    if (!buf || buf.length === 0 || buf.length > cap) return null;
+    return { buffer: buf, mime: m[1] };
+  } catch (_) { return null; }
+}
+
+function isCbzImageEntryName(name) {
+  if (!name || typeof name !== 'string') return false;
+  if (name.endsWith('/')) return false;
+  if (name.startsWith(CBZ_ORIG_PREFIX)) return false;
+  if (name === CBZ_MANIFEST_NAME) return false;
+  const lower = name.toLowerCase();
+  return ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp'].some((ext) => lower.endsWith(ext));
+}
+
+// فهرستِ ورودی‌هایِ تصویریِ آرشیو با مرتب‌سازیِ طبیعیِ نام (همان
+// ترتیبی که استخراج‌کننده صفحات را می‌چیند).
+function listCbzImageEntries(zip) {
+  const names = Object.keys(zip.files || {}).filter((n) => isCbzImageEntryName(n));
+  names.sort((a, b) => a.localeCompare(b, 'en', { numeric: true, sensitivity: 'base' }));
+  return names;
+}
+
+// نگاشتِ شمارهٔ صفحه به ورودیِ آرشیو: اول تطابقِ دقیقِ basename
+// (entryNameای که رندرر فرستاده)؛ اگر چند ورودی هم‌نام بودند، به
+// ترتیبِ رسیدنِ صفحه‌ها؛ اگر هینت نبود یا پیدا نشد، ایندکسِ مرتب‌شده.
+function resolveCbzPageEntry(imageEntries, pageNumber, entryNameHint, seenBasenames) {
+  const hintBase = typeof entryNameHint === 'string' && entryNameHint ? entryNameHint.split(/[\\/]/).pop() : '';
+  if (hintBase) {
+    const candidates = imageEntries.filter((n) => n.split('/').pop() === hintBase);
+    if (candidates.length === 1) return candidates[0];
+    if (candidates.length > 1) {
+      const seen = seenBasenames[hintBase] || 0;
+      seenBasenames[hintBase] = seen + 1;
+      return candidates[Math.min(seen, candidates.length - 1)];
+    }
+  }
+  const idx = pageNumber - 1;
+  if (idx >= 0 && idx < imageEntries.length) return imageEntries[idx];
+  return null;
+}
+
+// مرحلهٔ ۴۴ §۴: ساختِ CBZِ حاشیه‌نویسی‌شده (فقط بافر برمی‌گردد؛
+// نوشتنِ اتمیک با هندلر است). برایِ هر صفحهٔ ویرایش‌شده، اصلِ خام
+// فقط اگر از قبل در __cr_orig__ نیست، آنجا نگه داشته می‌شود و
+// تصویرِ پخته‌شده جایگزینِ فایلِ اصلی می‌شود؛ پس ذخیرهٔ دوم، اصلِ
+// خام را دوباره‌نویسی نمی‌کند و کیفیت افت نمی‌کند. اگر pages خالی
+// باشد (همهٔ حاشیه‌نویسی‌ها پاک شده‌اند)، اصل‌ها برگردانده و مانیفست
+// حذف می‌شود (restoredClean). فشرده‌سازی STORE است تا بایت‌هایِ
+// تصویر دست نخورند و بازنویسی سریع بماند.
+async function saveAnnotatedCbz(args) {
+  try {
+    const { cbzPath, outputPath, pages, annotationsByPage } = args || {};
+    if (!cbzPath || typeof cbzPath !== 'string') return { success: false, error: 'مسیرِ فایلِ CBZ مشخص نیست.' };
+    if (!outputPath || typeof outputPath !== 'string') return { success: false, error: 'مسیرِ خروجی مشخص نیست.' };
+    const stat = await fs.promises.stat(cbzPath);
+    if (!stat.isFile()) return { success: false, error: 'فایلِ CBZ یافت نشد.' };
+    if (stat.size > CBZ_MAX_BYTES) return { success: false, error: 'فایلِ CBZ بزرگ‌تر از حدِ مجاز (۵۰۰ مگابایت) است.' };
+    const JSZip = require('jszip');
+    const buf = await fs.promises.readFile(cbzPath);
+    const zip = await JSZip.loadAsync(buf);
+    const imageEntries = listCbzImageEntries(zip);
+    const pageMap = pages && typeof pages === 'object' ? pages : {};
+    const pageNumbers = Object.keys(pageMap).map(Number).filter((n) => Number.isFinite(n) && n >= 1).sort((a, b) => a - b);
+    let replacedCount = 0;
+    let preservedCount = 0;
+    let skippedCount = 0;
+    let restoredClean = false;
+    if (pageNumbers.length === 0) {
+      const origNames = Object.keys(zip.files || {}).filter((n) => n.startsWith(CBZ_ORIG_PREFIX) && !zip.files[n].dir);
+      for (const origName of origNames) {
+        const originalName = origName.slice(CBZ_ORIG_PREFIX.length);
+        if (!originalName || !zip.file(originalName)) continue;
+        try {
+          const origBuf = await zip.file(origName).async('nodebuffer');
+          zip.file(originalName, origBuf);
+          try { zip.remove(origName); } catch (_) {}
+          restoredClean = true;
+        } catch (_) {}
+      }
+      if (zip.file(CBZ_MANIFEST_NAME)) {
+        try { zip.remove(CBZ_MANIFEST_NAME); } catch (_) {}
+        restoredClean = true;
+      }
+      const outBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
+      return { success: true, buffer: outBuffer, replacedCount, preservedCount, skippedCount, restoredClean };
+    }
+    const seenBasenames = {};
+    for (const pageNum of pageNumbers) {
+      const page = pageMap[pageNum];
+      if (!page || typeof page !== 'object') { skippedCount++; continue; }
+      const entryName = resolveCbzPageEntry(imageEntries, pageNum, page.entryName, seenBasenames);
+      if (!entryName) { skippedCount++; continue; }
+      const decoded = cbzDecodeImageDataUrl(page.imageDataUrl, CBZ_MAX_IMAGE_BYTES);
+      if (!decoded) { skippedCount++; continue; }
+      const origName = CBZ_ORIG_PREFIX + entryName;
+      if (!zip.file(origName)) {
+        try {
+          const origBuf = await zip.file(entryName).async('nodebuffer');
+          zip.file(origName, origBuf);
+          preservedCount++;
+        } catch (_) { skippedCount++; continue; }
+      }
+      zip.file(entryName, decoded.buffer);
+      replacedCount++;
+    }
+    const manifest = cbzBuildAnnotationManifest('cbz', annotationsByPage);
+    if (Object.keys(manifest.annotationsByPage).length > 0) {
+      zip.file(CBZ_MANIFEST_NAME, JSON.stringify(manifest, null, 2));
+    } else if (zip.file(CBZ_MANIFEST_NAME)) {
+      try { zip.remove(CBZ_MANIFEST_NAME); } catch (_) {}
+    }
+    const outBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
+    return { success: true, buffer: outBuffer, replacedCount, preservedCount, skippedCount, restoredClean };
+  } catch (err) {
+    return { success: false, error: 'خطا در ذخیرهٔ CBZِ حاشیه‌نویسی‌شده: ' + String((err && err.message) || err) };
+  }
+}
+
+// خواندنِ مانیفستِ جاسازی‌شدهٔ CBZ (برایِ بارگذاریِ خودکار).
+async function readEmbeddedCbzAnnotations(cbzPath) {
+  try {
+    if (!cbzPath || typeof cbzPath !== 'string') return { success: false, error: 'مسیرِ فایل مشخص نیست.' };
+    const stat = await fs.promises.stat(cbzPath);
+    if (!stat.isFile()) return { success: false, error: 'فایلِ CBZ یافت نشد.' };
+    if (stat.size > CBZ_MAX_BYTES) return { success: false, error: 'فایلِ CBZ بزرگ‌تر از حدِ مجاز (۵۰۰ مگابایت) است.' };
+    const JSZip = require('jszip');
+    const buf = await fs.promises.readFile(cbzPath);
+    const zip = await JSZip.loadAsync(buf);
+    const entry = zip.file(CBZ_MANIFEST_NAME);
+    if (!entry) return { success: true, hasManifest: false, annotationsByPage: {} };
+    const text = await entry.async('string');
+    const parsed = cbzParseAnnotationManifest(text, 'cbz');
+    if (!parsed) return { success: true, hasManifest: true, annotationsByPage: {}, invalid: true };
+    return { success: true, hasManifest: true, annotationsByPage: parsed.annotationsByPage };
+  } catch (err) {
+    return { success: false, error: 'خطا در خواندنِ CBZ: ' + String((err && err.message) || err) };
+  }
+}
+
 module.exports = function(app) {
   ipcApp = app;
   const tempDir = path.join(app.getPath('temp'), 'ComicReaderCache');
@@ -1514,9 +1716,21 @@ function createBuiltInEpubService() {
   // کامل: استایلِ ناشر حذف می‌شود (نه محدودسازی به کلاس) تا رنگ و
   // فونتِ سایدبار/تاپ‌بارِ برنامه هرگز خراب نشود؛ اسکریپت، رویدادهایِ
   // on*، و hrefهایِ javascript: هم حذف می‌شوند.
+  // مرحلهٔ ۴۴ §۴: حذفِ بلوکِ اورلیِ پخته‌شدهٔ خودِ برنامه از HTMLِ فصل
+  // (همان منطقِ سرویسِ اصلی؛ اینجا نسخهٔ داخلی است).
+  function removeOldEpubOverlayBlock(xhtml) {
+    let s = String(xhtml || '');
+    s = s.replace(/<!--cr-baked-epub-overlay-begin-->[\s\S]*?<!--cr-baked-epub-overlay-end-->/g, '');
+    s = s.replace(/<div\b[^>]*cr-baked-epub-overlay[^>]*>[\s\S]*?<\/div\s*>/gi, '');
+    return s;
+  }
+
   async function sanitizeChapterHtml(rawHtml, opts) {
     const { zip, chapterDir, imagesDir } = opts || {};
     let html = String(rawHtml || '');
+  // مرحلهٔ ۴۴ §۴: اورلیِ پخته‌شده، هرگز دوباره در خواننده نمایش
+  // داده نمی‌شود؛ مانیفست، مرجعِ بازیابی است.
+  html = removeOldEpubOverlayBlock(html);
     const bodyM = html.match(/<body\b[^>]*>([\s\S]*)<\/body\s*>/i);
     if (bodyM) html = bodyM[1];
     html = html.replace(/<!--[\s\S]*?-->/g, '');
@@ -1611,6 +1825,7 @@ function createBuiltInEpubService() {
           success: true,
           fromCache: true,
           title: meta.title || '',
+          embeddedAnnotations: null,
           creator: meta.creator || '',
           coverUrl: meta.coverUrl || null,
           chapters: meta.chapters,
@@ -1623,6 +1838,30 @@ function createBuiltInEpubService() {
       const JSZip = require('jszip');
       const buf = await fs.promises.readFile(filePath);
       const zip = await JSZip.loadAsync(buf);
+      // مرحلهٔ ۴۴ §۴: مانیفستِ جاسازی‌شدهٔ حاشیه‌نویسی (اگر بود).
+      let embeddedAnnotations = null;
+      try {
+        const manEntry = zipEntry(zip, 'META-INF/comic-reader-annotations.json');
+        if (manEntry) {
+          const manText = await manEntry.async('string');
+          const manParsed = JSON.parse(manText);
+          if (manParsed && manParsed.format === 'comic-reader-annotations' && manParsed.version === 1) {
+            const cleanPages = {};
+            const rawPages = manParsed.annotationsByPage || {};
+            for (const [k, v] of Object.entries(rawPages)) {
+              const n = Number(k);
+              if (Number.isFinite(n) && n >= 1 && Math.floor(n) === n && Array.isArray(v) && v.length > 0) {
+                cleanPages[String(n)] = v.filter((it) => it && typeof it === 'object');
+              }
+            }
+            embeddedAnnotations = {
+              annotationsByPage: cleanPages,
+              highlights: Array.isArray(manParsed.highlights) ? manParsed.highlights.filter((it) => it && typeof it === 'object') : [],
+              bookmarks: Array.isArray(manParsed.bookmarks) ? manParsed.bookmarks.filter((it) => it && typeof it === 'object') : [],
+            };
+          }
+        }
+      } catch (_) { embeddedAnnotations = null; }
       const names = Object.keys(zip.files || {});
       const findCaseInsensitive = (target) => names.find((n) => n.toLowerCase() === target.toLowerCase()) || null;
       const encName = findCaseInsensitive('META-INF/encryption.xml');
@@ -1720,6 +1959,7 @@ function createBuiltInEpubService() {
       return {
         success: true,
         fromCache: false,
+        embeddedAnnotations,
         title: opf.title,
         creator: opf.creator,
         coverUrl,
@@ -2053,6 +2293,213 @@ function getEpubService() {
       // برنامه هم قابلِ بررسی باشد. قراردادِ برگشتی، عیناً قبل است.
       try { const lg = getIpcLogger(); if (lg) lg.error('export-annotated-pdf failed', err); } catch (_) { /* ignore */ }
       return { success: false, error: 'خطا در ساختِ PDFِ حاشیه‌نویسی‌شده: ' + err.message };
+    }
+  });
+
+  // مرحلهٔ ۴۴ §۴: خروجیِ CBZِ حاشیه‌نویسی‌شده (ذخیرهٔ مستقیم در آرشیو).
+  ipcMain.handle('export-annotated-cbz', async (event, payload) => {
+    try {
+      const { cbzPath, pages, annotationsByPage, mode } = payload || {};
+      const normalizedMode = mode === 'in-place' ? 'in-place' : 'save-as';
+      if (!cbzPath || typeof cbzPath !== 'string' || !fs.existsSync(cbzPath)) {
+        return { success: false, error: 'فایل CBZ پیدا نشد.' };
+      }
+      const ext = path.extname(cbzPath).toLowerCase();
+      if (ext !== '.cbz' && ext !== '.zip') {
+        return { success: false, error: 'فقط فایل‌های CBZ و ZIP قابلِ ذخیره‌اند.' };
+      }
+      if (!pages || typeof pages !== 'object') {
+        return { success: false, error: 'حاشیه‌نویسی‌ای برای خروجی وجود ندارد.' };
+      }
+      const pageKeys = Object.keys(pages);
+      if (pageKeys.length === 0 && normalizedMode !== 'in-place') {
+        return { success: false, error: 'حاشیه‌نویسی‌ای برای خروجی وجود ندارد.' };
+      }
+      let dataUrlChars = 0;
+      for (const entry of Object.values(pages)) {
+        if (entry && typeof entry.imageDataUrl === 'string') dataUrlChars += entry.imageDataUrl.length;
+      }
+      if (dataUrlChars > 200000000) {
+        return { success: false, error: 'دادهٔ خروجی بیش از حد بزرگ است.' };
+      }
+      let outputPath = null;
+      if (normalizedMode === 'in-place') {
+        outputPath = cbzPath;
+      } else {
+        const baseName = path.basename(cbzPath, path.extname(cbzPath));
+        const defaultName = baseName + '-annotated' + ext;
+        const win = getWindowFromEvent(event);
+        const dialogOptions = {
+          title: 'ذخیره CBZ با حاشیه‌نویسی‌ها',
+          defaultPath: path.join(path.dirname(cbzPath), defaultName),
+          filters: [{ name: 'Comic archive (*.cbz, *.zip)', extensions: ['cbz', 'zip'] }],
+        };
+        const { canceled, filePath: chosenPath } = win
+          ? await dialog.showSaveDialog(win, dialogOptions)
+          : await dialog.showSaveDialog(dialogOptions);
+        if (canceled || !chosenPath) return { success: false, canceled: true };
+        outputPath = chosenPath;
+      }
+      const result = await saveAnnotatedCbz({ cbzPath, outputPath, pages, annotationsByPage });
+      if (!result || !result.success) {
+        return { success: false, error: (result && result.error) || 'ذخیرهٔ CBZ انجام نشد.' };
+      }
+      try {
+        await atomicWriteBuffer(outputPath, result.buffer);
+      } catch (err) {
+        if (err && err.code === 'FILE_LOCKED') return { success: false, locked: true, error: err.message };
+        throw err;
+      }
+      if (normalizedMode === 'in-place') {
+        closeComicReadStreams(app, cbzPath);
+        invalidateComicRamCache(app, cbzPath);
+      }
+      return { success: true, outputPath, mode: normalizedMode, replacedCount: result.replacedCount, preservedCount: result.preservedCount, skippedCount: result.skippedCount, restoredClean: result.restoredClean };
+    } catch (err) {
+      if (err && err.code === 'FILE_LOCKED') {
+        try { const lg = getIpcLogger(); if (lg) lg.warn('export-annotated-cbz: file locked', err.message); } catch (_) {}
+        return { success: false, locked: true, error: err.message };
+      }
+      try { const lg = getIpcLogger(); if (lg) lg.error('export-annotated-cbz failed', err); } catch (_) {}
+      return { success: false, error: 'خطا در ساختِ CBZِ حاشیه‌نویسی‌شده: ' + err.message };
+    }
+  });
+
+  // مرحلهٔ ۴۴ §۴: خواندنِ مانیفستِ جاسازی‌شدهٔ CBZ (بارگذاریِ خودکار).
+  ipcMain.handle('get-embedded-cbz-annotations', async (event, payload) => {
+    try {
+      const filePath = payload && typeof payload.filePath === 'string' ? payload.filePath.trim() : '';
+      if (!filePath) return { success: false, error: 'مسیرِ فایل مشخص نیست.' };
+      return await readEmbeddedCbzAnnotations(filePath);
+    } catch (err) {
+      return { success: false, error: 'خطا در خواندنِ CBZ: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحلهٔ ۴۴ §۴: خروجیِ EPUBِ حاشیه‌نویسی‌شده (اورلیِ پخته + مانیفست).
+  ipcMain.handle('export-annotated-epub', async (event, payload) => {
+    try {
+      const { epubPath, chapters, annotationsByPage, highlights, bookmarks, mode } = payload || {};
+      const normalizedMode = mode === 'in-place' ? 'in-place' : 'save-as';
+      if (!epubPath || typeof epubPath !== 'string' || !fs.existsSync(epubPath)) {
+        return { success: false, error: 'فایل EPUB پیدا نشد.' };
+      }
+      if (path.extname(epubPath).toLowerCase() !== '.epub') {
+        return { success: false, error: 'فقط فایل‌های EPUB قابلِ ذخیره‌اند.' };
+      }
+      const chapterList = Array.isArray(chapters) ? chapters : [];
+      const pages = annotationsByPage && typeof annotationsByPage === 'object' ? annotationsByPage : {};
+      const hasGraphic = Object.values(pages).some((arr) => Array.isArray(arr) && arr.length > 0);
+      const hasHighlights = Array.isArray(highlights) && highlights.length > 0;
+      const hasBookmarks = Array.isArray(bookmarks) && bookmarks.length > 0;
+      if (chapterList.length === 0 && !hasGraphic && !hasHighlights && !hasBookmarks && normalizedMode !== 'in-place') {
+        return { success: false, error: 'حاشیه‌نویسی‌ای برای خروجی وجود ندارد.' };
+      }
+      let dataUrlChars = 0;
+      for (const ch of chapterList) {
+        if (ch && typeof ch.overlayPng === 'string') dataUrlChars += ch.overlayPng.length;
+        if (ch && typeof ch.highlightPng === 'string') dataUrlChars += ch.highlightPng.length;
+      }
+      if (dataUrlChars > 200000000) {
+        return { success: false, error: 'دادهٔ خروجی بیش از حد بزرگ است.' };
+      }
+      let outputPath = null;
+      if (normalizedMode === 'in-place') {
+        outputPath = epubPath;
+      } else {
+        const baseName = path.basename(epubPath, path.extname(epubPath));
+        const defaultName = baseName + '-annotated.epub';
+        const win = getWindowFromEvent(event);
+        const dialogOptions = {
+          title: 'ذخیره EPUB با حاشیه‌نویسی‌ها',
+          defaultPath: path.join(path.dirname(epubPath), defaultName),
+          filters: [{ name: 'EPUB (*.epub)', extensions: ['epub'] }],
+        };
+        const { canceled, filePath: chosenPath } = win
+          ? await dialog.showSaveDialog(win, dialogOptions)
+          : await dialog.showSaveDialog(dialogOptions);
+        if (canceled || !chosenPath) return { success: false, canceled: true };
+        outputPath = chosenPath;
+        if (path.extname(outputPath).toLowerCase() !== '.epub') outputPath += '.epub';
+      }
+      const epubService = getEpubService();
+      if (!epubService || typeof epubService.exportAnnotatedEpub !== 'function') {
+        return { success: false, error: 'ماژولِ خروجیِ EPUB (epubService.js) به‌روز نیست؛ فایل را در پوشهٔ electron/services قرار دهید.' };
+      }
+      const result = await epubService.exportAnnotatedEpub({ epubPath, outputPath, chapters: chapterList, annotationsByPage: pages, highlights: highlights || [], bookmarks: bookmarks || [] });
+      if (!result || !result.success) {
+        return { success: false, error: (result && result.error) || 'ذخیرهٔ EPUB انجام نشد.' };
+      }
+      try {
+        await atomicWriteBuffer(outputPath, result.buffer);
+      } catch (err) {
+        if (err && err.code === 'FILE_LOCKED') return { success: false, locked: true, error: err.message };
+        throw err;
+      }
+      if (normalizedMode === 'in-place') {
+        const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (app && app.getPath('userData'));
+        if (typeof epubService.clearEpubCache === 'function') {
+          try { await epubService.clearEpubCache(epubPath, dataDir); } catch (_) {}
+        }
+        invalidateComicRamCache(app, epubPath);
+      }
+      return { success: true, outputPath, mode: normalizedMode, injectedChapters: result.injectedChapters, removedChapters: result.removedChapters, restoredClean: result.restoredClean };
+    } catch (err) {
+      if (err && err.code === 'FILE_LOCKED') {
+        try { const lg = getIpcLogger(); if (lg) lg.warn('export-annotated-epub: file locked', err.message); } catch (_) {}
+        return { success: false, locked: true, error: err.message };
+      }
+      try { const lg = getIpcLogger(); if (lg) lg.error('export-annotated-epub failed', err); } catch (_) {}
+      return { success: false, error: 'خطا در ساختِ EPUBِ حاشیه‌نویسی‌شده: ' + err.message };
+    }
+  });
+
+  // مرحلهٔ ۴۶ §۲: خروجیِ HTMLِ مستقلِ گزارشِ آماربندی (گزارشِ آمادهٔ
+  // نمایش + پی‌لودِ جاسازی‌شدهٔ واردات). همان الگویِ مرحلهٔ ۴۴ §۴
+  // (export-annotated-cbz/epub): یک کانالِ اختصاصی + showSaveDialog +
+  // نوشتنِ اتمیک (atomicWriteBuffer: فایلِ موقت + rename). قراردادِ
+  // payload با preload و coreApi یکی است: { html, defaultFileName } و
+  // برگشتی { success: true, filePath } یا { success: false, error }.
+  // دیالوگِ عمومیِ ذخیره ساخته نمی‌شود؛ فقط همین یک کانال.
+  ipcMain.handle('export-stats-html', async (event, payload) => {
+    try {
+      const html = payload && typeof payload.html === 'string' ? payload.html : '';
+      const defaultFileName = payload && typeof payload.defaultFileName === 'string' ? payload.defaultFileName.trim() : '';
+      if (!html) {
+        return { success: false, error: 'دادهٔ خروجیِ HTML کامل نیست.' };
+      }
+      if (!defaultFileName) {
+        return { success: false, error: 'نامِ فایلِ خروجی مشخص نیست.' };
+      }
+      if (html.length > 50000000) {
+        return { success: false, error: 'دادهٔ خروجی بیش از حد بزرگ است.' };
+      }
+      const win = getWindowFromEvent(event);
+      const dialogOptions = {
+        title: 'ذخیرهٔ گزارشِ HTML آمار',
+        defaultPath: defaultFileName,
+        filters: [{ name: 'HTML', extensions: ['html'] }],
+      };
+      const { canceled, filePath: chosenPath } = win
+        ? await dialog.showSaveDialog(win, dialogOptions)
+        : await dialog.showSaveDialog(dialogOptions);
+      if (canceled || !chosenPath) return { success: false, canceled: true };
+      let outputPath = chosenPath;
+      if (path.extname(outputPath).toLowerCase() !== '.html') outputPath += '.html';
+      try {
+        await atomicWriteBuffer(outputPath, Buffer.from(html, 'utf8'));
+      } catch (err) {
+        if (err && err.code === 'FILE_LOCKED') return { success: false, locked: true, error: err.message };
+        throw err;
+      }
+      return { success: true, filePath: outputPath };
+    } catch (err) {
+      if (err && err.code === 'FILE_LOCKED') {
+        try { const lg = getIpcLogger(); if (lg) lg.warn('export-stats-html: file locked', err.message); } catch (_) {}
+        return { success: false, locked: true, error: err.message };
+      }
+      try { const lg = getIpcLogger(); if (lg) lg.error('export-stats-html failed', err); } catch (_) {}
+      return { success: false, error: 'خطا در ذخیرهٔ گزارشِ HTML: ' + err.message };
     }
   });
 
@@ -2916,6 +3363,14 @@ function getEpubService() {
           skippedCount: result.skippedCount || 0,
           coverFilesDeleted: result.coverFilesDeleted || 0,
           coverBytesFreed: result.coverBytesFreed || 0,
+          // مرحلهٔ ۵۲ §۱: خلاصهٔ همگام‌سازی (پیش‌نمایش، چیزی را
+          // تغییر نمی‌دهد؛ فقط می‌شمارد).
+          checked: result.checked || 0,
+          purgedFromRecent: result.purgedFromRecent || 0,
+          keptWithWarning: result.keptWithWarning || 0,
+          coversFreed: result.coversFreed || 0,
+          missingPaths: Array.isArray(result.missingPaths) ? result.missingPaths : [],
+          returnedPaths: Array.isArray(result.returnedPaths) ? result.returnedPaths : [],
         };
       }
       return { success: false, error: (result && result.message) || 'پیش‌نمایشِ هرس انجام نشد.' };
@@ -2936,11 +3391,58 @@ function getEpubService() {
           skippedCount: result.skippedCount || 0,
           coverFilesDeleted: result.coverFilesDeleted || 0,
           coverBytesFreed: result.coverBytesFreed || 0,
+          // مرحلهٔ ۵۲ §۱: خلاصهٔ همگام‌سازی (نامِ قدیمی، رفتارِ امنِ تازه).
+          checked: result.checked || 0,
+          purgedFromRecent: result.purgedFromRecent || 0,
+          keptWithWarning: result.keptWithWarning || 0,
+          coversFreed: result.coversFreed || 0,
+          missingPaths: Array.isArray(result.missingPaths) ? result.missingPaths : [],
+          returnedPaths: Array.isArray(result.returnedPaths) ? result.returnedPaths : [],
+          coversFreedPaths: Array.isArray(result.coversFreedPaths) ? result.coversFreedPaths : [],
         };
       }
       return { success: false, error: (result && result.message) || 'هرسِ فایل‌های حذف‌شده انجام نشد.' };
     } catch (err) {
       return { success: false, error: 'هرسِ فایل‌های حذف‌شده انجام نشد: ' + String((err && err.message) || err) };
+    }
+  });
+
+  // مرحلهٔ ۵۲ §۱: همگام‌سازیِ دسته‌ایِ فایل‌هایِ حذف‌شده — یک هندلر،
+  // یک پیامِ ورکر، بدونِ حلقهٔ IPC. payload.paths اختیاری است: اگر
+  // داده شد، فقط همان مسیرها بررسی می‌شوند (مثلاً وقتی فایلی رویِ
+  // دیسک پیدا نشد)؛ اگر داده نشد، همهٔ مسیرهایِ شناخته‌شده بررسی
+  // می‌شوند. تایم‌اوت، همان الگویِ ۶۰ ثانیه‌ایِ هرس است.
+  ipcMain.handle('sync-missing-files', async (event, payload) => {
+    try {
+      const paths = payload && Array.isArray(payload.paths)
+        ? payload.paths.filter((p) => typeof p === 'string' && p)
+        : undefined;
+      const result = await executeDbRequest(
+        'SYNC_AND_CLEAN_MISSING_FILES',
+        paths ? { paths } : {},
+        60000
+      );
+      if (result && result.type === 'done') {
+        return {
+          success: true,
+          checked: result.checked || 0,
+          purgedFromRecent: result.purgedFromRecent || 0,
+          keptWithWarning: result.keptWithWarning || 0,
+          coversFreed: result.coversFreed || 0,
+          missingPaths: Array.isArray(result.missingPaths) ? result.missingPaths : [],
+          returnedPaths: Array.isArray(result.returnedPaths) ? result.returnedPaths : [],
+          coversFreedPaths: Array.isArray(result.coversFreedPaths) ? result.coversFreedPaths : [],
+          removed: Array.isArray(result.removed) ? result.removed : [],
+          skipped: Array.isArray(result.skipped) ? result.skipped : [],
+          removedCount: result.removedCount || 0,
+          skippedCount: result.skippedCount || 0,
+          coverFilesDeleted: result.coverFilesDeleted || 0,
+          coverBytesFreed: result.coverBytesFreed || 0,
+        };
+      }
+      return { success: false, error: (result && result.message) || 'همگام‌سازیِ فایل‌های حذف‌شده انجام نشد.' };
+    } catch (err) {
+      return { success: false, error: 'همگام‌سازیِ فایل‌های حذف‌شده انجام نشد: ' + String((err && err.message) || err) };
     }
   });
 
