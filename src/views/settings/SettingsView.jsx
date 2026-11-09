@@ -26,6 +26,7 @@ export default function SettingsView() {
   const updateShortcut = useSettingsStore((s) => s.updateShortcut);
   const resetShortcutsToDefault = useSettingsStore((s) => s.resetShortcutsToDefault);
   const updatePreference = useSettingsStore((s) => s.updatePreference);
+  const resetPreferences = useSettingsStore((s) => s.resetPreferences);
   const setHeroSliderVariant = useSettingsStore((s) => s.setHeroSliderVariant);
   const cbzDefaultZoom = useSettingsStore((s) => s.cbzDefaultZoom ?? 165);
   const cbzDefaultViewMode = useSettingsStore((s) => s.cbzDefaultViewMode ?? 'horizontal-paged');
@@ -164,6 +165,21 @@ export default function SettingsView() {
     showToast('تمام کلیدهای میانبر به حالت پیش‌فرض بازنشانی شدند', { type: 'info' });
   };
 
+  // مرحلهٔ ۵۳ مأموریت ۱: بازنشانیِ تنظیماتِ ظاهر به پیش‌فرض —
+  // resetPreferences همهٔ کلیدهایِ preferences را به
+  // DEFAULT_PREFERENCES برمی‌گرداند (میانبرها دست نمی‌خورند).
+  const handleResetAppearance = () => {
+    resetPreferences();
+    showToast('تنظیمات ظاهر به حالت پیش‌فرض بازنشانی شد', { type: 'info' });
+  };
+
+  // مرحلهٔ ۵۳ مأموریت ۱: تأخیرِ ورودِ خودکار به حالتِ تمرکز،
+  // به ثانیه (۱ تا ۱۰)؛ در استور به میلی‌ثانیه نگه داشته می‌شود.
+  const handleAutoZenDelayChange = (seconds) => {
+    const sec = Math.min(10, Math.max(1, parseFloat(seconds) || 3.2));
+    updatePreference('autoZenDelay', Math.round(sec * 1000));
+  };
+
   const handleDefaultZoomChange = (val) => {
     const num = parseFloat(val);
     updatePreference('defaultZoom', num);
@@ -204,6 +220,10 @@ export default function SettingsView() {
   // مقدار نمایشی ورودی رنگ؛ اگر مقدار استور معتبر نباشد، به
   // پیش‌فرض قرارداد برمی‌گردد تا <input type="color"> خراب نشود.
   const backdropColorValue = isValidHex(readerBackdropColor) ? readerBackdropColor : '#2b3038';
+  // مرحلهٔ ۵۳ مأموریت ۱: مقدارِ نمایشیِ تأخیرِ تمرکز، به ثانیه
+  // و در بازهٔ ۱ تا ۱۰؛ مقدارِ ذخیره‌شدهٔ قدیمیِ خارج از بازه،
+  // فقط در نمایش محدود می‌شود و با نخستین تغییر، اصلاح می‌شود.
+  const autoZenDelaySeconds = Math.min(10, Math.max(1, (preferences?.autoZenDelay ?? 3200) / 1000));
   const handleBackdropSelect = (hex) => {
     setHexDraft(null);
     setHexError('');
@@ -516,6 +536,29 @@ export default function SettingsView() {
               />
             </div>
 
+            {/* مرحلهٔ ۵۳ مأموریت ۱: تأخیرِ ورودِ خودکار به حالتِ تمرکز */}
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>تأخیر ورود خودکار به حالت تمرکز (Auto Zen Delay)</span>
+                <span style={styles.monoValue}>
+                  {autoZenDelaySeconds.toFixed(1)} ثانیه
+                </span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="10"
+                step="0.5"
+                value={autoZenDelaySeconds}
+                onChange={(e) => handleAutoZenDelayChange(e.target.value)}
+                style={styles.slider}
+                aria-label="تأخیر ورود خودکار به حالت تمرکز"
+              />
+              <div style={styles.prefSub}>
+                پس از باز شدن کمیک، نوارها پس از این مدت مخفی می‌شوند.
+              </div>
+            </div>
+
             {/* نمایش شمارنده آیتم‌ها در سایدبار */}
             <div style={styles.prefSwitchRow}>
               <div>
@@ -530,6 +573,49 @@ export default function SettingsView() {
                 onChange={(e) => updatePreference('showSidebarCounts', e.target.checked)}
                 style={styles.checkbox}
               />
+            </div>
+
+            {/* مرحلهٔ ۵۳ مأموریت ۱: مدت‌زمانِ نمایشِ اعلان‌ها —
+                همان گزینه‌هایِ مودالِ تنظیماتِ سریع؛ با
+                updatePreferences ذخیره می‌شود. مصرف‌کنندهٔ این
+                مقدار، تایمرِ showToast در useAppStore است که
+                بیرون از محدودهٔ این مأموریت است و سیم‌کشیِ آن
+                جداگانه انجام می‌شود؛ این کنترل، مقدار را آماده
+                می‌کند و مسیرِ مودال را دست نمی‌زند. */}
+            <div style={styles.prefItem}>
+              <div style={styles.prefLabelRow}>
+                <span style={styles.prefTitle}>مدت‌زمان نمایش اعلان‌ها (HUD Toast)</span>
+                <span style={styles.monoValue}>
+                  {((preferences?.hudDuration ?? 2200) / 1000).toFixed(1)} ثانیه
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {[
+                  { label: 'سریع (۱.۵ ثانیه)', val: 1500 },
+                  { label: 'استاندارد (۲.۲ ثانیه)', val: 2200 },
+                  { label: 'آهسته (۳.۵ ثانیه)', val: 3500 },
+                ].map((item) => {
+                  const isActive = (preferences?.hudDuration ?? 2200) === item.val;
+                  return (
+                    <button
+                      key={item.val}
+                      type="button"
+                      onClick={() => updatePreference('hudDuration', item.val)}
+                      style={{
+                        border: isActive ? '2px solid #22d3ee' : '1px solid var(--border)',
+                        background: isActive ? 'rgba(34,211,238,0.12)' : 'rgba(255,255,255,0.03)',
+                        color: isActive ? '#67e8f9' : 'var(--text)',
+                        borderRadius: 20,
+                        padding: '6px 14px',
+                        fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -784,6 +870,22 @@ export default function SettingsView() {
               );
             })}
           </div>
+        </div>
+
+        {/* مرحلهٔ ۵۳ مأموریت ۱: بازنشانیِ تنظیماتِ ظاهر به پیش‌فرض */}
+        <div style={styles.sectionCard}>
+          <h3 style={styles.cardTitle}>بازنشانی تنظیمات ظاهر</h3>
+          <p style={styles.cardDesc}>
+            همهٔ تنظیماتِ برنامه — از جمله بزرگ‌نمایی، حالت تمرکز، رنگ پس‌زمینه، گرادیان اسکرول‌بار و سبک اسلایدر — به مقدارهای پیش‌فرض برمی‌گردند. کلیدهای میانبر دست نمی‌خورند.
+          </p>
+          <button
+            type="button"
+            onClick={handleResetAppearance}
+            style={styles.resetBtn}
+          >
+            <Icons.RefreshCw size={14} />
+            <span>بازنشانی تنظیمات ظاهر به پیش‌فرض</span>
+          </button>
         </div>
         </>
       )}

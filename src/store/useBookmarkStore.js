@@ -184,7 +184,7 @@ function toast(message, type = 'info') {
   } catch (_) {}
 }
 
-const useBookmarkStore = create((set, get) => ({
+export const useBookmarkStore = create((set, get) => ({
   bookmarksByFile: {},
   loadedFilePath: null,
   // مرحله ۱۸ — حالتِ اولیه، مستقیماً و همگام از localStorage خوانده

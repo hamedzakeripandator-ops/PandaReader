@@ -411,7 +411,8 @@ export const DEFAULT_PREFERENCES = {
   jpgQuality: 0.94,
   defaultZoom: 1.0,
   zoomStep: 0.1,
-  smoothScroll: true,
+  // مرحلهٔ ۵۳ مأموریت ۱: کلیدِ مردهٔ اسکرولِ نرم حذف شد — کلیدِ مرده بود؛
+  // هیچ مصرف‌کننده‌ای نداشت و هیچ کنترلی هم برایش نبود.
   autoZenOnOpen: true,
   autoZenDelay: 3200,
   pageGap: 0,
@@ -711,10 +712,14 @@ const buildInitialShortcuts = () => {
   return merged;
 };
 
-const useSettingsStore = create((set, get) => ({
+export const useSettingsStore = create((set, get) => ({
   shortcuts: buildInitialShortcuts(),
   preferences: (() => {
     const base = { ...DEFAULT_PREFERENCES, ...(saved?.preferences || {}) };
+    // مرحلهٔ ۵۳ مأموریت ۱: مقدارِ قدیمیِ کلیدِ مرده در
+    // localStorage (از نسخه‌هایِ پیشین) این‌جا حذف می‌شود تا در
+    // استورِ زنده نماند.
+    delete base.smoothScroll;
     // مرحلهٔ ۳۵ §۶: اگر تنظیماتِ ذخیره‌شده، تمپلیت را ندارند، آینهٔ
     // localStorage (کلیدِ comicReader.heroSliderVariant.v1) به‌عنوانِ
     // fallback خوانده می‌شود؛ وگرنه پیش‌فرضِ 'mirror' می‌ماند.
@@ -746,6 +751,10 @@ const useSettingsStore = create((set, get) => ({
       const setsRes = await coreApi.dbAction({ action: 'GET_SETTINGS' });
       if (setsRes?.settings) {
         const mergedPrefs = { ...get().preferences, ...setsRes.settings };
+        // مرحلهٔ ۵۳ مأموریت ۱: ردیفِ قدیمیِ کلیدِ مرده در
+        // دیتابیس (از نسخه‌هایِ پیشین) این‌جا حذف می‌شود تا در
+        // ادغام برنگردد.
+        delete mergedPrefs.smoothScroll;
         set({ preferences: mergedPrefs, ...syncFormatPrefs(mergedPrefs) });
       }
 
@@ -1040,6 +1049,12 @@ const useSettingsStore = create((set, get) => ({
     });
   },
 
+  // مرحلهٔ ۵۳ مأموریت ۱: نامِ مستعارِ مفردِ updatePreferences —
+  // SettingsView و هر فراخوانندهٔ قدیمی با امضایِ (key, value)
+  // صدا می‌زنند؛ هر دو امضا از یک مسیر می‌گذرند، پس هم در
+  // localStorage و هم با SAVE_SETTING در دیتابیس ماندگار می‌شوند.
+  updatePreference: (key, value) => get().updatePreferences({ [key]: value }),
+
   resetPreferences: () => {
     set({ preferences: { ...DEFAULT_PREFERENCES }, ...syncFormatPrefs(DEFAULT_PREFERENCES) });
     saveStateToStorage({
@@ -1120,6 +1135,9 @@ const useSettingsStore = create((set, get) => ({
       const nextPrefs = parsed.preferences
         ? { ...DEFAULT_PREFERENCES, ...parsed.preferences }
         : get().preferences;
+      // مرحلهٔ ۵۳ مأموریت ۱: مقدارِ قدیمیِ کلیدِ مرده در فایلِ
+      // واردشده حذف می‌شود تا کلیدِ مرده برنگردد.
+      if (parsed.preferences) delete nextPrefs.smoothScroll;
       const nextProfile = parsed.profile
         ? { ...DEFAULT_PROFILE, ...parsed.profile }
         : get().profile;

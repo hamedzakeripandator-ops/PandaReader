@@ -1,7 +1,10 @@
-import React, { useState, useMemo } from 'react';
-import useLibraryStore from '../../store/useLibraryStore';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
+import useLibraryStore, {
+  useCardReorderGrid,
+  applyReorderToFullList,
+} from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
-import ComicCard from '../library/ComicCard';
+import ComicCard, { shouldSuppressCardClick } from '../library/ComicCard';
 import Icons from '../../components/common/Icons';
 
 // مرحله ۴۸ (B): رنگ‌های پوشه، دقیقاً همان فهرستِ LibraryView تا
@@ -18,6 +21,7 @@ const FOLDER_COLORS = [
 export default function FavoritesView({ onOpenComic }) {
   const favorites = useLibraryStore((state) => state.favorites || []);
   const removeFromFavorites = useLibraryStore((state) => state.removeFromFavorites);
+  const reorderFavoriteItems = useLibraryStore((state) => state.reorderFavoriteItems);
   const library = useLibraryStore((state) => state.library || []);
   const favoriteFolders = useLibraryStore((state) => state.favoriteFolders || []);
   const activeFavoriteFolderId = useLibraryStore(
@@ -32,7 +36,34 @@ export default function FavoritesView({ onOpenComic }) {
   const assignToFavoriteFolder = useLibraryStore((state) => state.assignToFavoriteFolder);
   const { searchQuery, setCurrentView, showToast } = useAppStore();
 
-  const [sortBy, setSortBy] = useState('newest'); // 'newest' | 'name' | 'progress'
+  // مرحلهٔ ۵۳ — مأموریت ۳: «چیدمان دستی (سفارشی)» گزینهٔ تازهٔ
+  // مرتب‌سازی است و انتخابِ آن در localStorage می‌ماند تا چیدمانِ
+  // دستی پس از ری‌استارت هم حفظ شود.
+  const [sortBy, setSortBy] = useState(() => {
+    try {
+      const saved = localStorage.getItem('comicReader.favoritesSort.v1');
+      if (
+        saved === 'custom' ||
+        saved === 'name' ||
+        saved === 'progress' ||
+        saved === 'newest'
+      ) {
+        return saved;
+      }
+    } catch (_) {}
+    return 'newest';
+  });
+
+  const handleSortChange = (value) => {
+    const next =
+      value === 'custom' || value === 'name' || value === 'progress'
+        ? value
+        : 'newest';
+    setSortBy(next);
+    try {
+      localStorage.setItem('comicReader.favoritesSort.v1', next);
+    } catch (_) {}
+  };
 
   // استیت‌های مودال ساخت / ویرایش پوشه در علاقه‌مندی‌ها
   const [folderModal, setFolderModal] = useState(null); // { mode: 'create'|'edit', id, name, color }
@@ -112,6 +143,12 @@ export default function FavoritesView({ onOpenComic }) {
       return true;
     });
 
+    // مرحلهٔ ۵۳ — مأموریت ۳: در «چیدمان دستی»، ترتیبِ استور
+    // (customOrder) بدونِ هیچ مرتب‌سازیِ دوباره می‌ماند؛ جستجو در
+    // این حالت فقط فیلتر می‌کند. (برخلافِ کتابخانه، این نما از اول
+    // قانونِ پین‌اول را در sort نداشت — پین اینجا فقط فیلتر است.)
+    if (sortBy === 'custom') return list;
+
     return [...list].sort((a, b) => {
       if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '', 'fa');
       if (sortBy === 'progress') {
@@ -122,6 +159,158 @@ export default function FavoritesView({ onOpenComic }) {
       return new Date(b.favoritedAt || 0) - new Date(a.favoritedAt || 0);
     });
   }, [enrichedFavorites, searchQuery, sortBy, activeFavoriteFolderId]);
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: انتقالِ کارت به پوشهٔ علاقه‌مندی با
+  // مسیرِ مشترک؛ هم رها کردنِ بومی و هم رها کردنِ اشاره‌گرِ فوری
+  // از همین‌جا می‌گذرند. 'ALL' و 'UNFOLDERED' یعنی بیرون از پوشه.
+  const assignCardToFavoriteFolderId = useCallback(
+    async (draggedPath, targetFolderId) => {
+      if (!draggedPath) return;
+      const realFolderId =
+        targetFolderId === 'ALL' || targetFolderId === 'UNFOLDERED'
+          ? null
+          : targetFolderId;
+      await assignToFavoriteFolder(draggedPath, realFolderId);
+      const targetFolderObj = favoriteFolders.find((f) => f.id === realFolderId);
+      showToast(
+        targetFolderObj
+          ? `به پوشه «${targetFolderObj.name}» منتقل شد`
+          : 'به نمای کلی علاقه‌مندی‌ها منتقل شد',
+        { type: 'success' }
+      );
+    },
+    [assignToFavoriteFolder, favoriteFolders, showToast]
+  );
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: رها کردنِ اشاره‌گرِ فوری رویِ تبِ
+  // پوشه؛ هوک، تبِ زیرِ نشانگر را با data-folder-drop-id پیدا
+  // کرده و شناسه‌اش را اینجا می‌دهد.
+  const handlePointerFolderDrop = useCallback(
+    (draggedPath, targetFolderId) => {
+      setDragOverFolderId(null);
+      assignCardToFavoriteFolderId(draggedPath, targetFolderId);
+    },
+    [assignCardToFavoriteFolderId]
+  );
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: سیم‌کشیِ جابه‌جاییِ فوریِ کارت‌ها
+  // (بدونِ نگه‌داشتن؛ همان هوکِ مشترکِ کتابخانه).
+  const gridRef = useRef(null);
+  const scrollRef = useRef(null);
+
+  const handleReorderCommit = useCallback(
+    (visibleOrderedPaths) => {
+      // ترتیبِ نمایِ فیلترشده، با حفظِ ۱۰۰٪ بقیه، در فهرستِ کاملِ
+      // علاقه‌مندی‌ها ادغام می‌شود (گاردِ باگِ ۲) و با customOrder
+      // ذخیره می‌شود؛ هم‌زمان، sort به «چیدمان دستی» می‌رود و می‌ماند.
+      const fullOrdered = applyReorderToFullList(favorites, visibleOrderedPaths);
+      const fullPaths = fullOrdered
+        .map((item) => item.path || item.filePath)
+        .filter(Boolean);
+      reorderFavoriteItems(fullPaths);
+      setSortBy('custom');
+      try {
+        localStorage.setItem('comicReader.favoritesSort.v1', 'custom');
+      } catch (_) {}
+    },
+    [favorites, reorderFavoriteItems]
+  );
+
+  const reorder = useCardReorderGrid({
+    enabled: true,
+    visibleItems: displayedFavorites,
+    gridRef,
+    scrollRef,
+    onCommit: handleReorderCommit,
+    onFolderDrop: handlePointerFolderDrop,
+  });
+
+  // گاردِ باگِ ۱: رها کردنِ نشانگر پس از درگ، هرگز کتاب را باز
+  // نمی‌کند؛ هوک، کلیکِ همان ژست را با wasReorderingRef می‌بلعد.
+  const guardedOpenComic = useCallback(
+    (item) => {
+      if (reorder.wasReorderingRef.current) {
+        reorder.wasReorderingRef.current = false;
+        return;
+      }
+      // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲: کلیکِ پس از هر درگِ داخلیِ
+      // کارت (جابه‌جایی یا کشیدن به تبِ پوشه) هم بلعیده می‌شود؛ پرچم
+      // تا ۱۰۰ میلی‌ثانیه پس از pointerup روشن می‌ماند، پس کلیکِ
+      // همان ژست هنوز آن را روشن می‌بیند. رفتارِ مرحلهٔ ۵۳
+      // (wasReorderingRef) دست‌نخورده می‌ماند.
+      if (shouldSuppressCardClick()) return;
+      if (onOpenComic) onOpenComic(item);
+    },
+    [onOpenComic]
+  );
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: کلیکِ تبِ پوشه پس از رها کردنِ درگِ
+  // فوری، نباید پوشهٔ فعال را عوض کند؛ همان گاردِ wasReorderingRef
+  // که کلیکِ بازکنندهٔ کتاب را می‌بلعد، اینجا هم به کار می‌رود.
+  const guardedSetActiveFavoriteFolder = useCallback(
+    (folderId) => {
+      if (reorder.wasReorderingRef.current) {
+        reorder.wasReorderingRef.current = false;
+        return;
+      }
+      setActiveFavoriteFolder(folderId);
+    },
+    [setActiveFavoriteFolder]
+  );
+
+  // رندرِ گرید در حالتِ جابه‌جایی: کارتِ گرفته‌شده از گرید بیرون
+  // می‌رود و جایِ خالیِ نقطه‌چین (اسلات) در جایِ هدف می‌نشیند؛
+  // در حالتِ عادی، دقیقاً مثلِ قبل.
+  const renderGridCards = () => {
+    const isDragging = Boolean(reorder.grabbedPath);
+    const list = isDragging ? reorder.previewItems : displayedFavorites;
+    const nodes = [];
+    list.forEach((item, idx) => {
+      if (isDragging && reorder.placeholderIndex === idx) {
+        nodes.push(
+          <div
+            key="cr-reorder-slot"
+            className="cr-reorder-slot"
+            style={{
+              height: reorder.floatingRect ? reorder.floatingRect.height : undefined,
+            }}
+          />
+        );
+      }
+      const norm = (item?.path || item?.filePath || '')
+        .trim()
+        .replace(/[\\/]+/g, '\\')
+        .toLowerCase();
+      nodes.push(
+        // data-cr-card-slot، شناسهٔ اندازه‌گیریِ کارت در گرید است
+        // و cr-repel-card، گرهی است که دافعهٔ مغناطیسی مستقیم
+        // رویِ آن اعمال می‌شود.
+        <div key={item.path || item.filePath || item.name} data-cr-card-slot={norm} className="cr-repel-card">
+          <ComicCard
+            item={item}
+            onOpenComic={guardedOpenComic}
+            onRemove={handleRemoveFav}
+            showRemoveBtn={true}
+            folderScope="favorites"
+            reorderable={!isDragging}
+            onReorderActivate={reorder.onReorderActivate}
+          />
+        </div>
+      );
+    });
+    if (isDragging && reorder.placeholderIndex >= list.length) {
+      nodes.push(
+        <div
+          key="cr-reorder-slot"
+          className="cr-reorder-slot"
+          style={{
+            height: reorder.floatingRect ? reorder.floatingRect.height : undefined,
+          }}
+        />
+      );
+    }
+    return nodes;
+  };
 
   const activeFolderObject = useMemo(
     () => favoriteFolders.find((f) => f.id === activeFavoriteFolderId) || null,
@@ -170,23 +359,11 @@ export default function FavoritesView({ onOpenComic }) {
     const draggedPath = e.dataTransfer.getData('text/comic-path');
     if (!draggedPath) return;
 
-    const realFolderId =
-      targetFolderId === 'ALL' || targetFolderId === 'UNFOLDERED'
-        ? null
-        : targetFolderId;
-
-    await assignToFavoriteFolder(draggedPath, realFolderId);
-    const targetFolderObj = favoriteFolders.find((f) => f.id === realFolderId);
-    showToast(
-      targetFolderObj
-        ? `به پوشه «${targetFolderObj.name}» منتقل شد`
-        : 'به نمای کلی علاقه‌مندی‌ها منتقل شد',
-      { type: 'success' }
-    );
+    await assignCardToFavoriteFolderId(draggedPath, targetFolderId);
   };
 
   return (
-    <div style={styles.container}>
+    <div ref={scrollRef} style={styles.container}>
       <div style={styles.containerInner}>
       {/* هدر بخش علاقه‌مندی‌ها */}
       <div style={styles.header}>
@@ -205,12 +382,13 @@ export default function FavoritesView({ onOpenComic }) {
         <div style={styles.controlsWrap}>
           <select
             value={sortBy}
-            onChange={(e) => setSortBy(e.target.value)}
+            onChange={(e) => handleSortChange(e.target.value)}
             style={styles.sortSelect}
           >
             <option value="newest">مرتب‌سازی: جدیدترین</option>
             <option value="name">مرتب‌سازی: نام (الفبا)</option>
             <option value="progress">مرتب‌سازی: بیشترین پیشرفت</option>
+            <option value="custom">مرتب‌سازی: چیدمان دستی (سفارشی)</option>
           </select>
         </div>
       </div>
@@ -227,7 +405,8 @@ export default function FavoritesView({ onOpenComic }) {
           {/* تب همه علاقه‌مندی‌ها */}
           <button
             type="button"
-            onClick={() => setActiveFavoriteFolder('ALL')}
+            data-folder-drop-id="ALL"
+            onClick={() => guardedSetActiveFavoriteFolder('ALL')}
             onDragOver={(e) => {
               e.preventDefault();
               setDragOverFolderId('ALL');
@@ -241,6 +420,7 @@ export default function FavoritesView({ onOpenComic }) {
                   ? 'rgba(34, 211, 238, 0.16)'
                   : 'var(--panel2)',
               borderColor:
+                reorder.folderDropTargetId === 'ALL' ||
                 dragOverFolderId === 'ALL'
                   ? '#f72585'
                   : activeFavoriteFolderId === 'ALL'
@@ -257,7 +437,7 @@ export default function FavoritesView({ onOpenComic }) {
           {/* تب پین‌شده‌ها */}
           <button
             type="button"
-            onClick={() => setActiveFavoriteFolder('PINNED')}
+            onClick={() => guardedSetActiveFavoriteFolder('PINNED')}
             style={{
               ...styles.folderTabBtn,
               backgroundColor:
@@ -277,7 +457,8 @@ export default function FavoritesView({ onOpenComic }) {
           {/* تب بدون پوشه */}
           <button
             type="button"
-            onClick={() => setActiveFavoriteFolder('UNFOLDERED')}
+            data-folder-drop-id="UNFOLDERED"
+            onClick={() => guardedSetActiveFavoriteFolder('UNFOLDERED')}
             onDragOver={(e) => {
               e.preventDefault();
               setDragOverFolderId('UNFOLDERED');
@@ -291,6 +472,7 @@ export default function FavoritesView({ onOpenComic }) {
                   ? 'rgba(34, 211, 238, 0.16)'
                   : 'var(--panel2)',
               borderColor:
+                reorder.folderDropTargetId === 'UNFOLDERED' ||
                 dragOverFolderId === 'UNFOLDERED'
                   ? '#f72585'
                   : activeFavoriteFolderId === 'UNFOLDERED'
@@ -308,14 +490,17 @@ export default function FavoritesView({ onOpenComic }) {
           {/* تب پوشه‌های سفارشی کاربر */}
           {favoriteFolders.map((folder) => {
             const isSelected = activeFavoriteFolderId === folder.id;
-            const isDragTarget = dragOverFolderId === folder.id;
+            const isDragTarget =
+              reorder.folderDropTargetId === folder.id ||
+              dragOverFolderId === folder.id;
             const fColor = folder.color || '#22d3ee';
 
             return (
               <button
                 key={folder.id}
                 type="button"
-                onClick={() => setActiveFavoriteFolder(folder.id)}
+                data-folder-drop-id={folder.id}
+                onClick={() => guardedSetActiveFavoriteFolder(folder.id)}
                 onDragOver={(e) => {
                   e.preventDefault();
                   setDragOverFolderId(folder.id);
@@ -519,17 +704,32 @@ export default function FavoritesView({ onOpenComic }) {
           </p>
         </div>
       ) : (
-        <div style={styles.cardsGrid}>
-          {displayedFavorites.map((item) => (
-            <ComicCard
-              key={item.path || item.filePath || item.name}
-              item={item}
-              onOpenComic={onOpenComic}
-              onRemove={handleRemoveFav}
-              showRemoveBtn={true}
-              folderScope="favorites"
-            />
-          ))}
+        <div ref={gridRef} style={styles.cardsGrid}>
+          {renderGridCards()}
+        </div>
+      )}
+      {/* مرحلهٔ ۵۴ — مأموریت ۱: کارتِ شناورِ گرفته‌شده که دنبالِ
+          نشانگر می‌آید؛ reorderable در اینجا false است، چون کارت
+          همین حالا گرفته شده و درگِ تازه نمی‌خواهد. */}
+      {reorder.floatingItem && (
+        <div
+          ref={reorder.floatingElRef}
+          className="cr-reorder-floating"
+          style={{
+            left: reorder.floatingRect.left,
+            top: reorder.floatingRect.top,
+            width: reorder.floatingRect.width,
+          }}
+        >
+          <ComicCard
+            item={reorder.floatingItem}
+            onOpenComic={guardedOpenComic}
+            onRemove={handleRemoveFav}
+            showRemoveBtn={true}
+            folderScope="favorites"
+            reorderable={false}
+            isGrabbedForReorder
+          />
         </div>
       )}
       </div>

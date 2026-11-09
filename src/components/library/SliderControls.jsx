@@ -21,6 +21,14 @@
 // MIN = 6، MAX = 44. مرکزِ دیداریِ هر ۵ تمپلیت دقیقاً رویِ MID = 32
 // است و با مرکزِ دکمه‌هایِ ۳۶ پیکسلیِ قبلی/بعدی هم‌تراز است.
 // «میلهٔ پیک» در همهٔ تمپلیت‌ها، میلهٔ مرکزیِ گروهِ فعال است.
+// مرحلهٔ ۵۳ مأموریتِ ۲ — نگاشتِ راست‌به‌چپِ گروه‌هایِ دیداری:
+// گروهِ دیداریِ اسلاید = (N - 1) - اندیسِ اسلاید؛ اسلایدِ ۱ (اندیسِ ۰)
+// راست‌ترین گروه است و اسلایدِ ۲ دومین گروه از راست. همهٔ جاهایی که
+// گروهِ فعال، میلهٔ پیک، مرکزِ زنگوله، پاپِ اسلاید، هاور یا کلیک به
+// گروه وصل می‌شوند از همین نگاشت استفاده می‌کنند؛ مختصاتِ فیزیکیِ
+// ماوس و بوم (چپ‌به‌راست) وارونه نمی‌شوند و فقط تبدیلِ گروه‌به‌اسلاید
+// وارونه است. موتورِ مرحلهٔ ۵۲ §۴ (پوشِ دو-گوسی، هندسهٔ تطبیقیِ
+// ۵ باندی، تغییرِ اندازهٔ مشروطِ بوم) بدونِ تغییر ماند.
 // ============================================================================
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -189,12 +197,30 @@ export function classicBarHeight(p, j, ts, refCenter, g, bars, isActiveGroup, is
   return clamp01(h, MIN, MAX);
 }
 
-// مرحلهٔ ۵۱ §۱ — پاپِ پلکانیِ یک میله: تأخیرِ (j % G) * 0.035
-// ثانیه و واپاشیِ نماییِ ۲۵۰ میلی‌ثانیه‌ای با بهرهٔ ۰.۳۵.
+// مرحلهٔ ۵۱ §۱ — پاپِ پلکانیِ یک میله: تأخیرِ پلکانی و واپاشیِ
+// نماییِ ۲۵۰ میلی‌ثانیه‌ای با بهرهٔ ۰.۳۵.
+// مرحلهٔ ۵۳ مأموریتِ ۲ — پلکان راست‌به‌چپ است: (G - 1 - (j % G)) * 0.035
+// ثانیه؛ پس راست‌ترین میلهٔ گروهِ فعال اول می‌پرد و موج به سمتِ چپ می‌رود.
 export function slidePopFor(j, g, popAgeMs) {
-  const staggerMs = (j % g) * POP_STAGGER_SEC * 1000;
+  const staggerMs = (g - 1 - (j % g)) * POP_STAGGER_SEC * 1000;
   const effAge = Math.max(0, popAgeMs - staggerMs);
   return 1 + POP_GAIN * Math.exp(-effAge / POP_DECAY_MS);
+}
+
+// مرحلهٔ ۵۳ مأموریتِ ۲ — نگاشتِ راست‌به‌چپِ گروه‌به‌اسلاید (تابع‌هایِ
+// خالص؛ تست‌ها از همین‌جا می‌خوانند): گروهِ دیداریِ فیزیکی (۰ = چپ‌ترین
+// گروهِ بوم) به اندیسِ اسلاید و برعکس؛ هر دو تبدیل، وارونِ یکدیگرند و
+// فرمولِ هر دو (N - 1) - x است.
+export function visualGroupForSlide(slideIndex, total) {
+  const n = Math.max(1, Number(total) || 1);
+  const sIdx = clamp01(Math.floor(Number(slideIndex) || 0), 0, n - 1);
+  return (n - 1) - sIdx;
+}
+
+export function slideIndexForVisualGroup(visualGroup, total) {
+  const n = Math.max(1, Number(total) || 1);
+  const vg = clamp01(Math.floor(Number(visualGroup) || 0), 0, n - 1);
+  return (n - 1) - vg;
 }
 
 function barX(j, geo) {
@@ -216,10 +242,12 @@ function barAtX(x, total, geo) {
   return { group: g, bar: g * geo.g + b };
 }
 
-function groupColor(j, active, hoverGroup, hoverBar, geo) {
+// مرحلهٔ ۵۳ مأموریتِ ۲ — پارامترِ active این تابع، گروهِ دیداریِ فعال
+// (فیزیکی، چپ‌به‌راست) است، نه اندیسِ اسلاید؛ فراخوان‌ها activeVisualGroup می‌دهند.
+function groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo) {
   if (hoverBar === j) return COLOR_HOVER_BAR;
   const g = Math.floor(j / geo.g);
-  if (g === active) return COLOR_ACTIVE;
+  if (g === activeVisualGroup) return COLOR_ACTIVE;
   if (hoverGroup === g) return COLOR_HOVER_GROUP;
   return COLOR_INACTIVE;
 }
@@ -241,7 +269,16 @@ function rr(ctx, x, y, w, h, r) {
 // و با باندِ هندسه متناسب کوچک می‌شود؛ اگر geo قدیمی فاقدِ این
 // میدان‌ها باشد، مقدارهایِ مرحلهٔ ۵۱ به‌عنوانِ پیش‌فرض به کار می‌روند.
 export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBar, t, geo) {
-  const peakBar = active * geo.g + Math.floor((geo.g - 1) / 2);
+  // مرحلهٔ ۵۳ مأموریتِ ۲ — نگاشتِ راست‌به‌چپ: active اندیسِ اسلاید است
+  // (۰ = اسلایدِ اول) و گروهِ دیداریِ آن در بومِ فیزیکی (چپ‌به‌راست)
+  // وارونه است: activeVisualGroup = (N - 1) - active؛ اسلایدِ ۱
+  // راست‌ترین گروه است. N از تعدادِ میله‌ها (v.length) و G به دست می‌آید.
+  // hoverGroup و hoverBar فیزیکی‌اند و وارونه نمی‌شوند. این نگاشت در هر
+  // ۵ تمپلیت (led / mirror / matrix / pendulum / firefly) اعمال می‌شود.
+  const totalGroups = Math.max(1, Math.round(v.length / Math.max(1, geo.g)));
+  const safeActiveSlide = clamp01(Math.floor(Number(active) || 0), 0, totalGroups - 1);
+  const activeVisualGroup = (totalGroups - 1) - safeActiveSlide;
+  const peakBar = activeVisualGroup * geo.g + Math.floor((geo.g - 1) / 2);
   const dotR = geo.dotR || 1.7;
   const barW = geo.barW || 3;
   const cellS = geo.cellS || 4;
@@ -268,7 +305,7 @@ export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBa
         // مرحلهٔ ۵۱ §۱ — ستونِ نقطه‌ها دقیقاً رویِ MID وسط‌چین است:
         // نقطهٔ میانی رویِ y = 32 می‌نشیند، نه رویِ کفِ بوم.
         ctx.arc(x, MID + ((n - 1) / 2 - r) * 5, dotR, 0, Math.PI * 2);
-        ctx.fillStyle = isPeakTop ? COLOR_PEAK : groupColor(j, active, hoverGroup, hoverBar, geo);
+        ctx.fillStyle = isPeakTop ? COLOR_PEAK : groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo);
         ctx.fill();
       }
     }
@@ -286,7 +323,7 @@ export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBa
           fill = COLOR_PEAK;
         } else if (hoverBar === j) {
           fill = COLOR_HOVER_BAR;
-        } else if (g === active) {
+        } else if (g === activeVisualGroup) {
           const flicker = r === n - 1 ? 1 : 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 0.002 * (p.fr || 1) + (p.ph || 0) + r));
           fill = `rgba(34, 211, 238, ${flicker.toFixed(3)})`;
         } else if (hoverGroup === g) {
@@ -326,12 +363,12 @@ export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBa
       ctx.beginPath();
       ctx.moveTo(x, PENDULUM_HANGER_Y);
       ctx.lineTo(bx, by);
-      ctx.strokeStyle = groupColor(j, active, hoverGroup, hoverBar, geo);
+      ctx.strokeStyle = groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo);
       ctx.lineWidth = 1.3;
       ctx.stroke();
       ctx.beginPath();
       ctx.arc(bx, by, (j === peakBar ? 3.6 : 2.6) * (dotR / 1.7), 0, Math.PI * 2);
-      ctx.fillStyle = j === peakBar ? COLOR_PEAK : groupColor(j, active, hoverGroup, hoverBar, geo);
+      ctx.fillStyle = j === peakBar ? COLOR_PEAK : groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo);
       ctx.fill();
     }
     return;
@@ -351,7 +388,7 @@ export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBa
         const isPeakTop = j === peakBar && k === 3;
         ctx.beginPath();
         ctx.arc(px, py, (isPeakTop ? 3 : 1.9) * (dotR / 1.7), 0, Math.PI * 2);
-        ctx.fillStyle = isPeakTop ? COLOR_PEAK : groupColor(j, active, hoverGroup, hoverBar, geo);
+        ctx.fillStyle = isPeakTop ? COLOR_PEAK : groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo);
         ctx.globalAlpha = k < 3 && !isPeakTop ? 0.75 : 1;
         ctx.fill();
         ctx.globalAlpha = 1;
@@ -364,7 +401,7 @@ export function drawVariant(ctx, variant, v, params, active, hoverGroup, hoverBa
   for (let j = 0; j < bars; j++) {
     const x = barX(j, geo);
     rr(ctx, x - barW / 2, MID - v[j] / 2, barW, v[j], barW / 2);
-    ctx.fillStyle = groupColor(j, active, hoverGroup, hoverBar, geo);
+    ctx.fillStyle = groupColor(j, activeVisualGroup, hoverGroup, hoverBar, geo);
     ctx.fill();
   }
   const peakX = barX(peakBar, geo);
@@ -388,6 +425,9 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
   // دکمهٔ قبلی/بعدیِ زیرِ ماوس.
   const bellRef = useRef(null);
   const entryRef = useRef({ side: null, t0: 0 });
+  // مرحلهٔ ۵۳ مأموریتِ ۲ — نگه‌داشتنِ تعدادِ قبلیِ اسلایدها تا با تغییرِ
+  // N، مرکزِ زنگوله بی‌درنگ رویِ گروهِ دیداریِ فعال بنشیند (نه با لغزش).
+  const prevTotalRef = useRef(null);
   const [hoveredBtn, setHoveredBtn] = useState(null);
 
   const safeTotal = Math.max(1, Number(total ?? count) || 1);
@@ -396,6 +436,10 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
   const geo = sliderGeometryFor(safeTotal);
   const G = geo.g;
   const W = sliderStripWidth(safeTotal);
+  // مرحلهٔ ۵۳ مأموریتِ ۲ — گروهِ دیداریِ اسلایدِ فعال در چیدمانِ
+  // راست‌به‌چپ: activeVisualGroup = (N - 1) - activeSlide؛ اسلایدِ ۱
+  // (اندیسِ ۰) راست‌ترین گروه است.
+  const activeVisualGroup = (safeTotal - 1) - safeIndex;
 
   // اندازهٔ بوم با dpr (حداکثر ۲).
   // مرحلهٔ ۵۲ §۴ — بررسیِ مغایرتِ ۱: اندازهٔ بوم فقط همین‌جا و فقط
@@ -429,6 +473,14 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
     if (bellRef.current !== null && bellRef.current !== undefined && Number.isFinite(bellRef.current)) {
       bellRef.current = clamp01(bellRef.current, 0, next.length - 1);
     }
+    // مرحلهٔ ۵۳ مأموریتِ ۲ (BUG 4) — با تغییرِ تعدادِ اسلایدها (یا در
+    // اولین اجرا)، مرکزِ زنگوله بی‌درنگ رویِ مرکزِ گروهِ دیداریِ فعال
+    // می‌نشیند: activeVisualGroup * G + (G - 1) / 2؛ با تغییرِ صرفِ
+    // اسلاید، لغزشِ نرمِ BELL_DRIFT حفظ می‌شود و اینجا دست نمی‌خورد.
+    if (prevTotalRef.current !== safeTotal) {
+      prevTotalRef.current = safeTotal;
+      bellRef.current = activeVisualGroup * G + (G - 1) / 2;
+    }
     popRef.current = performance.now();
   }, [safeTotal, safeIndex]);
 
@@ -455,12 +507,17 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
       ctx.clearRect(0, 0, W, HC);
       const active = safeIndex;
       const hover = hoverRef.current;
+      // مرحلهٔ ۵۳ مأموریتِ ۲ — مرکزِ قلهٔ زنگوله رویِ گروهِ دیداریِ
+      // فعال است (راست‌به‌چپ): activeCenterBar = activeVisualGroup * G
+      // + (G - 1) / 2؛ با هاور، مرکز به سمتِ میلهٔ فیزیکیِ زیرِ ماوس
+      // می‌لغزد (مختصاتِ ماوس وارونه نمی‌شود).
+      const activeCenterBar = activeVisualGroup * G + (G - 1) / 2;
       // مرکزِ منحنیِ زنگوله‌ای به‌نرمی به سمتِ میلهٔ زیرِ ماوس می‌لغزد
       // و با رفتنِ ماوس، به مرکزِ گروهِ فعال برمی‌گردد.
       if (bellRef.current === null || bellRef.current === undefined || !Number.isFinite(bellRef.current)) {
-        bellRef.current = active * G + (G - 1) / 2;
+        bellRef.current = activeCenterBar;
       }
-      const hoverTarget = (hover.bar !== null && hover.bar !== undefined) ? hover.bar : active * G + (G - 1) / 2;
+      const hoverTarget = (hover.bar !== null && hover.bar !== undefined) ? hover.bar : activeCenterBar;
       bellRef.current += (hoverTarget - bellRef.current) * BELL_DRIFT;
       bellRef.current = clamp01(bellRef.current, 0, params.length - 1);
       const refCenter = bellRef.current;
@@ -471,9 +528,15 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
       const ts = t * 0.001;
       for (let j = 0; j < params.length; j++) {
         const p = params[j];
-        const g = Math.floor(j / G);
+        // مرحلهٔ ۵۳ مأموریتِ ۲ — نگاشتِ راست‌به‌چپِ هر میله: گروهِ
+        // دیداریِ فیزیکیِ میله و اندیسِ اسلایدِ آن؛ گروهِ فعال وقتی
+        // است که اندیسِ اسلایدش با اسلایدِ فعال برابر باشد. هاور
+        // فیزیکی است (hover.group گروهِ چپ‌به‌راستِ زیرِ ماوس است).
+        const barVisualGroup = Math.floor(j / G);
+        const barSlideIndex = (safeTotal - 1) - barVisualGroup;
+        const isActiveGroup = barSlideIndex === active;
         const pop = slidePopFor(j, G, popAge);
-        let h = classicBarHeight(p, j, ts, refCenter, G, params.length, g === active, hover.group === g, pop);
+        let h = classicBarHeight(p, j, ts, refCenter, G, params.length, isActiveGroup, hover.group === barVisualGroup, pop);
         // موجِ سینوسیِ ورود: جبهه از سمتِ ورودِ ماوس در طولِ میله‌ها
         // حرکت می‌کند و در ۴۵۰ms محو می‌شود.
         const entry = entryRef.current;
@@ -507,7 +570,14 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
 
   const handleCanvasClick = (e) => {
     const hit = barAtX(canvasX(e), safeTotal, geo);
-    if (hit && typeof onSelect === 'function') onSelect(hit.group);
+    if (hit && typeof onSelect === 'function') {
+      // مرحلهٔ ۵۳ مأموریتِ ۲ (BUG 1) — hit.group گروهِ دیداریِ فیزیکی
+      // (چپ‌به‌راست) است؛ اندیسِ اسلایدِ آن وارونه است:
+      // targetSlideIdx = (N - 1) - clickedVisualGroup.
+      const clickedVisualGroup = hit.group;
+      const targetSlideIdx = (safeTotal - 1) - clickedVisualGroup;
+      onSelect(targetSlideIdx);
+    }
   };
 
   const handleCanvasPointerMove = (e) => {
@@ -539,7 +609,10 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
 
   return (
     <div className="eq-controls" dir="ltr" style={{ direction: 'ltr', display: 'inline-flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: '14px', height: 64, maxWidth: '100%' }}>
-      <button type="button" className="eq-nav" onClick={onPrev} onMouseEnter={() => setHoveredBtn('prev')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید قبلی" aria-label="اسلاید قبلی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'prev' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'prev' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, margin: 0, alignSelf: 'center', outline: 'none', flexShrink: 0, transform: hoveredBtn === 'prev' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'prev' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+      {/* مرحلهٔ ۵۳ مأموریتِ ۲ — چیدمانِ راست‌به‌چپ: اسلایدِ بعد به سمتِ چپ
+          است، پس دکمهٔ سمتِ چپ «بعدی» و دکمهٔ سمتِ راست «قبلی» است؛
+          شورون‌ها در جهتِ حرکت می‌مانند (چپ = بعد، راست = قبل). */}
+      <button type="button" className="eq-nav" onClick={onNext} onMouseEnter={() => setHoveredBtn('next')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید بعدی" aria-label="اسلاید بعدی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'next' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'next' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, margin: 0, alignSelf: 'center', outline: 'none', flexShrink: 0, transform: hoveredBtn === 'next' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'next' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'none', display: 'block' }}>
           <polyline points="15 18 9 12 15 6" />
         </svg>
@@ -568,7 +641,7 @@ export default function SliderControls({ currentIndex, total, count, onPrev, onN
           </button>
         ))}
       </div>
-      <button type="button" className="eq-nav" onClick={onNext} onMouseEnter={() => setHoveredBtn('next')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید بعدی" aria-label="اسلاید بعدی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'next' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'next' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, margin: 0, alignSelf: 'center', outline: 'none', flexShrink: 0, transform: hoveredBtn === 'next' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'next' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
+      <button type="button" className="eq-nav" onClick={onPrev} onMouseEnter={() => setHoveredBtn('prev')} onMouseLeave={() => setHoveredBtn(null)} title="اسلاید قبلی" aria-label="اسلاید قبلی" dir="ltr" style={{ direction: 'ltr', width: 36, height: 36, borderRadius: '50%', background: hoveredBtn === 'prev' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.08)', border: hoveredBtn === 'prev' ? '1px solid #22d3ee' : '1px solid rgba(255,255,255,0.15)', color: '#ffffff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, margin: 0, alignSelf: 'center', outline: 'none', flexShrink: 0, transform: hoveredBtn === 'prev' ? 'scale(1.12) translateY(-1px)' : 'none', boxShadow: hoveredBtn === 'prev' ? '0 0 14px rgba(34, 211, 238, 0.45)' : 'none', transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)' }}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: 'none', display: 'block' }}>
           <polyline points="9 18 15 12 9 6" />
         </svg>

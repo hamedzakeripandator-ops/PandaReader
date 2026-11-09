@@ -71,6 +71,27 @@ function isChunkLoadError(error) {
   return /ChunkLoadError|Loading chunk|Failed to fetch dynamically imported module|Importing a module script failed|Failed to load module script/i.test(text);
 }
 
+// مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۳: فیلترِ سخت‌گیرانهٔ فایلِ خارجی.
+// فقط وقتی dataTransfer واقعاً نوعِ 'Files' دارد و هیچ نشانهٔ درگِ
+// داخلیِ کارت ندارد، فایلِ خارجی حساب می‌شود. 'text/x-panda-internal-card'
+// نوعِ رزروشده برایِ درگِ داخلی است؛ اگر بود، هرگز فایلِ خارجی نیست.
+// این دو تابعِ خالص‌اند تا تست‌هایِ Node مستقیم از همین فایل بخوانندشان.
+export function hasRealExternalFiles(dataTransfer) {
+  const dt = dataTransfer;
+  if (!dt) return false;
+  const types = Array.from(dt.types || []);
+  if (!types.includes('Files')) return false;
+  if (types.includes('text/x-panda-internal-card')) return false;
+  return true;
+}
+
+// خوانشِ مستقیمِ پرچمِ درگِ داخلیِ کارت، با همان الگویِ
+// window.__isAnnotationGestureActive؛ App.jsx فقط می‌خواند و هرگز
+// خودش پرچم را نمی‌گذارد.
+export function isInternalCardDragActive() {
+  return typeof window !== 'undefined' && window.__isInternalCardDragActive === true;
+}
+
 class ChunkErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -314,7 +335,9 @@ export default function App() {
     cancelAutoZen();
     const prefs = useSettingsStore.getState().preferences;
     const autoZenEnabled = prefs?.autoZenOnOpen !== false;
-    const autoZenDelay = prefs?.autoZenDelay || 2800;
+    // مرحلهٔ ۵۳ مأموریت ۱: پیش‌فرضِ جایگزین با پیش‌فرضِ استور
+    // (autoZenDelay: 3200) یکی شد؛ پیش از این ۲۸۰۰ بود.
+    const autoZenDelay = prefs?.autoZenDelay || 3200;
 
     setIsRightSidebarOpen(true);
 
@@ -1051,6 +1074,17 @@ export default function App() {
   // مدیریت کشیدن و رها کردن فایل‌ها (Drag & Drop)
   useEffect(() => {
     const handleDragOver = (e) => {
+      // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۳: درگِ داخلیِ کارت، اورلیِ
+      // دراپ را روشن نمی‌کند؛ درگِ بدونِ فایلِ واقعی هم همین‌طور.
+      // فقط فایلِ واقعاً خارجی از ویندوز اکسپلورر، اورلی را نشان
+      // می‌دهد. توجه: در App.jsx هندلرِ onDragOver رویِ div ریشه
+      // نیست؛ مسیرِ واقعیِ دراپ همین شنونده‌هایِ window هستند.
+      if (isInternalCardDragActive()) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (!hasRealExternalFiles(e.dataTransfer)) return;
       e.preventDefault();
       e.stopPropagation();
       if (!isDraggingRef.current) {
@@ -1081,8 +1115,14 @@ export default function App() {
       isDraggingRef.current = false;
       setIsDragging(false);
 
-      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-        const files = Array.from(e.dataTransfer.files)
+      // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۳: رها کردنِ کارتِ داخلی،
+      // هرگز processFiles را صدا نمی‌زند؛ و فقط فایلِ واقعاً خارجی
+      // (با files غیرخالی) پردازش می‌شود.
+      if (isInternalCardDragActive()) return;
+      const dt = e.dataTransfer;
+      if (!hasRealExternalFiles(dt)) return;
+      if (dt.files && dt.files.length > 0) {
+        const files = Array.from(dt.files)
           .map((file) => coreApi.getFilePath(file))
           .filter(Boolean);
 

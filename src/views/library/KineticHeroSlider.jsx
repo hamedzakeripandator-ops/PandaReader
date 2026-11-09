@@ -51,6 +51,12 @@ export default function KineticHeroSlider({ items = [], onOpenComic, capSlides =
   const [coverRetryTick, setCoverRetryTick] = useState(0);
   const failedCoverUrlsRef = useRef(new Set());
   const retriedNormsRef = useRef(new Set());
+  // مرحلهٔ ۵۳ مأموریت ۱ (R9): بازیابیِ null — مسیرهایی که نتیجهٔ
+  // null گرفته‌اند ولی بازیابیِ ۳۵۰ میلی‌ثانیه‌ای‌شان هنوز اجرا
+  // نشده، و شناسه‌هایِ تایمرهایِ در انتظار؛ فقط یک بازیابی برایِ
+  // هر مسیر مجاز است تا حلقهٔ درخواست ساخته نشود.
+  const nullRecoveryRef = useRef(new Set());
+  const nullRecoveryTimersRef = useRef(new Set());
 
   const dragStartXRef = useRef(0);
   const dragCurrentXRef = useRef(0);
@@ -209,14 +215,37 @@ export default function KineticHeroSlider({ items = [], onOpenComic, capSlides =
         return;
       }
 
+      // مرحلهٔ ۵۳ مأموریت ۱ (R9): اسلایدِ فایلِ حذف‌شده هرگز
+      // استخراج نمی‌شود — نه تلاشِ اول، نه بازیابیِ null.
+      if (item?.isMissing === true) return;
       // مرحله ۴۷ §۲: استخراجِ دوباره فقط یک‌بار برایِ هر مسیر
       // امتحان می‌شود تا خطایِ تصویر، حلقهٔ درخواست نسازد.
+      // مرحلهٔ ۵۳ مأموریت ۱ (R9): مسیر پیش از گرفتنِ نتیجه،
+      // «نهایتاً امتحان‌شده» قفل نمی‌شود؛ نتیجهٔ null ممکن است
+      // لغوِ مشترکِ یک کارتِ دیگر باشد، نه نبودِ واقعیِ کاور.
       if (retriedNormsRef.current.has(norm)) return;
-      retriedNormsRef.current.add(norm);
       thumbnailService.getThumbnail(rawPath).then((thumb) => {
-        if (isMounted && thumb && !failed.has(thumb)) {
+        if (!isMounted) return;
+        if (thumb && !failed.has(thumb)) {
           setResolvedCovers((prev) => ({ ...prev, [norm]: thumb }));
+          return;
         }
+        // نتیجهٔ null: مسیر قفل نمی‌شود؛ فقط یک‌بار، با تأخیرِ
+        // سبکِ ۳۵۰ میلی‌ثانیه، افکت دوباره اجرا می‌شود تا اول
+        // کش دوباره خوانده شود و اگر نبود، استخراج تکرار شود.
+        // اگر بازیابی هم null برگرداند، آن‌وقت مسیر قفل می‌شود
+        // تا حلقهٔ درخواست ساخته نشود.
+        if (item?.isMissing === true) return;
+        if (nullRecoveryRef.current.has(norm)) {
+          retriedNormsRef.current.add(norm);
+          return;
+        }
+        nullRecoveryRef.current.add(norm);
+        const recoveryTimerId = setTimeout(() => {
+          nullRecoveryTimersRef.current.delete(recoveryTimerId);
+          setCoverRetryTick((t) => t + 1);
+        }, 350);
+        nullRecoveryTimersRef.current.add(recoveryTimerId);
       });
     });
 
@@ -224,6 +253,16 @@ export default function KineticHeroSlider({ items = [], onOpenComic, capSlides =
       isMounted = false;
     };
   }, [slides, cachedCovers, coverRetryTick]);
+
+  // مرحلهٔ ۵۳ مأموریت ۱ (R9): پاک‌سازیِ تایمرهایِ بازیابیِ null
+  // هنگامِ آنمانت تا پس از جداشدنِ اسلایدر، setState رخ ندهد.
+  useEffect(() => {
+    const timers = nullRecoveryTimersRef.current;
+    return () => {
+      timers.forEach((id) => clearTimeout(id));
+      timers.clear();
+    };
+  }, []);
 
   // مرحله ۴۷ §۲ — خطایِ پوستر، اسلاید را خالی نمی‌گذارد: نشانیِ
   // خراب کنار گذاشته می‌شود تا کاورِ سالمِ آیتم (یا استخراجِ دوباره)
@@ -271,8 +310,12 @@ export default function KineticHeroSlider({ items = [], onOpenComic, capSlides =
     const handleKeyDown = (e) => {
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'ArrowLeft') moveSlider(1);
-      if (e.key === 'ArrowRight') moveSlider(-1);
+      // مرحلهٔ ۵۳ مأموریتِ ۲ — جهتِ راست‌به‌چپ (مثلِ EpubViewer مرحلهٔ ۴۱ §۲):
+      // ArrowLeft اسلایدِ بعد و ArrowRight اسلایدِ قبل است؛ پیش از این وارونه بود.
+      // کشیدن/لمس و پخشِ خودکار دست نمی‌خورند: کشیدن به راست، اسلایدِ بعد
+      // (سمتِ چپ) را نشان می‌دهد و پخشِ خودکار هم به سمتِ اسلایدِ بعد می‌رود.
+      if (e.key === 'ArrowLeft') moveSlider(-1);
+      if (e.key === 'ArrowRight') moveSlider(1);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);

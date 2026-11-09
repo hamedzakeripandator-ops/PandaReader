@@ -1,7 +1,11 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import useLibraryStore, { resolveHeroSliderItems } from '../../store/useLibraryStore';
+import useLibraryStore, {
+  resolveHeroSliderItems,
+  useCardReorderGrid,
+  applyReorderToFullList,
+} from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
-import ComicCard from './ComicCard';
+import ComicCard, { shouldSuppressCardClick } from './ComicCard';
 import KineticHeroSlider from './KineticHeroSlider';
 import { coreApi } from '../../services/coreApi';
 import Icons from '../../components/common/Icons';
@@ -57,7 +61,7 @@ function markCardPathSeen(key) {
   }
 }
 
-function LazyLibraryCard({ item, onOpenComic, onRemove }) {
+function LazyLibraryCard({ item, onOpenComic, onRemove, reorderable = false, onReorderActivate = null }) {
   const slotRef = useRef(null);
   const measuredHeightRef = useRef(0);
   const pathKey = normalizeSeenPath(item?.path || item?.filePath);
@@ -121,9 +125,18 @@ function LazyLibraryCard({ item, onOpenComic, onRemove }) {
   // واقعاً هرگز دیده نشده و بیرون از دید است؛ کارتِ دیده‌شده هرگز
   // دوباره اسکلت نمی‌شود.
   return (
-    <div ref={slotRef}>
+    // مرحلهٔ ۵۳ — مأموریت ۳: data-cr-card-slot، شناسهٔ اندازه‌گیریِ
+    // کارت در گرید است (مسیرِ نرمال‌شده) و cr-repel-card، گرهی است
+    // که دافعهٔ مغناطیسی مستقیم رویِ آن اعمال می‌شود.
+    <div ref={slotRef} data-cr-card-slot={pathKey} className="cr-repel-card">
       {isVisible ? (
-        <ComicCard item={item} onOpenComic={onOpenComic} onRemove={onRemove} />
+        <ComicCard
+          item={item}
+          onOpenComic={onOpenComic}
+          onRemove={onRemove}
+          reorderable={reorderable}
+          onReorderActivate={onReorderActivate}
+        />
       ) : (
         <div
           style={
@@ -165,6 +178,7 @@ export default function LibraryView({ onOpenComic }) {
   const customSliderBookPaths = useLibraryStore((state) => state.customSliderBookPaths || []);
   const addToLibrary = useLibraryStore((state) => state.addToLibrary);
   const removeFromLibrary = useLibraryStore((state) => state.removeFromLibrary);
+  const reorderLibraryItems = useLibraryStore((state) => state.reorderLibraryItems);
 
   const searchQuery = useAppStore((state) => state.searchQuery);
   const showToast = useAppStore((state) => state.showToast);
@@ -175,7 +189,35 @@ export default function LibraryView({ onOpenComic }) {
   );
 
   const [filterMode, setFilterMode] = useState('all');
-  const [sortBy, setSortBy] = useState('newest');
+  // مرحلهٔ ۵۳ — مأموریت ۳: «چیدمان دستی (سفارشی)» گزینهٔ تازهٔ
+  // مرتب‌سازی است و انتخابِ آن در localStorage می‌ماند تا چیدمانِ
+  // دستی پس از ری‌استارت هم حفظ شود. مقدارِ ناشناختهٔ قدیمی،
+  // به newest برمی‌گردد.
+  const [sortBy, setSortBy] = useState(() => {
+    try {
+      const saved = localStorage.getItem('comicReader.librarySort.v1');
+      if (
+        saved === 'custom' ||
+        saved === 'name' ||
+        saved === 'progress' ||
+        saved === 'newest'
+      ) {
+        return saved;
+      }
+    } catch (_) {}
+    return 'newest';
+  });
+
+  const handleSortChange = (value) => {
+    const next =
+      value === 'custom' || value === 'name' || value === 'progress'
+        ? value
+        : 'newest';
+    setSortBy(next);
+    try {
+      localStorage.setItem('comicReader.librarySort.v1', next);
+    } catch (_) {}
+  };
 
   // استیت‌های مودال ساخت / ویرایش پوشه در کتابخانه
   const [folderModal, setFolderModal] = useState(null); // { mode: 'create'|'edit', id, name, color }
@@ -287,6 +329,15 @@ export default function LibraryView({ onOpenComic }) {
       return true;
     });
 
+    // مرحلهٔ ۵۳ — مأموریت ۳ (گاردِ باگِ ۴): در «چیدمان دستی»،
+    // ترتیبِ استور (customOrder) بدونِ هیچ مرتب‌سازیِ دوباره
+    // می‌ماند — پین‌اول هم در این حالت خاموش است، وگرنه کارتِ
+    // عادی هرگز نمی‌توانست میانِ پین‌شده‌ها بنشیند. جستجو در این
+    // حالت فقط فیلتر می‌کند و رتبه‌بندیِ فازی نمی‌کند.
+    if (sortBy === 'custom') {
+      return filtered.map(({ item }) => item);
+    }
+
     return [...filtered]
       .sort((a, b) => {
         // آیتم‌های پین‌شده همیشه در بالای لیست قرار می‌گیرند
@@ -364,6 +415,29 @@ export default function LibraryView({ onOpenComic }) {
     showToast(`پوشه «${folder.name}» حذف شد`, { type: 'info' });
   };
 
+  // مرحلهٔ ۵۴ — مأموریت ۱: انتقالِ کارت به پوشه با مسیرِ مشترک؛
+  // هم رها کردنِ بومی (dataTransfer) و هم رها کردنِ اشاره‌گرِ
+  // فوری (elementFromPoint) از همین‌جا می‌گذرند. 'ALL' و
+  // 'UNFOLDERED' یعنی بیرون از پوشه (null).
+  const assignCardToFolderId = useCallback(
+    async (draggedPath, targetFolderId) => {
+      if (!draggedPath) return;
+      const realFolderId =
+        targetFolderId === 'ALL' || targetFolderId === 'UNFOLDERED'
+          ? null
+          : targetFolderId;
+      await assignToFolder(draggedPath, realFolderId);
+      const targetFolderObj = libraryFolders.find((f) => f.id === realFolderId);
+      showToast(
+        targetFolderObj
+          ? `به پوشه «${targetFolderObj.name}» منتقل شد`
+          : 'به نمای کلی کتابخانه منتقل شد',
+        { type: 'success' }
+      );
+    },
+    [assignToFolder, libraryFolders, showToast]
+  );
+
   // رها کردن کارت کشیده‌شده روی تب پوشه (Drag & Drop to Folder)
   const handleDropCardOnFolder = async (e, targetFolderId) => {
     e.preventDefault();
@@ -373,19 +447,128 @@ export default function LibraryView({ onOpenComic }) {
     const draggedPath = e.dataTransfer.getData('text/comic-path');
     if (!draggedPath) return;
 
-    const realFolderId =
-      targetFolderId === 'ALL' || targetFolderId === 'UNFOLDERED'
-        ? null
-        : targetFolderId;
+    await assignCardToFolderId(draggedPath, targetFolderId);
+  };
 
-    await assignToFolder(draggedPath, realFolderId);
-    const targetFolderObj = libraryFolders.find((f) => f.id === realFolderId);
-    showToast(
-      targetFolderObj
-        ? `به پوشه «${targetFolderObj.name}» منتقل شد`
-        : 'به نمای کلی کتابخانه منتقل شد',
-      { type: 'success' }
-    );
+  // مرحلهٔ ۵۴ — مأموریت ۱: رها کردنِ اشاره‌گرِ فوری رویِ تبِ
+  // پوشه؛ هوک، تبِ زیرِ نشانگر را با data-folder-drop-id پیدا
+  // کرده و شناسه‌اش را اینجا می‌دهد. کلیکِ پس از درگ، با
+  // wasReorderingRef بلعیده می‌شود و تب عوض نمی‌شود.
+  const handlePointerFolderDrop = useCallback(
+    (draggedPath, targetFolderId) => {
+      setDragOverFolderId(null);
+      assignCardToFolderId(draggedPath, targetFolderId);
+    },
+    [assignCardToFolderId]
+  );
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: سیم‌کشیِ جابه‌جاییِ فوریِ کارت‌ها (بدونِ نگه‌داشتن).
+  const gridRef = useRef(null);
+  const scrollRef = useRef(null);
+
+  const handleReorderCommit = useCallback(
+    (visibleOrderedPaths) => {
+      // ترتیبِ نمایِ فیلترشده، با حفظِ ۱۰۰٪ بقیه، در فهرستِ کامل
+      // ادغام می‌شود (گاردِ باگِ ۲) و با customOrder ذخیره می‌شود؛
+      // هم‌زمان، sort به «چیدمان دستی» می‌رود و می‌ماند.
+      const fullOrdered = applyReorderToFullList(effectiveLibrary, visibleOrderedPaths);
+      const fullPaths = fullOrdered
+        .map((item) => item.path || item.filePath)
+        .filter(Boolean);
+      reorderLibraryItems(fullPaths);
+      setSortBy('custom');
+      try {
+        localStorage.setItem('comicReader.librarySort.v1', 'custom');
+      } catch (_) {}
+    },
+    [effectiveLibrary, reorderLibraryItems]
+  );
+
+  const reorder = useCardReorderGrid({
+    enabled: true,
+    visibleItems: displayedLibrary,
+    gridRef,
+    scrollRef,
+    onCommit: handleReorderCommit,
+    onFolderDrop: handlePointerFolderDrop,
+  });
+
+  // گاردِ باگِ ۱: رها کردنِ نشانگر پس از درگ، هرگز کتاب را باز
+  // نمی‌کند؛ هوک، کلیکِ همان ژست را با wasReorderingRef می‌بلعد.
+  const guardedOpenComic = useCallback(
+    (item) => {
+      if (reorder.wasReorderingRef.current) {
+        reorder.wasReorderingRef.current = false;
+        return;
+      }
+      // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲: کلیکِ پس از هر درگِ داخلیِ
+      // کارت (جابه‌جایی یا کشیدن به تبِ پوشه) هم بلعیده می‌شود؛ پرچم
+      // تا ۱۰۰ میلی‌ثانیه پس از pointerup روشن می‌ماند، پس کلیکِ
+      // همان ژست هنوز آن را روشن می‌بیند. رفتارِ مرحلهٔ ۵۳
+      // (wasReorderingRef) دست‌نخورده می‌ماند.
+      if (shouldSuppressCardClick()) return;
+      if (onOpenComic) onOpenComic(item);
+    },
+    [onOpenComic]
+  );
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: کلیکِ تبِ پوشه پس از رها کردنِ درگِ
+  // فوری، نباید پوشهٔ فعال را عوض کند؛ همان گاردِ wasReorderingRef
+  // که کلیکِ بازکنندهٔ کتاب را می‌بلعد، اینجا هم به کار می‌رود.
+  const guardedSetActiveFolder = useCallback(
+    (folderId) => {
+      if (reorder.wasReorderingRef.current) {
+        reorder.wasReorderingRef.current = false;
+        return;
+      }
+      setActiveFolder(folderId);
+    },
+    [setActiveFolder]
+  );
+
+  // رندرِ گرید در حالتِ جابه‌جایی: کارتِ گرفته‌شده از گرید بیرون
+  // می‌رود و جایِ خالیِ نقطه‌چین (اسلات) در جایِ هدف می‌نشیند؛
+  // ارتفاعِ اسلات از ارتفاعِ اندازه‌گیری‌شدهٔ کارت می‌آید تا
+  // ردیف‌هایِ گرید تکان نخورند. در حالتِ عادی، دقیقاً مثلِ قبل.
+  const renderGridCards = () => {
+    const isDragging = Boolean(reorder.grabbedPath);
+    const list = isDragging ? reorder.previewItems : displayedLibrary;
+    const nodes = [];
+    list.forEach((item, idx) => {
+      if (isDragging && reorder.placeholderIndex === idx) {
+        nodes.push(
+          <div
+            key="cr-reorder-slot"
+            className="cr-reorder-slot"
+            style={{
+              height: reorder.floatingRect ? reorder.floatingRect.height : undefined,
+            }}
+          />
+        );
+      }
+      nodes.push(
+        <LazyLibraryCard
+          key={item.path || item.filePath}
+          item={item}
+          onOpenComic={guardedOpenComic}
+          onRemove={handleRemoveFromLib}
+          reorderable={!isDragging}
+          onReorderActivate={reorder.onReorderActivate}
+        />
+      );
+    });
+    if (isDragging && reorder.placeholderIndex >= list.length) {
+      nodes.push(
+        <div
+          key="cr-reorder-slot"
+          className="cr-reorder-slot"
+          style={{
+            height: reorder.floatingRect ? reorder.floatingRect.height : undefined,
+          }}
+        />
+      );
+    }
+    return nodes;
   };
 
   const activeFolderObject = useMemo(
@@ -394,7 +577,7 @@ export default function LibraryView({ onOpenComic }) {
   );
 
   return (
-    <div style={styles.container}>
+    <div ref={scrollRef} style={styles.container}>
       <div style={styles.containerInner}>
       {/* =====================================================================
           ۱. اسلایدر Kinetic Typography + Split Navigation
@@ -447,12 +630,13 @@ export default function LibraryView({ onOpenComic }) {
 
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
+              onChange={(e) => handleSortChange(e.target.value)}
               style={styles.sortSelect}
             >
               <option value="newest">مرتب‌سازی: جدیدترین (پین‌ها در صدر)</option>
               <option value="name">مرتب‌سازی: نام الفبا (پین‌ها در صدر)</option>
               <option value="progress">مرتب‌سازی: بیشترین پیشرفت</option>
+              <option value="custom">مرتب‌سازی: چیدمان دستی (سفارشی)</option>
             </select>
 
             <button
@@ -474,7 +658,8 @@ export default function LibraryView({ onOpenComic }) {
             {/* تب همه عناوین */}
             <button
               type="button"
-              onClick={() => setActiveFolder('ALL')}
+              data-folder-drop-id="ALL"
+              onClick={() => guardedSetActiveFolder('ALL')}
               onDragOver={(e) => {
                 e.preventDefault();
                 setDragOverFolderId('ALL');
@@ -488,6 +673,7 @@ export default function LibraryView({ onOpenComic }) {
                     ? 'rgba(34, 211, 238, 0.16)'
                     : 'var(--panel2)',
                 borderColor:
+                  reorder.folderDropTargetId === 'ALL' ||
                   dragOverFolderId === 'ALL'
                     ? '#f72585'
                     : activeFolderId === 'ALL'
@@ -504,7 +690,7 @@ export default function LibraryView({ onOpenComic }) {
             {/* تب پین‌شده‌ها */}
             <button
               type="button"
-              onClick={() => setActiveFolder('PINNED')}
+              onClick={() => guardedSetActiveFolder('PINNED')}
               style={{
                 ...styles.folderTabBtn,
                 backgroundColor:
@@ -524,7 +710,8 @@ export default function LibraryView({ onOpenComic }) {
             {/* تب بدون پوشه */}
             <button
               type="button"
-              onClick={() => setActiveFolder('UNFOLDERED')}
+              data-folder-drop-id="UNFOLDERED"
+              onClick={() => guardedSetActiveFolder('UNFOLDERED')}
               onDragOver={(e) => {
                 e.preventDefault();
                 setDragOverFolderId('UNFOLDERED');
@@ -538,6 +725,7 @@ export default function LibraryView({ onOpenComic }) {
                     ? 'rgba(34, 211, 238, 0.16)'
                     : 'var(--panel2)',
                 borderColor:
+                  reorder.folderDropTargetId === 'UNFOLDERED' ||
                   dragOverFolderId === 'UNFOLDERED'
                     ? '#f72585'
                     : activeFolderId === 'UNFOLDERED'
@@ -555,14 +743,17 @@ export default function LibraryView({ onOpenComic }) {
             {/* تب پوشه‌های سفارشی کاربر */}
             {libraryFolders.map((folder) => {
               const isSelected = activeFolderId === folder.id;
-              const isDragTarget = dragOverFolderId === folder.id;
+              const isDragTarget =
+                reorder.folderDropTargetId === folder.id ||
+                dragOverFolderId === folder.id;
               const fColor = folder.color || '#22d3ee';
 
               return (
                 <button
                   key={folder.id}
                   type="button"
-                  onClick={() => setActiveFolder(folder.id)}
+                  data-folder-drop-id={folder.id}
+                  onClick={() => guardedSetActiveFolder(folder.id)}
                   onDragOver={(e) => {
                     e.preventDefault();
                     setDragOverFolderId(folder.id);
@@ -741,18 +932,35 @@ export default function LibraryView({ onOpenComic }) {
             </p>
           </div>
         ) : (
-          <div style={styles.cardsGrid}>
-            {displayedLibrary.map((item) => (
-              <LazyLibraryCard
-                key={item.path || item.filePath}
-                item={item}
-                onOpenComic={onOpenComic}
-                onRemove={handleRemoveFromLib}
-              />
-            ))}
+          <div ref={gridRef} style={styles.cardsGrid}>
+            {renderGridCards()}
           </div>
         )}
       </section>
+      {/* مرحلهٔ ۵۴ — مأموریت ۱: کارتِ شناورِ گرفته‌شده که دنبالِ
+          نشانگر می‌آید؛ موقعیتِ آن ثابت نسبت به پنجره است و
+          جابه‌جایی‌اش فقط با translate3d در هوک عوض می‌شود.
+          reorderable در اینجا false است، چون کارت همین حالا
+          گرفته شده و درگِ تازه نمی‌خواهد. */}
+      {reorder.floatingItem && (
+        <div
+          ref={reorder.floatingElRef}
+          className="cr-reorder-floating"
+          style={{
+            left: reorder.floatingRect.left,
+            top: reorder.floatingRect.top,
+            width: reorder.floatingRect.width,
+          }}
+        >
+          <ComicCard
+            item={reorder.floatingItem}
+            onOpenComic={guardedOpenComic}
+            onRemove={handleRemoveFromLib}
+            reorderable={false}
+            isGrabbedForReorder
+          />
+        </div>
+      )}
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { coreApi } from '../services/coreApi';
 import annotationLocalBackup from '../services/annotationLocalBackup';
 
@@ -39,6 +40,91 @@ const normalizePath = (p) => {
   return p.trim().replace(/[\\/]+/g, '\\').toLowerCase();
 };
 
+// مرحلهٔ ۵۴ — مأموریت ۱: ثابت‌هایِ جابه‌جاییِ فوریِ کارت‌ها
+// (گرفتن و کشیدن، بدونِ نگه‌داشتن). نگه‌داشتنِ ۲۰۰۰ میلی‌ثانیه‌ایِ
+// مرحلهٔ ۵۳ و حلقهٔ پیشرفتِ ۲۲۰ میلی‌ثانیه‌ای، کاملاً حذف شدند؛
+// هیچ تایمری برایِ فعال‌سازی نیست. تنها آستانه، جابه‌جاییِ ۶
+// پیکسلیِ نشانگر است: کمتر از آن، کلیکِ عادی است و کتاب بی‌درنگ
+// باز می‌شود؛ از ۶ پیکسل به بالا، درگ بی‌درنگ و بدونِ هیچ تأخیرِ
+// زمانی شروع می‌شود.
+export const REORDER_GRAB_MOVE_PX = 6;
+export const REORDER_REPULSION_RADIUS = 280;
+export const REORDER_REPEL_MAX = 22;
+export const REORDER_REPEL_EXPONENT = 1.6;
+export const REORDER_SLOT_CORE_RATIO = 0.42;
+export const REORDER_SLOT_HYSTERESIS_PX = 15;
+export const REORDER_EDGE_SCROLL_PX = 60;
+export const REORDER_MIN_MOVE_PX = 2;
+export const REORDER_CLICK_BLOCK_MS = 400;
+
+// مرحلهٔ ۵۳ — مأموریت ۳: نرمال‌سازیِ customOrder — فقط عددِ صحیحِ
+// متناهی معتبر است؛ بقیه (رشته، NaN، undefined) یعنی «بدونِ ترتیبِ
+// دستی» و null برمی‌گردانند.
+export function normalizeCustomOrder(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+// مرحلهٔ ۵۳ — مأموریت ۳: دافعهٔ کشسانِ مغناطیسی — تابعِ خالص تا
+// تست‌ها از همان ریاضی بخوانند. d فاصلهٔ اقلیدسیِ مرکزِ کارتِ
+// گرفته‌شده تا مرکزِ کارتِ دیگر است؛ بیرون از شعاعِ ۲۸۰ پیکسل،
+// دافعه صفر است. در d=0 جهت تعریف‌نشده است و فشار، مستقیم به بالا
+// می‌رود تا تقسیم بر صفر پیش نیاید.
+export function computeRepelOffset(dx, dy, dist) {
+  if (!(dist < REORDER_REPULSION_RADIUS)) {
+    return { pushX: 0, pushY: 0, strength: 0 };
+  }
+  // شدت از فاصلهٔ خام حساب می‌شود (در d=0 دقیقاً ۲۲) و فقط جهت،
+  // با فاصلهٔ حداقلیِ ۰٫۰۰۱ از تقسیم بر صفر در امان می‌ماند.
+  const d = Math.max(dist, 0.001);
+  const strength =
+    Math.pow(1 - dist / REORDER_REPULSION_RADIUS, REORDER_REPEL_EXPONENT) *
+    REORDER_REPEL_MAX;
+  let ux = dx / d;
+  let uy = dy / d;
+  if (dist < 0.001) {
+    ux = 0;
+    uy = -1;
+  }
+  return { pushX: ux * strength, pushY: uy * strength, strength };
+}
+
+// مرحلهٔ ۵۳ — مأموریت ۳: ادغامِ امنِ ترتیبِ نمایِ فیلترشده در
+// فهرستِ کامل (گاردِ باگِ ۲). فقط ترتیبِ نسبیِ مسیرهایِ دیده‌شده
+// عوض می‌شود و هر آیتمِ دیده‌شده، دقیقاً در همان جایِ (اسلاتِ)
+// قبلیِ خودش در فهرستِ کامل می‌نشیند؛ بقیهٔ آیتم‌ها، بیت‌به‌بیت
+// سرِ جایِ خود می‌مانند. مسیرهایِ ناشناخته نادیده گرفته می‌شوند و
+// آیتم‌هایِ دیده‌نشدهٔ فهرستِ کامل، هرگز حذف یا جابه‌جا نمی‌شوند.
+export function applyReorderToFullList(fullList, visibleOrderedPaths) {
+  const full = Array.isArray(fullList) ? fullList : [];
+  const orderedPaths = Array.isArray(visibleOrderedPaths) ? visibleOrderedPaths : [];
+  const byNorm = new Map();
+  full.forEach((item) => {
+    const n = normalizePath(item?.path || item?.filePath);
+    if (n && !byNorm.has(n)) byNorm.set(n, item);
+  });
+  const orderedVisible = [];
+  const visibleNorms = new Set();
+  orderedPaths.forEach((rawPath) => {
+    const n = normalizePath(rawPath);
+    if (!n || visibleNorms.has(n)) return;
+    const found = byNorm.get(n);
+    if (!found) return;
+    visibleNorms.add(n);
+    orderedVisible.push(found);
+  });
+  let vi = 0;
+  return full.map((item) => {
+    const n = normalizePath(item?.path || item?.filePath);
+    if (n && visibleNorms.has(n)) {
+      const next = orderedVisible[vi];
+      vi += 1;
+      return next || item;
+    }
+    return item;
+  });
+}
+
 // فیلتر اصالت کاور جهت مسدودسازی فایل‌های موقت
 const isPermanentCover = (str) => {
   if (!str || typeof str !== 'string') return false;
@@ -65,9 +151,18 @@ const isPermanentCover = (str) => {
 };
 
 // مرتب‌سازی هوشمند کتابخانه: آیتم‌های پین‌شده همیشه در صدر قرار می‌گیرند
+// مرحلهٔ ۵۳ — مأموریت ۳ (گاردِ باگِ ۴): ترتیبِ دستی (customOrder)
+// بر پین و تاریخِ افزودن می‌چربد — وگرنه کارتی که کاربر بینِ
+// پین‌شده‌ها انداخته، پس از ری‌لود یا پین/آن‌پین، سرِ جایِ
+// انداخته‌شده نمی‌ماند. پس از هر جابه‌جایی، همهٔ آیتم‌ها customOrder
+// دارند؛ کتابِ تازه‌افزوده‌شده (بدونِ customOrder) پس از بلوکِ دستی
+// می‌آید و در آن بلوک، قانونِ قبلی (پین، بعد addedAt) می‌ماند.
 const sortLibraryItems = (list) => {
   if (!Array.isArray(list)) return [];
   return [...list].sort((a, b) => {
+    const aOrder = Number.isFinite(a?.customOrder) ? a.customOrder : Infinity;
+    const bOrder = Number.isFinite(b?.customOrder) ? b.customOrder : Infinity;
+    if (aOrder !== bOrder) return aOrder - bOrder;
     const aPinned = a?.isPinned ? 1 : 0;
     const bPinned = b?.isPinned ? 1 : 0;
     if (aPinned !== bPinned) return bPinned - aPinned;
@@ -244,7 +339,7 @@ export function resolveHeroSliderItems({ source, folderId, customPaths, library,
   return Array.from(combinedMap.values()).slice(0, 7);
 }
 
-const useLibraryStore = create((set, get) => ({
+export const useLibraryStore = create((set, get) => ({
   library: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
   libraryItems: sortLibraryItems(readLocal(STORAGE_KEYS.LIBRARY, [])),
   libraryFolders: readLocal(STORAGE_KEYS.FOLDERS, []),
@@ -952,6 +1047,99 @@ const useLibraryStore = create((set, get) => ({
   // library با آن‌ها، کارت‌ها را خالی می‌کرد. اینجا فقط وضعیتِ پین
   // از ورکر گرفته می‌شود و کاور و فیلدهایِ غنیِ رندرر همیشه می‌مانند؛
   // آیتمِ فقط-ورکری اضافه و آیتمِ فقط-رندرری نگه داشته می‌شود.
+  // مرحلهٔ ۵۳ — مأموریت ۳: ثبتِ ترتیبِ دستیِ کتابخانه.
+  // orderedPaths، فهرستِ کاملِ مسیرها به ترتیبِ تازه است (نما، با
+  // applyReorderToFullList آن را از ترتیبِ نمایِ فیلترشده ساخته
+  // است). به‌روزرسانیِ خوش‌بینانه: customOrder = اندیس در فهرستِ
+  // کامل به همهٔ آیتم‌ها داده می‌شود؛ مسیری که در استیت نیست
+  // (هم‌زمان اضافه شده) نادیده گرفته می‌شود و آیتمی که در
+  // orderedPaths نیست، با حفظِ ترتیبِ نسبی، به انتها می‌رود.
+  // پاسخِ ورکر فقط customOrder را همگام می‌کند (mergeLibraryFromDb).
+  reorderLibraryItems: async (orderedPaths) => {
+    if (!Array.isArray(orderedPaths) || orderedPaths.length === 0) return false;
+    const current = get().library || [];
+    const byNorm = new Map();
+    current.forEach((item) => {
+      const n = normalizePath(item?.path || item?.filePath);
+      if (n && !byNorm.has(n)) byNorm.set(n, item);
+    });
+    const ordered = [];
+    orderedPaths.forEach((rawPath) => {
+      const n = normalizePath(rawPath);
+      const found = n ? byNorm.get(n) : null;
+      if (!found) return;
+      byNorm.delete(n);
+      ordered.push(found);
+    });
+    byNorm.forEach((item) => ordered.push(item));
+    const next = ordered.map((item, idx) => ({ ...item, customOrder: idx }));
+    const sorted = sortLibraryItems(next);
+    set({ library: sorted, libraryItems: sorted });
+    writeLocal(STORAGE_KEYS.LIBRARY, sorted);
+    try {
+      const res = await coreApi.dbAction({
+        action: 'REORDER_LIBRARY_ITEMS',
+        payload: {
+          orderedPaths: next.map((item) => item.path || item.filePath).filter(Boolean),
+        },
+      });
+      if (Array.isArray(res?.library)) {
+        get().mergeLibraryFromDb(res.library);
+      }
+    } catch (_) {}
+    return true;
+  },
+
+  // مرحلهٔ ۵۳ — مأموریت ۳: ثبتِ ترتیبِ دستیِ علاقه‌مندی‌ها؛ همان
+  // قراردادِ کتابخانه، ولی رویِ state.favorites و اکشنِ
+  // REORDER_FAVORITE_ITEMS. علاقه‌مندی‌ها sort سراسری ندارند، پس
+  // ترتیبِ آرایه دقیقاً ترتیبِ دستی است و پاسخِ ورکر فقط
+  // customOrder را همگام می‌کند.
+  reorderFavoriteItems: async (orderedPaths) => {
+    if (!Array.isArray(orderedPaths) || orderedPaths.length === 0) return false;
+    const current = get().favorites || [];
+    const byNorm = new Map();
+    current.forEach((item) => {
+      const n = normalizePath(item?.path || item?.filePath);
+      if (n && !byNorm.has(n)) byNorm.set(n, item);
+    });
+    const ordered = [];
+    orderedPaths.forEach((rawPath) => {
+      const n = normalizePath(rawPath);
+      const found = n ? byNorm.get(n) : null;
+      if (!found) return;
+      byNorm.delete(n);
+      ordered.push(found);
+    });
+    byNorm.forEach((item) => ordered.push(item));
+    const next = ordered.map((item, idx) => ({ ...item, customOrder: idx }));
+    set({ favorites: next });
+    writeLocal(STORAGE_KEYS.FAVORITES, next);
+    try {
+      const res = await coreApi.dbAction({
+        action: 'REORDER_FAVORITE_ITEMS',
+        payload: {
+          orderedPaths: next.map((item) => item.path || item.filePath).filter(Boolean),
+        },
+      });
+      if (Array.isArray(res?.favorites)) {
+        const orderByNorm = new Map();
+        res.favorites.forEach((dbItem) => {
+          const n = normalizePath(dbItem?.path || dbItem?.filePath);
+          if (n && Number.isFinite(dbItem.customOrder)) orderByNorm.set(n, dbItem.customOrder);
+        });
+        const merged = get().favorites.map((item) => {
+          const n = normalizePath(item?.path || item?.filePath);
+          if (!n || !orderByNorm.has(n)) return item;
+          return { ...item, customOrder: orderByNorm.get(n) };
+        });
+        set({ favorites: merged });
+        writeLocal(STORAGE_KEYS.FAVORITES, merged);
+      }
+    } catch (_) {}
+    return true;
+  },
+
   mergeLibraryFromDb: (dbLibrary) => {
     if (!Array.isArray(dbLibrary)) return;
     const current = get().library;
@@ -970,6 +1158,11 @@ const useLibraryStore = create((set, get) => ({
         byNorm.delete(n);
         merged.push({
           ...existing,
+          // مرحلهٔ ۵۳ — مأموریت ۳: ترتیبِ دستی از ورکر گرفته
+          // می‌شود؛ اگر ورکر customOrder نداشت، مقدارِ رندرر می‌ماند.
+          customOrder: Number.isFinite(dbItem.customOrder)
+            ? dbItem.customOrder
+            : existing.customOrder ?? null,
           isPinned: Boolean(dbItem.isPinned),
           pinnedAt: dbItem.isPinned
             ? dbItem.pinnedAt || existing.pinnedAt || null
@@ -1673,3 +1866,409 @@ const useLibraryStore = create((set, get) => ({
 }));
 
 export default useLibraryStore;
+
+// ============================================================================
+// مرحلهٔ ۵۴ — مأموریت ۱: هوکِ مشترکِ جابه‌جاییِ فوریِ کارت‌ها با
+// گرفتن و کشیدن (بدونِ نگه‌داشتن) و دافعهٔ مغناطیسی (LibraryView و
+// FavoritesView، هر دو از همین یک پیاده‌سازی استفاده می‌کنند تا منطق
+// دو نسخه نشود). فعال‌سازی فقط با جابه‌جاییِ ۶ پیکسلیِ نشانگر است؛
+// نگه‌داشتنِ ۲۰۰۰ میلی‌ثانیه‌ایِ مرحلهٔ ۵۳ کاملاً حذف شد.
+//
+// قرارداد با نما:
+// - نما، gridRef را رویِ گریدِ کارت‌ها و scrollRef را رویِ کانتینرِ
+//   اسکرول‌خور می‌گذارد؛ هر کارت در گرید، یک پوشش با
+//   data-cr-card-slot="<مسیرِ نرمال‌شده>" و کلاسِ cr-repel-card دارد.
+// - نما، onReorderActivate را به ComicCard می‌دهد و وقتی کارتِ
+//   گرفته‌شده را رندر می‌کند، floatingItem/floatingRect/floatingElRef
+//   را همان‌طور که هوک برمی‌گرداند، به کار می‌برد.
+// - نما، onCommit را می‌دهد: با ترتیبِ تازهٔ مسیرهایِ دیده‌شده صدا
+//   زده می‌شود و نما، آن را با applyReorderToFullList در فهرستِ
+//   کامل ادغام و اکشنِ reorder* استور و سوییچ به sort سفارشی را
+//   انجام می‌دهد.
+// - نما، onFolderDrop را هم می‌دهد: وقتی کارت رویِ تبِ پوشه رها
+//   شود، به‌جایِ onCommit، با (مسیرِ نرمال‌شدهٔ کارت، شناسهٔ تبِ
+//   پوشه) صدا زده می‌شود تا نما، assignToFolder یا
+//   assignToFavoriteFolder را صدا بزند. تب‌ها با
+//   data-folder-drop-id نشانه‌گذاری شده‌اند و هوک، در هر حرکتِ
+//   نشانگر، با elementFromPoint تبِ زیرِ نشانگر را پیدا می‌کند.
+// - نما، onOpenComic را با wasReorderingRef گارد می‌کند تا رها کردن
+//   پس از درگ، هرگز کتاب را باز نکند (گاردِ باگِ ۱).
+//
+// تضمین‌هایِ کارایی و ایمنی:
+// - مرکزِ همهٔ کارت‌ها فقط یک‌بار در شروعِ درگ اندازه‌گیری و در
+//   gridRectsRef کش می‌شود؛ در mousemove هیچ getBoundingClientRect
+//   تازه‌ای نیست (بدونِ layout thrashing).
+// - دافعه فقط در یک حلقهٔ requestAnimationFrame و فقط وقتی نشانگر
+//   دست‌کم ۲ پیکسل جابه‌جا شده باشد، محاسبه می‌شود و با دستکاریِ
+//   مستقیمِ style.transform رویِ گرهٔ DOM اعمال می‌شود (بدونِ
+//   رندرِ دوبارهٔ ری‌اکت در هر فریم).
+// - خروج از جیگل همیشه ممکن است: pointerup و pointercancel و blur
+//   پنجره و Escape و resize، همه شنوندهٔ پنجره‌اند و حالت را
+//   پاک می‌کنند؛ پس کارت هرگز در جیگل گیر نمی‌کند (گاردِ باگِ ۵).
+// ============================================================================
+export function useCardReorderGrid(options) {
+  const enabled = Boolean(options && options.enabled);
+  const gridRef = options ? options.gridRef : null;
+  const scrollRef = options ? options.scrollRef : null;
+
+  const visibleItemsRef = useRef(Array.isArray(options?.visibleItems) ? options.visibleItems : []);
+  visibleItemsRef.current = Array.isArray(options?.visibleItems) ? options.visibleItems : [];
+  const onCommitRef = useRef(options ? options.onCommit : null);
+  onCommitRef.current = options ? options.onCommit : null;
+
+  const [dragState, setDragState] = useState(null);
+  const dragStateRef = useRef(null);
+  const gridRectsRef = useRef([]);
+  const previewPathsRef = useRef([]);
+  const pointerRef = useRef({ x: 0, y: 0 });
+  const lastProcessedRef = useRef({ x: 0, y: 0 });
+  const lastSwapPointerRef = useRef({ x: 0, y: 0 });
+  const rafRef = useRef(null);
+  const floatingElRef = useRef(null);
+  const wasReorderingRef = useRef(false);
+  const clickBlockTimerRef = useRef(null);
+  const onFolderDropRef = useRef(options ? options.onFolderDrop : null);
+  onFolderDropRef.current = options ? options.onFolderDrop : null;
+  // مرحلهٔ ۵۴ — مأموریت ۱: تبِ پوشهٔ زیرِ نشانگر هنگامِ درگ؛ هم
+  // ref (برایِ تصمیمِ لحظهٔ رها کردن) و هم state (برایِ هایلایتِ
+  // تب در نما) نگه داشته می‌شود و فقط هنگامِ عوض شدن، setState
+  // می‌شود تا رندرِ اضافه نسازد.
+  const folderDropTargetRef = useRef(null);
+  const [folderDropTargetId, setFolderDropTargetId] = useState(null);
+
+  const updateDragState = useCallback((next) => {
+    dragStateRef.current = next;
+    setDragState(next);
+  }, []);
+
+  const clearAllTransforms = useCallback(() => {
+    gridRectsRef.current.forEach((entry) => {
+      if (entry && entry.el) entry.el.style.transform = '';
+    });
+    if (floatingElRef.current) floatingElRef.current.style.transform = '';
+  }, []);
+
+  const detachWindowListeners = useCallback(() => {
+    window.removeEventListener('pointermove', handleWindowPointerMove);
+    window.removeEventListener('pointerup', handleWindowPointerUp);
+    window.removeEventListener('pointercancel', handleWindowPointerCancel);
+    window.removeEventListener('blur', handleWindowBlur);
+    window.removeEventListener('keydown', handleWindowKeyDown);
+    window.removeEventListener('resize', handleWindowResize);
+  }, []);
+
+  const markClickBlocked = useCallback(() => {
+    wasReorderingRef.current = true;
+    if (clickBlockTimerRef.current) clearTimeout(clickBlockTimerRef.current);
+    clickBlockTimerRef.current = setTimeout(() => {
+      wasReorderingRef.current = false;
+      clickBlockTimerRef.current = null;
+    }, REORDER_CLICK_BLOCK_MS);
+  }, []);
+
+  const finishReorder = useCallback(
+    (commit) => {
+      const st = dragStateRef.current;
+      if (!st) return;
+      // مرحلهٔ ۵۴ — مأموریت ۱: اگر رها کردن رویِ تبِ پوشه بود،
+      // به‌جایِ ذخیرهٔ ترتیب، کارت به آن پوشه منتقل می‌شود.
+      const folderTarget = folderDropTargetRef.current;
+      folderDropTargetRef.current = null;
+      setFolderDropTargetId(null);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      detachWindowListeners();
+      clearAllTransforms();
+      let orderedVisiblePaths = null;
+      if (commit) {
+        const preview = previewPathsRef.current;
+        const insertAt = Math.max(0, Math.min(st.targetIndex, preview.length));
+        orderedVisiblePaths = [...preview];
+        orderedVisiblePaths.splice(insertAt, 0, st.path);
+      }
+      gridRectsRef.current = [];
+      previewPathsRef.current = [];
+      updateDragState(null);
+      // رها کردنِ پس از درگ (یا لغو با Escape) هرگز نباید کلیکِ
+      // بازکنندهٔ کتاب شود؛ پرچم، کلیکِ همان ژست را می‌بلعد و پس
+      // از ۴۰۰ میلی‌ثانیه خودبه‌خود برمی‌گردد تا کلیکِ بعدیِ واقعی
+      // مسدود نماند (گاردِ باگِ ۱).
+      markClickBlocked();
+      if (commit && folderTarget && typeof onFolderDropRef.current === 'function') {
+        onFolderDropRef.current(st.path, folderTarget);
+      } else if (
+        commit &&
+        orderedVisiblePaths &&
+        typeof onCommitRef.current === 'function'
+      ) {
+        onCommitRef.current(orderedVisiblePaths);
+      }
+    },
+    [clearAllTransforms, detachWindowListeners, markClickBlocked, updateDragState]
+  );
+
+  const finishReorderRef = useRef(finishReorder);
+  finishReorderRef.current = finishReorder;
+
+  const processFrame = useCallback(() => {
+    rafRef.current = null;
+    const st = dragStateRef.current;
+    if (!st) return;
+    const p = pointerRef.current;
+    const last = lastProcessedRef.current;
+    // گاردِ باگِ ۶: بدونِ حرکتِ دست‌کم ۲ پیکسلی، هیچ محاسبه‌ای نیست.
+    if (Math.hypot(p.x - last.x, p.y - last.y) < REORDER_MIN_MOVE_PX) return;
+    lastProcessedRef.current = { x: p.x, y: p.y };
+
+    const deltaX = p.x - st.startX;
+    const deltaY = p.y - st.startY;
+    if (floatingElRef.current) {
+      floatingElRef.current.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
+    }
+    const draggedCx = st.rect.left + st.rect.width / 2 + deltaX;
+    const draggedCy = st.rect.top + st.rect.height / 2 + deltaY;
+
+    // دافعهٔ مغناطیسیِ کارت‌هایِ دیگر (گاردِ باگِ ۶: مستقیم رویِ DOM).
+    gridRectsRef.current.forEach((entry) => {
+      if (!entry || !entry.el || entry.path === st.path) return;
+      const d = Math.hypot(draggedCx - entry.cx, draggedCy - entry.cy);
+      if (d < REORDER_REPULSION_RADIUS) {
+        const repelled = computeRepelOffset(draggedCx - entry.cx, draggedCy - entry.cy, d);
+        entry.el.style.transform = `translate3d(${repelled.pushX.toFixed(1)}px, ${repelled.pushY.toFixed(1)}px, 0) scale(0.97)`;
+      } else {
+        entry.el.style.transform = '';
+      }
+    });
+
+    // تعویضِ زندهٔ اسلات با هیسترزیس: کارتِ هدف، کارتِ همسایه‌ای
+    // است که مرکزِ کارتِ گرفته‌شده در هستهٔ ۴۲٪ ابعادش باشد؛
+    // جابه‌جاییِ اسلات فقط وقتی پذیرفته می‌شود که نشانگر دست‌کم
+    // ۱۵ پیکسل از نقطهٔ آخرین تعویض دور شده باشد تا در مرز،
+    // سوسو نزند.
+    let candidate = null;
+    let candidateDist = Infinity;
+    gridRectsRef.current.forEach((entry) => {
+      if (!entry || entry.path === st.path) return;
+      const inCore =
+        Math.abs(draggedCx - entry.cx) <= REORDER_SLOT_CORE_RATIO * entry.w &&
+        Math.abs(draggedCy - entry.cy) <= REORDER_SLOT_CORE_RATIO * entry.h;
+      if (!inCore) return;
+      const d = Math.hypot(draggedCx - entry.cx, draggedCy - entry.cy);
+      if (d < candidateDist) {
+        candidateDist = d;
+        candidate = entry;
+      }
+    });
+    if (candidate) {
+      const preview = previewPathsRef.current;
+      const idxInPreview = preview.indexOf(candidate.path);
+      if (idxInPreview >= 0) {
+        let insertAt = idxInPreview;
+        // جهتِ جریانِ خواندن در گریدِ راست‌به‌چپ: پایین‌تر از هدف
+        // یعنی ردیفِ بعد، و در همان ردیف، چپِ هدف یعنی بعد از آن.
+        const sameRow = Math.abs(draggedCy - candidate.cy) <= candidate.h * 0.25;
+        if (!sameRow && draggedCy > candidate.cy) insertAt = idxInPreview + 1;
+        else if (sameRow && draggedCx < candidate.cx) insertAt = idxInPreview + 1;
+        insertAt = Math.max(0, Math.min(insertAt, preview.length));
+        if (insertAt !== st.targetIndex) {
+          const swapPoint = lastSwapPointerRef.current;
+          if (Math.hypot(p.x - swapPoint.x, p.y - swapPoint.y) >= REORDER_SLOT_HYSTERESIS_PX) {
+            lastSwapPointerRef.current = { x: p.x, y: p.y };
+            updateDragState({ ...st, targetIndex: insertAt });
+          }
+        }
+      }
+    }
+
+    // اسکرولِ خودکارِ لبه: نزدیکِ ۶۰ پیکسلِ بالا/پایینِ کانتینر،
+    // کانتینر نرم اسکرول می‌خورد و مرکزهایِ کش‌شده به‌اندازهٔ همان
+    // جابه‌جایی، اصلاح می‌شوند تا دافعه و هدف‌گیری درست بمانند.
+    const scrollEl = scrollRef ? scrollRef.current : null;
+    if (scrollEl) {
+      const box = scrollEl.getBoundingClientRect();
+      let delta = 0;
+      if (p.y < box.top + REORDER_EDGE_SCROLL_PX && scrollEl.scrollTop > 0) {
+        const closeness = (box.top + REORDER_EDGE_SCROLL_PX - p.y) / REORDER_EDGE_SCROLL_PX;
+        delta = -Math.max(2, closeness * 14);
+      } else if (
+        p.y > box.bottom - REORDER_EDGE_SCROLL_PX &&
+        scrollEl.scrollTop < scrollEl.scrollHeight - scrollEl.clientHeight
+      ) {
+        const closeness = (p.y - (box.bottom - REORDER_EDGE_SCROLL_PX)) / REORDER_EDGE_SCROLL_PX;
+        delta = Math.max(2, closeness * 14);
+      }
+      if (delta !== 0) {
+        const before = scrollEl.scrollTop;
+        scrollEl.scrollTop = before + delta;
+        const applied = scrollEl.scrollTop - before;
+        if (applied !== 0) {
+          gridRectsRef.current.forEach((entry) => {
+            if (entry) entry.cy -= applied;
+          });
+        }
+      }
+    }
+  }, [scrollRef, updateDragState]);
+
+  const handleWindowPointerMove = useCallback(
+    (e) => {
+      pointerRef.current = { x: e.clientX, y: e.clientY };
+      // مرحلهٔ ۵۴ — مأموریت ۱: تشخیصِ تبِ پوشهٔ زیرِ نشانگر با
+      // elementFromPoint؛ کارتِ شناور pointer-events ندارد، پس
+      // تبِ زیر دیده می‌شود. فقط هنگامِ عوض شدن، state عوض
+      // می‌شود تا هایلایتِ تب، رندرِ اضافه نسازد.
+      let folderId = null;
+      try {
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const tab =
+          el && typeof el.closest === 'function'
+            ? el.closest('[data-folder-drop-id]')
+            : null;
+        folderId = tab ? tab.getAttribute('data-folder-drop-id') : null;
+      } catch (_) {
+        folderId = null;
+      }
+      if (folderId !== folderDropTargetRef.current) {
+        folderDropTargetRef.current = folderId;
+        setFolderDropTargetId(folderId);
+      }
+      if (rafRef.current === null) {
+        rafRef.current = requestAnimationFrame(processFrame);
+      }
+    },
+    [processFrame]
+  );
+
+  const handleWindowPointerUp = useCallback((e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    finishReorderRef.current(true);
+  }, []);
+
+  const handleWindowPointerCancel = useCallback(() => {
+    finishReorderRef.current(false);
+  }, []);
+
+  const handleWindowBlur = useCallback(() => {
+    finishReorderRef.current(false);
+  }, []);
+
+  const handleWindowKeyDown = useCallback((e) => {
+    if (e.key === 'Escape') finishReorderRef.current(false);
+  }, []);
+
+  const handleWindowResize = useCallback(() => {
+    finishReorderRef.current(false);
+  }, []);
+
+  const onReorderActivate = useCallback(
+    (item, clientX, clientY) => {
+      if (!enabled || dragStateRef.current) return;
+      const gridEl = gridRef ? gridRef.current : null;
+      if (!gridEl) return;
+      const rawPath = item?.path || item?.filePath || '';
+      const draggedNorm = normalizePath(rawPath);
+      if (!draggedNorm) return;
+      // اندازه‌گیریِ یک‌بارهٔ مرکزِ همهٔ کارت‌ها در شروعِ درگ؛
+      // در mousemove هیچ getBoundingClientRect تازه‌ای نیست.
+      const slots = gridEl.querySelectorAll('[data-cr-card-slot]');
+      const rects = [];
+      slots.forEach((el) => {
+        const slotPath = el.getAttribute('data-cr-card-slot') || '';
+        if (!slotPath) return;
+        const r = el.getBoundingClientRect();
+        if (!r || r.width <= 0 || r.height <= 0) return;
+        rects.push({
+          path: slotPath,
+          el,
+          cx: r.left + r.width / 2,
+          cy: r.top + r.height / 2,
+          w: r.width,
+          h: r.height,
+        });
+      });
+      const draggedRect = rects.find((entry) => entry.path === draggedNorm);
+      if (!draggedRect) return;
+      const visible = visibleItemsRef.current;
+      const fromIndex = visible.findIndex(
+        (entry) => normalizePath(entry?.path || entry?.filePath) === draggedNorm
+      );
+      if (fromIndex < 0) return;
+      const previewPaths = visible
+        .map((entry) => normalizePath(entry?.path || entry?.filePath))
+        .filter((norm, idx) => idx !== fromIndex && norm);
+      gridRectsRef.current = rects;
+      previewPathsRef.current = previewPaths;
+      pointerRef.current = { x: clientX, y: clientY };
+      lastProcessedRef.current = { x: clientX, y: clientY };
+      lastSwapPointerRef.current = { x: clientX, y: clientY };
+      updateDragState({
+        path: draggedNorm,
+        item,
+        rect: {
+          left: draggedRect.cx - draggedRect.w / 2,
+          top: draggedRect.cy - draggedRect.h / 2,
+          width: draggedRect.w,
+          height: draggedRect.h,
+        },
+        startX: clientX,
+        startY: clientY,
+        fromIndex,
+        targetIndex: fromIndex,
+      });
+      window.addEventListener('pointermove', handleWindowPointerMove);
+      window.addEventListener('pointerup', handleWindowPointerUp);
+      window.addEventListener('pointercancel', handleWindowPointerCancel);
+      window.addEventListener('blur', handleWindowBlur);
+      window.addEventListener('keydown', handleWindowKeyDown);
+      window.addEventListener('resize', handleWindowResize);
+    },
+    [
+      enabled,
+      gridRef,
+      handleWindowBlur,
+      handleWindowKeyDown,
+      handleWindowPointerCancel,
+      handleWindowPointerMove,
+      handleWindowPointerUp,
+      handleWindowResize,
+      updateDragState,
+    ]
+  );
+
+  // پاک‌سازیِ نهایی هنگامِ آنمانتِ نما.
+  useEffect(
+    () => () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      if (clickBlockTimerRef.current) clearTimeout(clickBlockTimerRef.current);
+      folderDropTargetRef.current = null;
+      detachWindowListeners();
+      clearAllTransforms();
+    },
+    [clearAllTransforms, detachWindowListeners]
+  );
+
+  const grabbedPath = dragState ? dragState.path : null;
+  const previewItems = dragState
+    ? visibleItemsRef.current.filter(
+        (entry) => normalizePath(entry?.path || entry?.filePath) !== dragState.path
+      )
+    : visibleItemsRef.current;
+  const floatingItem = dragState ? dragState.item : null;
+  const floatingRect = dragState ? dragState.rect : null;
+  const placeholderIndex = dragState ? dragState.targetIndex : -1;
+
+  return {
+    grabbedPath,
+    previewItems,
+    placeholderIndex,
+    floatingItem,
+    floatingRect,
+    floatingElRef,
+    folderDropTargetId,
+    onReorderActivate,
+    wasReorderingRef,
+    cancelReorder: () => finishReorder(false),
+  };
+}

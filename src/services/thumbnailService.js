@@ -276,6 +276,16 @@ const getMemoryCover = (norm) => {
 // نقشه جلوگیری از ارسال درخواست‌های هم‌زمان برای یک مسیر مشترک
 const inFlightRequests = new Map();
 
+// مرحلهٔ ۵۳ مأموریت ۱ (R9): شمارشِ مرجعِ مصرف‌کننده‌ها برایِ هر
+// مسیرِ در حالِ پرواز. وعدهٔ مشترکِ inFlightRequests را چند
+// مصرف‌کننده (گرید و اسلایدر) با هم دارند؛ لغوِ یک مصرف‌کننده
+// نباید وعدهٔ مشترک را با null حل کند، مگر وقتی که هیچ
+// مصرف‌کنندهٔ دیگری نمانده باشد. شمارنده فقط برایِ درخواست‌هایِ
+// ناهمگام زیاد می‌شود — برگشتی‌هایِ کش (کشِ رم، کشِ استور، کشِ
+// دیتابیس) هرگز شمارنده را لمس نمی‌کنند و سرانجامِ هر درخواست
+// (تکمیل یا لغو)، ورودیِ شمارنده را پاک می‌کند تا Map نشت نکند.
+const inFlightSubscriberCount = new Map();
+
 // مرحله ۴ — صفِ استخراجِ کاور با اولویتِ تازه‌ترین و لغوِ در صف:
 //  - LIFO به‌جای FIFO: وقتی کاربر سریع اسکرول می‌کند، تازه‌ترین کارت‌های
 //    در دید، زودتر از کارت‌های قدیمیِ صف اجرا می‌شوند (کارت‌های قدیمی
@@ -533,6 +543,12 @@ export const thumbnailService = {
 
     // گام سوم: جلوگیری از ارسال درخواست‌های تکراری موازی
     if (inFlightRequests.has(norm)) {
+      // مرحلهٔ ۵۳ مأموریت ۱ (R9): پیوستن به وعدهٔ مشترک هم یک
+      // مصرف‌کننده است و شمارنده را +۱ می‌کند؛ وگرنه لغوِ
+      // مصرف‌کنندهٔ اول، وعده‌ای را با null حل می‌کرد که
+      // مصرف‌کنندهٔ دوم هم دارد. برگشتیِ کش نیست، پس شمارش
+      // مجاز است.
+      inFlightSubscriberCount.set(norm, (inFlightSubscriberCount.get(norm) || 0) + 1);
       return inFlightRequests.get(norm);
     }
 
@@ -716,9 +732,16 @@ export const thumbnailService = {
       })
       .finally(() => {
         inFlightRequests.delete(norm);
+        // مرحلهٔ ۵۳ مأموریت ۱ (R9): با سرانجامِ وعدهٔ مشترک،
+        // شمارندهٔ مسیر هم پاک می‌شود تا Map پس از تکمیل یا
+        // لغو، خالی بماند.
+        inFlightSubscriberCount.delete(norm);
       });
 
     inFlightRequests.set(norm, requestPromise);
+    // مرحلهٔ ۵۳ مأموریت ۱ (R9): سازندهٔ درخواست، نخستین
+    // مصرف‌کننده است و شمارنده را +۱ می‌کند.
+    inFlightSubscriberCount.set(norm, (inFlightSubscriberCount.get(norm) || 0) + 1);
     return requestPromise;
   },
 
@@ -732,10 +755,32 @@ export const thumbnailService = {
     memoryCoverCache.clear();
   },
 
+  // مرحلهٔ ۵۳ مأموریت ۱ (R9): لغوِ شمارش‌شده. اول یک مصرف‌کننده
+  // کم می‌شود؛ فقط وقتی هیچ مصرف‌کننده‌ای نماند (rem <= 0)، کارِ
+  // در صف لغو می‌شود. اگر مصرف‌کنندهٔ دیگری هنوز همان وعده را
+  // دارد، کار دست نمی‌خورد و لغوکننده فقط از شمارش خارج می‌شود.
   cancelThumbnailRequest: (filePath) => {
     const norm = normalizeCoverKey(filePath);
     if (!norm) return false;
-    return thumbnailQueue.cancel(norm);
+    const rem = (inFlightSubscriberCount.get(norm) || 1) - 1;
+    if (rem > 0) {
+      inFlightSubscriberCount.set(norm, rem);
+      return false;
+    }
+    const cancelled = thumbnailQueue.cancel(norm);
+    inFlightRequests.delete(norm);
+    inFlightSubscriberCount.delete(norm);
+    return cancelled;
+  },
+
+  // مرحلهٔ ۵۳ مأموریت ۱: دسترسیِ فقط-تستی به شمارندهٔ
+  // مصرف‌کننده‌ها، برایِ راستی‌آزماییِ خالی بودنِ Map پس از
+  // تکمیل یا لغو در تست‌هایِ رفتاری؛ در کدِ برنامه هیچ‌جا صدا
+  // زده نمی‌شود.
+  getSubscriberCountForTest: (filePath) => {
+    const norm = normalizeCoverKey(filePath);
+    if (!norm) return 0;
+    return inFlightSubscriberCount.get(norm) || 0;
   },
 
   // بررسی آنی کش رم بدون تاخیر

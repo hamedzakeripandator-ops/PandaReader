@@ -30,6 +30,7 @@
     "@neslinesli93/qpdf-wasm": "^0.3.0",
     "@tanstack/react-virtual": "^3.14.24",
     "better-sqlite3": "^11.10.0",
+    "electron-updater": "^6.8.11",
     "jszip": "^3.10.1",
     "konva": "^10.9.0",
     "lucide-react": "^1.61.0",

@@ -1,4 +1,7 @@
+// مرحلهٔ ۵۳ — هاتفیکسِ ۲۲:۴۰: ایمپورتِ useSettingsStore پیش‌فرض است؛
+// ایمپورتِ پیش‌فرض، سبکِ استانداردِ پروژه است (از مرحلهٔ ۵۴ خروجیِ نام‌دار هم دارد).
 import { create } from 'zustand';
+import useSettingsStore from './useSettingsStore';
 
 let toastTimerId = null;
 
@@ -74,7 +77,7 @@ function scheduleColorDbSync() {
   } catch (_) {}
 }
 
-const useAppStore = create((set, get) => ({
+export const useAppStore = create((set, get) => ({
   // ویوهای معتبر: 'home' | 'library' | 'recent' | 'favorites' | 'downloads' | 'settings' | 'profile' | 'reader'
   currentView: 'home',
   // مرحلهٔ ۳۶ §۳: وضعیتِ مشترکِ انتخابِ کتاب برایِ ساخت/ویرایشِ آماربندی.
@@ -162,8 +165,16 @@ const useAppStore = create((set, get) => ({
     const {
       type = 'info',
       icon = '',
-      duration = 2200,
+      duration,
     } = typeof options === 'string' ? { type: options } : options;
+
+    // مرحلهٔ ۵۳ مأموریتِ ۱: مدتِ نمایشِ پیامِ شناور از تنظیمِ hudDuration
+    // خوانده می‌شود (پیش‌فرض ۲۲۰۰)؛ فقط وقتی فراخواننده مدتِ صریح نداده
+    // باشد. تایمرِ واقعیِ پیام‌هایِ شناور همین‌جاست، نه در ویوئرها.
+    const resolvedDuration =
+      typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+        ? duration
+        : (useSettingsStore.getState().preferences?.hudDuration ?? 2200);
 
     if (toastTimerId) {
       clearTimeout(toastTimerId);
@@ -192,7 +203,7 @@ const useAppStore = create((set, get) => ({
         toast: { ...state.toast, visible: false },
       }));
       toastTimerId = null;
-    }, duration);
+    }, resolvedDuration);
   },
 
   hideToast: () => {

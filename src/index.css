@@ -321,3 +321,64 @@ textarea {
   image-rendering: auto;
   will-change: transform;
 }
+
+/* ==========================================================================
+   مرحلهٔ ۵۳ — مأموریت ۳: جیگل و جابه‌جاییِ مغناطیسیِ کارت‌ها
+   (Long-press jiggle و magnetic repulsion reorder در کتابخانه و
+   علاقه‌مندی‌ها). کلاس‌ها فقط وقتی فعال‌اند که نما، کارت را در حالتِ
+   جابه‌جایی قرار داده باشد؛ در حالتِ عادی هیچ اثری ندارند.
+   ========================================================================== */
+
+/* انیمیشنِ تکانِ (جیگلِ) کارتِ گرفته‌شده — دقیقاً طبقِ مشخصاتِ مأموریت ۳:
+   بزرگ‌نماییِ ثابتِ ۱٫۰۴ با چرخشِ رفت‌وبرگشتیِ ‎±۱٫۳۵ درجه و بالا‌پرشِ
+   ‎۴- پیکسلی. مدتِ چرخه ۰٫۴۲ ثانیه و تکرارِ بی‌نهایت است. */
+@keyframes crCardJiggle {
+  0% { transform: scale(1.04) rotate(0deg); }
+  25% { transform: scale(1.04) rotate(-1.35deg) translateY(-2px); }
+  50% { transform: scale(1.04) rotate(0deg) translateY(-4px); }
+  75% { transform: scale(1.04) rotate(1.35deg) translateY(-2px); }
+  100% { transform: scale(1.04) rotate(0deg); }
+}
+
+/* کارتِ گرفته‌شده برایِ جابه‌جایی: انیمیشنِ جیگل + قابِ نئونیِ فیروزه‌ای
+   و سایهٔ بلند تا کارت، visibly از گرید بلند شده دیده شود.
+   توجه: border و boxShadowِ نهایی، در ComicCard به‌صورتِ inline هم
+   گذاشته می‌شوند، چون استایلِ پایهٔ کارت inline است و inline بر کلاس
+   می‌چربد؛ این کلاس، انیمیشن و zIndex را می‌دهد. */
+.cr-card-jiggle {
+  animation: crCardJiggle 0.42s ease-in-out infinite;
+  position: relative;
+  z-index: 60;
+  border: 2px solid #22d3ee;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.65), 0 0 20px rgba(34, 211, 238, 0.45);
+}
+
+/* جایِ خالیِ (اسلاتِ) هدف در گرید هنگامِ کشیدن: خط‌چینِ فیروزه‌ای که
+   نشان می‌دهد کارتِ گرفته‌شده، در صورتِ رها شدن، اینجا می‌نشیند.
+   ارتفاعِ دقیق، inline از ارتفاعِ اندازه‌گیری‌شدهٔ اسلاتِ کارت می‌آید
+   تا ردیف‌هایِ گرید هنگامِ جابه‌جایی، حتی یک پیکسل جابه‌جا نشوند. */
+.cr-reorder-slot {
+  border: 2px dashed rgba(34, 211, 238, 0.7);
+  border-radius: 16px;
+  background: rgba(34, 211, 238, 0.06);
+  min-height: 260px;
+  box-sizing: border-box;
+}
+
+/* کارتِ شناورِ گرفته‌شده که دنبالِ نشانگر می‌آید: موقعیتِ ثابت نسبت
+   به پنجره (left/top/width از اندازه‌گیریِ لحظهٔ شروع می‌آیند و
+   جابه‌جاییِ آن فقط با translate3d در حلقهٔ requestAnimationFrame
+   عوض می‌شود) و بدونِ دریافتِ رویدادِ اشاره‌گر تا گریدِ زیر، دیده شود. */
+.cr-reorder-floating {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* پوششِ (wrapper) هر کارت در گرید هنگامِ جابه‌جایی: دافعهٔ مغناطیسی
+   با transform مستقیم رویِ همین گره اعمال می‌شود و این transition،
+   برگشتِ نرمِ آن را می‌سازد. */
+.cr-repel-card {
+  transition: transform 0.22s cubic-bezier(0.2, 0.85, 0.3, 1);
+}

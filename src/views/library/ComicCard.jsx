@@ -1,9 +1,58 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import useLibraryStore from '../../store/useLibraryStore';
+import useLibraryStore, {
+  REORDER_GRAB_MOVE_PX,
+} from '../../store/useLibraryStore';
 import useAppStore from '../../store/useAppStore';
 import { coreApi } from '../../services/coreApi';
 import thumbnailService, { resolveCoverUrl } from '../../services/thumbnailService';
 import Icons from '../../components/common/Icons';
+
+// مرحلهٔ ۵۴ — ادغام (m2) لایهٔ ۲: توابعِ پرچمِ درگِ داخلیِ کارت،
+// از ComicCard می‌آیند تا هر دو مسیرِ درگ (جابه‌جایی و کشیدن به تب)
+// همان پرچم و همان شمارندهٔ نسل را ببینند.
+// مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲: پرچمِ سراسریِ درگِ داخلیِ کارت.
+// window.__isInternalCardDragActive از لحظهٔ شروعِ درگِ کارت با اشاره‌گر
+// (نه درگِ بومیِ HTML5) true می‌شود و تا ۱۰۰ میلی‌ثانیه پس از pointerup
+// true می‌ماند تا کلیکِ پس از رها کردن، پیش از پاک‌شدنِ پرچم برسد و
+// بلعیده شود. الگو دقیقاً مثلِ window.__isAnnotationGestureActive است:
+// پرچم را کارِ درگ می‌گذارد و App.jsx فقط آن را می‌خواند. شمارندهٔ نسل،
+// پاک‌شدنِ معلقِ درگِ قبلی را از درگِ تازه‌ای که در همان ۱۰۰ میلی‌ثانیه
+// شروع شده جدا می‌کند.
+let internalCardDragClearTimer = null;
+let internalCardDragGeneration = 0;
+
+export function isInternalCardDragActive() {
+  return typeof window !== 'undefined' && window.__isInternalCardDragActive === true;
+}
+
+export function setInternalCardDragActive() {
+  if (typeof window === 'undefined') return;
+  internalCardDragGeneration += 1;
+  if (internalCardDragClearTimer) {
+    clearTimeout(internalCardDragClearTimer);
+    internalCardDragClearTimer = null;
+  }
+  window.__isInternalCardDragActive = true;
+}
+
+export function scheduleClearInternalCardDragActive() {
+  if (typeof window === 'undefined') return;
+  const generation = internalCardDragGeneration;
+  if (internalCardDragClearTimer) clearTimeout(internalCardDragClearTimer);
+  internalCardDragClearTimer = setTimeout(() => {
+    internalCardDragClearTimer = null;
+    if (generation === internalCardDragGeneration) {
+      window.__isInternalCardDragActive = false;
+    }
+  }, 100);
+}
+
+// گاردِ کلیکِ پس از درگ: وقتی پرچمِ درگِ داخلی روشن است، کلیکِ کارت
+// باید کامل بلعیده شود تا رها کردنِ کارت هرگز کتاب را باز نکند.
+export function shouldSuppressCardClick() {
+  return isInternalCardDragActive();
+}
+
 
 const COVER_GRADIENTS = [
   'linear-gradient(145deg, #0f171c 0%, #141d23 50%, #1d2a31 100%)',
@@ -67,6 +116,18 @@ export default function ComicCard({
   onRemove,
   showRemoveBtn = true,
   folderScope = 'library',
+  // مرحلهٔ ۵۴ — مأموریت ۱: جابه‌جاییِ فوری با گرفتن و کشیدن
+  // (بدونِ نگه‌داشتن).
+  // reorderable: این نما اجازهٔ شروعِ جابه‌جایی از رویِ این کارت را
+  // می‌دهد (فقط LibraryView و FavoritesView، و فقط true می‌فرستند).
+  // isGrabbedForReorder: کارت در حالتِ جیگل/گرفته‌شده است (نما، پس
+  // از جابه‌جاییِ ۶ پیکسلیِ نشانگر، آن را true می‌کند).
+  // onReorderActivate: وقتی نشانگر، با دکمهٔ چپِ پایین، ۶ پیکسل
+  // جابه‌جا شد، بی‌درنگ با (item, clientX, clientY) صدا زده
+  // می‌شود تا نما، اندازه‌گیریِ گرید و شنونده‌هایِ پنجره را شروع کند.
+  reorderable = false,
+  isGrabbedForReorder = false,
+  onReorderActivate = null,
 }) {
   // مرحله ۴۹ (C): حوزهٔ پوشهٔ این کارت — 'library' (پیش‌فرض، رفتارِ
   // قبلی برایِ LibraryView) یا 'favorites' (نمایِ علاقه‌مندی‌ها:
@@ -167,6 +228,87 @@ export default function ComicCard({
 
   const [isHovered, setIsHovered] = useState(false);
   const [showFolderMenu, setShowFolderMenu] = useState(false);
+
+  // مرحلهٔ ۵۴ — مأموریت ۱: گرفتنِ فوریِ کارت (grab-and-drag، بدونِ
+// نگه‌داشتن و بدونِ هیچ تایمری). pointerdown فقط نقطهٔ شروع را
+// ثبت می‌کند و هنوز درگ نیست، پس کلیکِ بدونِ حرکت، بی‌درنگ کتاب
+// را باز می‌کند. به‌محضِ اینکه نشانگر، با دکمهٔ چپِ پایین، ۶
+// پیکسل جابه‌جا شود، درگ بی‌درنگ فعال می‌شود (جیگل + قابِ نئونی
+// + دافعه، دستِ هوک است). dragActivatedRef همگام است تا پس از
+// فعال‌شدن، حرکت/رها کردنِ دوباره، فعال‌سازیِ تکراری نسازد.
+const pendingDragRef = useRef(null);
+const dragActivatedRef = useRef(false);
+
+const cancelPendingDrag = useCallback(() => {
+  pendingDragRef.current = null;
+}, []);
+
+const handleCardPointerDown = (e) => {
+  if (!reorderable || isGrabbedForReorder) return;
+  if (e.button !== 0) return;
+  if (isMissingFileItem(item)) return;
+  // دکمه‌هایِ کوچکِ کارت (حذف، پین، علاقه‌مندی، پوشه، تغییرِ کاور،
+  // اسلایدر) و منویِ سریعِ پوشه، هرگز درگ را شروع نمی‌کنند.
+  if (
+    e.target &&
+    typeof e.target.closest === 'function' &&
+    e.target.closest('button, [data-cr-no-reorder]')
+  ) {
+    return;
+  }
+  dragActivatedRef.current = false;
+  pendingDragRef.current = { x: e.clientX, y: e.clientY };
+};
+
+const handleCardPointerMove = (e) => {
+  const pending = pendingDragRef.current;
+  if (!pending || dragActivatedRef.current) return;
+  // ادغام (m2): بدونِ دکمهٔ پایین، حرکتِ ماوس درگ نیست — وگرنه رها
+  // کردنِ بیرونِ کارت و برگشتنِ ماوس، درگِ خیالی می‌ساخت.
+  if (e.buttons === 0) return;
+  const moved = Math.hypot(e.clientX - pending.x, e.clientY - pending.y);
+  if (moved < REORDER_GRAB_MOVE_PX) return;
+  dragActivatedRef.current = true;
+  pendingDragRef.current = null;
+  // ادغام (m2) لایهٔ ۲: با فعال‌شدنِ درگ، پرچمِ درگِ داخلی هم روشن
+  // می‌شود تا رها کردنِ کارت، نه کتاب را باز کند و نه دراپِ خارجیِ
+  // App.jsx را تحریک کند.
+  setInternalCardDragActive();
+  if (typeof onReorderActivate === 'function') {
+    onReorderActivate(item, pending.x, pending.y);
+  }
+};
+
+const handleCardPointerUp = () => {
+  // پس از فعال‌شدن، رها کردن دستِ نماست (pointerupِ پنجره و
+  // گاردِ wasReorderingRef)؛ اینجا فقط شروعِ هنوز-فعال‌نشده پاک
+  // می‌شود تا کلیکِ عادی، کتاب را باز کند.
+  if (!dragActivatedRef.current) pendingDragRef.current = null;
+};
+
+const handleCardPointerCancel = () => {
+  pendingDragRef.current = null;
+};
+
+  // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲ + ادغام: تورِ امنِ پاک‌شدنِ پرچم.
+  // pointerup ممکن است بیرونِ کارت (مثلاً رویِ تبِ پوشه) رخ دهد و
+  // هندلرِ رویِ کارت اصلاً صدا زده نشود؛ پس شنوندهٔ پنجره با هر
+  // pointerup/pointercancel، پاک‌شدنِ ۱۰۰ میلی‌ثانیه‌ای را زمان‌بندی
+  // می‌کند و شروعِ هنوز-فعال‌نشده را هم پاک می‌کند تا حرکتِ بعدیِ
+  // ماوس بدونِ دکمه، درگِ خیالی نسازد.
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onPointerEnd = () => {
+      pendingDragRef.current = null;
+      if (isInternalCardDragActive()) scheduleClearInternalCardDragActive();
+    };
+    window.addEventListener('pointerup', onPointerEnd);
+    window.addEventListener('pointercancel', onPointerEnd);
+    return () => {
+      window.removeEventListener('pointerup', onPointerEnd);
+      window.removeEventListener('pointercancel', onPointerEnd);
+    };
+  }, []);
 
   // مرحله ۴۷ §۲: فهرستِ کاورهایِ خراب و شمارشِ تلاش‌هایِ بازیابی، تا
   // خطایِ گذرایِ تصویر یا لغوِ درخواستِ تنبل، کارت را برای همیشه
@@ -445,6 +587,10 @@ export default function ComicCard({
   // می‌دهد و هرگز onOpenComic را صدا نمی‌زند (پس باز کردنِ فایلِ
   // رفته، کرش نمی‌کند). دکمهٔ سطل، جداست و همچنان کار می‌کند.
   const handleCardClick = () => {
+    // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲: کلیکِ پس از درگِ داخلی،
+    // بی‌صدا بلعیده می‌شود؛ پیش از گاردِ فایلِ حذف‌شده، تا رها کردنِ
+    // کارت رویِ فایلِ رفته هم Toastِ اشتباه نشان ندهد.
+    if (shouldSuppressCardClick()) return;
     if (isMissingFileItem(item)) {
       showToast(MISSING_FILE_TOAST, { type: 'warning' });
       return;
@@ -460,6 +606,7 @@ export default function ComicCard({
   const handleCardContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
+    cancelPendingDrag();
     openContextMenu?.(
       { x: e.clientX, y: e.clientY },
       {
@@ -477,37 +624,58 @@ export default function ComicCard({
     );
   };
 
-  const handleDragStart = (e) => {
-    if (filePath) {
-      e.dataTransfer.setData('text/comic-path', filePath);
-      e.dataTransfer.effectAllowed = 'move';
-    }
-  };
+  // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۱ + ادغام: تابعِ درگِ بومی
+  // کامل حذف شد؛ با draggable={false}یِ همیشه، درگِ بومیِ HTML5
+  // دیگر هرگز از کارت شروع نمی‌شود و جابه‌جایی/انتقالِ پوشه ۱۰۰٪
+  // با Pointer Events انجام می‌شوند.
 
   const lastPageNum = item?.lastPage || item?.currentPage || null;
 
   return (
     <div
-      draggable={Boolean(filePath)}
-      onDragStart={handleDragStart}
+      draggable={false}
+      onDragStart={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
       onClick={handleCardClick}
       onContextMenu={handleCardContextMenu}
+      onPointerDown={handleCardPointerDown}
+      onPointerMove={handleCardPointerMove}
+      onPointerUp={handleCardPointerUp}
+      onPointerCancel={handleCardPointerCancel}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
         setIsHovered(false);
         setShowFolderMenu(false);
+        if (!dragActivatedRef.current) pendingDragRef.current = null;
       }}
+      className={isGrabbedForReorder ? 'cr-card-jiggle' : undefined}
       style={{
         ...styles.card,
-        transform: isHovered ? 'translateY(-4px)' : 'translateY(0)',
-        borderColor: isHovered
+        position: 'relative',
+        // مرحلهٔ ۵۳ — مأموریت ۳: کارتِ گرفته‌شده، بلندشده با قابِ
+        // نئونی است؛ transform را انیمیشنِ جیگل می‌دهد، پس inline
+        // خالی می‌ماند تا با آن نجنگد. border و boxShadow هم inline
+        // گذاشته می‌شوند، چون استایلِ پایهٔ کارت inline است.
+        transform: isGrabbedForReorder
+          ? undefined
+          : isHovered
+          ? 'translateY(-4px)'
+          : 'translateY(0)',
+        borderWidth: isGrabbedForReorder ? '2px' : undefined,
+        borderColor: isGrabbedForReorder
+          ? '#22d3ee'
+          : isHovered
           ? 'var(--accent)'
           : isPinned
           ? 'rgba(34, 211, 238, 0.55)'
           : isFav
           ? 'rgba(248, 81, 73, 0.4)'
           : 'var(--border)',
-        boxShadow: isHovered
+        boxShadow: isGrabbedForReorder
+          ? '0 18px 42px rgba(0, 0, 0, 0.65), 0 0 20px rgba(34, 211, 238, 0.45)'
+          : isHovered
           ? '0 14px 28px rgba(0, 0, 0, 0.65), 0 0 14px rgba(34, 211, 238, 0.15)'
           : '0 6px 16px rgba(0, 0, 0, 0.35)',
       }}
@@ -519,6 +687,10 @@ export default function ComicCard({
             src={coverUrl}
             alt={title}
             onError={handleCoverError}
+            onDragStart={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
             draggable={false}
             style={{
               ...styles.coverImg,
@@ -655,6 +827,7 @@ export default function ComicCard({
         {/* منوی سریع انتخاب پوشه روی خود کارت */}
         {showFolderMenu && (
           <div
+            data-cr-no-reorder="true"
             style={styles.folderQuickMenu}
             onClick={(e) => e.stopPropagation()}
           >

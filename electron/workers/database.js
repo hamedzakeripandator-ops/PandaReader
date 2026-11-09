@@ -133,9 +133,17 @@ function isPermanentCover(str) {
 }
 
 // ترتيب عناصر المكتبة بحيث تظهر العناصر المثبتة في الأعلى دائمًا
+// مرحلهٔ ۵۳ — مأموریت ۳ (گاردِ باگِ ۴): ترتیبِ دستی (customOrder)
+// بر پین و تاریخِ افزودن می‌چربد؛ دقیقاً همان منطقِ
+// useLibraryStore.js تا ورکر و رندرر یک ترتیب بدهند. پس از هر
+// جابه‌جایی، همهٔ آیتم‌ها customOrder دارند؛ کتابِ تازه‌افزوده‌شده
+// (بدونِ customOrder) پس از بلوکِ دستی می‌آید.
 function sortLibraryItems(list) {
   if (!Array.isArray(list)) return [];
   return [...list].sort((a, b) => {
+    const aOrder = Number.isFinite(a?.customOrder) ? a.customOrder : Infinity;
+    const bOrder = Number.isFinite(b?.customOrder) ? b.customOrder : Infinity;
+    if (aOrder !== bOrder) return aOrder - bOrder;
     const aPinned = a?.isPinned ? 1 : 0;
     const bPinned = b?.isPinned ? 1 : 0;
     if (aPinned !== bPinned) return bPinned - aPinned;
@@ -148,6 +156,14 @@ function sortLibraryItems(list) {
     const addedB = b?.addedAt || '';
     return addedB.localeCompare(addedA);
   });
+}
+
+// مرحلهٔ ۵۳ — مأموریت ۳: نرمال‌سازیِ customOrder در migrateSchema —
+// فقط عددِ صحیحِ متناهی معتبر است و بقیه null می‌شوند (یعنی «بدونِ
+// ترتیبِ دستی») تا مقدارِ خرابِ قدیمی، مرتب‌سازی را نشکند.
+function normalizeCustomOrder(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
 }
 
 // مرحله ۱۳: فهرستِ ۱۵ تمپلیت — باید پیش از migrateSchema باشد، چون
@@ -201,6 +217,9 @@ function migrateSchema(parsed) {
     const norm = normalizePath(item.path || item.filePath);
     item.normPath = norm;
     item.isPinned = Boolean(item.isPinned);
+    // مرحلهٔ ۵۳ — مأموریت ۳: ترتیبِ دستیِ ذخیره‌شده، اعتبارسنجی
+    // می‌شود تا پس از ری‌لود، کارت‌ها دقیقاً سرِ جایِ دستی بمانند.
+    item.customOrder = normalizeCustomOrder(item.customOrder);
     item.pinnedAt = item.isPinned ? item.pinnedAt || item.addedAt || new Date().toISOString() : null;
     item.folderId = item.folderId && validFolderIds.has(item.folderId) ? item.folderId : null;
     if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.cover)) {
@@ -223,6 +242,9 @@ function migrateSchema(parsed) {
       item.favoriteFolderId && validFavoriteFolderIds.has(item.favoriteFolderId)
         ? item.favoriteFolderId
         : null;
+    // مرحلهٔ ۵۳ — مأموریت ۳: ترتیبِ دستیِ علاقه‌مندی‌ها هم مثلِ
+    // کتابخانه اعتبارسنجی می‌شود.
+    item.customOrder = normalizeCustomOrder(item.customOrder);
     item.folderId = item.folderId && validFolderIds.has(item.folderId) ? item.folderId : null;
     if (cleanCoverCache[norm]?.isCustom && isPermanentCover(cleanCoverCache[norm]?.cover)) {
       item.cover = cleanCoverCache[norm].cover;
@@ -3400,6 +3422,9 @@ parentPort.on('message', (request) => {
           cover: cachedCover,
           hasCustomCover: Boolean(db.coverCache[norm]?.isCustom || existingItem?.hasCustomCover),
           folderId: folderId !== undefined ? folderId : existingItem?.folderId || null,
+          // مرحلهٔ ۵۳ — مأموریت ۳: بازسازیِ ردیفِ موجود، ترتیبِ
+          // دستیِ آن را پاک نمی‌کند (مثلِ pinnedAt و addedAt).
+          customOrder: existingItem ? normalizeCustomOrder(existingItem.customOrder) : null,
           isPinned: pinnedState,
           pinnedAt: pinnedState
             ? existingItem?.pinnedAt || new Date().toISOString()
@@ -3550,6 +3575,46 @@ parentPort.on('message', (request) => {
           isPinned: nextPinned,
           library: db.library
         });
+        break;
+      }
+
+      // مرحلهٔ ۵۳ — مأموریت ۳: ثبتِ ترتیبِ دستیِ کتابخانه.
+      // orderedPaths، فهرستِ کاملِ مسیرها به ترتیبِ تازه است؛
+      // customOrder = اندیس در فهرستِ کامل به هر آیتم داده می‌شود.
+      // مسیری که در db.library نیست نادیده گرفته می‌شود و آیتمی که
+      // در orderedPaths نیست، با حفظِ ترتیبِ نسبی، به انتها می‌رود
+      // تا هم‌زمانیِ افزودنِ کتاب، چیزی را گم نکند. جدولِ تازه در
+      // SQLite ساخته نشد، چون library/favorites در هیچ‌کدام از ۸
+      // جدولِ SQLite نیستند و مرجعِ آن‌ها همین آینهٔ db.json است؛
+      // پس این اکشن در هر دو موتور (sqlite و json) از همین
+      // switchِ JSON پاسخ می‌گیرد، دقیقاً مثلِ TOGGLE_PIN_LIBRARY.
+      case 'REORDER_LIBRARY_ITEMS': {
+        const { orderedPaths } = payload;
+        if (!Array.isArray(orderedPaths) || orderedPaths.length === 0) {
+          sendReply({ type: 'error', action, message: 'فهرستِ ترتیب ارسال نشده است.' });
+          return;
+        }
+        db.library = Array.isArray(db.library) ? db.library : [];
+        const byNorm = new Map();
+        db.library.forEach((item) => {
+          const n = normalizePath(item.path || item.filePath);
+          if (n && !byNorm.has(n)) byNorm.set(n, item);
+        });
+        const ordered = [];
+        orderedPaths.forEach((rawPath) => {
+          const n = normalizePath(rawPath);
+          const found = n ? byNorm.get(n) : null;
+          if (!found) return;
+          byNorm.delete(n);
+          ordered.push(found);
+        });
+        byNorm.forEach((item) => ordered.push(item));
+        ordered.forEach((item, idx) => {
+          item.customOrder = idx;
+        });
+        db.library = sortLibraryItems(ordered);
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true, library: db.library });
         break;
       }
 
@@ -4050,6 +4115,40 @@ parentPort.on('message', (request) => {
 
         writeDB(db);
         sendReply({ type: 'done', action, isFavorite: isFav, favorites: db.favorites });
+        break;
+      }
+
+      // مرحلهٔ ۵۳ — مأموریت ۳: ثبتِ ترتیبِ دستیِ علاقه‌مندی‌ها؛
+      // همان قراردادِ REORDER_LIBRARY_ITEMS رویِ db.favorites.
+      // علاقه‌مندی‌ها sort سراسری ندارند، پس ترتیبِ آرایه دقیقاً
+      // ترتیبِ دستی است و همان‌طور ذخیره و برگردانده می‌شود.
+      case 'REORDER_FAVORITE_ITEMS': {
+        const { orderedPaths } = payload;
+        if (!Array.isArray(orderedPaths) || orderedPaths.length === 0) {
+          sendReply({ type: 'error', action, message: 'فهرستِ ترتیب ارسال نشده است.' });
+          return;
+        }
+        db.favorites = Array.isArray(db.favorites) ? db.favorites : [];
+        const byNorm = new Map();
+        db.favorites.forEach((item) => {
+          const n = normalizePath(item.path || item.filePath);
+          if (n && !byNorm.has(n)) byNorm.set(n, item);
+        });
+        const ordered = [];
+        orderedPaths.forEach((rawPath) => {
+          const n = normalizePath(rawPath);
+          const found = n ? byNorm.get(n) : null;
+          if (!found) return;
+          byNorm.delete(n);
+          ordered.push(found);
+        });
+        byNorm.forEach((item) => ordered.push(item));
+        ordered.forEach((item, idx) => {
+          item.customOrder = idx;
+        });
+        db.favorites = ordered;
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true, favorites: db.favorites });
         break;
       }
 

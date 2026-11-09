@@ -71,7 +71,7 @@ const sameEpubChapters = (prev, next) => {
   return next.every((chapter, index) => epubChapterKey(chapter, index) === epubChapterKey(prev[index], index));
 };
 
-const useReaderStore = create((set, get) => ({
+export const useReaderStore = create((set, get) => ({
   comicData: null,
   currentPage: 1,
   targetPage: null,
