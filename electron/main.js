@@ -1,7 +1,7 @@
 // افزایش ظرفیت تردپول I/O موتور Node.js پیش از بارگذاری کامل
 process.env.UV_THREADPOOL_SIZE = '8';
 
-const { app, BrowserWindow, protocol } = require('electron');
+const { app, BrowserWindow, nativeImage, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -63,6 +63,68 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 let mainWindow;
+
+// مرحلهٔ ۵۵ §۲ (m2): موتورِ به‌روزرسانیِ خودکار (electron-updater).
+// بارگذاریِ امن: اگر بسته نصب نباشد (حالتِ توسعه)، autoUpdater
+// همان null می‌ماند و برنامه هرگز به‌خاطرِ نبودِ آن از کار
+// نمی‌افتد. نمونهٔ موتور روی app.autoUpdater گذاشته می‌شود تا
+// ipcHandlers همان نمونه را ببیند، بدونِ require دوم و بدونِ
+// وابستگیِ چرخه‌ای. پیکربندیِ انتشار (publish) در این‌جا نیست:
+// مخزنِ انتشار و توکن، در مرحلهٔ بسته‌بندی (package.json) تعیین
+// می‌شوند و این کد، هیچ نامِ کاربری یا آدرسِ مخزنی را حدس نمی‌زند.
+let autoUpdater = null;
+try { ({ autoUpdater } = require('electron-updater')); } catch (_) { autoUpdater = null; }
+app.autoUpdater = autoUpdater;
+if (autoUpdater) {
+  try { autoUpdater.autoDownload = false; } catch (_) {}
+  try { autoUpdater.autoInstallOnAppQuit = true; } catch (_) {}
+}
+
+// مرحلهٔ ۵۵ §۲ (m2): فرستادنِ وضعیتِ به‌روزرسانی به پنجرهٔ اصلی.
+// اگر پنجره بسته شده باشد یا موتور نباشد، هیچ‌چیز پرتاب نمی‌شود.
+function sendUpdateStatusToWindow(payload) {
+  try {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.webContents || mainWindow.webContents.isDestroyed()) return;
+    mainWindow.webContents.send('app-update-status', payload);
+  } catch (_) { /* ignore */ }
+}
+
+// مرحلهٔ ۵۵ §۲ (m2): سیم‌کشیِ شش رویدادِ electron-updater به
+// رندرر. فقط یک بار سیم‌کشی می‌شود تا با ساخته‌شدنِ دوبارهٔ پنجره
+// (activate)، شنوندهٔ تکراری ساخته نشود؛ فرستادن، همیشه به پنجرهٔ
+// فعلی (mainWindow) می‌رود.
+let autoUpdaterWired = false;
+function setupAutoUpdater() {
+  if (autoUpdaterWired || !autoUpdater || typeof autoUpdater.on !== 'function') return;
+  autoUpdaterWired = true;
+  const forward = (status, extra) => {
+    try { sendUpdateStatusToWindow({ status, ...(extra || {}) }); } catch (_) {}
+  };
+  try {
+    autoUpdater.on('checking-for-update', () => forward('checking-for-update'));
+    autoUpdater.on('update-available', (info) => forward('update-available', {
+      version: (info && info.version) || '',
+      releaseDate: (info && info.releaseDate) || '',
+      releaseNotes: typeof (info && info.releaseNotes) === 'string' ? info.releaseNotes : '',
+    }));
+    autoUpdater.on('update-not-available', (info) => forward('update-not-available', {
+      version: (info && info.version) || '',
+    }));
+    autoUpdater.on('download-progress', (progress) => forward('download-progress', {
+      percent: typeof (progress && progress.percent) === 'number' ? progress.percent : 0,
+      transferred: (progress && progress.transferred) || 0,
+      total: (progress && progress.total) || 0,
+      bytesPerSecond: (progress && progress.bytesPerSecond) || 0,
+    }));
+    autoUpdater.on('update-downloaded', (info) => forward('update-downloaded', {
+      version: (info && info.version) || '',
+    }));
+    autoUpdater.on('error', (err) => forward('error', {
+      message: String((err && err.message) || err || 'خطا در بررسیِ به‌روزرسانی'),
+    }));
+  } catch (_) { /* ignore */ }
+}
 
 // مرحله ۱ ـ بخش الف: قفلِ تک‌نمونه‌ای.
 // بدونِ این قفل، اجرای دومِ برنامه یک پروسهٔ دوم با ورکرِ دیتابیسِ
@@ -624,9 +686,43 @@ function isNotModified(requestHeaders, etag, mtimeMs) {
   return false;
 }
 
+// مرحلهٔ ۵۵ ـ بخش ۱: پیدا کردنِ آیکونِ برنامه.
+// ترتیبِ جست‌وجو: اول فایلِ کنارِ پروژه در حالتِ توسعه
+// (build/icon.ico بعد build/icon.png)، بعد همان فایل‌ها زیرِ
+// resources در حالتِ بسته‌بندی‌شده. اگر فایل پیدا شد، اول
+// nativeImage ساخته می‌شود؛ اگر خالی بود، خودِ مسیر برگردانده
+// می‌شود تا BrowserWindow خودش آن را بخواند. اگر هیچ‌کدام
+// نبود، undefined برمی‌گردد و الکترون آیکونِ پیش‌فرض را می‌گذارد.
+function resolveAppIcon() {
+  const candidates = [
+    path.join(__dirname, '../build/icon.ico'),
+    path.join(__dirname, '../build/icon.png'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'build/icon.ico') : null,
+    process.resourcesPath ? path.join(process.resourcesPath, 'build/icon.png') : null
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      if (!fs.existsSync(candidate)) continue;
+    } catch (_) {
+      continue;
+    }
+    try {
+      const img = nativeImage.createFromPath(candidate);
+      const isEmpty = img && typeof img.isEmpty === 'function' ? img.isEmpty() : !img;
+      if (img && !isEmpty) return img;
+      return candidate;
+    } catch (_) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 function createWindow() {
   // نمونهٔ دوم، هرگز پنجره نمی‌سازد (نگهبانِ دومِ قفلِ تک‌نمونه‌ای).
   if (!gotSingleInstanceLock) return;
+  // مرحلهٔ ۵۵ ـ بخش ۱: آیکونِ پنجره، پیش از ساختِ آن حل می‌شود.
+  const appIcon = resolveAppIcon();
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -636,6 +732,8 @@ function createWindow() {
     // بدونِ این گزینه، الکترون عنوان را از تگِ <title> سندِ HTML می‌گیرد؛
     // این مقدارِ صریح، همان برندِ PandaReader را از همان لحظهٔ ساختِ پنجره تثبیت می‌کند.
     title: 'PandaReader',
+    // مرحلهٔ ۵۵ ـ بخش ۱: آیکونِ پنجرهٔ اصلی (build/icon.ico یا build/icon.png).
+    icon: appIcon,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -647,6 +745,12 @@ function createWindow() {
       spellcheck: false
     }
   });
+
+  // مرحلهٔ ۵۵ ـ بخش ۱: ست کردنِ صریحِ آیکونِ پنجره؛ روی ویندوز،
+  // گزینهٔ icon گاهی کافی نیست و setIcon آن را تثبیت می‌کند.
+  if (appIcon && typeof mainWindow.setIcon === 'function') {
+    try { mainWindow.setIcon(appIcon); } catch (_) {}
+  }
 
   // مرحله ۱ ـ بخش الف: هندلرِ ایمنِ did-fail-load.
   // قبلاً اگر سرورِ توسعه (Vite) بالا نبود، فقط صفحهٔ سفیدِ
@@ -693,10 +797,16 @@ function createWindow() {
   // قبلی. پیش از این، همیشه localhost لود می‌شد و نسخهٔ
   // بسته‌بندی‌شده، صفحهٔ سفید نشان می‌داد.
   if (app.isPackaged) {
-    mainWindow.loadFile(path.join(app.getAppPath(), 'dist', 'index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../dist', 'index.html'));
   } else {
     mainWindow.loadURL('http://localhost:5173');
   }
+}
+
+// مرحلهٔ ۵۵ ـ بخش ۱: شناسهٔ مدلِ کاربرِ ویندوز، پیش از آماده‌شدنِ
+// برنامه؛ تا آیکون و پینِ تسک‌بار، درست به همین برنامه بچسبد.
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.pandareader.app');
 }
 
 app.whenReady().then(() => {
@@ -952,6 +1062,8 @@ app.whenReady().then(() => {
 
   require('./ipcHandlers')(app);
   createWindow();
+  // مرحلهٔ ۵۵ §۲ (m2): سیم‌کشیِ رویدادهای به‌روزرسان پس از ساختِ پنجره.
+  setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

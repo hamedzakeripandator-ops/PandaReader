@@ -176,6 +176,63 @@ export const coreApi = {
       return { success: false, error: err?.message || 'خطا در دریافتِ اطلاعاتِ برنامه' };
     }
   },
+  // مرحلهٔ ۵۵ §۲ (m2): به‌روزرسانیِ خودکار از گیت‌هاب.
+  // الگو، همان getAppInfo است: گاردِ api?.، تایم‌اوتِ مرسوم و
+  // پاسخِ { success: false } وقتی API در دسترس نیست. دانلود و
+  // نصب، عمداً بدونِ withTimeout اند: دانلود دقیقه‌ها طول می‌کشد
+  // و پیشرفتش با رویداد می‌آید، و quitAndInstall برنامه را خارج
+  // می‌کند (همان استدلالِ exportAnnotatedPdf برای دیالوگ‌دارها).
+  getAppVersion: async () => {
+    const api = getApi();
+    if (!api?.getAppVersion) return { version: '', isPackaged: false };
+    try {
+      return await withTimeout(api.getAppVersion(), 5000, { version: '', isPackaged: false });
+    } catch (err) {
+      return { version: '', isPackaged: false };
+    }
+  },
+
+  checkForUpdates: async () => {
+    const api = getApi();
+    if (!api?.checkForUpdates) return { success: false, status: 'error', version: '', message: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await withTimeout(api.checkForUpdates(), 60000, { success: false, status: 'error', version: '', message: 'مهلت زمانی بررسیِ به‌روزرسانی به پایان رسید.' });
+    } catch (err) {
+      return { success: false, status: 'error', version: '', message: err?.message || 'خطا در بررسیِ به‌روزرسانی' };
+    }
+  },
+
+  downloadUpdate: async () => {
+    const api = getApi();
+    if (!api?.downloadUpdate) return { success: false, status: 'dev-mode', version: '', message: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.downloadUpdate();
+    } catch (err) {
+      return { success: false, status: 'error', version: '', message: err?.message || 'خطا در دانلودِ به‌روزرسانی' };
+    }
+  },
+
+  quitAndInstallUpdate: async () => {
+    const api = getApi();
+    if (!api?.quitAndInstallUpdate) return { success: false, status: 'dev-mode', version: '', message: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.quitAndInstallUpdate();
+    } catch (err) {
+      return { success: false, status: 'error', version: '', message: err?.message || 'خطا در نصبِ به‌روزرسانی' };
+    }
+  },
+
+  // مرحلهٔ ۵۵ §۲ (m2): وضعیتِ زندهٔ به‌روزرسانی. تابعِ لغوِ اشتراک
+  // را برمی‌گرداند (الگوی onPdfCopyProgress در همین فایل).
+  onUpdateStatus: (callback) => {
+    const api = getApi();
+    if (!api?.onUpdateStatus) return () => {};
+    try {
+      return api.onUpdateStatus(callback) || (() => {});
+    } catch (_) {
+      return () => {};
+    }
+  },
 
   showItemInFolder: async (filePath) => {
     const api = getApi();

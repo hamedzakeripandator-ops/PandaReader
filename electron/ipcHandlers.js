@@ -31,6 +31,21 @@ function getIpcLogger() {
 // (Portable: COMIC_READER_DATA_DIR) تا با حالتِ Portable هم‌خوان
 // باشد؛ فایل‌ها با کلیدِ هشِ محتوا نام‌گذاری می‌شوند و هرگز روی
 // فایلِ اصلی نوشته نمی‌شوند.
+// مرحلهٔ ۵۵ ـ بخش ۱: مسیرِ ورکر در حالتِ بسته‌بندی‌شده.
+// ورکرهای worker_threads نمی‌توانند از داخلِ app.asar اجرا شوند؛
+// electron-builder آن‌ها را در app.asar.unpacked می‌گذارد. پس اگر
+// همان مسیر با app.asar.unpacked روی دیسک بود، آن برگردانده
+// می‌شود؛ وگرنه همان مسیرِ معمولِ __dirname (حالتِ توسعه).
+function resolveUnpackedWorkerPath(packagedPath) {
+  try {
+    if (typeof packagedPath === 'string' && packagedPath.indexOf('app.asar') !== -1) {
+      const unpackedPath = packagedPath.replace('app.asar', 'app.asar.unpacked');
+      if (fs.existsSync(unpackedPath)) return unpackedPath;
+    }
+  } catch (_) {}
+  return packagedPath;
+}
+
 function getProtectedCacheDir() {
   try {
     const base = (ipcApp && ipcApp.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (ipcApp && typeof ipcApp.getPath === 'function' ? ipcApp.getPath('userData') : '');
@@ -83,7 +98,7 @@ async function renamePdfCopyTempWithRetries(tmpPath, targetPath) {
 }
 
 function runPdfCopyWorker({ kind, filePath, tempPath, sender, timeoutMs, password, cacheDir }) {
-  const workerPath = path.join(__dirname, 'workers', 'pdfCopyWorker.js');
+  const workerPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'pdfCopyWorker.js'));
   let worker;
   try {
     worker = new Worker(workerPath);
@@ -170,7 +185,7 @@ function runPdfCopyWorker({ kind, filePath, tempPath, sender, timeoutMs, passwor
 // نمی‌شود تا دکمهٔ «لغوِ ساختِ کپی» نتواند آن را بکشد؛ در صورتِ خطایِ
 // ساختِ ورکر، خطایِ ورکر یا تایم‌اوت، فراخواننده به اجرایِ مستقیم برمی‌گردد.
 function runAnnotatedExportWorker({ pdfPath, pages, outputPath, mode, password, dataDir, sender, timeoutMs }) {
-  const workerPath = path.join(__dirname, 'workers', 'pdfCopyWorker.js');
+  const workerPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'pdfCopyWorker.js'));
   let worker;
   try {
     worker = new Worker(workerPath);
@@ -370,7 +385,7 @@ const pendingDbCallbacks = new Map();
 function ensurePersistentDbWorker() {
   if (persistentDbWorker) return persistentDbWorker;
 
-  const workerPath = path.join(__dirname, 'workers', 'database.js');
+  const workerPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'database.js'));
   if (!fs.existsSync(workerPath)) return null;
 
   try {
@@ -1192,7 +1207,7 @@ module.exports = function(app) {
       }
 
       // ۳. فایل‌های فشرده آرشیو (ZIP, CBZ, RAR, CBR)
-      const extractorPath = path.join(__dirname, 'workers', 'fileExtractor.js');
+      const extractorPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'fileExtractor.js'));
       if (!fs.existsSync(extractorPath)) {
         resolve({ success: false, error: 'ماژول استخراج فایل یافت نشد.' });
         return;
@@ -1458,7 +1473,7 @@ module.exports = function(app) {
         }
       }
 
-      const extractorPath = path.join(__dirname, 'workers', 'fileExtractor.js');
+      const extractorPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'fileExtractor.js'));
       if (!fs.existsSync(extractorPath)) {
         return { success: false, error: 'ماژول استخراج فایل یافت نشد' };
       }
@@ -2889,6 +2904,111 @@ function getEpubService() {
     }
   });
 
+  // ==========================================================================
+  // مرحلهٔ ۵۵ §۲ (m2): به‌روزرسانیِ خودکار از گیت‌هاب (electron-updater).
+  // موتور، در main.js با require امن خوانده شده و روی app.autoUpdater
+  // گذاشته شده است؛ این‌جا همان نمونه خوانده می‌شود و هیچ require
+  // دومی نیست. اگر موتور نباشد یا برنامه بسته‌بندی‌شده نباشد، هر
+  // چهار کانال، پاسخِ تمیزِ حالتِ توسعه برمی‌گردانند و هرگز throw
+  // نمی‌کنند. فلاشِ دیتابیس پیش از نصب، همان flushAndTerminateDbWorker
+  // موجود است (FLUSH_SYNC + ACK یا تایم‌اوتِ ۲۵۰۰ میلی‌ثانیه)؛
+  // مسیرِ فلاشِ دومی ساخته نشده است. توجه: flushAndTerminateDbWorker
+  // پایین‌تر در همین اسکوپ، function declaration است و hoist می‌شود،
+  // پس صدا زدنِ آن از این هندلرها درست است.
+  // ==========================================================================
+
+  // خواندنِ موتورِ به‌روزرسان از روی app (null وقتی نصب نشده است).
+  function getAppAutoUpdater() {
+    try { return (app && app.autoUpdater) || null; } catch (_) { return null; }
+  }
+
+  // نسخهٔ برنامه، بدونِ throw (برای پاسخ‌های حالتِ توسعه).
+  function getUpdaterAppVersion() {
+    try { return app.getVersion(); } catch (_) { return ''; }
+  }
+
+  // پیامِ یکتای حالتِ توسعه برای بررسیِ به‌روزرسانی (متنِ دقیقِ پرامپت).
+  const DEV_MODE_CHECK_MESSAGE = 'بررسی خودکار بروزرسانی در نسخهٔ نصبی (Installer) فعال است.';
+
+  ipcMain.handle('get-app-version', async () => {
+    return { version: getUpdaterAppVersion(), isPackaged: Boolean(app && app.isPackaged) };
+  });
+
+  ipcMain.handle('check-for-updates', async () => {
+    const version = getUpdaterAppVersion();
+    if (!app || !app.isPackaged) {
+      return { success: true, status: 'dev-mode', version, message: DEV_MODE_CHECK_MESSAGE };
+    }
+    const updater = getAppAutoUpdater();
+    if (!updater || typeof updater.checkForUpdates !== 'function') {
+      return { success: true, status: 'dev-mode', version, message: 'موتورِ به‌روزرسانی در این نصب در دسترس نیست.' };
+    }
+    try {
+      const result = await updater.checkForUpdates();
+      const info = result && result.updateInfo ? result.updateInfo : null;
+      // وضعیت، فقط «بررسی انجام شد» است: در دسترس بودنِ نسخهٔ تازه،
+      // با رویدادهای update-available / update-not-available می‌آید،
+      // چون نتیجهٔ checkForUpdates پرچمِ قابلِ اعتمادی برای آن ندارد.
+      return {
+        success: true,
+        status: 'checked',
+        version,
+        updateInfo: info ? { version: info.version || '', releaseDate: info.releaseDate || '' } : null,
+      };
+    } catch (err) {
+      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در بررسیِ به‌روزرسانی') };
+    }
+  });
+
+  ipcMain.handle('download-update', async () => {
+    const version = getUpdaterAppVersion();
+    if (!app || !app.isPackaged) {
+      return { success: false, status: 'dev-mode', version, message: 'دانلودِ به‌روزرسانی فقط در نسخهٔ نصبی (Installer) انجام می‌شود.' };
+    }
+    const updater = getAppAutoUpdater();
+    if (!updater || typeof updater.downloadUpdate !== 'function') {
+      return { success: false, status: 'dev-mode', version, message: 'موتورِ به‌روزرسانی در این نصب در دسترس نیست.' };
+    }
+    try {
+      // دانلود، آغاز می‌شود و نتیجه برنمی‌گردد: پیشرفت و پایان،
+      // با رویدادهای download-progress و update-downloaded می‌آیند.
+      // await نمی‌شود تا invoke، دقیقه‌ها باز نماند.
+      const started = updater.downloadUpdate();
+      if (started && typeof started.catch === 'function') {
+        started.catch((err) => {
+          try { const lg = getIpcLogger(); if (lg) lg.error('download-update failed', err); } catch (_) {}
+        });
+      }
+      return { success: true, status: 'downloading', version };
+    } catch (err) {
+      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در دانلودِ به‌روزرسانی') };
+    }
+  });
+
+  ipcMain.handle('quit-and-install-update', async () => {
+    const version = getUpdaterAppVersion();
+    if (!app || !app.isPackaged) {
+      return { success: false, status: 'dev-mode', version, message: 'نصبِ به‌روزرسانی فقط در نسخهٔ نصبی (Installer) انجام می‌شود.' };
+    }
+    const updater = getAppAutoUpdater();
+    if (!updater || typeof updater.quitAndInstall !== 'function') {
+      return { success: false, status: 'dev-mode', version, message: 'موتورِ به‌روزرسانی در این نصب در دسترس نیست.' };
+    }
+    try {
+      // اول: فلاشِ دیتابیس با همان handshake موجود (FLUSH_SYNC +
+      // ACK یا تایم‌اوت) تا هیچ نوشتنِ معلقی، پیش از خروج نماند.
+      // این تابع، ورکر را هم خاتمه می‌دهد؛ چون برنامه بلافاصله
+      // برای نصب، خارج می‌شود، این پایانِ تمیز است، نه قطعِ کار.
+      await flushAndTerminateDbWorker();
+    } catch (_) { /* ignore */ }
+    try { quitAfterFlush = true; } catch (_) {}
+    try {
+      updater.quitAndInstall(false, true);
+    } catch (err) {
+      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در نصبِ به‌روزرسانی') };
+    }
+    return { success: true, status: 'installing', version };
+  });
 
   // ==========================================================================
   // مرحله ۱۰: مدیریتِ حافظه، پاک‌سازی و تغییرِ محلِ ذخیرهٔ داده.

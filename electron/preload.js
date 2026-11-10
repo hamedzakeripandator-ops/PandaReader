@@ -284,6 +284,15 @@ contextBridge.exposeInMainWorld('api', {
   // (نسخه، حالتِ بسته‌بندی/Portable، اندازهٔ دیتابیس و لاگ، تعدادِ کاورها).
   getAppInfo: () => ipcRenderer.invoke('get-app-info'),
 
+  // مرحلهٔ ۵۵ §۲ (m2): به‌روزرسانیِ خودکار از گیت‌هاب.
+  // هر چهار فراخوانی، بدونِ payload می‌روند؛ قراردادِ payload با
+  // ipcHandlers یکی است (هیچ آرگومانی ندارد) و پاسخ‌ها، همان
+  // شکل‌های { success, status, version, message } اند.
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  quitAndInstallUpdate: () => ipcRenderer.invoke('quit-and-install-update'),
+
   // شنونده پیشرفت استخراج بدون نشت حافظه
   onExtractionProgress: (callback) => {
     if (typeof callback !== 'function') return () => {};
@@ -324,6 +333,29 @@ contextBridge.exposeInMainWorld('api', {
     return () => {
       try {
         ipcRenderer.removeListener('pdf-copy-progress', subscription);
+      } catch (_) {}
+    };
+  },
+
+  // مرحلهٔ ۵۵ §۲ (m2): وضعیتِ زندهٔ به‌روزرسانی (درصدِ دانلود و
+  // تغییرِ وضعیت). الگو، همان onExtractionProgress است: اشتراک +
+  // تابعِ لغوِ اشتراک، بدونِ نشتِ شنونده.
+  onUpdateStatus: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+
+    const subscription = (event, payload) => {
+      try {
+        callback(payload);
+      } catch (err) {
+        console.error('Update status listener error:', err);
+      }
+    };
+
+    ipcRenderer.on('app-update-status', subscription);
+
+    return () => {
+      try {
+        ipcRenderer.removeListener('app-update-status', subscription);
       } catch (_) {}
     };
   },

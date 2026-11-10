@@ -5,26 +5,56 @@
   },
   "author": "",
   "build": {
-    "appId": "com.comicreader.app",
+    "appId": "com.pandareader.app",
     "asar": true,
     "directories": {
       "output": "dist-electron"
     },
     "extraResources": [
-      "bookmark-backgrounds"
+      "bookmark-backgrounds",
+      "build/icon.ico",
+      "build/icon.png"
     ],
     "files": [
       "dist/**/*",
       "electron/**/*",
+      "build/**/*",
       "package.json"
     ],
-    "productName": "my-comic-reader",
+    "productName": "PandaReader",
     "win": {
-      "arch": [
-        "x64"
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
-      "target": "nsis"
-    }
+      "icon": "build/icon.ico"
+    },
+    "asarUnpack": [
+      "**/*.node",
+      "**/node_modules/better-sqlite3/**/*",
+      "**/node_modules/@neslinesli93/qpdf-wasm/**/*",
+      "electron/workers/**/*"
+    ],
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PandaReader",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "hamedzakeripandator-ops",
+        "repo": "PandaReader"
+      }
+    ]
   },
   "dependencies": {
     "@neslinesli93/qpdf-wasm": "^0.3.0",
@@ -55,13 +85,15 @@
   "keywords": [],
   "license": "ISC",
   "main": "electron/main.js",
-  "name": "my-comic-reader",
+  "name": "pandareader",
+  "productName": "PandaReader",
   "private": true,
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "dist": "npm run build && electron-builder",
-    "electron": "electron ."
+    "dist": "vite build && electron-builder --win --x64",
+    "electron": "electron .",
+    "publish": "vite build && electron-builder --win --x64 --publish always"
   },
   "version": "1.0.0"
 }

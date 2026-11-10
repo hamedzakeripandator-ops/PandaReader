@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import useSettingsStore, { SCROLLBAR_PRESETS } from '../../store/useSettingsStore';
 import useReaderStore from '../../store/useReaderStore';
 import useAppStore from '../../store/useAppStore';
@@ -14,6 +14,163 @@ import annotationLocalBackup from '../../services/annotationLocalBackup';
 // (shortcuts) رندر می‌شوند؛ پس هر ورودیِ جدیدِ استور (مثلِ
 // undoAnnotation یا toggleLeftSidebar) خودبه‌خود این‌جا هم دیده
 // می‌شود و عنوان/دسته، فقط در یک جا تعریف شده است.
+
+
+// مرحلهٔ ۵۵ §۳: مرکزِ بروزرسانی (PandaReader Update Center) —
+// قراردادِ IPC (سمتِ main/preload، کارِ m2):
+//   کانال‌ها: 'get-app-version' ،'check-for-updates' ،'download-update' ،
+//   'quit-and-install-update' ،'app-update-status'.
+//   رپرهایِ موردِ انتظارِ coreApi: getAppVersion ،checkForUpdates ،
+//   downloadUpdate ،quitAndInstallUpdate ،onUpdateStatus.
+//   اگر رپرِ تازه هنوز در coreApi نباشد، این فایل از window.api یا
+//   getAppInfoِ موجود (کانالِ 'get-app-info') استفاده می‌کند و هرگز
+//   کرش نمی‌کند؛ پس ترتیبِ قرارگیریِ استیج‌ها مهم نیست.
+//   سه تابعِ زیر خالص‌اند (بدونِ وابستگی به React) تا ماشینِ وضعیت،
+//   در Node هم با coreApiِ ساختگی تست شود.
+
+// مرحلهٔ ۵۵ §۳: نرمال‌سازیِ پاسخِ نسخه — رشتهٔ خالی، آبجکتِ
+// { version, isPackaged } یا { success, version, isPackaged }، همه به
+// یک شکل برمی‌گردند. isPackaged فقط وقتی معتبر است که main آن را
+// واقعاً گفته باشد (envKnown)؛ وگرنه محیط «نامشخص» است و دکمه‌ها
+// غیرفعال نمی‌شوند.
+export function normalizeAppVersionInfo(raw) {
+  if (typeof raw === 'string') {
+    return { version: raw.trim(), isPackaged: false, envKnown: false };
+  }
+  if (raw && typeof raw === 'object') {
+    const version = typeof raw.version === 'string' ? raw.version.trim() : '';
+    const packaged = typeof raw.isPackaged === 'boolean'
+      ? raw.isPackaged
+      : (typeof raw.packaged === 'boolean' ? raw.packaged : null);
+    return {
+      version,
+      isPackaged: packaged === true,
+      envKnown: packaged !== null,
+    };
+  }
+  return { version: '', isPackaged: false, envKnown: false };
+}
+
+// مرحلهٔ ۵۵ §۳: برداشتنِ رپرهایِ آپدیت از coreApi؛ اگر رپری نبود،
+// window.apiِ مستقیم هم دیده می‌شود. هر رپرِ پیدا نشده، null است و
+// فراخواننده باید مسیرِ جایگزین (fallback) را برود، نه این‌که کرش کند.
+export function resolveUpdateApi(api) {
+  const winApi = (typeof window !== 'undefined' && window.api) || null;
+  const pick = (...fns) => {
+    for (let i = 0; i < fns.length; i++) {
+      if (typeof fns[i] === 'function') return fns[i];
+    }
+    return null;
+  };
+  return {
+    getAppVersion: pick(api && api.getAppVersion, winApi && winApi.getAppVersion),
+    getAppInfo: pick(api && api.getAppInfo, winApi && winApi.getAppInfo),
+    checkForUpdates: pick(api && api.checkForUpdates, winApi && winApi.checkForUpdates),
+    downloadUpdate: pick(api && api.downloadUpdate, winApi && winApi.downloadUpdate),
+    quitAndInstallUpdate: pick(api && api.quitAndInstallUpdate, winApi && winApi.quitAndInstallUpdate),
+    onUpdateStatus: pick(api && api.onUpdateStatus, winApi && winApi.onUpdateStatus),
+  };
+}
+
+// مرحلهٔ ۵۵ §۳: رویدادِ خامِ کانالِ 'app-update-status' را به یک شکلِ
+// واحد برمی‌گرداند: { kind, version, percent, message }.
+// kindها: 'checking' | 'available' | 'not-available' |
+// 'downloading' | 'downloaded' | 'error' | 'unknown'.
+// هم رشته ('update-available') و هم آبجکت ({ type/status/event })
+// قبول است، چون شکلِ دقیقِ payload دستِ main است (m2).
+export function normalizeUpdateEvent(raw) {
+  const empty = { kind: 'unknown', version: '', percent: 0, message: '' };
+  if (typeof raw === 'string') {
+    const key = raw.trim().toLowerCase().replace(/_/g, '-');
+    if (key === 'checking' || key === 'checking-for-update') return { ...empty, kind: 'checking' };
+    if (key === 'update-available' || key === 'available') return { ...empty, kind: 'available' };
+    if (key === 'update-not-available' || key === 'not-available' || key === 'up-to-date') return { ...empty, kind: 'not-available' };
+    if (key === 'download-progress' || key === 'downloading') return { ...empty, kind: 'downloading', percent: 0 };
+    if (key === 'update-downloaded' || key === 'downloaded') return { ...empty, kind: 'downloaded', percent: 100 };
+    if (key === 'error') return { ...empty, kind: 'error' };
+    return empty;
+  }
+  if (raw && typeof raw === 'object') {
+    const keyRaw = raw.type || raw.status || raw.event || raw.kind || '';
+    const key = String(keyRaw).trim().toLowerCase().replace(/_/g, '-');
+    const version = typeof raw.version === 'string'
+      ? raw.version
+      : (raw.info && typeof raw.info.version === 'string'
+        ? raw.info.version
+        : (raw.updateInfo && typeof raw.updateInfo.version === 'string' ? raw.updateInfo.version : ''));
+    let percent = 0;
+    if (typeof raw.percent === 'number') percent = raw.percent;
+    else if (typeof raw.progress === 'number') percent = raw.progress;
+    else if (typeof raw.percentComplete === 'number') percent = raw.percentComplete;
+    else if (typeof raw.transferred === 'number' && typeof raw.total === 'number' && raw.total > 0) {
+      percent = (raw.transferred / raw.total) * 100;
+    }
+    const message = typeof raw.message === 'string'
+      ? raw.message
+      : (typeof raw.error === 'string' ? raw.error : '');
+    if (key === 'checking' || key === 'checking-for-update') return { kind: 'checking', version, percent: 0, message };
+    if (key === 'update-available' || key === 'available') return { kind: 'available', version, percent: 0, message };
+    if (key === 'update-not-available' || key === 'not-available' || key === 'up-to-date') return { kind: 'not-available', version, percent: 0, message };
+    if (key === 'download-progress' || key === 'downloading') return { kind: 'downloading', version, percent, message };
+    if (key === 'update-downloaded' || key === 'downloaded') return { kind: 'downloaded', version, percent: 100, message };
+    if (key === 'error') return { kind: 'error', version, percent: 0, message };
+    return empty;
+  }
+  return empty;
+}
+
+// مرحلهٔ ۵۵ §۳: نرمال‌سازیِ نتیجهٔ مستقیمِ checkForUpdates —
+// main ممکن است { updateAvailable, version } برگرداند یا فقط رویداد
+// بفرستد. updateAvailable === null یعنی «نتیجهٔ مستقیم نیست؛ منتظرِ
+// رویداد بمان».
+export function normalizeUpdateResult(result) {
+  if (typeof result === 'boolean') return { updateAvailable: result, version: '' };
+  if (result && typeof result === 'object') {
+    const flag = (typeof result.updateAvailable === 'boolean')
+      ? result.updateAvailable
+      : (typeof result.available === 'boolean'
+        ? result.available
+        : (typeof result.hasUpdate === 'boolean' ? result.hasUpdate : null));
+    const version = typeof result.version === 'string'
+      ? result.version
+      : (result.info && typeof result.info.version === 'string'
+        ? result.info.version
+        : (result.updateInfo && typeof result.updateInfo.version === 'string' ? result.updateInfo.version : ''));
+    return { updateAvailable: flag, version };
+  }
+  return { updateAvailable: null, version: '' };
+}
+
+// مرحلهٔ ۵۵ §۳: ماشینِ وضعیتِ کارتِ بروزرسانی — تابعِ خالص.
+// وضعیت‌ها: 'idle' | 'checking' | 'up-to-date' | 'available' |
+// 'downloading' | 'downloaded' | 'error'.
+// رشته‌هایِ دقیقِ پرامپت، فقط این‌جا تعریف شده‌اند:
+//   checking: «در حال بررسی ارتباط با گیت‌هاب...»
+//   up-to-date: «نرم‌افزار شما به آخرین نسخه بروز است.»
+export function mapUpdateEventToState(prev, event) {
+  const base = prev || { status: 'idle', version: '', progress: 0, message: '' };
+  const ev = normalizeUpdateEvent(event);
+  if (ev.kind === 'checking') {
+    return { ...base, status: 'checking', progress: 0, message: 'در حال بررسی ارتباط با گیت‌هاب...' };
+  }
+  if (ev.kind === 'available') {
+    return { ...base, status: 'available', version: ev.version || base.version, progress: 0, message: '' };
+  }
+  if (ev.kind === 'not-available') {
+    return { ...base, status: 'up-to-date', progress: 0, message: 'نرم‌افزار شما به آخرین نسخه بروز است.' };
+  }
+  if (ev.kind === 'downloading') {
+    const pct = Number.isFinite(ev.percent) ? Math.max(0, Math.min(100, ev.percent)) : 0;
+    return { ...base, status: 'downloading', progress: pct, message: '' };
+  }
+  if (ev.kind === 'downloaded') {
+    return { ...base, status: 'downloaded', progress: 100, message: '' };
+  }
+  if (ev.kind === 'error') {
+    return { ...base, status: 'error', message: ev.message || 'بررسی بروزرسانی انجام نشد؛ اتصال اینترنت را بررسی کنید.' };
+  }
+  return base;
+}
 
 export default function SettingsView() {
   // مرحلهٔ ۴۴ §۵ (OPT-02): اشتراکِ هدفمندِ استورها — هر کلید با
@@ -75,6 +232,82 @@ export default function SettingsView() {
     } catch (_) {}
     return null;
   });
+
+  // مرحلهٔ ۵۵ §۳: مرکزِ بروزرسانی — نسخهٔ فعلی + وضعیتِ بررسی/
+  // دانلود/نصب. همهٔ هوک‌هایِ این کارت این‌جا، بالایِ کامپوننت و
+  // پیش از هر returnِ شرطی‌اند (در این کامپوننت، returnِ شرطیِ
+  // زودهنگام نیست؛ ترتیبِ هوک‌ها همیشه ثابت است).
+  const [updateInfo, setUpdateInfo] = useState({ version: '', isPackaged: false, envKnown: false, loaded: false });
+  const [updateState, setUpdateState] = useState({ status: 'idle', version: '', progress: 0, message: '' });
+  const updateUnsubscribeRef = useRef(null);
+  const updateCheckTimeoutRef = useRef(null);
+  const updateMountedRef = useRef(true);
+
+  // مرحلهٔ ۵۵ §۳: پاک‌کردنِ نگهبانِ ۳۰ ثانیه‌ای (اگر تایمری نباشد،
+  // هیچ کاری نمی‌کند).
+  const clearUpdateCheckTimeout = () => {
+    if (updateCheckTimeoutRef.current) {
+      clearTimeout(updateCheckTimeoutRef.current);
+      updateCheckTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    updateMountedRef.current = true;
+    const api = resolveUpdateApi(coreApi);
+    let cancelled = false;
+    // ۱) خواندنِ نسخهٔ فعلی + محیط (نصبی/توسعه) — اول از کانالِ
+    // تازهٔ 'get-app-version'، و اگر نبود یا خطا داد، از getAppInfoِ
+    // موجود (کانالِ 'get-app-info' که version و isPackaged می‌دهد).
+    // هر دو مسیر که نباشند، کارت با نسخهٔ خالی و محیطِ «نامشخص»
+    // رندر می‌شود و کرش نمی‌کند.
+    const loadVersion = async () => {
+      let info = { version: '', isPackaged: false, envKnown: false };
+      try {
+        if (api.getAppVersion) info = normalizeAppVersionInfo(await api.getAppVersion());
+      } catch (_) {
+        info = { version: '', isPackaged: false, envKnown: false };
+      }
+      if (!info.version && !info.envKnown && api.getAppInfo) {
+        try {
+          info = normalizeAppVersionInfo(await api.getAppInfo());
+        } catch (_) {}
+      }
+      if (!cancelled && updateMountedRef.current) {
+        setUpdateInfo({
+          version: info.version || '',
+          isPackaged: Boolean(info.isPackaged),
+          envKnown: Boolean(info.envKnown),
+          loaded: true,
+        });
+      }
+    };
+    loadVersion();
+    // ۲) اشتراکِ رویدادهایِ زندهٔ آپدیت (کانالِ 'app-update-status').
+    // onUpdateStatus تابعِ لغوِ اشتراک برمی‌گرداند؛ در cleanup صدا
+    // زده می‌شود تا شنونده نشت نکند (الگویِ onPdfCopyProgress).
+    try {
+      if (api.onUpdateStatus) {
+        const off = api.onUpdateStatus((rawEvent) => {
+          if (!updateMountedRef.current) return;
+          clearUpdateCheckTimeout();
+          setUpdateState((prev) => mapUpdateEventToState(prev, rawEvent));
+        });
+        updateUnsubscribeRef.current = typeof off === 'function' ? off : null;
+      }
+    } catch (_) {
+      updateUnsubscribeRef.current = null;
+    }
+    return () => {
+      cancelled = true;
+      updateMountedRef.current = false;
+      clearUpdateCheckTimeout();
+      try {
+        if (updateUnsubscribeRef.current) updateUnsubscribeRef.current();
+      } catch (_) {}
+      updateUnsubscribeRef.current = null;
+    };
+  }, []);
 
   const handleExportBackup = async () => {
     if (backupBusy) return;
@@ -138,6 +371,90 @@ export default function SettingsView() {
       // زودتر اجرا می‌شود و دکمه را آزاد می‌کند تا کاربر، وضعیتِ
       // موفقیت را ببیند.
       setBackupBusy(null);
+    }
+  };
+
+  // مرحلهٔ ۵۵ §۳: نگهبانِ ۳۰ ثانیه‌ای — اگر main نه رویداد فرستاد و
+  // نه جواب داد، کارت در «در حال بررسی…» گیر نمی‌کند و خطایِ
+  // اتصال نشان می‌دهد.
+  const armUpdateCheckTimeout = () => {
+    clearUpdateCheckTimeout();
+    updateCheckTimeoutRef.current = setTimeout(() => {
+      if (!updateMountedRef.current) return;
+      setUpdateState((prev) => (prev.status === 'checking'
+        ? { ...prev, status: 'error', message: 'پاسخی از گیت‌هاب نرسید؛ اتصال اینترنت را بررسی کنید و دوباره تلاش کنید.' }
+        : prev));
+    }, 30000);
+  };
+
+  // مرحلهٔ ۵۵ §۳: حالتِ توسعه فقط وقتی قطعی است که main، isPackaged
+  // را واقعاً گفته باشد (envKnown). اگر محیط نامشخص باشد، دکمه‌ها
+  // فعال می‌مانند تا main جواب بدهد؛ در نسخهٔ نصبی، هرگز به‌اشتباه
+  // غیرفعال نمی‌شوند.
+  const isDevUpdateMode = updateInfo.loaded && updateInfo.envKnown && !updateInfo.isPackaged;
+
+  // مرحلهٔ ۵۵ §۳: بررسیِ بروزرسانی جدید از گیت‌هاب.
+  const handleCheckForUpdates = async () => {
+    if (isDevUpdateMode) return;
+    const api = resolveUpdateApi(coreApi);
+    if (!api.checkForUpdates) {
+      setUpdateState({ status: 'error', version: '', progress: 0, message: 'سرویسِ بروزرسانی در این نسخه در دسترس نیست.' });
+      return;
+    }
+    setUpdateState((prev) => ({ ...prev, status: 'checking', progress: 0, message: 'در حال بررسی ارتباط با گیت‌هاب...' }));
+    armUpdateCheckTimeout();
+    try {
+      const result = await api.checkForUpdates();
+      if (!updateMountedRef.current) return;
+      // main ممکن است نتیجه را مستقیم برگرداند ({ updateAvailable,
+      // version }) یا فقط رویداد بفرستد؛ هر دو مسیر پوشش داده شده
+      // است. اگر نتیجهٔ مستقیم نبود، وضعیتِ 'checking' می‌ماند تا
+      // رویداد برسد (نگهبانِ ۳۰ ثانیه‌ای، گیرکردن را می‌گیرد).
+      const norm = normalizeUpdateResult(result);
+      if (norm.updateAvailable === true) {
+        clearUpdateCheckTimeout();
+        setUpdateState((prev) => mapUpdateEventToState(prev, { type: 'update-available', version: norm.version }));
+      } else if (norm.updateAvailable === false) {
+        clearUpdateCheckTimeout();
+        setUpdateState((prev) => mapUpdateEventToState(prev, { type: 'update-not-available' }));
+      }
+    } catch (err) {
+      if (!updateMountedRef.current) return;
+      clearUpdateCheckTimeout();
+      setUpdateState((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+    }
+  };
+
+  // مرحلهٔ ۵۵ §۳: دانلودِ نسخهٔ جدید. تکمیلِ دانلود با رویدادِ
+  // 'update-downloaded' می‌رسد و دکمهٔ «نصب و راه‌اندازی مجدد» را
+  // روشن می‌کند؛ پیشرفت با رویدادِ 'download-progress' می‌رسد.
+  const handleDownloadUpdate = async () => {
+    if (isDevUpdateMode) return;
+    const api = resolveUpdateApi(coreApi);
+    if (!api.downloadUpdate) {
+      setUpdateState((prev) => ({ ...prev, status: 'error', message: 'سرویسِ دانلودِ بروزرسانی در این نسخه در دسترس نیست.' }));
+      return;
+    }
+    setUpdateState((prev) => ({ ...prev, status: 'downloading', progress: 0, message: '' }));
+    try {
+      await api.downloadUpdate();
+    } catch (err) {
+      if (!updateMountedRef.current) return;
+      setUpdateState((prev) => ({ ...prev, status: 'error', message: 'دانلودِ بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+    }
+  };
+
+  // مرحلهٔ ۵۵ §۳: نصبِ نسخهٔ دانلودشده و راه‌اندازیِ مجددِ برنامه.
+  const handleQuitAndInstallUpdate = async () => {
+    const api = resolveUpdateApi(coreApi);
+    if (!api.quitAndInstallUpdate) {
+      showToast('سرویسِ نصبِ بروزرسانی در این نسخه در دسترس نیست.', { type: 'error' });
+      return;
+    }
+    try {
+      await api.quitAndInstallUpdate();
+    } catch (err) {
+      showToast('نصب و راه‌اندازیِ مجدد انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص'), { type: 'error' });
     }
   };
 
@@ -1057,6 +1374,102 @@ export default function SettingsView() {
           </div>
         )}
       </div>
+
+      {/* مرحلهٔ ۵۵ §۳: کارتِ «نسخه و بروزرسانی نرم‌افزار» — همیشه زیرِ
+          تب‌ها دیده می‌شود (مثلِ کارتِ پشتیبان‌گیری)، چون به هیچ تبِ
+          خاصی تعلق ندارد. در حالتِ توسعه، دکمهٔ بررسی غیرفعال است و
+          کارت هرگز کرش نمی‌کند. آیکون‌ها از Iconsِ موجودِ پروژه‌اند
+          (RefreshCw/Download)؛ هیچ ایموجی نیست. */}
+      <div style={styles.sectionCard}>
+        <div style={styles.cardTopRow}>
+          <div>
+            <h3 style={styles.cardTitle}>نسخه و بروزرسانی نرم‌افزار (PandaReader Update Center)</h3>
+            <p style={styles.cardDesc}>
+              نسخهٔ جدید را مستقیم از گیت‌هاب بررسی و دانلود کنید؛ نصبِ نسخهٔ جدید، برنامه را بسته و دوباره باز می‌کند.
+            </p>
+          </div>
+          <div style={styles.headerIcon}>
+            <Icons.Download size={22} />
+          </div>
+        </div>
+
+        <div style={styles.updateMetaRow}>
+          <span style={styles.updateVersionText}>
+            {updateInfo.loaded ? `PandaReader v${updateInfo.version || '1.0.0'}` : 'PandaReader'}
+          </span>
+          <span style={{ ...styles.updateEnvChip, ...(isDevUpdateMode ? styles.updateEnvChipDev : {}) }}>
+            {updateInfo.loaded ? (updateInfo.envKnown ? (updateInfo.isPackaged ? 'نسخهٔ نصبی' : 'نسخهٔ توسعه') : 'محیط نامشخص') : 'در حال خواندنِ نسخه…'}
+          </span>
+        </div>
+
+        {isDevUpdateMode && (
+          <p style={styles.cardDesc}>
+            در حالتِ توسعه، بررسیِ بروزرسانی غیرفعال است؛ بروزرسانی فقط در نسخهٔ نصبی (ساخته‌شده با electron-builder) کار می‌کند.
+          </p>
+        )}
+
+        <div style={styles.backupBtnRow}>
+          <button
+            type="button"
+            onClick={handleCheckForUpdates}
+            disabled={isDevUpdateMode || updateState.status === 'checking' || updateState.status === 'downloading'}
+            style={{ ...styles.backupBtn, ...((isDevUpdateMode || updateState.status === 'checking' || updateState.status === 'downloading') ? styles.backupBtnDisabled : {}) }}
+          >
+            <Icons.RefreshCw size={15} />
+            <span>{updateState.status === 'checking' ? 'در حال بررسی…' : 'بررسی بروزرسانی جدید از گیت‌هاب'}</span>
+          </button>
+
+          {updateState.status === 'available' && (
+            <button
+              type="button"
+              onClick={handleDownloadUpdate}
+              disabled={isDevUpdateMode}
+              style={styles.backupBtn}
+            >
+              <Icons.Download size={15} />
+              <span>دانلود بروزرسانی</span>
+            </button>
+          )}
+
+          {updateState.status === 'downloaded' && (
+            <button
+              type="button"
+              onClick={handleQuitAndInstallUpdate}
+              style={{ ...styles.backupBtn, ...styles.updateBtnPrimary }}
+            >
+              <Icons.RefreshCw size={15} />
+              <span>نصب و راه‌اندازی مجدد (Install & Restart)</span>
+            </button>
+          )}
+        </div>
+
+        {updateState.status === 'downloading' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={styles.updateProgressTrack}>
+              <div style={{ ...styles.updateProgressFill, width: `${Math.max(0, Math.min(100, updateState.progress || 0))}%` }} />
+            </div>
+            <span style={styles.updateProgressLabel}>{`در حال دانلود… ${Math.max(0, Math.min(100, Math.round(updateState.progress || 0)))}٪`}</span>
+          </div>
+        )}
+
+        {updateState.status !== 'idle' && updateState.status !== 'downloading' && (
+          <div style={styles.backupStatusRow}>
+            <span style={styles.backupStatus}>
+              {updateState.status === 'checking' && 'در حال بررسی ارتباط با گیت‌هاب...'}
+              {updateState.status === 'up-to-date' && 'نرم‌افزار شما به آخرین نسخه بروز است.'}
+              {updateState.status === 'available' && `نسخهٔ جدید ${updateState.version || ''} منتشر شده است؛ برای دریافت، «دانلود بروزرسانی» را بزنید.`}
+              {updateState.status === 'downloaded' && 'دانلود کامل شد؛ با «نصب و راه‌اندازی مجدد»، نسخهٔ جدید نصب می‌شود.'}
+              {updateState.status === 'error' && (updateState.message || 'بررسی بروزرسانی انجام نشد.')}
+            </span>
+          </div>
+        )}
+
+        {updateState.status === 'idle' && (
+          <div style={styles.backupStatusRow}>
+            <span style={styles.backupStatus}>برای بررسی نسخهٔ جدید، روی «بررسی بروزرسانی جدید از گیت‌هاب» بزنید.</span>
+          </div>
+        )}
+      </div>
       </div>
     </div>
   );
@@ -1557,5 +1970,55 @@ const styles = {
     alignItems: 'center',
     gap: '14px',
     flexWrap: 'wrap',
+  },
+  // مرحلهٔ ۵۵ §۳: استایل‌هایِ کارتِ بروزرسانی.
+  updateMetaRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  updateVersionText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '15px',
+    fontWeight: 800,
+    color: 'var(--text)',
+  },
+  updateEnvChip: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
+    fontWeight: 700,
+    color: '#0a0f13',
+    backgroundColor: 'var(--accent)',
+    padding: '3px 10px',
+    borderRadius: '999px',
+  },
+  updateEnvChipDev: {
+    color: 'var(--text)',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+  },
+  updateProgressTrack: {
+    height: '10px',
+    borderRadius: '999px',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    border: '1px solid var(--border)',
+    overflow: 'hidden',
+  },
+  updateProgressFill: {
+    height: '100%',
+    borderRadius: '999px',
+    backgroundColor: 'var(--accent)',
+    transition: 'width 0.2s ease',
+  },
+  updateProgressLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    color: 'var(--muted)',
+  },
+  updateBtnPrimary: {
+    backgroundColor: '#22c55e',
+    borderColor: '#22c55e',
+    color: '#06110a',
   },
 };
