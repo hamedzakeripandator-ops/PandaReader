@@ -2860,9 +2860,9 @@ function getEpubService() {
   // مرحله ۷ ـ بخش الف: اطلاعاتِ صادقانهٔ محیط برای صفحهٔ
   // دانلودها/به‌روزرسانی. هرگز throw نمی‌کند و هر فیلد، با
   // بهترین تلاش پر می‌شود؛ نبودِ یک فایل، صفر/خالی برمی‌گرداند،
-  // نه خطا. هیچ سرورِ به‌روزرسانی‌ای در کار نیست و این هندلر هم
-  // چیزی را چک نمی‌کند؛ فقط وضعیتِ فعلیِ همین نصب را گزارش
-  // می‌دهد.
+  // نه خطا. این هندلر، فقط وضعیتِ فعلیِ همین نصب را گزارش
+  // می‌دهد و چیزی را چک نمی‌کند؛ وضعیتِ زندهٔ گیت‌هاب (آخرین
+  // نسخه و یادداشتِ انتشار)، از هندلرِ check-for-updates می‌آید.
   ipcMain.handle('get-app-info', async () => {
     try {
       const dataDir = (app && app.comicDataDir) || process.env.COMIC_READER_DATA_DIR || '';
@@ -2905,16 +2905,21 @@ function getEpubService() {
   });
 
   // ==========================================================================
-  // مرحلهٔ ۵۵ §۲ (m2): به‌روزرسانیِ خودکار از گیت‌هاب (electron-updater).
-  // موتور، در main.js با require امن خوانده شده و روی app.autoUpdater
-  // گذاشته شده است؛ این‌جا همان نمونه خوانده می‌شود و هیچ require
-  // دومی نیست. اگر موتور نباشد یا برنامه بسته‌بندی‌شده نباشد، هر
-  // چهار کانال، پاسخِ تمیزِ حالتِ توسعه برمی‌گردانند و هرگز throw
-  // نمی‌کنند. فلاشِ دیتابیس پیش از نصب، همان flushAndTerminateDbWorker
-  // موجود است (FLUSH_SYNC + ACK یا تایم‌اوتِ ۲۵۰۰ میلی‌ثانیه)؛
-  // مسیرِ فلاشِ دومی ساخته نشده است. توجه: flushAndTerminateDbWorker
-  // پایین‌تر در همین اسکوپ، function declaration است و hoist می‌شود،
-  // پس صدا زدنِ آن از این هندلرها درست است.
+  // مرحلهٔ ۵۵ §۲ (m2) + مرحلهٔ ۵۷ §۳ (m3): به‌روزرسانیِ خودکار
+  // از گیت‌هاب. موتورِ electron-updater، در main.js با require امن
+  // خوانده شده و روی app.autoUpdater گذاشته شده است؛ این‌جا همان
+  // نمونه خوانده می‌شود و هیچ require دومی نیست. از مرحلهٔ ۵۷،
+  // بررسی، دوموتوره است: اول REST عمومیِ گیت‌هاب (بدونِ توکن،
+  // تایم‌اوتِ ۱۵ ثانیه) که نسخهٔ دقیق، یادداشتِ کامل و لینکِ
+  // مستقیمِ .exe را می‌دهد، و بعد — فقط در نسخهٔ نصبی — موتورِ
+  // electron-updater، تا مسیرِ نصبِ خودکار هم آماده باشد. در
+  // حالتِ Portable/توسعه هم، نسخهٔ تازه از REST دیده می‌شود و
+  // دانلودِ مستقیمِ .exe جایِ موتور را می‌گیرد. فلاشِ دیتابیس
+  // پیش از نصب، همان flushAndTerminateDbWorker موجود است
+  // (FLUSH_SYNC + ACK یا تایم‌اوتِ ۲۵۰۰ میلی‌ثانیه)؛ مسیرِ
+  // فلاشِ دومی ساخته نشده است. توجه: flushAndTerminateDbWorker
+  // پایین‌تر در همین اسکوپ، function declaration است و hoist
+  // می‌شود، پس صدا زدنِ آن از این هندلرها درست است.
   // ==========================================================================
 
   // خواندنِ موتورِ به‌روزرسان از روی app (null وقتی نصب نشده است).
@@ -2926,38 +2931,318 @@ function getEpubService() {
   function getUpdaterAppVersion() {
     try { return app.getVersion(); } catch (_) { return ''; }
   }
+  // مرحلهٔ ۵۷ §۳ (m3): موتورِ دومِ بروزرسانی — REST عمومیِ گیت‌هاب.
+  // مخزن، عمومی است؛ پس بررسیِ آخرین انتشار، بدونِ هیچ توکنی انجام
+  // می‌شود و این فایل، هیچ هدرِ احرازِ هویتی نمی‌سازد. تابع‌هایِ
+  // خالصِ این بخش (مقایسهٔ نسخه و تمیزکردنِ یادداشت‌ها)، همان معنایِ
+  // نسخه‌هایِ coreApi را دارند و با همان فیixtureها تست می‌شوند؛
+  // کپیِ آن‌ها در این‌جا عمدی است، چون پروسهٔ اصلی نمی‌تواند فایلِ
+  // رندرر (coreApi.js) را require کند.
+  const GITHUB_LATEST_RELEASE_URL = 'https://api.github.com/repos/hamedzakeripandator-ops/PandaReader/releases/latest';
+  const GITHUB_RELEASE_DOWNLOAD_PREFIX = '/hamedzakeripandator-ops/PandaReader/releases/download/';
+  const GITHUB_REST_TIMEOUT_MS = 15000;
+  const DIRECT_DOWNLOAD_INACTIVITY_TIMEOUT_MS = 120000;
+  const DIRECT_DOWNLOAD_MAX_REDIRECTS = 5;
 
-  // پیامِ یکتای حالتِ توسعه برای بررسیِ به‌روزرسانی (متنِ دقیقِ پرامپت).
-  const DEV_MODE_CHECK_MESSAGE = 'بررسی خودکار بروزرسانی در نسخهٔ نصبی (Installer) فعال است.';
+  function stripMainVersionPrefix(version) {
+    if (typeof version !== 'string') return '';
+    return version.trim().replace(/^[vV]/, '').trim();
+  }
+
+  function compareMainVersions(a, b) {
+    const splitParts = (v) => {
+      const noBuild = stripMainVersionPrefix(v).split('+')[0];
+      const dashAt = noBuild.indexOf('-');
+      const core = dashAt === -1 ? noBuild : noBuild.slice(0, dashAt);
+      const pre = dashAt === -1 ? '' : noBuild.slice(dashAt + 1);
+      const nums = core.split('.').map((part) => {
+        const n = parseInt(part, 10);
+        return Number.isFinite(n) ? n : 0;
+      });
+      return { nums, pre };
+    };
+    const left = splitParts(a);
+    const right = splitParts(b);
+    const len = Math.max(left.nums.length, right.nums.length);
+    for (let i = 0; i < len; i++) {
+      const l = left.nums[i] || 0;
+      const r = right.nums[i] || 0;
+      if (l > r) return 1;
+      if (l < r) return -1;
+    }
+    if (left.pre === right.pre) return 0;
+    if (!left.pre) return 1;
+    if (!right.pre) return -1;
+    if (left.pre < right.pre) return -1;
+    return 1;
+  }
+
+  function cleanMainReleaseNotes(body) {
+    if (typeof body !== 'string') return '';
+    let text = body.replace(/<br\s*\/?>/gi, '\n');
+    text = text.replace(/<[^>]*>/g, '');
+    text = text.replace(/&#(\d+);/g, (m, code) => {
+      const n = parseInt(code, 10);
+      if (!Number.isFinite(n) || n <= 0 || n > 0x10ffff) return '';
+      try { return String.fromCodePoint(n); } catch (_) { return ''; }
+    });
+    text = text.replace(/&#x([0-9a-fA-F]+);/g, (m, code) => {
+      const n = parseInt(code, 16);
+      if (!Number.isFinite(n) || n <= 0 || n > 0x10ffff) return '';
+      try { return String.fromCodePoint(n); } catch (_) { return ''; }
+    });
+    text = text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'");
+    const splitLines = text.split('\n').map((line) => line.replace(/[ \t]+$/, ''));
+    const out = [];
+    let blankRun = 0;
+    for (let i = 0; i < splitLines.length; i++) {
+      if (splitLines[i].trim() === '') {
+        blankRun += 1;
+        if (blankRun <= 1) out.push('');
+      } else {
+        blankRun = 0;
+        out.push(splitLines[i]);
+      }
+    }
+    while (out.length > 0 && out[0].trim() === '') out.shift();
+    while (out.length > 0 && out[out.length - 1].trim() === '') out.pop();
+    return out.join('\n');
+  }
+
+  // GET سادهٔ JSON رویِ https با تایم‌اوت؛ برایِ REST گیت‌هاب.
+  function httpsGetJson(requestUrl, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      };
+      let req = null;
+      try {
+        const parsed = new URL(requestUrl);
+        if (parsed.protocol !== 'https:') {
+          fail(new Error('آدرسِ گیت‌هاب معتبر نیست.'));
+          return;
+        }
+        const httpsMod = require('https');
+        req = httpsMod.get(requestUrl, {
+          headers: { 'User-Agent': 'PandaReader-App', Accept: 'application/vnd.github+json' },
+        }, (res) => {
+          const chunks = [];
+          res.on('data', (chunk) => { chunks.push(chunk); });
+          res.on('end', () => {
+            if (settled) return;
+            settled = true;
+            const text = Buffer.concat(chunks).toString('utf8');
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+              reject(new Error('گیت‌هاب، پاسخِ ' + res.statusCode + ' داد.'));
+              return;
+            }
+            try { resolve(JSON.parse(text)); } catch (_) { reject(new Error('پاسخِ گیت‌هاب، JSON معتبر نبود.')); }
+          });
+        });
+        req.on('error', fail);
+        req.setTimeout(timeoutMs, () => {
+          try { req.destroy(new Error('مهلتِ ۱۵ ثانیه‌ایِ تماس با گیت‌هاب گذشت.')); } catch (_) {}
+          fail(new Error('مهلتِ ۱۵ ثانیه‌ایِ تماس با گیت‌هاب گذشت.'));
+        });
+      } catch (err) { fail(err); }
+    });
+  }
+
+  // آخرین انتشارِ عمومی را می‌خواند و فقط فیلدهایِ لازم را
+  // برمی‌گرداند: نسخه، یادداشتِ تمیز، تاریخِ انتشار، لینکِ صفحه و
+  // لینکِ مستقیمِ فایلِ .exe. هیچ توکنی فرستاده نمی‌شود.
+  async function fetchLatestGithubRelease() {
+    const json = await httpsGetJson(GITHUB_LATEST_RELEASE_URL, GITHUB_REST_TIMEOUT_MS);
+    if (!json || typeof json !== 'object' || typeof json.tag_name !== 'string' || !json.tag_name) {
+      throw new Error('پاسخِ گیت‌هاب، انتشارِ معتبری نداشت.');
+    }
+    const assets = Array.isArray(json.assets) ? json.assets : [];
+    const exes = assets.filter((a) => a && typeof a.name === 'string' && /\.exe$/i.test(a.name));
+    const preferred = exes.find((a) => /setup/i.test(a.name)) || exes[0];
+    const downloadUrl = preferred && typeof preferred.browser_download_url === 'string'
+      ? preferred.browser_download_url
+      : '';
+    return {
+      tagName: json.tag_name,
+      version: stripMainVersionPrefix(json.tag_name),
+      releaseNotes: cleanMainReleaseNotes(typeof json.body === 'string' ? json.body : ''),
+      publishedAt: typeof json.published_at === 'string' ? json.published_at : '',
+      htmlUrl: typeof json.html_url === 'string' ? json.html_url : '',
+      downloadUrl,
+    };
+  }
+
+  // آدرسِ دانلودِ مستقیم، فقط وقتی معتبر است که https و دامنهٔ
+  // github.com و مسیرِ انتشارِ همین مخزن باشد و به .exe برسد؛
+  // هر آدرسِ دیگری (حتی با دامنهٔ شبیهِ گیت‌هاب) رد می‌شود.
+  function isValidGithubExeDownloadUrl(downloadUrl) {
+    try {
+      const parsed = new URL(downloadUrl);
+      if (parsed.protocol !== 'https:') return false;
+      if (parsed.hostname !== 'github.com') return false;
+      if (!parsed.pathname.startsWith(GITHUB_RELEASE_DOWNLOAD_PREFIX)) return false;
+      if (!/\.exe$/i.test(parsed.pathname)) return false;
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // پیشرفتِ دانلودِ مستقیم را با همان کانالِ 'app-update-status'
+  // به فرستنده می‌فرستد؛ اگر فرستنده از بین رفته باشد، هیچ‌کاری نمی‌کند.
+  function sendUpdateProgressToSender(sender, payload) {
+    try {
+      if (!sender || sender.isDestroyed()) return;
+      sender.send('app-update-status', payload);
+    } catch (_) { /* ignore */ }
+  }
+
+  // دانلودِ فایلِ .exe با دنبال‌کردنِ حداکثر ۵ ریدایرکت (به
+  // release-assets.githubusercontent.com) و گزارشِ پیشرفتِ زنده. تایم‌اوتِ
+  // ۱۲۰ ثانیه‌ایِ بی‌فعالیتی، دانلودِ گیرکرده را قطع می‌کند و فایلِ
+  // ناقص، حذف می‌شود.
+  function downloadGithubExe(downloadUrl, destPath, sender) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let transferred = 0;
+      let total = 0;
+      const startedAt = Date.now();
+      let lastSentAt = 0;
+      let inactivityTimer = null;
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        try { if (inactivityTimer) clearTimeout(inactivityTimer); } catch (_) {}
+        try { fs.unlinkSync(destPath); } catch (_) {}
+        reject(err);
+      };
+      const armInactivity = () => {
+        try { if (inactivityTimer) clearTimeout(inactivityTimer); } catch (_) {}
+        inactivityTimer = setTimeout(() => {
+          fail(new Error('دانلودِ نسخهٔ جدید متوقف شد؛ اتصال اینترنت را بررسی کنید.'));
+        }, DIRECT_DOWNLOAD_INACTIVITY_TIMEOUT_MS);
+      };
+      const sendProgress = (force) => {
+        const now = Date.now();
+        if (!force && now - lastSentAt < 250) return;
+        lastSentAt = now;
+        const elapsed = Math.max(1, now - startedAt) / 1000;
+        sendUpdateProgressToSender(sender, {
+          status: 'download-progress',
+          percent: total > 0 ? (transferred / total) * 100 : 0,
+          transferred,
+          total,
+          bytesPerSecond: Math.round(transferred / elapsed),
+        });
+      };
+      const requestOne = (currentUrl, redirectsLeft) => {
+        let parsed = null;
+        try { parsed = new URL(currentUrl); } catch (_) { fail(new Error('آدرسِ دانلود معتبر نیست.')); return; }
+        if (parsed.protocol !== 'https:') { fail(new Error('آدرسِ دانلود معتبر نیست.')); return; }
+        if (parsed.hostname !== 'github.com' && parsed.hostname !== 'objects.githubusercontent.com' && parsed.hostname !== 'release-assets.githubusercontent.com') {
+          fail(new Error('آدرسِ دانلود معتبر نیست.'));
+          return;
+        }
+        let fileStream = null;
+        try {
+          fileStream = fs.createWriteStream(destPath);
+        } catch (err) { fail(err); return; }
+        fileStream.on('error', (err) => fail(err));
+        fileStream.on('finish', () => {
+          try { if (inactivityTimer) clearTimeout(inactivityTimer); } catch (_) {}
+          if (settled) return;
+          settled = true;
+          sendProgress(true);
+          resolve({ filePath: destPath, size: transferred });
+        });
+        const httpsMod = require('https');
+        let req = null;
+        try {
+          req = httpsMod.get(currentUrl, { headers: { 'User-Agent': 'PandaReader-App' } }, (res) => {
+            const code = res.statusCode || 0;
+            if (code >= 300 && code < 400 && res.headers && res.headers.location) {
+              try { fileStream.destroy(); } catch (_) {}
+              try { fs.unlinkSync(destPath); } catch (_) {}
+              if (redirectsLeft <= 0) { fail(new Error('ریدایرکتِ دانلود، بیش از حد ادامه یافت.')); return; }
+              requestOne(res.headers.location, redirectsLeft - 1);
+              return;
+            }
+            if (code < 200 || code >= 300) {
+              try { fileStream.destroy(); } catch (_) {}
+              fail(new Error('دانلودِ نسخهٔ جدید با پاسخِ ' + code + ' ناموفق بود.'));
+              return;
+            }
+            const len = parseInt(res.headers['content-length'], 10);
+            if (Number.isFinite(len) && len > 0) total = len;
+            armInactivity();
+            sendUpdateProgressToSender(sender, { status: 'downloading', percent: 0, transferred: 0, total, bytesPerSecond: 0 });
+            res.on('data', (chunk) => {
+              transferred += chunk.length;
+              armInactivity();
+              sendProgress(false);
+            });
+            res.on('error', (err) => { try { fileStream.destroy(); } catch (_) {} fail(err); });
+            res.pipe(fileStream);
+          });
+        } catch (err) { fail(err); return; }
+        req.on('error', (err) => { try { fileStream.destroy(); } catch (_) {} fail(err); });
+      };
+      armInactivity();
+      requestOne(downloadUrl, DIRECT_DOWNLOAD_MAX_REDIRECTS);
+    });
+  }
+
 
   ipcMain.handle('get-app-version', async () => {
     return { version: getUpdaterAppVersion(), isPackaged: Boolean(app && app.isPackaged) };
   });
 
+  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ دوموتوره. همیشه اول REST عمومیِ
+  // گیت‌هاب خوانده می‌شود (بدونِ توکن، تایم‌اوتِ ۱۵ ثانیه) و نسخهٔ
+  // دقیق، یادداشتِ کاملِ انتشار و لینکِ مستقیمِ .exe از همان‌جا
+  // می‌آید؛ پس در حالتِ Portable و توسعه هم، نسخهٔ تازه دیده
+  // می‌شود. بعد، فقط در نسخهٔ نصبی، electron-updater هم صدا زده
+  // می‌شود تا مسیرِ نصبِ خودکار آماده باشد؛ نتیجهٔ نهایی، همیشه
+  // همان REST است و خطایِ موتور، بررسی را خراب نمی‌کند.
   ipcMain.handle('check-for-updates', async () => {
     const version = getUpdaterAppVersion();
-    if (!app || !app.isPackaged) {
-      return { success: true, status: 'dev-mode', version, message: DEV_MODE_CHECK_MESSAGE };
-    }
-    const updater = getAppAutoUpdater();
-    if (!updater || typeof updater.checkForUpdates !== 'function') {
-      return { success: true, status: 'dev-mode', version, message: 'موتورِ به‌روزرسانی در این نصب در دسترس نیست.' };
-    }
+    let latest = null;
+    let restError = '';
     try {
-      const result = await updater.checkForUpdates();
-      const info = result && result.updateInfo ? result.updateInfo : null;
-      // وضعیت، فقط «بررسی انجام شد» است: در دسترس بودنِ نسخهٔ تازه،
-      // با رویدادهای update-available / update-not-available می‌آید،
-      // چون نتیجهٔ checkForUpdates پرچمِ قابلِ اعتمادی برای آن ندارد.
-      return {
-        success: true,
-        status: 'checked',
-        version,
-        updateInfo: info ? { version: info.version || '', releaseDate: info.releaseDate || '' } : null,
-      };
+      latest = await fetchLatestGithubRelease();
     } catch (err) {
-      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در بررسیِ به‌روزرسانی') };
+      restError = String((err && err.message) || err || 'خطا در تماس با گیت‌هاب');
     }
+    if (app && app.isPackaged) {
+      const updater = getAppAutoUpdater();
+      if (updater && typeof updater.checkForUpdates === 'function') {
+        try {
+          await Promise.race([
+            updater.checkForUpdates(),
+            new Promise((resolve) => setTimeout(resolve, 20000)),
+          ]);
+        } catch (_) { /* خطایِ موتور، با رویدادِ error گزارش می‌شود */ }
+      }
+    }
+    if (!latest) {
+      return { success: false, status: 'error', version, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'rest', message: restError || 'بررسی بروزرسانی انجام نشد؛ اتصال اینترنت را بررسی کنید.' };
+    }
+    const compared = version ? compareMainVersions(latest.version, version) : null;
+    const updateAvailable = compared === null ? null : compared > 0;
+    return {
+      success: true,
+      status: updateAvailable === true ? 'available' : (updateAvailable === false ? 'up-to-date' : 'checked'),
+      version,
+      updateAvailable,
+      latestVersion: latest.version,
+      tagName: latest.tagName,
+      releaseNotes: latest.releaseNotes,
+      publishedAt: latest.publishedAt,
+      htmlUrl: latest.htmlUrl,
+      downloadUrl: latest.downloadUrl,
+      source: 'rest',
+    };
   });
 
   ipcMain.handle('download-update', async () => {
@@ -3007,6 +3292,75 @@ function getEpubService() {
     } catch (err) {
       return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در نصبِ به‌روزرسانی') };
     }
+    return { success: true, status: 'installing', version };
+  });
+  // مرحلهٔ ۵۷ §۳ (m3): دانلودِ مستقیمِ فایلِ نصب (.exe) برایِ
+  // حالتِ Portable/توسعه که electron-updater در آن کار نمی‌کند.
+  // آدرس، سخت‌گیرانه اعتبارسنجی می‌شود (فقط انتشارِ همین مخزن) و
+  // فایل، در پوشهٔ موقتِ سیستم ذخیره می‌شود؛ پیشرفت، زنده با همان
+  // کانالِ 'app-update-status' می‌رسد.
+  ipcMain.handle('download-update-direct', async (event, payload) => {
+    const version = getUpdaterAppVersion();
+    const downloadUrl = payload && typeof payload.downloadUrl === 'string' ? payload.downloadUrl : '';
+    const wantedVersion = payload && typeof payload.version === 'string' ? payload.version : '';
+    if (!isValidGithubExeDownloadUrl(downloadUrl)) {
+      return { success: false, status: 'error', version, message: 'آدرسِ دانلودِ نسخهٔ جدید معتبر نیست.' };
+    }
+    let tmpDir = '';
+    try { tmpDir = require('os').tmpdir(); } catch (_) { tmpDir = ''; }
+    if (!tmpDir) {
+      return { success: false, status: 'error', version, message: 'پوشهٔ موقتِ سیستم پیدا نشد.' };
+    }
+    const safeVersion = stripMainVersionPrefix(wantedVersion).replace(/[^A-Za-z0-9._-]/g, '') || 'latest';
+    const destPath = path.join(tmpDir, 'PandaReader-Setup-' + safeVersion + '.exe');
+    try {
+      const done = await downloadGithubExe(downloadUrl, destPath, event && event.sender);
+      sendUpdateProgressToSender(event && event.sender, { status: 'update-downloaded', version: safeVersion });
+      return { success: true, status: 'downloaded', version, filePath: done.filePath, size: done.size, downloadVersion: safeVersion };
+    } catch (err) {
+      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در دانلودِ نسخهٔ جدید') };
+    }
+  });
+
+  // مرحلهٔ ۵۷ §۳ (m3): اجرایِ نصب‌کنندهٔ دانلودشده. ترتیب، دقیقاً
+  // مثلِ quit-and-install-update است: اول FLUSH_SYNC با همان
+  // handshake موجود (flushAndTerminateDbWorker)، بعد اجرایِ
+  // نصب‌کننده و خروجِ برنامه؛ هیچ مسیرِ فلاشِ دومی ساخته نشده است.
+  // فایل، فقط وقتی اجرا می‌شود که داخلِ پوشهٔ موقت و با پسوندِ
+  // .exe باشد و واقعاً رویِ دیسک وجود داشته باشد.
+  ipcMain.handle('install-downloaded-update', async (event, payload) => {
+    const version = getUpdaterAppVersion();
+    const filePath = payload && typeof payload.filePath === 'string' ? payload.filePath : '';
+    let tmpDir = '';
+    try { tmpDir = require('os').tmpdir(); } catch (_) { tmpDir = ''; }
+    let insideTmp = false;
+    try {
+      if (tmpDir && filePath) {
+        const resolvedFile = path.resolve(filePath);
+        const resolvedTmp = path.resolve(tmpDir);
+        insideTmp = resolvedFile === resolvedTmp || resolvedFile.startsWith(resolvedTmp + path.sep);
+      }
+    } catch (_) { insideTmp = false; }
+    if (!filePath || !/\.exe$/i.test(filePath) || !insideTmp) {
+      return { success: false, status: 'error', version, message: 'مسیرِ نصب‌کنندهٔ دانلودشده معتبر نیست.' };
+    }
+    try {
+      if (!fs.existsSync(filePath)) {
+        return { success: false, status: 'error', version, message: 'فایلِ نصب‌کننده پیدا نشد؛ دوباره دانلود کنید.' };
+      }
+    } catch (_) { /* ignore */ }
+    try {
+      await flushAndTerminateDbWorker();
+    } catch (_) { /* ignore */ }
+    try { quitAfterFlush = true; } catch (_) {}
+    try {
+      const { execFile } = require('child_process');
+      const child = execFile(filePath, [], { detached: true, windowsHide: false });
+      if (child && typeof child.unref === 'function') child.unref();
+    } catch (err) {
+      return { success: false, status: 'error', version, message: String((err && err.message) || err || 'خطا در اجرای نصب‌کننده') };
+    }
+    try { if (app && typeof app.quit === 'function') app.quit(); } catch (_) {}
     return { success: true, status: 'installing', version };
   });
 

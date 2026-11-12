@@ -85,6 +85,12 @@ import {
   normalizeMixedBidiText,
 } from '../../utils/bidiTextEngine';
 
+// مرحلهٔ ۵۷ (مأموریت ۴): موتورِ جوهرِ perfect-freehand — فقط getStroke
+// (در perfect-freehand@^1.2.3 تأیید شد: getStroke خروجیِ نام‌دارِ
+// پکیج است؛ getStrokeBounds خروجیِ پکیج نیست و مثلِ قبل از
+// annotationEngine می‌آید و دست نمی‌خورد).
+import { getStroke } from 'perfect-freehand';
+
 // مرحلهٔ ۴۹ — پرچمِ ژستِ حاشیه‌نویسی (قرارداد با کارگر D):
 // حینِ هر ژستِ select (مارکی/کمند/جابه‌جایی/هندل/پن) و رسم، true است
 // تا App.jsx و BottomControls هات‌اسپات و پنهان‌شدنِ خودکار را سرکوب
@@ -180,51 +186,62 @@ function bboxesIntersect(a, b) {
 }
 
 // ============================================================================
-// بخش ۲: رندر مستقیم — Midpoint Quadratic Bézier
+// بخش ۲: رندر مستقیم — کانتورِ پرشدهٔ perfect-freehand (مرحلهٔ ۵۷)
 // ============================================================================
 
+// گزینه‌هایِ واحدِ perfect-freehand برایِ قلم و هایلایتر — در هر سه
+// مسیرِ رسم (پیش‌نمایشِ زنده، استروکِ ثبت‌شده، و خروجیِ PDF در
+// annotationPdfExport.js) دقیقاً همین گزینه‌ها استفاده می‌شوند تا
+// هر سه خروجی، یک سیلوئت بدهند:
+//  • thinning: 0 — پهنای ثابت؛ پهنای انتخابیِ کاربر (sw*2.4 / sw*5.5)
+//    با فشارِ موس عوض نمی‌شود (فشار نداریم؛ simulatePressure هم false است).
+//  • streamline: 0 — نقطه‌ها موقعِ ثبت، با streamline() (۰٫۳۵) و
+//    MIN_POINT_DIST هموار شده‌اند؛ هموارسازیِ دوباره، پیچ‌ها را
+//    می‌خورد و نقطهٔ پایانی را جابه‌جا می‌کند.
+//  • smoothing: 0.5 — هموارسازیِ لبهٔ کانتور (پیش‌فرضِ پکیج).
+//  • cap: true و taper: 0 در هر دو سر — کلاهکِ گردِ کامل، بدونِ
+//    باریک‌شدن (مثلِ نوکِ ماژیک)؛ last: true یعنی استروک کامل است.
+function getFreehandStrokeOptions(size) {
+  const w = Number.isFinite(size) && size > 0 ? size : 1;
+  return {
+    size: w,
+    thinning: 0,
+    smoothing: 0.5,
+    streamline: 0,
+    simulatePressure: false,
+    start: { cap: true, taper: 0 },
+    end: { cap: true, taper: 0 },
+    last: true,
+  };
+}
+
+// رسمِ یک استروکِ آزاد با کانتورِ پرشدهٔ perfect-freehand — همان
+// امضا و همان optsی قبلی ({ color, width, opacity, compositeOp })
+// تا هیچ فراخواننده‌ای (CommittedStroke، پیش‌نمایشِ زنده، و اکسپورتِ
+// نام‌دارِ پایینِ فایل) عوض نشود. تفاوت با drawSmoothStrokeی قبلی
+// (منحنیِ درجه‌دومِ نقطهٔ میانی): کانتور، خطِ مرکزی را دور می‌زند؛
+// پس رویِ ورودیِ لرزانِ موس، لبه‌ها ابریشمی‌اند و سر و تهِ استروک،
+// دایره‌ایِ کامل است — با همان پهنای اسمی (size = قطرِ کانتور) و
+// همان کلاهکِ گردِ قبلی. نقطهٔ تکی، حبابِ گرد می‌شود و دو نقطه،
+// خطِ کلاهک‌دار (هر دو در perfect-freehand آزمایش شدند)؛ نقطه‌هایِ
+// غیرِ متناهی، پیش از رسم حذف می‌شوند.
 function drawSmoothStroke(ctx, points, opts) {
   const { color, width, opacity, compositeOp } = opts;
   if (!points || points.length === 0) return;
+  const finitePts = points.filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (finitePts.length === 0) return;
+  const outline = getStroke(finitePts, getFreehandStrokeOptions(width));
+  if (!outline || outline.length === 0) return;
 
   ctx.save();
   ctx.globalAlpha = opacity;
   if (compositeOp) ctx.globalCompositeOperation = compositeOp;
-
-  if (points.length === 1) {
-    ctx.beginPath();
-    ctx.fillStyle = color;
-    ctx.arc(points[0].x, points[0].y, width / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
-
   ctx.beginPath();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-
-  const n = points.length;
-  if (n === 2) {
-    ctx.moveTo(points[0].x, points[0].y);
-    ctx.lineTo(points[1].x, points[1].y);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-
-  ctx.moveTo(points[0].x, points[0].y);
-  const m1 = midpoint(points[0], points[1]);
-  ctx.lineTo(m1.x, m1.y);
-  for (let i = 1; i < n - 1; i++) {
-    const mNext = midpoint(points[i], points[i + 1]);
-    ctx.quadraticCurveTo(points[i].x, points[i].y, mNext.x, mNext.y);
-  }
-  const last = points[n - 1];
-  ctx.lineTo(last.x, last.y);
-  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.moveTo(outline[0][0], outline[0][1]);
+  for (let i = 1; i < outline.length; i++) ctx.lineTo(outline[i][0], outline[i][1]);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
@@ -241,10 +258,27 @@ function getStrokeOpacity(tool, baseOpacity) {
 }
 
 function getCompositeOp(tool) {
-  // مرحلهٔ ۳۷ §۴(ج): همهٔ ابزارها source-over — هایلایتر دیگر multiply
-  // نیست تا داخلِ برنامه و خروجیِ PDF بایت‌به‌بایت یکی باشند (رویِ
-  // صفحهٔ سفید، هر دو ترکیب یک نتیجه می‌دادند؛ رویِ محتوایِ تیره،
-  // multiply متن را سیاهِ خالص نگه می‌داشت و خروجی رنگی می‌شد).
+  // مرحلهٔ ۵۷ (مأموریت ۴) — حلِّ تناقضِ multiply: همهٔ ابزارها همچنان
+  // source-over می‌مانند؛ multiply به بومِ شفاف برنمی‌گردد. استدلال،
+  // با سندِ کد (نه حدس):
+  //  ۱) لایهٔ Konva، بومِ شفافِ جداگانه‌ای بالایِ بومِ pdf.js است
+  //     (PdfViewer: لایه رویِ صفحه سوار است، نه درونِ آن)؛ و multiply
+  //     در Canvas 2D فقط با پس‌زمینهٔ همان بوم ترکیب می‌شود. رویِ
+  //     پس‌زمینهٔ شفاف (آلفا صفر)، multiply دقیقاً برابرِ source-over
+  //     است؛ پس multiply داخلِ این بوم، هرگز به متنِ PDF نمی‌رسد —
+  //     نه زنده، نه در خروجی (hlCanvas هم بومِ شفافِ جداگانه است و
+  //     جایگذاریِ نهایی در PDF هم normal است).
+  //     ادعایِ زندهٔ مرحلهٔ ۳۷ («multiply متن را سیاه نگه می‌داشت»)
+  //     فقط وقتی درست بود که حاشیه و صفحه، یک بوم می‌بودند؛ نیستند.
+  //  ۲) حتی با اعمالِ یکسان در لایه و خروجی هم ناامن است: زنده همهٔ
+  //     ابزارها در یک بومِ مشترک‌اند و خروجی، هایلایتر را رویِ بومِ
+  //     جداگانه می‌گذارد؛ پس هایلایتر رویِ قلم/باکس، زنده multiply
+  //     می‌شد و در خروجی نه — واگراییِ تازه از همان جنسِ باگِ مرحلهٔ ۳۷.
+  //  ۳) multiplyِ واقعی، فقط موقعِ جایگذاریِ highlightPng در فایلِ
+  //     PDF با ExtGStateِ /BM /Multiply معنا دارد (در saver، بیرونِ
+  //     این فایل) و نیتِ آن، با highlightBlend از annotationPdfExport.js
+  //     بیرون می‌آید. تا آن قدم برداشته نشود، source-overِ یکسان در
+  //     هر دو بوم، تنها گزینه‌ای است که زنده و خروجی را یکی نگه می‌دارد.
   return 'source-over';
 }
 
@@ -6231,5 +6265,8 @@ export {
   pointToSegmentDist,
   getStrokeBBox,
   getStrokeWidth,
+  getStrokeOpacity,
+  getCompositeOp,
+  getFreehandStrokeOptions,
   eraserHitsStroke,
 };

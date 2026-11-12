@@ -27,6 +27,10 @@ import annotationLocalBackup from '../../services/annotationLocalBackup';
 //   کرش نمی‌کند؛ پس ترتیبِ قرارگیریِ استیج‌ها مهم نیست.
 //   سه تابعِ زیر خالص‌اند (بدونِ وابستگی به React) تا ماشینِ وضعیت،
 //   در Node هم با coreApiِ ساختگی تست شود.
+// مرحلهٔ ۵۷ §۳ (m3): بررسیِ دوموتوره — REST عمومیِ گیت‌هاب
+// (بدونِ توکن) + electron-updater در نسخهٔ نصبی؛ دانلودِ مستقیمِ
+// .exe در حالتِ Portable/توسعه؛ مودالِ هوشمندِ یادآوری در App و
+// سوییچِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها» این‌جا و در مودال.
 
 // مرحلهٔ ۵۵ §۳: نرمال‌سازیِ پاسخِ نسخه — رشتهٔ خالی، آبجکتِ
 // { version, isPackaged } یا { success, version, isPackaged }، همه به
@@ -68,6 +72,8 @@ export function resolveUpdateApi(api) {
     checkForUpdates: pick(api && api.checkForUpdates, winApi && winApi.checkForUpdates),
     downloadUpdate: pick(api && api.downloadUpdate, winApi && winApi.downloadUpdate),
     quitAndInstallUpdate: pick(api && api.quitAndInstallUpdate, winApi && winApi.quitAndInstallUpdate),
+    downloadUpdateDirect: pick(api && api.downloadUpdateDirect, winApi && winApi.downloadUpdateDirect),
+    installDownloadedUpdate: pick(api && api.installDownloadedUpdate, winApi && winApi.installDownloadedUpdate),
     onUpdateStatus: pick(api && api.onUpdateStatus, winApi && winApi.onUpdateStatus),
   };
 }
@@ -79,7 +85,7 @@ export function resolveUpdateApi(api) {
 // هم رشته ('update-available') و هم آبجکت ({ type/status/event })
 // قبول است، چون شکلِ دقیقِ payload دستِ main است (m2).
 export function normalizeUpdateEvent(raw) {
-  const empty = { kind: 'unknown', version: '', percent: 0, message: '' };
+  const empty = { kind: 'unknown', version: '', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' };
   if (typeof raw === 'string') {
     const key = raw.trim().toLowerCase().replace(/_/g, '-');
     if (key === 'checking' || key === 'checking-for-update') return { ...empty, kind: 'checking' };
@@ -105,14 +111,17 @@ export function normalizeUpdateEvent(raw) {
     else if (typeof raw.transferred === 'number' && typeof raw.total === 'number' && raw.total > 0) {
       percent = (raw.transferred / raw.total) * 100;
     }
+    const transferred = typeof raw.transferred === 'number' ? raw.transferred : 0;
+    const total = typeof raw.total === 'number' ? raw.total : 0;
+    const bytesPerSecond = typeof raw.bytesPerSecond === 'number' ? raw.bytesPerSecond : 0;
     const message = typeof raw.message === 'string'
       ? raw.message
       : (typeof raw.error === 'string' ? raw.error : '');
     if (key === 'checking' || key === 'checking-for-update') return { kind: 'checking', version, percent: 0, message };
     if (key === 'update-available' || key === 'available') return { kind: 'available', version, percent: 0, message };
     if (key === 'update-not-available' || key === 'not-available' || key === 'up-to-date') return { kind: 'not-available', version, percent: 0, message };
-    if (key === 'download-progress' || key === 'downloading') return { kind: 'downloading', version, percent, message };
-    if (key === 'update-downloaded' || key === 'downloaded') return { kind: 'downloaded', version, percent: 100, message };
+    if (key === 'download-progress' || key === 'downloading') return { kind: 'downloading', version, percent, transferred, total, bytesPerSecond, message };
+    if (key === 'update-downloaded' || key === 'downloaded') return { kind: 'downloaded', version, percent: 100, transferred, total, bytesPerSecond, message };
     if (key === 'error') return { kind: 'error', version, percent: 0, message };
     return empty;
   }
@@ -161,10 +170,10 @@ export function mapUpdateEventToState(prev, event) {
   }
   if (ev.kind === 'downloading') {
     const pct = Number.isFinite(ev.percent) ? Math.max(0, Math.min(100, ev.percent)) : 0;
-    return { ...base, status: 'downloading', progress: pct, message: '' };
+    return { ...base, status: 'downloading', progress: pct, transferred: ev.transferred || 0, total: ev.total || 0, bytesPerSecond: ev.bytesPerSecond || 0, message: '' };
   }
   if (ev.kind === 'downloaded') {
-    return { ...base, status: 'downloaded', progress: 100, message: '' };
+    return { ...base, status: 'downloaded', progress: 100, transferred: ev.transferred || base.transferred || 0, total: ev.total || base.total || 0, bytesPerSecond: 0, message: '' };
   }
   if (ev.kind === 'error') {
     return { ...base, status: 'error', message: ev.message || 'بررسی بروزرسانی انجام نشد؛ اتصال اینترنت را بررسی کنید.' };
@@ -205,6 +214,71 @@ export default function SettingsView() {
   const setZoomLevel = useReaderStore((s) => s.setZoomLevel);
   const showToast = useAppStore((state) => state.showToast);
 
+  // مرحلهٔ ۵۷ §۳ (m3): خواندنِ امنِ انتخاب‌هایِ بروزرسانی از coreApi؛
+  // اگر coreApiِ قدیمی آن‌ها را نداشت، مقدارِ پیش‌فرض برمی‌گردد و
+  // کارت کرش نمی‌کند.
+  const readSkippedVersionSafe = () => {
+    try {
+      if (coreApi && typeof coreApi.readSkippedUpdateVersion === 'function') return coreApi.readSkippedUpdateVersion() || '';
+    } catch (_) {}
+    return '';
+  };
+  const readAutoCheckSafe = () => {
+    try {
+      if (coreApi && typeof coreApi.readAutoCheckUpdatesEnabled === 'function') return coreApi.readAutoCheckUpdatesEnabled();
+    } catch (_) {}
+    return true;
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): نرمال‌سازیِ نتیجهٔ مستقیمِ checkForUpdates؛
+  // اگر coreApiِ قدیمی آن را نداشت، شکلِ خامِ هندلر مستقیم خوانده
+  // می‌شود تا کارت کرش نکند.
+  const normalizeCheckResult = (result) => {
+    try {
+      if (coreApi && typeof coreApi.normalizeCheckForUpdatesResult === 'function') {
+        return coreApi.normalizeCheckForUpdatesResult(result, updateInfo.version || '');
+      }
+    } catch (_) {}
+    if (!result || typeof result !== 'object') return null;
+    return {
+      updateAvailable: typeof result.updateAvailable === 'boolean' ? result.updateAvailable : null,
+      latestVersion: typeof result.latestVersion === 'string' ? result.latestVersion : '',
+      releaseNotes: typeof result.releaseNotes === 'string' ? result.releaseNotes : '',
+      publishedAt: typeof result.publishedAt === 'string' ? result.publishedAt : '',
+      downloadUrl: typeof result.downloadUrl === 'string' ? result.downloadUrl : '',
+      htmlUrl: typeof result.htmlUrl === 'string' ? result.htmlUrl : '',
+      currentVersion: typeof result.version === 'string' ? result.version : '',
+      status: typeof result.status === 'string' ? result.status : 'checked',
+      message: typeof result.message === 'string' ? result.message : '',
+    };
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): تاریخِ انتشارِ ISO به تاریخِ فارسی؛ ورودیِ
+  // نامعتبر، رشتهٔ خالی می‌دهد و کارت کرش نمی‌کند.
+  const formatReleaseDate = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('fa-IR');
+    } catch (_) { return ''; }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): برچسبِ پیشرفتِ دانلود با درصد، حجم و سرعت.
+  const formatDownloadProgressLabel = (state) => {
+    const pct = Math.max(0, Math.min(100, Math.round(state.progress || 0)));
+    let label = `در حال دانلود… ${pct}٪`;
+    try {
+      if (coreApi && typeof coreApi.formatBytes === 'function' && state.total > 0) {
+        label += ` • ${coreApi.formatBytes(state.transferred || 0)} از ${coreApi.formatBytes(state.total)}`;
+      }
+      if (coreApi && typeof coreApi.formatDownloadSpeed === 'function' && state.bytesPerSecond > 0) {
+        label += ` • ${coreApi.formatDownloadSpeed(state.bytesPerSecond)}`;
+      }
+    } catch (_) {}
+    return label;
+  };
+
   const [activeTab, setActiveTab] = useState('shortcuts'); // 'shortcuts' | 'reader' | 'formats' | 'storage'
 
   // مرحله ۵ ـ بخش الف: پشتیبان‌گیری و بازیابیِ یک‌کلیکی.
@@ -238,7 +312,9 @@ export default function SettingsView() {
   // پیش از هر returnِ شرطی‌اند (در این کامپوننت، returnِ شرطیِ
   // زودهنگام نیست؛ ترتیبِ هوک‌ها همیشه ثابت است).
   const [updateInfo, setUpdateInfo] = useState({ version: '', isPackaged: false, envKnown: false, loaded: false });
-  const [updateState, setUpdateState] = useState({ status: 'idle', version: '', progress: 0, message: '' });
+  const [updateState, setUpdateState] = useState({ status: 'idle', version: '', latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', directFilePath: '', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' });
+  const [autoCheckEnabled, setAutoCheckEnabled] = useState(() => readAutoCheckSafe());
+  const [skippedVersion, setSkippedVersion] = useState(() => readSkippedVersionSafe());
   const updateUnsubscribeRef = useRef(null);
   const updateCheckTimeoutRef = useRef(null);
   const updateMountedRef = useRef(true);
@@ -252,6 +328,33 @@ export default function SettingsView() {
     }
   };
 
+  // مرحلهٔ ۵۷ §۳ (m3): خواندنِ نسخهٔ فعلی + محیط، جدا از افکتِ
+  // مونت شد تا دکمهٔ «بررسی» هم بتواند همان را تازه کند (هر کلیک،
+  // هم اطلاعاتِ محلی را تازه می‌کند و هم گیت‌هاب را چک می‌کند).
+  const loadLocalVersion = async () => {
+    const api = resolveUpdateApi(coreApi);
+    let info = { version: '', isPackaged: false, envKnown: false };
+    try {
+      if (api.getAppVersion) info = normalizeAppVersionInfo(await api.getAppVersion());
+    } catch (_) {
+      info = { version: '', isPackaged: false, envKnown: false };
+    }
+    if (!info.version && !info.envKnown && api.getAppInfo) {
+      try {
+        info = normalizeAppVersionInfo(await api.getAppInfo());
+      } catch (_) {}
+    }
+    if (updateMountedRef.current) {
+      setUpdateInfo({
+        version: info.version || '',
+        isPackaged: Boolean(info.isPackaged),
+        envKnown: Boolean(info.envKnown),
+        loaded: true,
+      });
+    }
+    return info;
+  };
+
   useEffect(() => {
     updateMountedRef.current = true;
     const api = resolveUpdateApi(coreApi);
@@ -261,28 +364,8 @@ export default function SettingsView() {
     // موجود (کانالِ 'get-app-info' که version و isPackaged می‌دهد).
     // هر دو مسیر که نباشند، کارت با نسخهٔ خالی و محیطِ «نامشخص»
     // رندر می‌شود و کرش نمی‌کند.
-    const loadVersion = async () => {
-      let info = { version: '', isPackaged: false, envKnown: false };
-      try {
-        if (api.getAppVersion) info = normalizeAppVersionInfo(await api.getAppVersion());
-      } catch (_) {
-        info = { version: '', isPackaged: false, envKnown: false };
-      }
-      if (!info.version && !info.envKnown && api.getAppInfo) {
-        try {
-          info = normalizeAppVersionInfo(await api.getAppInfo());
-        } catch (_) {}
-      }
-      if (!cancelled && updateMountedRef.current) {
-        setUpdateInfo({
-          version: info.version || '',
-          isPackaged: Boolean(info.isPackaged),
-          envKnown: Boolean(info.envKnown),
-          loaded: true,
-        });
-      }
-    };
-    loadVersion();
+    loadLocalVersion();
+    setSkippedVersion(readSkippedVersionSafe());
     // ۲) اشتراکِ رویدادهایِ زندهٔ آپدیت (کانالِ 'app-update-status').
     // onUpdateStatus تابعِ لغوِ اشتراک برمی‌گرداند؛ در cleanup صدا
     // زده می‌شود تا شنونده نشت نکند (الگویِ onPdfCopyProgress).
@@ -306,6 +389,24 @@ export default function SettingsView() {
         if (updateUnsubscribeRef.current) updateUnsubscribeRef.current();
       } catch (_) {}
       updateUnsubscribeRef.current = null;
+    };
+  }, []);
+
+  // مرحلهٔ ۵۷ §۳ (m3): هم‌گام‌ماندنِ سوییچِ بررسیِ خودکار با مودالِ
+  // یادآوری؛ هر تغییر (از هر جا) با رویداد می‌رسد و نگهبانِ برابری،
+  // setStateِ تکراری را نمی‌گذارد.
+  useEffect(() => {
+    let off = null;
+    try {
+      if (coreApi && typeof coreApi.onAutoCheckUpdatesChanged === 'function') {
+        off = coreApi.onAutoCheckUpdatesChanged((enabled) => {
+          if (!updateMountedRef.current) return;
+          setAutoCheckEnabled((prev) => (prev === enabled ? prev : enabled));
+        });
+      }
+    } catch (_) { off = null; }
+    return () => {
+      try { if (typeof off === 'function') off(); } catch (_) {}
     };
   }, []);
 
@@ -393,30 +494,51 @@ export default function SettingsView() {
   // غیرفعال نمی‌شوند.
   const isDevUpdateMode = updateInfo.loaded && updateInfo.envKnown && !updateInfo.isPackaged;
 
-  // مرحلهٔ ۵۵ §۳: بررسیِ بروزرسانی جدید از گیت‌هاب.
+  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ دستیِ بروزرسانی جدید از گیت‌هاب —
+  // هم اطلاعاتِ محلیِ نسخه تازه می‌شود و هم آخرین انتشارِ گیت‌هاب
+  // خوانده می‌شود (دکمهٔ بررسی، هر دو را با هم انجام می‌دهد).
+  // نتیجهٔ مستقیمِ هندلر (نسخهٔ دقیق + یادداشتِ کامل + لینکِ .exe)
+  // مبناست؛ رویدادهایِ موتور فقط پیشرفت را تکمیل می‌کنند. بررسیِ
+  // دستی، «manual» است: اگر نسخهٔ تازه پیدا شد، مودالِ یادآوری حتی
+  // برایِ نسخهٔ نادیده‌گرفته‌شده هم باز می‌شود.
   const handleCheckForUpdates = async () => {
-    if (isDevUpdateMode) return;
     const api = resolveUpdateApi(coreApi);
     if (!api.checkForUpdates) {
-      setUpdateState({ status: 'error', version: '', progress: 0, message: 'سرویسِ بروزرسانی در این نسخه در دسترس نیست.' });
+      setUpdateState((prev) => ({ ...prev, status: 'error', version: '', progress: 0, message: 'سرویسِ بروزرسانی در این نسخه در دسترس نیست.' }));
       return;
     }
     setUpdateState((prev) => ({ ...prev, status: 'checking', progress: 0, message: 'در حال بررسی ارتباط با گیت‌هاب...' }));
     armUpdateCheckTimeout();
     try {
-      const result = await api.checkForUpdates();
+      const results = await Promise.all([api.checkForUpdates(), loadLocalVersion()]);
       if (!updateMountedRef.current) return;
-      // main ممکن است نتیجه را مستقیم برگرداند ({ updateAvailable,
-      // version }) یا فقط رویداد بفرستد؛ هر دو مسیر پوشش داده شده
-      // است. اگر نتیجهٔ مستقیم نبود، وضعیتِ 'checking' می‌ماند تا
-      // رویداد برسد (نگهبانِ ۳۰ ثانیه‌ای، گیرکردن را می‌گیرد).
-      const norm = normalizeUpdateResult(result);
-      if (norm.updateAvailable === true) {
-        clearUpdateCheckTimeout();
-        setUpdateState((prev) => mapUpdateEventToState(prev, { type: 'update-available', version: norm.version }));
+      const norm = normalizeCheckResult(results[0]);
+      clearUpdateCheckTimeout();
+      setSkippedVersion(readSkippedVersionSafe());
+      if (!norm) {
+        setUpdateState((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد.' }));
+        return;
+      }
+      if (norm.updateAvailable === true && norm.latestVersion) {
+        setUpdateState((prev) => ({ ...prev, status: 'available', version: norm.latestVersion, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, directFilePath: '', progress: 0, message: '' }));
+        try {
+          if (coreApi && typeof coreApi.emitUpdateAvailable === 'function') {
+            coreApi.emitUpdateAvailable({ updateAvailable: true, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, currentVersion: norm.currentVersion || updateInfo.version || '', manual: true });
+          }
+        } catch (_) {}
       } else if (norm.updateAvailable === false) {
-        clearUpdateCheckTimeout();
-        setUpdateState((prev) => mapUpdateEventToState(prev, { type: 'update-not-available' }));
+        setUpdateState((prev) => ({ ...prev, status: 'up-to-date', latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, progress: 0, message: 'نرم‌افزار شما به آخرین نسخه بروز است.' }));
+      } else if (norm.latestVersion) {
+        // نسخهٔ فعلی خوانده نشد؛ فقط آخرین نسخهٔ گیت‌هاب نشان داده
+        // می‌شود و مودال هم با نسخهٔ فعلیِ نامشخص باز می‌شود.
+        setUpdateState((prev) => ({ ...prev, status: 'available', version: norm.latestVersion, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, directFilePath: '', progress: 0, message: '' }));
+        try {
+          if (coreApi && typeof coreApi.emitUpdateAvailable === 'function') {
+            coreApi.emitUpdateAvailable({ updateAvailable: true, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, currentVersion: norm.currentVersion || updateInfo.version || '', manual: true });
+          }
+        } catch (_) {}
+      } else {
+        setUpdateState((prev) => ({ ...prev, status: 'error', message: norm.message || 'بررسی بروزرسانی انجام نشد.' }));
       }
     } catch (err) {
       if (!updateMountedRef.current) return;
@@ -425,17 +547,58 @@ export default function SettingsView() {
     }
   };
 
-  // مرحلهٔ ۵۵ §۳: دانلودِ نسخهٔ جدید. تکمیلِ دانلود با رویدادِ
-  // 'update-downloaded' می‌رسد و دکمهٔ «نصب و راه‌اندازی مجدد» را
-  // روشن می‌کند؛ پیشرفت با رویدادِ 'download-progress' می‌رسد.
+  // مرحلهٔ ۵۷ §۳ (m3): سوییچِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها» —
+  // همان کلیدِ مودالِ یادآوری؛ نوشتن در coreApi، رویدادِ هم‌گام‌سازی
+  // می‌فرستد تا مودال هم همان لحظه عوض شود.
+  const handleAutoCheckToggle = (next) => {
+    const value = next === true;
+    setAutoCheckEnabled(value);
+    try {
+      if (coreApi && typeof coreApi.writeAutoCheckUpdatesEnabled === 'function') {
+        coreApi.writeAutoCheckUpdatesEnabled(value);
+      }
+    } catch (_) {}
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): دانلودِ نسخهٔ جدید. در نسخهٔ نصبی، موتورِ
+  // electron-updater؛ در حالتِ Portable/توسعه، دانلودِ مستقیمِ
+  // فایلِ .exe از گیت‌هاب (همان لینکی که REST برگردانده است).
+  // تکمیلِ دانلود با رویدادِ 'update-downloaded' یا با نتیجهٔ
+  // مستقیمِ invoke می‌رسد و دکمهٔ «نصب و راه‌اندازی مجدد» را روشن
+  // می‌کند؛ پیشرفت با رویدادِ 'download-progress' می‌رسد.
   const handleDownloadUpdate = async () => {
-    if (isDevUpdateMode) return;
     const api = resolveUpdateApi(coreApi);
+    const latestVersion = updateState.latestVersion || updateState.version || '';
+    const isDirect = !updateInfo.isPackaged;
+    if (isDirect) {
+      if (!api.downloadUpdateDirect) {
+        setUpdateState((prev) => ({ ...prev, status: 'error', message: 'سرویسِ دانلودِ مستقیم در این نسخه در دسترس نیست.' }));
+        return;
+      }
+      if (!updateState.downloadUrl) {
+        setUpdateState((prev) => ({ ...prev, status: 'error', message: 'لینکِ دانلودِ نسخهٔ جدید پیدا نشد.' }));
+        return;
+      }
+      setUpdateState((prev) => ({ ...prev, status: 'downloading', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' }));
+      try {
+        const result = await api.downloadUpdateDirect({ downloadUrl: updateState.downloadUrl, version: latestVersion });
+        if (!updateMountedRef.current) return;
+        if (result && result.success) {
+          setUpdateState((prev) => ({ ...prev, status: 'downloaded', progress: 100, directFilePath: result.filePath || '', message: '' }));
+        } else {
+          setUpdateState((prev) => ({ ...prev, status: 'error', message: (result && result.message) || 'دانلودِ نسخهٔ جدید انجام نشد.' }));
+        }
+      } catch (err) {
+        if (!updateMountedRef.current) return;
+        setUpdateState((prev) => ({ ...prev, status: 'error', message: 'دانلودِ بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+      }
+      return;
+    }
     if (!api.downloadUpdate) {
       setUpdateState((prev) => ({ ...prev, status: 'error', message: 'سرویسِ دانلودِ بروزرسانی در این نسخه در دسترس نیست.' }));
       return;
     }
-    setUpdateState((prev) => ({ ...prev, status: 'downloading', progress: 0, message: '' }));
+    setUpdateState((prev) => ({ ...prev, status: 'downloading', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' }));
     try {
       await api.downloadUpdate();
     } catch (err) {
@@ -444,9 +607,24 @@ export default function SettingsView() {
     }
   };
 
-  // مرحلهٔ ۵۵ §۳: نصبِ نسخهٔ دانلودشده و راه‌اندازیِ مجددِ برنامه.
+  // مرحلهٔ ۵۷ §۳ (m3): نصبِ نسخهٔ دانلودشده و راه‌اندازیِ مجددِ
+  // برنامه. اگر فایلِ .exe مستقیم دانلود شده باشد، نصب‌کنندهٔ همان
+  // فایل اجرا می‌شود (فلاشِ دیتابیس، داخلِ هندلر و پیش از اجراست)؛
+  // وگرنه مسیرِ electron-updater (quitAndInstall) می‌رود.
   const handleQuitAndInstallUpdate = async () => {
     const api = resolveUpdateApi(coreApi);
+    if (updateState.directFilePath) {
+      if (!api.installDownloadedUpdate) {
+        showToast('سرویسِ نصبِ نسخهٔ دانلودشده در این نسخه در دسترس نیست.', { type: 'error' });
+        return;
+      }
+      try {
+        await api.installDownloadedUpdate({ filePath: updateState.directFilePath });
+      } catch (err) {
+        showToast('نصب و راه‌اندازیِ مجدد انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص'), { type: 'error' });
+      }
+      return;
+    }
     if (!api.quitAndInstallUpdate) {
       showToast('سرویسِ نصبِ بروزرسانی در این نسخه در دسترس نیست.', { type: 'error' });
       return;
@@ -1404,7 +1582,7 @@ export default function SettingsView() {
 
         {isDevUpdateMode && (
           <p style={styles.cardDesc}>
-            در حالتِ توسعه، بررسیِ بروزرسانی غیرفعال است؛ بروزرسانی فقط در نسخهٔ نصبی (ساخته‌شده با electron-builder) کار می‌کند.
+            در این حالت، بررسیِ نسخهٔ جدید مستقیم از گیت‌هاب انجام می‌شود و فایلِ نصب (.exe) دانلود می‌شود؛ نصبِ خودکارِ درون‌برنامه‌ای فقط در نسخهٔ نصبی کار می‌کند.
           </p>
         )}
 
@@ -1412,8 +1590,8 @@ export default function SettingsView() {
           <button
             type="button"
             onClick={handleCheckForUpdates}
-            disabled={isDevUpdateMode || updateState.status === 'checking' || updateState.status === 'downloading'}
-            style={{ ...styles.backupBtn, ...((isDevUpdateMode || updateState.status === 'checking' || updateState.status === 'downloading') ? styles.backupBtnDisabled : {}) }}
+            disabled={updateState.status === 'checking' || updateState.status === 'downloading'}
+            style={{ ...styles.backupBtn, ...((updateState.status === 'checking' || updateState.status === 'downloading') ? styles.backupBtnDisabled : {}) }}
           >
             <Icons.RefreshCw size={15} />
             <span>{updateState.status === 'checking' ? 'در حال بررسی…' : 'بررسی بروزرسانی جدید از گیت‌هاب'}</span>
@@ -1423,11 +1601,11 @@ export default function SettingsView() {
             <button
               type="button"
               onClick={handleDownloadUpdate}
-              disabled={isDevUpdateMode}
+              disabled={!updateInfo.isPackaged && !updateState.downloadUrl}
               style={styles.backupBtn}
             >
               <Icons.Download size={15} />
-              <span>دانلود بروزرسانی</span>
+              <span>{updateInfo.isPackaged ? 'دانلود بروزرسانی' : 'دانلود فایل نصب (.exe)'}</span>
             </button>
           )}
 
@@ -1443,12 +1621,46 @@ export default function SettingsView() {
           )}
         </div>
 
+        {updateState.latestVersion && (
+          <div style={styles.backupStatusRow}>
+            <span style={styles.backupStatus}>
+              {`آخرین نسخه در گیت‌هاب: v${updateState.latestVersion}`}
+              {updateState.publishedAt ? ` — منتشرشده در ${formatReleaseDate(updateState.publishedAt)}` : ''}
+            </span>
+          </div>
+        )}
+
+        {updateState.status === 'available' && skippedVersion && updateState.latestVersion === skippedVersion && (
+          <div style={styles.backupStatusRow}>
+            <span style={styles.backupStatus}>
+              این نسخه را نادیده گرفته‌اید؛ پنجرهٔ یادآوری برای آن باز نمی‌شود، مگر با زدنِ دوبارهٔ «بررسی بروزرسانی جدید از گیت‌هاب».
+            </span>
+          </div>
+        )}
+
+        {/* مرحلهٔ ۵۷ §۳ (m3): سوییچِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها» — همان کلیدِ مودالِ یادآوری؛ با localStorage هم‌گام می‌ماند. */}
+        <div style={styles.prefSwitchRow}>
+          <div>
+            <div style={styles.prefTitle}>بررسی و یادآوریِ خودکارِ آپدیت‌ها</div>
+            <div style={styles.prefSub}>
+              بررسی خودکار بروزرسانی در شروع برنامه؛ ۵ ثانیه پس از باز شدن، آخرین نسخه در گیت‌هاب بررسی می‌شود.
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            checked={autoCheckEnabled}
+            onChange={(e) => handleAutoCheckToggle(e.target.checked)}
+            style={styles.checkbox}
+            aria-label="بررسی و یادآوری خودکار آپدیت‌ها"
+          />
+        </div>
+
         {updateState.status === 'downloading' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
             <div style={styles.updateProgressTrack}>
               <div style={{ ...styles.updateProgressFill, width: `${Math.max(0, Math.min(100, updateState.progress || 0))}%` }} />
             </div>
-            <span style={styles.updateProgressLabel}>{`در حال دانلود… ${Math.max(0, Math.min(100, Math.round(updateState.progress || 0)))}٪`}</span>
+            <span style={styles.updateProgressLabel}>{formatDownloadProgressLabel(updateState)}</span>
           </div>
         )}
 

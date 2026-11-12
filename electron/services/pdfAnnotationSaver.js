@@ -48,6 +48,13 @@ const nodeCrypto = (() => { try { return require('crypto'); } catch (_) { return
 // با «Contents.push is not a function» می‌شکست. هر سه، این‌جا با
 // ترمیمِ هدفمند (جست‌وجوی بی‌نوع) رفع شده‌اند؛ به‌علاوه، fallbackِ
 // «بازسازیِ تمیز» که روی سندِ تازه، همه‌چیز را از نو می‌سازد.
+//
+// مرحلهٔ ۵۷ (مأموریت ۵): ترکیبِ Multiply فقط در لحظهٔ جایگذاری در
+// PDF اعمال می‌شود — گذرِ هایلایترِ raster با ExtGStateِ /BM
+// /Multiply (مسیرِ کامل: blendModeِ drawImage؛ الحاقِ افزایشی:
+// ExtGStateِ دستی + /GS gs در استریمِ محتوا) و هایلایترِ برداریِ
+// fallback با استریمِ appearanceِ (AP) خودش. ترکیبِ زنده (روی بوم)
+// همچنان source-over می‌ماند (قراردادِ مأموریت ۴).
 
 let pdfLibCache = null;
 let pdfLibError = null;
@@ -1115,12 +1122,103 @@ function resourcesPlan(context, node, skipped) {
   return { dict: resolved, needsNewObject, skipped };
 }
 
-function buildResourcesDict(context, plan, imageEntries, skipped) {
+// ============================================================================
+// مرحلهٔ ۵۷ (مأموریت ۵): ترکیبِ Multiply در لحظهٔ جایگذاری در PDF
+//
+// قراردادِ مأموریت ۴ (annotationPdfExport.js، رندرر): گذرِ هایلایترِ
+// raster با `highlightBlend: 'Multiply'` و آیتمِ برداریِ هایلایتر با
+// `blendMode: 'Multiply'` می‌آیند؛ قلم، 'Normal' است. ترکیبِ زنده
+// (روی بومِ شفاف) عمداً source-over می‌ماند — multiplyِ واقعی فقط
+// این‌جا، روی کاغذِ PDF، اعمال می‌شود تا متنِ سیاهِ زیرِ جوهر، سیاهِ
+// خالص بماند (باگِ مرحلهٔ ۳۷ در خروجی). گذرِ پاک‌سازیِ آلفایِ مرحلهٔ
+// ۵۶ دست نمی‌خورد: PNGهایی که این‌جا می‌رسند، از قبل alpha-clean
+// شده‌اند و هیچ پیکسلی دوباره پردازش نمی‌شود.
+// ============================================================================
+
+// آینهٔ محلیِ HIGHLIGHT_BLEND_MODEِ annotationPdfExport.js (رندرر،
+// ESM) — این ماژول CommonJSِ main است و نمی‌تواند آن فایل را require
+// کند (چرخهٔ لایه‌ای)؛ پس مقدار این‌جا تکرار شده و با قراردادِ مأموریت
+// ۴ برابر است ('Multiply').
+const HIGHLIGHT_BLEND_MODE = 'Multiply';
+
+/** گذرِ هایلایتر، Multiply می‌خواهد؟ مقدارِ null/undefined یعنی
+ *  payloadِ قدیمیِ بدونِ فیلد — گذرِ هایلایتر همیشه فقط جوهرِ
+ *  هایلایتر است، پس Multiply. 'Normalِ صریح، Normal می‌ماند. */
+function isMultiplyHighlightBlend(blend, hasHighlight) {
+  if (blend === HIGHLIGHT_BLEND_MODE) return true;
+  if (blend === 'Normal') return false;
+  return Boolean(hasHighlight);
+}
+
+/**
+ * استریمِ appearanceِ (AP) یک ضربهٔ جوهرِ هایلایتر (fallbackِ
+ * برداری): همان چندخطیِ InkList، با همان رنگ/ضخامت/شفافیت، ولی داخلِ
+ * `q /GSML gs ... Q` با ExtGStateِ /BM /Multiply.
+ * توجه: /BM کلیدِ استانداردِ دیکشنریِ حاشیه‌نویسی نیست (مستنداتِ
+ * Nutrient/PSPDFKit: «blend mode is not a standard key of the
+ * annotation dictionary» — باید در استریمِ appearance رمز شود)؛ پس
+ * Multiply، فقط این‌جا جا می‌شود. BBox دقیقاً برابرِ Rect است تا
+ * مختصاتِ مطلقِ صفحه، بی‌تغییر رندر شوند.
+ */
+function buildMultiplyInkAppearance(pdfDoc, item, rect, normalized, opacity) {
+  const ctx = pdfDoc.context;
+  const { PDFName, PDFNumber } = getPdfLib();
+  const [r, g, b] = colorToRgb01(item.color);
+  const lineWidth = Math.max(0.25, Number(item.lineWidth) || 1);
+  const ops = [];
+  ops.push('q /GSML gs');
+  ops.push(fmtNum(r) + ' ' + fmtNum(g) + ' ' + fmtNum(b) + ' RG');
+  ops.push(fmtNum(lineWidth) + ' w 1 J 1 j');
+  for (const stroke of normalized) {
+    if (!stroke || stroke.length === 0) continue;
+    let path = fmtNum(stroke[0][0]) + ' ' + fmtNum(stroke[0][1]) + ' m';
+    for (let i = 1; i < stroke.length; i++) {
+      path += ' ' + fmtNum(stroke[i][0]) + ' ' + fmtNum(stroke[i][1]) + ' l';
+    }
+    ops.push(path + ' S');
+  }
+  ops.push('Q');
+  const gsDict = ctx.obj({ Type: 'ExtGState', BM: HIGHLIGHT_BLEND_MODE, CA: Number(Number(opacity).toFixed(2)) });
+  const apStream = ctx.flateStream(Buffer.from(ops.join('\n'), 'latin1'), {
+    Type: 'XObject',
+    Subtype: 'Form',
+    BBox: ctx.obj(rect.map((v) => PDFNumber.of(Number(Number(v).toFixed(2))))),
+    Resources: ctx.obj({ ExtGState: ctx.obj({ GSML: gsDict }) }),
+  });
+  return ctx.register(apStream);
+}
+
+/**
+ * آبجکت‌هایِ الحاقیِ استریمِ appearanceِ یک دیکشنریِ حاشیه‌نویسی:
+ * استریمِ /AP /N (ثبت‌شده در context) را با همان شماره‌ای که
+ * register داده، برای الحاقِ افزایشی برمی‌گرداند. ExtGStateِ داخلِ
+ * Resourcesِ استریم، دیکشنریِ مستقیم است و جدا الحاق نمی‌خواهد.
+ */
+function collectAppearanceStreamObjects(pdfDoc, annotDict) {
+  const out = [];
+  try {
+    const { PDFName, PDFRef, PDFStream } = getPdfLib();
+    const context = pdfDoc.context;
+    const apRaw = annotDict.get(PDFName.of('AP'));
+    if (apRaw === undefined) return out;
+    const ap = resolveUntyped(context, apRaw);
+    if (!ap || typeof ap.get !== 'function') return out;
+    const nRaw = ap.get(PDFName.of('N'));
+    if (!(nRaw instanceof PDFRef)) return out;
+    const stream = resolveUntyped(context, nRaw);
+    if (!(stream instanceof PDFStream)) return out;
+    out.push({ num: nRaw.objectNumber, gen: nRaw.generationNumber || 0, body: Buffer.from(serializePdfObject(stream), 'latin1') });
+  } catch (_) { /* بدونِ AP می‌ماند؛ دیکشنری دست نمی‌خورد */ }
+  return out;
+}
+
+
+function buildResourcesDict(context, plan, imageEntries, skipped, extGStateEntries) {
   const { PDFDict, PDFName, PDFRef, PDFStream, PDFInvalidObject } = getPdfLib();
   const out = PDFDict.withContext(context);
   if (plan.dict) {
     for (const [key, rawValue] of plan.dict.entries()) {
-      if (key.toString() === '/XObject') continue;
+      if (key.toString() === '/XObject' || key.toString() === '/ExtGState') continue;
       const resolved = resolveUntyped(context, rawValue);
       if (resolved === undefined) { skipped.push('Resources/' + key.toString() + ':dangling'); continue; }
       if (resolved instanceof PDFInvalidObject) { skipped.push('Resources/' + key.toString() + ':invalid'); continue; }
@@ -1158,7 +1256,40 @@ function buildResourcesDict(context, plan, imageEntries, skipped) {
     assigned[baseName] = name;
   }
   out.set(PDFName.of('XObject'), xobj);
-  return { resourcesDict: out, assigned };
+  // مرحلهٔ ۵۷: /ExtGState — ورودی‌های قدیمی (اعتبارسنجی‌شده) + ورودی‌های
+  // تازه (مثلاً GSML برای Multiplyِ گذرِ هایلایتر)؛ نامِ تکراری، با
+  // پسوندِ عددی جابه‌جا می‌شود (همان الگوی XObject). دیکشنریِ خالی،
+  // اصلاً گذاشته نمی‌شود تا خروجیِ بدونِ هایلایتر، بی‌تغییر بماند.
+  const extGState = PDFDict.withContext(context);
+  const usedGsNames = new Set();
+  if (plan.dict) {
+    const oldExtRaw = plan.dict.get(PDFName.of('ExtGState'));
+    const oldExtResolved = oldExtRaw !== undefined ? resolveUntyped(context, oldExtRaw) : undefined;
+    if (oldExtResolved instanceof PDFDict) {
+      for (const [key, rawValue] of oldExtResolved.entries()) {
+        const resolved = resolveUntyped(context, rawValue);
+        if (resolved === undefined || resolved instanceof PDFInvalidObject || (resolved instanceof PDFStream && !(rawValue instanceof PDFRef))) {
+          skipped.push('ExtGState/' + key.toString() + ':dropped');
+          continue;
+        }
+        usedGsNames.add(key.toString());
+        extGState.set(key, rawValue);
+      }
+    } else if (oldExtRaw !== undefined) {
+      skipped.push('ExtGState:wrong-type');
+    }
+  }
+  const assignedExtGState = {};
+  for (const [baseName, ref] of (Array.isArray(extGStateEntries) ? extGStateEntries : [])) {
+    let name = baseName;
+    let n = 2;
+    while (usedGsNames.has('/' + name)) { name = baseName + n; n++; }
+    usedGsNames.add('/' + name);
+    extGState.set(PDFName.of(name), ref);
+    assignedExtGState[baseName] = name;
+  }
+  if (extGState.keys().length > 0) out.set(PDFName.of('ExtGState'), extGState);
+  return { resourcesDict: out, assigned, assignedExtGState };
 }
 
 
@@ -1241,8 +1372,16 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
 
   let nextNum = maxObjNum + 1;
   const alloc = () => {
-    if (nextNum - (maxObjNum + 1) > MAX_INC_OBJECTS) throw new Error('incremental: شمارِ آبجکت‌های جدید از سقف گذشت.');
-    return nextNum++;
+    // مرحلهٔ ۵۷: شماره‌گذاریِ الحاقی و شماره‌گذاریِ contextِ pdf-lib
+    // (registerِ استریمِ appearanceِ هایلایتر) یک شمارندهٔ مشترک
+    // ندارند؛ alloc هر بار بالاتر از هر دو می‌ایستد تا شمارهٔ تکراری
+    // ساخته نشود، و شماره‌ای را که می‌دهد در largestObjectNumber هم
+    // ثبت می‌کند تا registerِ بعدی، از همان‌جا ادامه دهد.
+    const n = Math.max(nextNum, (context.largestObjectNumber || 0) + 1);
+    if (n - (maxObjNum + 1) > MAX_INC_OBJECTS) throw new Error('incremental: شمارِ آبجکت‌های جدید از سقف گذشت.');
+    nextNum = n + 1;
+    if ((context.largestObjectNumber || 0) < n) context.largestObjectNumber = n;
+    return n;
   };
   const appended = [];
   const skipped = [];
@@ -1276,8 +1415,11 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
       }
       const hlSet = highlightBuffer ? imageSets[0] : null;
       const ovSet = highlightBuffer ? imageSets[1] : imageSets[0];
+      // مرحلهٔ ۵۷: گذرِ هایلایتر، با /BM /Multiply می‌نشیند تا متنِ
+      // سیاهِ زیرش سیاهِ خالص بماند (قراردادِ مأموریت ۴:
+      // entry.highlightBlend). گذرِ overlayِ معمولی، Normal می‌ماند.
+      const hlMultiply = Boolean(hlSet) && isMultiplyHighlightBlend(entry.highlightBlend, Boolean(hlSet));
       const imageEntries = [];
-      const contentOps = ['q'];
       const placeImage = (set, baseName) => {
         let smaskNum = null;
         if (set.smask) {
@@ -1287,14 +1429,35 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
         const imgNum = alloc();
         appended.push({ num: imgNum, gen: 0, body: imageObjectBody(set.main, smaskNum) });
         imageEntries.push([baseName, PDFRef.of(imgNum, 0)]);
+      };
+      if (hlSet) placeImage(hlSet, 'ImHL');
+      if (ovSet) placeImage(ovSet, 'ImOV');
+      // ExtGStateِ Multiply (فقط برای گذرِ هایلایتر)؛ آبجکتِ جدا،
+      // پیش از ساختنِ Resources تخصیص می‌گیرد تا نامش معلوم باشد.
+      let multiplyGsRef = null;
+      if (hlMultiply) {
+        const gsNum = alloc();
+        const gsDict = context.obj({ Type: 'ExtGState', BM: 'Multiply' });
+        appended.push({ num: gsNum, gen: 0, body: Buffer.from(serializePdfObject(gsDict), 'latin1') });
+        multiplyGsRef = PDFRef.of(gsNum, 0);
+      }
+      const rp = resourcesPlan(context, node, skipped);
+      const built = buildResourcesDict(context, rp, imageEntries, skipped, multiplyGsRef ? [['GSML', multiplyGsRef]] : []);
+      const gsName = hlMultiply && built.assignedExtGState ? built.assignedExtGState.GSML : null;
+      // استریمِ محتوا: فقط بلوکِ هایلایتر داخلِ q /GS gs ... Q است؛
+      // بلوکِ overlay، با همان q/Qِ معمولی و بدونِ gs می‌نشیند.
+      const contentOps = ['q'];
+      if (gsName) contentOps.push('/' + gsName + ' gs');
+      const drawPlacedImage = (baseName) => {
+        const finalName = (built.assigned && built.assigned[baseName]) || baseName;
         contentOps.push(fmtNum(rawW) + ' 0 0 ' + fmtNum(rawH) + ' 0 0 cm');
-        contentOps.push('/' + baseName + ' Do');
+        contentOps.push('/' + finalName + ' Do');
         contentOps.push('Q');
         contentOps.push('q');
         placed += 1;
       };
-      if (hlSet) placeImage(hlSet, 'ImHL');
-      if (ovSet) placeImage(ovSet, 'ImOV');
+      if (hlSet) drawPlacedImage('ImHL');
+      if (ovSet) drawPlacedImage('ImOV');
       contentOps.pop(); // trailing bare 'q' (each Do block ends with Q + next q)
       const contentText = contentOps.join('\n') + '\n';
       const contentNum = alloc();
@@ -1318,8 +1481,6 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
       }
       contentRefs.push(PDFRef.of(contentNum, 0));
       newDict.set(PDFName.of('Contents'), context.obj(contentRefs));
-      const rp = resourcesPlan(context, node, skipped);
-      const built = buildResourcesDict(context, rp, imageEntries, skipped);
       if (rp.needsNewObject) {
         const resNum = alloc();
         appended.push({ num: resNum, gen: 0, body: Buffer.from(serializePdfObject(built.resourcesDict), 'latin1') });
@@ -1340,6 +1501,14 @@ async function saveByIncrementalUpdate({ pdfDoc, baseBytes, pages, logger }) {
     for (const item of vector) {
       const dict = buildAnnotDictForIncremental(pdfDoc, item);
       if (!dict) continue;
+      // مرحلهٔ ۵۷: استریمِ appearanceِ هایلایتر (در buildInkAnnotDict
+      // با register ساخته شده) هم باید به‌عنوانِ آبجکتِ جدا الحاق
+      // شود؛ وگرنه ارجاعِ /AP در دیکشنری، معلق می‌ماند. (alloc با
+      // largestObjectNumberِ context همگام است، پس شماره‌ها تکراری
+      // نمی‌شوند.)
+      for (const extraObj of collectAppearanceStreamObjects(pdfDoc, dict)) {
+        appended.push(extraObj);
+      }
       const num = alloc();
       appended.push({ num, gen: 0, body: Buffer.from(serializePdfObject(dict), 'latin1') });
       annotRefs.push(PDFRef.of(num, 0));
@@ -1740,6 +1909,13 @@ function buildInkAnnotDict(pdfDoc, item) {
     CA: pdfLibNumber(pdfDoc, opacity),
     Border: pdfLibNumberArray(pdfDoc, [0, 0, lineWidth]),
   });
+  // مرحلهٔ ۵۷: هایلایترِ برداری، appearanceِ Multiply می‌گیرد تا
+  // متنِ زیرش رنگی نشود؛ قلم ('Normal') بدونِ AP می‌ماند تا
+  // appearanceِ پیش‌فرضِ خواننده، بی‌تغییر بماند.
+  if (item.blendMode === HIGHLIGHT_BLEND_MODE) {
+    const apRef = buildMultiplyInkAppearance(pdfDoc, item, rect, normalized, opacity);
+    annot.set(pdfLibName(pdfDoc, 'AP'), ctx.obj({ N: apRef }));
+  }
   return annot;
 }
 function addInkAnnotation(pdfDoc, page, item) {
@@ -2482,20 +2658,20 @@ async function applyAnnotationsToDocument(pdfDoc, pages, options = {}) {
       const rawW = Number(entry.pageWidth);
       const rawH = Number(entry.pageHeight);
       if (Number.isFinite(rawW) && Number.isFinite(rawH) && rawW > 0 && rawH > 0) {
-        // گذرِ اول: فقط هایلایترها، با ترکیبِ عادی (Normal /
-        // source-over) — دقیقاً همان ترکیبی که مرورگر، بومِ
-        // شفافِ Konva را روی تصویرِ صفحه می‌نشاند. ترکیبِ
-        // Multiplyِ مرحلهٔ ۷ ـ بخش ب، روی هر پیکسلِ غیرسفیدِ
-        // صفحه (متنِ سیاه، زمینهٔ خاکستریِ اسکن) تصویر را تیره‌تر
-        // از داخلِ برنامه نشان می‌داد (روی سفید، هر دو یکسان‌اند؛
-        // روی سیاه، Multiply متن را سیاهِ خالص نگه می‌دارد ولی
-        // در برنامه، متن با رنگِ هایلایتر رنگی می‌شود)؛ پس
-        // Multiply حذف شد و گروهِ شفافیتِ DeviceRGB هم که فقط
-        // برای ایزوله‌کردنِ همان گذر لازم بود، برداشته شد.
+        // مرحلهٔ ۵۷: گذرِ اول، فقط هایلایترها — با ترکیبِ Multiply
+        // در لحظهٔ جایگذاری در PDF (قراردادِ مأموریت ۴:
+        // entry.highlightBlend). روی کاغذِ سفید، Multiply دقیقاً
+        // همان رنگِ جوهر را می‌دهد؛ روی متنِ سیاه، متن سیاهِ خالص
+        // می‌ماند (باگِ مرحلهٔ ۳۷ در خروجی). این، ترکیبِ زندهٔ روی
+        // بوم نیست — بومِ شفاف همچنان source-over می‌ماند، چون
+        // multiply روی شفافیت، به متنِ PDF نمی‌رسد. گذرِ overlayِ
+        // معمولی (قلم/متن/استیکی) همچنان Normal است.
         if (highlightBuffer) {
+          const { BlendMode } = getPdfLib();
           const hlImage = await pdfDoc.embedPng(highlightBuffer);
           await drawOverlayImageWithRetry(pdfDoc, page, hlImage, {
             x: 0, y: 0, width: rawW, height: rawH, opacity: 1.0,
+            ...(isMultiplyHighlightBlend(entry.highlightBlend, true) ? { blendMode: BlendMode.Multiply } : {}),
           });
           placed += 1;
         }
@@ -2545,9 +2721,12 @@ async function buildOutputBytes(pdfDoc, pages, options = {}) {
  *
  * @param {Object} args
  * @param {string} args.pdfPath - مسیرِ فایلِ PDFِ اصلی (فقط خوانده می‌شود).
- * @param {Object} args.pages - { [pageNumber: number]: { vector: Array, overlayPng: string|null, pageWidth: number, pageHeight: number } }
+ * @param {Object} args.pages - { [pageNumber: number]: { vector: Array, overlayPng: string|null, highlightPng: string|null, highlightBlend: 'Multiply'|'Normal'|null, pageWidth: number, pageHeight: number } }
  *   vector: آیتم‌های برداری با هندسهٔ نهایی در فضای خامِ PDF (پوینت، مبدأ پایین-چپ):
- *     { kind: 'ink', strokes: [[[x,y],...],...], color, lineWidth, opacity }
+ *     { kind: 'ink', strokes: [[[x,y],...],...], color, lineWidth, opacity, blendMode?: 'Multiply'|'Normal' }
+ *   highlightBlend (مرحلهٔ ۵۷): نیتِ ترکیبِ گذرِ هایلایترِ raster —
+ *   'Multiply' یعنی ExtGStateِ /BM /Multiply موقعِ جایگذاری؛
+ *   blendModeِ آیتمِ ink هم همان نیت را برای fallbackِ برداری دارد.
  *     { kind: 'line', x1, y1, x2, y2, color, lineWidth, opacity }
  *     { kind: 'square', rect: [x1,y1,x2,y2], strokeColor, fillColor|null, fillOpacity, lineWidth, opacity }
  *     { kind: 'circle', rect: [x1,y1,x2,y2], fillColor, opacity }
@@ -2785,6 +2964,7 @@ async function saveAnnotatedPdfImpl({ pdfPath, pages, outputPath, mode, logger, 
         vector: Array.isArray(e.vector) ? e.vector : [],
         overlayPngBuffer: decodeDataUrlPng(e.overlayPng),
         highlightPngBuffer: decodeDataUrlPng(e.highlightPng),
+        highlightBlend: e.highlightBlend || null,
         pageWidth: e.pageWidth,
         pageHeight: e.pageHeight,
       };

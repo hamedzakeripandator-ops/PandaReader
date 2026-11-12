@@ -37,6 +37,11 @@ import {
 } from './annotationEngine';
 import { normalizeMixedBidiLine } from './bidiTextEngine';
 
+// مرحلهٔ ۵۷ (مأموریت ۴): همان موتورِ جوهرِ لایه — getStroke از
+// perfect-freehand@^1.2.3 (نام‌دار، تأییدشده). فقط getStroke؛
+// getStrokeBounds خروجیِ این پکیج نیست.
+import { getStroke } from 'perfect-freehand';
+
 // --- چرخش در مربعِ واحد (مختصاتِ y-down) ---------------------------------
 // rotateUnitSquare نقطه را به اندازهٔ degrees، ساعتگرد می‌چرخاند.
 // فقط مضرب‌های ۹۰ پشتیبانی می‌شوند (چرخشِ صفحه همین‌هاست) تا هیچ
@@ -213,21 +218,27 @@ function displayedFractionsToPdf(fx, fy, geometry) {
   return fractionsToPdfPoint(vx, vy, geometry.viewport, geometry.inverseTransform);
 }
 
-// --- رسمِ وفادارِ روی بوم (مرحله ۵ ـ بخش ب) ---------------------------------
+// --- رسمِ وفادارِ روی بوم (مرحله ۵ ـ بخش ب؛ مرحلهٔ ۵۷ بازنویسی شد) -----
 //
-// چرا این رسم، خودِ رسمِ روی صفحه است، نه outlineی perfect-freehand؟
-// ممیزیِ سه‌لایهٔ بخش ب نشان داد قلمِ ثبت‌شده روی صفحه، اصلاً با
-// pointsToPath/getStrokeOptionsی انجین رسم نمی‌شود (آن توابع در
-// رندرر هیچ فراخواننده‌ای ندارند): CommittedStroke در AnnotationLayer
-// با drawSmoothStroke (چندضلعیِ هموارِ midpoint-quadratic، خطِ گرد)
-// و با پهنای لایه‌ایِ `sw*2.4` برای قلم و `sw*5.5` برای هایلایتر
-// رسم می‌شود (نه `sw*2.2`ی انجین). پس پختِ ۱۰۰٪ باید همان الگوریتمِ
-// لایه را در فضای بوم تکرار کند؛ outlineی perfect-freehand، شکلی
-// متفاوت (کانتورِ پرشده) می‌ساخت. هایلایتر، در گذرِ جداگانه‌ای
-// (highlightPng) با همان شفافیتِ اسلایدر (پیش‌فرض ۰٫۴۵) و source-over
-// رسم می‌شود و main، آن گذر را زیرِ بقیه می‌نشاند — بدونِ هیچ
-// BlendModeای (ترکیبِ Multiplyِ مرحلهٔ ۷ ـ بخش ب مدت‌هاست حذف شده؛
- // main با opacityی ۱٫۰ می‌نشیند).
+// از مرحلهٔ ۵۷، این رسم، همان موتورِ لایه است: کانتورِ پرشدهٔ
+// perfect-freehand (با getStroke) با دقیقاً همان گزینه‌ها (به
+// getFreehandStrokeOptions در پایین مراجعه کنید: thinning 0،
+// streamline 0 چون نقطه‌ها موقعِ ثبت هموار شده‌اند، smoothing 0.5،
+// کلاهکِ گردِ بدونِ taper). ممیزیِ قدیمیِ بخش ب که outline را رد
+// می‌کرد، رویِ این پیش‌فرض بود که لایه با منحنیِ درجه‌دوم رسم
+// می‌کند؛ حالا لایه هم getStroke می‌کند، پس همان استدلال، برعکس
+// شده: پختِ ۱۰۰٪ یعنی همان الگوریتمِ لایه. پهنای لایه‌ایِ `sw*2.4`
+// برای قلم و `sw*5.5` برای هایلایتر و شفافیتِ اسلایدر (پیش‌فرض
+// ۰٫۴۵ برای هایلایتر) سرِ جایشان‌اند.
+//
+// ترکیب (multiply) کجاست؟ داخلِ این بومِ شفاف، source-over است —
+// دلیلش در getExportCompositeOp آمده: رویِ پس‌زمینهٔ شفاف،
+// multiply دقیقاً برابرِ source-over است و به متنِ PDF نمی‌رسد.
+// multiplyِ واقعی، موقعِ جایگذاریِ highlightPng در فایلِ PDF
+// با ExtGStateِ /BM /Multiply اعمال می‌شود (در saver) و نیتِ آن،
+// با `highlightBlend: 'Multiply'` از renderPageOverlay بیرون می‌آید.
+// گذرِ پاک‌سازیِ آلفایِ مرحلهٔ ۵۶ هم سرِ جایش است (فقط پیکسل‌هایِ
+// کاملاً شفاف را دست می‌زند) و با کانتورِ پرشده هیچ تعارضی ندارد.
 
 /** نقطهٔ فضای یکنواخت (ux, uy) → پیکسلِ بومِ جهتِ خام. */
 function uniformToCanvasPoint(ux, uy, geometry, canvasW, canvasH) {
@@ -243,48 +254,59 @@ function storagePointToCanvasPoint(x, y, geometry, canvasW, canvasH) {
   return [rx * canvasW, ry * canvasH];
 }
 
-function midpointPt(a, b) {
-  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+// مرحلهٔ ۵۷ (مأموریت ۴) — حالتِ ترکیبِ PDF برایِ گذرِ هایلایتر:
+// مقدارِ ExtGStateِ /BMای که saver باید موقعِ نشاندنِ highlightPng
+// رویِ صفحه بگذارد تا متنِ سیاهِ PDF زیرِ جوهر، سیاهِ خالص بماند و
+// جوهر، زنده بماند (رویِ کاغذِ سفید، multiply دقیقاً همان رنگِ
+// جوهر را می‌دهد؛ رویِ متنِ سیاه، سیاه می‌ماند). این، فقط متادیتاست —
+// پیکسل‌هایِ PNG دست نمی‌خورند (به getExportCompositeOp مراجعه کنید).
+export const HIGHLIGHT_BLEND_MODE = 'Multiply';
+
+// حالتِ ترکیبِ قلم/هایلایتر در این بومِ شفاف — همیشه source-over.
+// (متنِ کاملِ استدلال در getCompositeOpی AnnotationLayer.jsx است:
+// بومِ شفاف، پس‌زمینه‌ای برایِ multiply ندارد؛ و خروجی، هایلایتر
+// را رویِ بومِ جداگانه می‌گذارد، پس multiplyِ داخلِ بوم، زنده و
+// خروجی را از هم می‌انداخت — همان جنسِ باگِ مرحلهٔ ۳۷.)
+export function getExportCompositeOp(tool) {
+  return 'source-over';
 }
 
-/** همان drawSmoothStrokeی لایه، ولی در فضای پیکسلِ بوم. */
-function drawSmoothStrokeCanvas(ctx, canvasPoints, color, widthPx, opacity) {
+// گزینه‌هایِ واحدِ perfect-freehand — دقیقاً برابرِ
+// getFreehandStrokeOptionsی لایه؛ هر تغییری اینجا باید آنجا هم
+// بخورد تا زنده و خروجی یکی بمانند (مثلِ strokeOpacity که منطقِ
+// getStrokeOpacityی لایه را تکرار می‌کند).
+function getFreehandStrokeOptions(size) {
+  const w = Number.isFinite(size) && size > 0 ? size : 1;
+  return {
+    size: w,
+    thinning: 0,
+    smoothing: 0.5,
+    streamline: 0,
+    simulatePressure: false,
+    start: { cap: true, taper: 0 },
+    end: { cap: true, taper: 0 },
+    last: true,
+  };
+}
+
+/** همان drawSmoothStrokeی لایه (کانتورِ perfect-freehand)، ولی در فضای پیکسلِ بوم. */
+export function drawSmoothStrokeCanvas(ctx, canvasPoints, color, widthPx, opacity, compositeOp) {
   if (!canvasPoints || canvasPoints.length === 0) return;
   // مرحلهٔ ۳۷ §۴(ج): رنگِ خالصِ مات؛ شفافیت فقط از globalAlpha می‌آید.
   const pureColor = toPureRgbCss(color) || color;
+  const finitePts = canvasPoints.filter((pt) => pt && Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+  if (finitePts.length === 0) return;
+  const outline = getStroke(finitePts, getFreehandStrokeOptions(widthPx));
+  if (!outline || outline.length === 0) return;
   ctx.save();
   ctx.globalAlpha = opacity;
-  ctx.globalCompositeOperation = 'source-over';
-  if (canvasPoints.length === 1) {
-    ctx.beginPath();
-    ctx.fillStyle = pureColor;
-    ctx.arc(canvasPoints[0][0], canvasPoints[0][1], widthPx / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-    return;
-  }
+  ctx.globalCompositeOperation = compositeOp || 'source-over';
   ctx.beginPath();
-  ctx.strokeStyle = pureColor;
-  ctx.lineWidth = widthPx;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  const n = canvasPoints.length;
-  if (n === 2) {
-    ctx.moveTo(canvasPoints[0][0], canvasPoints[0][1]);
-    ctx.lineTo(canvasPoints[1][0], canvasPoints[1][1]);
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-  ctx.moveTo(canvasPoints[0][0], canvasPoints[0][1]);
-  const m1 = midpointPt(canvasPoints[0], canvasPoints[1]);
-  ctx.lineTo(m1[0], m1[1]);
-  for (let i = 1; i < n - 1; i++) {
-    const mNext = midpointPt(canvasPoints[i], canvasPoints[i + 1]);
-    ctx.quadraticCurveTo(canvasPoints[i][0], canvasPoints[i][1], mNext[0], mNext[1]);
-  }
-  ctx.lineTo(canvasPoints[n - 1][0], canvasPoints[n - 1][1]);
-  ctx.stroke();
+  ctx.fillStyle = pureColor;
+  ctx.moveTo(outline[0][0], outline[0][1]);
+  for (let i = 1; i < outline.length; i++) ctx.lineTo(outline[i][0], outline[i][1]);
+  ctx.closePath();
+  ctx.fill();
   ctx.restore();
 }
 
@@ -300,7 +322,7 @@ function drawPenItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
   // پهنای لایه (نه انجین): قلم sw*2.4، هایلایتر sw*5.5.
   const widthPx = (item.tool === 'highlighter' ? sw * 5.5 : sw * 2.4) * unitScale;
   const opacity = item.tool === 'highlighter' ? normalizeOpacityValue(item.opacity, 0.45) : normalizeOpacityValue(item.opacity, 0.95);
-  drawSmoothStrokeCanvas(ctx, canvasPoints, item.color || '#22d3ee', widthPx, opacity);
+  drawSmoothStrokeCanvas(ctx, canvasPoints, item.color || '#22d3ee', widthPx, opacity, getExportCompositeOp(item.tool));
 }
 
 function drawBoxItemCanvas(ctx, item, geometry, canvasW, canvasH, unitScale) {
@@ -458,6 +480,10 @@ function convertPenItem(item, geometry) {
     color: item.color || '#22d3ee',
     lineWidth: strokeLineWidthPoints(item.tool, item.strokeWidth, geometry),
     opacity: strokeOpacity(item.tool, item),
+    // مرحلهٔ ۵۷: نیتِ ترکیبِ PDF برایِ fallbackِ برداری — saver باید
+    // هایلایتر را با /BM /Multiply بنشاند (وگرنه متنِ زیرش رنگی می‌شود؛
+    // باگِ مرحلهٔ ۳۷). قلم، Normal می‌ماند.
+    blendMode: item.tool === 'highlighter' ? HIGHLIGHT_BLEND_MODE : 'Normal',
   };
 }
 
@@ -920,11 +946,13 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
 /**
  * رندرِ overlayِ یک صفحه (همهٔ آیتم‌ها: قلم، هایلایتر، باکس، فلش،
  * متن، استیکی) روی بومِ Canvas 2D در جهتِ خامِ صفحه — پختِ کاملِ
- * لایهٔ شفاف. برمی‌گرداند: { overlayPng, highlightPng } یا null
+ * لایهٔ شفاف. برمی‌گرداند: { overlayPng, highlightPng, highlightBlend } یا null
  * (اگر آیتمی نیست). overlayPng، همهٔ آیتم‌ها به‌جز هایلایترهاست
- * و highlightPng فقط هایلایترهاست تا main، گذرِ هایلایتر را زیرِ
- * بقیه بنشاند (source-over، بدونِ BlendMode). وقتی overlay ساخته
- * شد، main دیگر /Annotِ تکراری نمی‌سازد.
+ * و highlightPng فقط هایلایترهاست تا main، گذرِ هایلایتر را زیرِ بقیه
+ * بنشاند (source-over، بدونِ BlendMode در خودِ PNG). وقتی overlay ساخته
+ * شد، main دیگر /Annotِ تکراری نمی‌سازد. highlightBlend، نیتِ
+ * ترکیبِ PDF برایِ گذرِ هایلایتر است (Multiply — به HIGHLIGHT_BLEND_MODE
+ * مراجعه کنید) تا saver آن را با ExtGState رویِ highlightPng بگذارد.
  */
 export async function renderPageOverlay(items, geometry) {
   const overlayItems = items || [];
@@ -1012,7 +1040,7 @@ export async function renderPageOverlay(items, geometry) {
   // پرحاشیه در رم انباشته نشود (صفر کردنِ ابعاد، بکینگ‌استور را آزاد می‌کند).
   try { canvas.width = 0; canvas.height = 0; } catch (_) {}
   try { hlCanvas.width = 0; hlCanvas.height = 0; } catch (_) {}
-  return { overlayPng, highlightPng };
+  return { overlayPng, highlightPng, highlightBlend: hasHighlight ? HIGHLIGHT_BLEND_MODE : null };
 }
 
 // --- ارکستراسیونِ کلِ خروجی -------------------------------------------------
@@ -1064,6 +1092,10 @@ export async function prepareAnnotatedPdfExport({ annotationsByPage, getPageView
         vector,
         overlayPng,
         highlightPng,
+        // مرحلهٔ ۵۷: نیتِ ترکیبِ PDF برایِ گذرِ هایلایتر (به
+        // HIGHLIGHT_BLEND_MODE مراجعه کنید) — saver آن را به /BM
+        // تبدیل می‌کند؛ بدونِ آن، متنِ زیرِ هایلایتر رنگی می‌شود.
+        highlightBlend: rendered ? rendered.highlightBlend || null : null,
         pageWidth: geometry.rawWidth,
         pageHeight: geometry.rawHeight,
       };

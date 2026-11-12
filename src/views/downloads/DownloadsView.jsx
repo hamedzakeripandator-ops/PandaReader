@@ -57,12 +57,18 @@ export default function DownloadsView() {
   // مرحله ۷ ـ بخش الف: این صفحه، حالا اطلاعاتِ واقعیِ همین نصب را
   // از پروسهٔ اصلی می‌خواند (کانالِ get-app-info). تایمرِ ساختگیِ
   // «بررسیِ سرور» (۱۶۰۰ میلی‌ثانیه، همیشه «به‌روز») و دانلودِ
-  // ساختگیِ +۲۰٪ هر ۳۵۰ میلی‌ثانیه و وضعیتِ دست‌نیافتنیِ
-  // 'available'، کاملاً حذف شدند: هیچ سرورِ به‌روزرسانی‌ای در
-  // برنامه وجود ندارد و چیزی برای «چک کردن» نیست.
+  // ساختگیِ +۲۰٪ هر ۳۵۰ میلی‌ثانیه، کاملاً حذف شدند.
+  // مرحلهٔ ۵۷ §۳ (m3): آخرین انتشار، زنده از REST عمومیِ گیت‌هابِ
+  // hamedzakeripandator-ops/PandaReader خوانده می‌شود (بدونِ توکن)؛
+  // دکمهٔ «به‌روزرسانیِ اطلاعات»، هم اطلاعاتِ محلی را تازه می‌کند
+  // و هم همان لحظه، آخرین نسخه را چک می‌کند.
   const [appInfo, setAppInfo] = useState(null);
   const [infoLoading, setInfoLoading] = useState(true);
   const [infoError, setInfoError] = useState('');
+
+  // مرحلهٔ ۵۷ §۳ (m3): وضعیتِ زندهٔ آخرین انتشارِ گیت‌هاب.
+  const [latestRelease, setLatestRelease] = useState({ status: 'idle', latestVersion: '', publishedAt: '', releaseNotes: '', downloadUrl: '', htmlUrl: '', message: '' });
+  const [releaseChecking, setReleaseChecking] = useState(false);
 
   const loadAppInfo = async () => {
     setInfoLoading(true);
@@ -81,6 +87,73 @@ export default function DownloadsView() {
     }
   };
 
+  // مرحلهٔ ۵۷ §۳ (m3): تاریخِ انتشارِ ISO به تاریخِ فارسی.
+  const formatReleaseDate = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('fa-IR');
+    } catch (_) { return ''; }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ آخرین انتشارِ گیت‌هاب (REST عمومی،
+  // بدونِ توکن). manual یعنی کاربر خودش دکمه را زده است و مودالِ
+  // یادآوری، حتی برایِ نسخهٔ نادیده‌گرفته‌شده هم باز می‌شود؛ در
+  // بررسیِ خودکارِ باز شدنِ صفحه، manual برابر false است.
+  const checkLatestRelease = async (manual) => {
+    if (!coreApi || typeof coreApi.checkForUpdates !== 'function') {
+      setLatestRelease((prev) => ({ ...prev, status: 'error', message: 'سرویسِ بروزرسانی در این نسخه در دسترس نیست.' }));
+      return;
+    }
+    setReleaseChecking(true);
+    setLatestRelease((prev) => ({ ...prev, status: 'checking', message: '' }));
+    try {
+      const result = await coreApi.checkForUpdates();
+      let norm = null;
+      try {
+        if (typeof coreApi.normalizeCheckForUpdatesResult === 'function') {
+          norm = coreApi.normalizeCheckForUpdatesResult(result, '');
+        }
+      } catch (_) { norm = null; }
+      if (!norm) {
+        setLatestRelease((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد.' }));
+        return;
+      }
+      if (norm.updateAvailable === true && norm.latestVersion) {
+        setLatestRelease({ status: 'available', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: '' });
+        try {
+          if (typeof coreApi.emitUpdateAvailable === 'function') {
+            coreApi.emitUpdateAvailable({ updateAvailable: true, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, currentVersion: norm.currentVersion || (appInfo && appInfo.version) || '', manual: manual === true });
+          }
+        } catch (_) {}
+      } else if (norm.updateAvailable === false) {
+        setLatestRelease({ status: 'up-to-date', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: '' });
+      } else if (norm.latestVersion) {
+        setLatestRelease({ status: 'available', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: '' });
+        try {
+          if (typeof coreApi.emitUpdateAvailable === 'function') {
+            coreApi.emitUpdateAvailable({ updateAvailable: true, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, currentVersion: norm.currentVersion || (appInfo && appInfo.version) || '', manual: manual === true });
+          }
+        } catch (_) {}
+      } else {
+        setLatestRelease((prev) => ({ ...prev, status: 'error', message: norm.message || 'بررسی بروزرسانی انجام نشد.' }));
+      }
+    } catch (err) {
+      setLatestRelease((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+    } finally {
+      setReleaseChecking(false);
+    }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): دکمهٔ آبیِ «به‌روزرسانیِ اطلاعات» — هر کلیک،
+  // هم اطلاعاتِ محلیِ سیستم را تازه می‌کند و هم آخرین انتشارِ
+  // گیت‌هاب را چک می‌کند.
+  const handleRefreshAll = async () => {
+    await loadAppInfo();
+    await checkLatestRelease(true);
+  };
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -92,6 +165,7 @@ export default function DownloadsView() {
         setInfoError((result && result.error) || 'دریافتِ اطلاعاتِ برنامه انجام نشد.');
       }
       setInfoLoading(false);
+      if (!cancelled) void checkLatestRelease(false);
     })();
     return () => { cancelled = true; };
   }, []);
@@ -124,7 +198,7 @@ export default function DownloadsView() {
             <span style={styles.subtitle}>
               نسخه، محیطِ اجرا و وضعیتِ دیتای همین نصب{' '}
               <span style={{ fontFamily: 'var(--font-latin)', fontWeight: 700 }}>ComicReader</span>
-              {' '}— این برنامه، سرورِ به‌روزرسانی ندارد؛ نسخه‌های جدید، به‌صورتِ دستی نصب می‌شوند.
+              {' '}— نسخه‌های جدید، مستقیم از گیت‌هابِ PandaReader بررسی می‌شوند و آخرین نسخهٔ منتشرشده، همین‌جا دیده می‌شود.
             </span>
           </div>
         </div>
@@ -141,8 +215,8 @@ export default function DownloadsView() {
           </button>
           <button
             type="button"
-            onClick={loadAppInfo}
-            disabled={infoLoading}
+            onClick={handleRefreshAll}
+            disabled={infoLoading || releaseChecking}
             style={styles.checkBtn}
           >
             {infoLoading ? (
@@ -179,11 +253,21 @@ export default function DownloadsView() {
           <h3 style={styles.statusTitle}>
             {infoLoading && 'در حال خواندنِ اطلاعاتِ محیط…'}
             {!infoLoading && infoError && infoError}
-            {!infoLoading && !infoError &&
-              'اطلاعاتِ زیر، وضعیتِ واقعیِ همین نصب است؛ هیچ بررسیِ سروری انجام نمی‌شود.'}
+            {!infoLoading && !infoError && latestRelease.status === 'available' && latestRelease.latestVersion &&
+              `نسخهٔ جدید v${latestRelease.latestVersion} در گیت‌هاب منتشر شده است.`}
+            {!infoLoading && !infoError && latestRelease.status === 'up-to-date' &&
+              'شما به آخرین نسخه بروز هستید.'}
+            {!infoLoading && !infoError && latestRelease.status === 'checking' &&
+              'در حال بررسیِ آخرین نسخه در گیت‌هاب…'}
+            {!infoLoading && !infoError && latestRelease.status === 'error' &&
+              (latestRelease.message || 'بررسیِ آخرین نسخه در گیت‌هاب انجام نشد.')}
+            {!infoLoading && !infoError && latestRelease.status === 'idle' &&
+              'اطلاعاتِ زیر، وضعیتِ واقعیِ همین نصب است.'}
           </h3>
           <p style={styles.statusDesc}>
-            به‌روزرسانی، خودکار نیست: نسخهٔ جدید را خودتان دانلود و نصب می‌کنید؛ دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.
+            {latestRelease.latestVersion
+              ? `آخرین نسخه در گیت‌هاب: v${latestRelease.latestVersion}${latestRelease.publishedAt ? ` — منتشرشده در ${formatReleaseDate(latestRelease.publishedAt)}` : ''}؛ دانلود و نصب از پنجرهٔ یادآوری یا کارتِ بروزرسانی در تنظیمات انجام می‌شود و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.`
+              : 'آخرین نسخه، مستقیم از گیت‌هابِ PandaReader بررسی می‌شود؛ دانلود و نصب از پنجرهٔ یادآوری یا کارتِ بروزرسانی در تنظیمات انجام می‌شود و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.'}
           </p>
         </div>
 

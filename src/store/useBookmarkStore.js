@@ -135,6 +135,71 @@ function mergeBookmarkLists(base, override) {
   return [...byId.values()];
 }
 
+// مرحلهٔ ۵۷، مأموریت ۱ — نامِ فایل از رویِ کلیدِ نرمال‌شده، برایِ
+// ورودیِ کشِ سراسری (کش، همیشه شکلِ { fileName, bookmarks } دارد).
+function fileBaseName(filePath) {
+  return String(filePath || '').split(/[\\/]/).pop() || String(filePath || '');
+}
+
+// مرحلهٔ ۵۷، مأموریت ۱ — خواندنِ کلِ آینهٔ محلیِ بوک‌مارک‌ها
+// (نه فقط یک فایل)، برایِ ساختنِ کشِ سراسری بدونِ IPC.
+function readAllBookmarksLocalStorage() {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return {};
+    const raw = window.localStorage.getItem(LS_BOOKMARKS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) || {};
+    const out = {};
+    Object.entries(parsed).forEach(([key, list]) => {
+      const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmark).filter(Boolean);
+      if (clean.length > 0) out[key] = clean;
+    });
+    return out;
+  } catch (_) {
+    return {};
+  }
+}
+
+// مرحلهٔ ۵۷، مأموریت ۱ — برابریِ محتوایی (برایِ اینکه شمارندهٔ
+// نسخه، فقط وقتی بالا برود که داده واقعاً عوض شده باشد).
+function jsonEqual(a, b) {
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch (_) {
+    return false;
+  }
+}
+
+// مرحلهٔ ۵۷، مأموریت ۱ — شمارندهٔ کلِ کشِ سراسری؛ هر دو شکلِ
+// ورودی (شیءِ { bookmarks } و آرایهٔ خامِ قدیمی) را می‌فهمد.
+function countAllBookmarkEntries(map) {
+  return Object.values(map || {}).reduce(
+    (sum, entry) => sum + (Array.isArray(entry && entry.bookmarks) ? entry.bookmarks.length : Array.isArray(entry) ? entry.length : 0),
+    0
+  );
+}
+
+// مرحلهٔ ۵۷، مأموریت ۱ — نقشهٔ سراسری از حافظه و آینهٔ محلی:
+// کشِ درونِ حافظه اول، بعد آینهٔ localStorage (تازه‌ترین لایه،
+// برندهٔ تعارض — همان قانونِ مرحلهٔ ۱۹ در loadBookmarksForFile).
+function buildLocalAllBookmarksMap(bookmarksByFile) {
+  const map = {};
+  Object.entries(bookmarksByFile || {}).forEach(([key, list]) => {
+    const norm = normalizeBookKey(key);
+    const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmark).filter(Boolean);
+    if (clean.length > 0) map[norm] = { fileName: fileBaseName(norm), bookmarks: clean };
+  });
+  Object.entries(readAllBookmarksLocalStorage()).forEach(([key, list]) => {
+    const norm = normalizeBookKey(key);
+    const prev = map[norm] ? map[norm].bookmarks : [];
+    const merged = mergeBookmarkLists(prev, list);
+    if (merged.length > 0) {
+      map[norm] = { fileName: (map[norm] && map[norm].fileName) || fileBaseName(norm), bookmarks: merged };
+    }
+  });
+  return map;
+}
+
 // مرحله ۱۸ — صفِ ترتیبیِ تغییرهایِ تمپلیت: دو ساختِ پشتِ سرِ هم،
 // هرگز از رویِ یک snapshotِ کهنهٔ state خوانده نمی‌شوند؛ هر تغییر،
 // پس از اتمامِ کاملِ تغییرِ قبلی (state + IPC) اجرا می‌شود.
@@ -198,6 +263,10 @@ export const useBookmarkStore = create((set, get) => ({
   allBookmarkFiles: {},
   allBookmarksLoaded: false,
   totalBookmarkCount: 0,
+  // مرحلهٔ ۵۷، مأموریت ۱ — شمارندهٔ واکنش‌گرِ جهش‌ها: با هر
+  // ساخت/ویرایش/حذفِ بوک‌مارک یا پریست، یک واحد بالا می‌رود تا
+  // مصرف‌کننده‌ها بی‌درنگ بازرندر شوند.
+  bookmarkVersion: 0,
 
   studioOpen: false,
   studioTarget: null, // { filePath, page, yRatio, bookmarkId? }
@@ -278,10 +347,12 @@ export const useBookmarkStore = create((set, get) => ({
         : (dbRaw.defaultSide === 'left' ? 'left' : 'right'),
       savedPresets,
     };
+    const prefsChanged = !jsonEqual(get().preferences, nextPrefs);
     set({
       preferences: nextPrefs,
       preferencesLoaded: true,
       isHydrated: true,
+      bookmarkVersion: prefsChanged ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
     });
     writePrefsLocalStorage(nextPrefs);
     // سینکِ برگشتی: هر پریستی که در دیتابیس نبود، یا محتوایش با
@@ -304,9 +375,12 @@ export const useBookmarkStore = create((set, get) => ({
     if (!coreApi.isAvailable()) {
       // مرحله ۱۹ — بدونِ IPC هم، آینهٔ محلی نشان داده می‌شود تا
       // بوک‌مارک‌ها هرگز خالی به نظر نرسند.
+      const lsList = readBookmarksLocalStorage(filePath);
+      const listChanged = !jsonEqual(get().bookmarksByFile && get().bookmarksByFile[filePath], lsList);
       set((state) => ({
-        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: readBookmarksLocalStorage(filePath) },
+        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: lsList },
         loadedFilePath: filePath,
+        bookmarkVersion: listChanged ? (state.bookmarkVersion || 0) + 1 : (state.bookmarkVersion || 0),
       }));
       return;
     }
@@ -319,9 +393,11 @@ export const useBookmarkStore = create((set, get) => ({
       // است، چون هر تغییر اولِ اول همان‌جا نوشته می‌شود)؛ هرگز یک
       // فهرستِ خالی از دیتابیس، بوک‌مارک‌هایِ محلی را پاک نمی‌کند.
       const merged = mergeBookmarkLists(dbList, readBookmarksLocalStorage(filePath));
+      const listChanged = !jsonEqual(get().bookmarksByFile && get().bookmarksByFile[filePath], merged);
       set((state) => ({
         bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: merged },
         loadedFilePath: filePath,
+        bookmarkVersion: listChanged ? (state.bookmarkVersion || 0) + 1 : (state.bookmarkVersion || 0),
       }));
       writeBookmarksLocalStorage(filePath, merged);
       // سینکِ برگشتی: اگر اتحاد چیزی داشت که دیتابیس نداشت، به
@@ -330,9 +406,12 @@ export const useBookmarkStore = create((set, get) => ({
         try { await get().persistBookmarks(filePath, merged); } catch (_) {}
       }
     } catch (_) {
+      const lsList = readBookmarksLocalStorage(filePath);
+      const listChanged = !jsonEqual(get().bookmarksByFile && get().bookmarksByFile[filePath], lsList);
       set((state) => ({
-        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: readBookmarksLocalStorage(filePath) },
+        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: lsList },
         loadedFilePath: filePath,
+        bookmarkVersion: listChanged ? (state.bookmarkVersion || 0) + 1 : (state.bookmarkVersion || 0),
       }));
     }
   },
@@ -360,9 +439,19 @@ export const useBookmarkStore = create((set, get) => ({
       yRatio: clampYRatio(draft.yRatio),
     });
     if (!bm) return null;
-    const prev = get().bookmarksByFile?.[filePath] || [];
-    const next = [...prev, bm];
-    set((state) => ({ bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next } }));
+    // مرحلهٔ ۵۷، مأموریت ۱ — جهشِ خوش‌بینانه و همگام: فهرستِ تازه،
+    // با ارجاعِ آرایهٔ تازه، از خودِ state ساخته می‌شود (نه از
+    // snapshot) و شمارندهٔ bookmarkVersion هم در همان set بالا
+    // می‌رود تا همهٔ مصرف‌کننده‌ها بی‌درنگ بازرندر شوند.
+    let next = null;
+    set((state) => {
+      const prev = state.bookmarksByFile?.[filePath] || [];
+      next = [...prev, bm];
+      return {
+        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next },
+        bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+      };
+    });
     get().syncAllCacheForFile(filePath, next);
     // مرحله ۱۹ — آینهٔ همگام، پیش از IPC: حتی اگر ذخیره در دیتابیس
     // ناموفق باشد، بوک‌مارک در حافظهٔ محلی امن است و در بارگذاریِ
@@ -387,9 +476,20 @@ export const useBookmarkStore = create((set, get) => ({
     if (idx < 0) return null;
     const updated = sanitizeBookmark({ ...prev[idx], ...patch, id });
     if (!updated) return null;
-    const next = [...prev];
-    next[idx] = updated;
-    set((state) => ({ bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next } }));
+    // مرحلهٔ ۵۷، مأموریت ۱ — جهشِ خوش‌بینانه و همگام (مانندِ addBookmark).
+    let next = null;
+    set((state) => {
+      const base = state.bookmarksByFile?.[filePath] || [];
+      const at = base.findIndex((b) => b.id === id);
+      if (at < 0) return {};
+      next = [...base];
+      next[at] = updated;
+      return {
+        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next },
+        bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+      };
+    });
+    if (!next) return null;
     get().syncAllCacheForFile(filePath, next);
     // مرحله ۱۹ — آینهٔ همگام، پیش از IPC (مانندِ addBookmark): تغییر،
     // حتی با شکستِ IPC، در حافظهٔ محلی امن می‌ماند و در بارگذاریِ
@@ -406,10 +506,19 @@ export const useBookmarkStore = create((set, get) => ({
   deleteBookmark: async (filePath, id) => {
     filePath = normalizeBookKey(filePath);
     if (!filePath || !id) return;
-    const prev = get().bookmarksByFile?.[filePath] || [];
-    const next = prev.filter((b) => b.id !== id);
-    if (next.length === prev.length) return;
-    set((state) => ({ bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next } }));
+    // مرحلهٔ ۵۷، مأموریت ۱ — جهشِ خوش‌بینانه و همگام (مانندِ addBookmark).
+    let next = null;
+    set((state) => {
+      const base = state.bookmarksByFile?.[filePath] || [];
+      const filtered = base.filter((b) => b.id !== id);
+      if (filtered.length === base.length) return {};
+      next = filtered;
+      return {
+        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next },
+        bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+      };
+    });
+    if (!next) return;
     get().syncAllCacheForFile(filePath, next);
     // مرحله ۱۹ — آینهٔ همگام، پیش از IPC. اگر IPC ناموفق باشد،
     // دیتابیس هنوز بوک‌مارک را دارد و اتحادِ بارگذاریِ بعدی آن را
@@ -471,7 +580,14 @@ export const useBookmarkStore = create((set, get) => ({
     };
     // مرحله ۱۸ — لایهٔ ۱، پیش از هر IPC: همین‌جا، همگام.
     writePrefsLocalStorage(next);
-    set({ preferences: next });
+    // مرحلهٔ ۵۷، مأموریت ۱ — شمارنده، فقط وقتی بالا می‌رود که
+    // محتوا واقعاً عوض شده باشد؛ پس تأییدِ پس‌زمینهٔ یک پریستِ
+    // خوش‌بینانه، شمارنده را دو بار بالا نمی‌برد.
+    const prefsChanged = !jsonEqual(get().preferences, next);
+    set({
+      preferences: next,
+      bookmarkVersion: prefsChanged ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
+    });
     if (!coreApi.isAvailable()) return next;
     try {
       await coreApi.dbAction({ action: 'SAVE_BOOKMARK_PREFERENCES', preferences: next });
@@ -481,40 +597,95 @@ export const useBookmarkStore = create((set, get) => ({
     return next;
   },
 
-  // مرحله ۱۴: همگام‌سازیِ کشِ سراسری با تغییرِ یک کتاب، وقتی
-  // کش بارگذاری شده است؛ شمارندهٔ کل هم از رویِ کش حساب می‌شود.
+  // مرحله ۱۴: همگام‌سازیِ کشِ سراسری با تغییرِ یک کتاب؛ شمارندهٔ
+  // کل هم از رویِ کش حساب می‌شود.
+  // مرحلهٔ ۵۷، مأموریت ۱ — علتِ اصلیِ گزارشِ کاربر («بوک‌مارک تا
+  // ری‌استارت دیده نمی‌شود») همین‌جا بود: loadAllBookmarks ورودیِ
+  // کش را به شکلِ { fileName, bookmarks } می‌سازد، ولی این تابع،
+  // آرایهٔ خام را جایِ آن می‌گذاشت (next[filePath] = list)؛ پس
+  // BookmarksView که فقط entry.bookmarks را می‌خواند، ورودی را
+  // خالی می‌دید و با فیلترِ length > 0 حذفش می‌کرد، در حالی که
+  // totalBookmarkCount (که آرایه را هم می‌فهمید) بالا می‌رفت.
+  // ری‌استارت، کش را از دیتابیس با شکلِ درست بازمی‌ساخت و بوک‌مارک
+  // «ظاهر» می‌شد. اصلاح: همیشه شکلِ { fileName, bookmarks } با
+  // آرایهٔ تازه نوشته می‌شود و fileNameِ قبلی حفظ می‌شود. همچنین
+  // دیگر به allBookmarksLoaded وابسته نیست — کش، حتی پیش از اولین
+  // بارگذاریِ نما، بذر می‌خورد؛ loadAllBookmarks به‌جایِ شستن،
+  // با کشِ تازه اتحاد می‌کند. این تابع، بخشی از همان جهش است و
+  // شمارنده را جداگانه بالا نمی‌برد (جهشِ اصلی، یک بار بالا برده است).
   syncAllCacheForFile: (filePath, list) => {
     filePath = normalizeBookKey(filePath);
-    if (!get().allBookmarksLoaded || !filePath) return;
-    const next = { ...get().allBookmarkFiles };
-    if (!list || list.length === 0) delete next[filePath];
-    else next[filePath] = list;
-    const total = Object.values(next).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
-    set({ allBookmarkFiles: next, totalBookmarkCount: total });
+    if (!filePath) return;
+    set((state) => {
+      const prevAll = state.allBookmarkFiles || {};
+      const prevEntry = prevAll[filePath];
+      const prevFileName = prevEntry && typeof prevEntry === 'object' && !Array.isArray(prevEntry)
+        ? prevEntry.fileName
+        : null;
+      const next = { ...prevAll };
+      if (!list || list.length === 0) delete next[filePath];
+      else next[filePath] = { fileName: prevFileName || fileBaseName(filePath), bookmarks: [...list] };
+      return { allBookmarkFiles: next, totalBookmarkCount: countAllBookmarkEntries(next) };
+    });
   },
 
   loadAllBookmarks: async (force = false) => {
     if (get().allBookmarksLoaded && !force) return get().allBookmarkFiles;
     if (!coreApi.isAvailable()) {
-      set({ allBookmarksLoaded: true });
-      return {};
+      // مرحلهٔ ۵۷، مأموریت ۱ — بدونِ IPC هم، کشِ سراسری از حافظه و
+      // آینهٔ محلی ساخته می‌شود تا نما خالی نماند (پایه، {} برمی‌گرداند
+      // و بوک‌مارکِ محلی را تا بارگذاریِ بعدی پنهان می‌کرد).
+      const localMap = buildLocalAllBookmarksMap(get().bookmarksByFile);
+      const changed = !jsonEqual(get().allBookmarkFiles, localMap);
+      set({
+        allBookmarkFiles: localMap,
+        allBookmarksLoaded: true,
+        totalBookmarkCount: countAllBookmarkEntries(localMap),
+        bookmarkVersion: changed ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
+      });
+      return localMap;
     }
     try {
       const res = await coreApi.dbAction({ action: 'GET_ALL_BOOKMARKS' });
       const files = Array.isArray(res && res.files) ? res.files : [];
       const map = {};
-      let total = 0;
       files.forEach((f) => {
         const list = Array.isArray(f.bookmarks) ? f.bookmarks.map(sanitizeBookmark).filter(Boolean) : [];
         if (list.length === 0) return;
         map[normalizeBookKey(f.filePath)] = { fileName: f.fileName || String(f.filePath).split(/[\\/]/).pop() || f.filePath, bookmarks: list };
-        total += list.length;
       });
-      set({ allBookmarkFiles: map, allBookmarksLoaded: true, totalBookmarkCount: total });
+      // مرحلهٔ ۵۷، مأموریت ۱ — اتحاد با کشِ تازهٔ حافظه و آینهٔ
+      // محلی (دقیقاً همان قانونِ loadBookmarksForFile: محلی برندهٔ
+      // تعارض است)؛ خواندنِ کش، پس از await انجام می‌شود تا
+      // بوک‌مارکی که در حینِ IPC ساخته شده، با نقشهٔ کهنه شسته نشود.
+      const localMap = buildLocalAllBookmarksMap(get().bookmarksByFile);
+      Object.entries(localMap).forEach(([key, entry]) => {
+        const dbList = map[key] ? map[key].bookmarks : [];
+        const merged = mergeBookmarkLists(dbList, entry.bookmarks);
+        if (merged.length > 0) {
+          map[key] = { fileName: (map[key] && map[key].fileName) || entry.fileName, bookmarks: merged };
+        }
+      });
+      const changed = !jsonEqual(get().allBookmarkFiles, map);
+      set({
+        allBookmarkFiles: map,
+        allBookmarksLoaded: true,
+        totalBookmarkCount: countAllBookmarkEntries(map),
+        bookmarkVersion: changed ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
+      });
       return map;
     } catch (_) {
-      set({ allBookmarksLoaded: true });
-      return {};
+      // مرحلهٔ ۵۷، مأموریت ۱ — شکستِ IPC، نما را خالی نمی‌کند؛
+      // کشِ محلی نشان داده می‌شود.
+      const localMap = buildLocalAllBookmarksMap(get().bookmarksByFile);
+      const changed = !jsonEqual(get().allBookmarkFiles, localMap);
+      set({
+        allBookmarkFiles: localMap,
+        allBookmarksLoaded: true,
+        totalBookmarkCount: countAllBookmarkEntries(localMap),
+        bookmarkVersion: changed ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
+      });
+      return localMap;
     }
   },
 
@@ -550,6 +721,8 @@ export const useBookmarkStore = create((set, get) => ({
         allBookmarkFiles: nextAll,
         totalBookmarkCount: total,
         loadedFilePath: norms.has(normalizeBookKey(state.loadedFilePath)) ? null : state.loadedFilePath,
+        // مرحلهٔ ۵۷، مأموریت ۱ — شمارنده، فقط وقتی چیزی واقعاً حذف شد.
+        bookmarkVersion: removed > 0 ? (state.bookmarkVersion || 0) + 1 : (state.bookmarkVersion || 0),
       };
     });
     removeFileBookmarksFromLocalStorage(paths);
@@ -558,10 +731,13 @@ export const useBookmarkStore = create((set, get) => ({
 
   // مرحله ۱۴: ساخت‌هایِ سفارشیِ کاربر — در تنظیماتِ سراسری
   // ذخیره می‌شوند تا در همهٔ کتاب‌ها در دسترس باشند.
-  savePreset: async (preset) => queuePresetWrite(async () => {
-    if (!get().isHydrated) {
-      try { await get().loadPreferences(); } catch (_) {}
-    }
+  // مرحلهٔ ۵۷، مأموریت ۱ — ذخیرهٔ پریست هم، مثلِ بوک‌مارک، اول
+  // همگام در استور می‌نشیند (پیش از صف و پیش از IPC) و فقط سینکِ
+  // دیتابیس، نوبتی و در پس‌زمینه می‌ماند؛ پیش از این، set فقط
+  // درونِ savePreferences و پس از انتظارِ صف (یعنی پس از IPCِ
+  // پریستِ قبلی) و فقط در صورتِ هیدراتِ موفق انجام می‌شد و با
+  // شکستِ هیدرات، ساخته تا ری‌استارت از نما پنهان می‌ماند.
+  savePreset: async (preset) => {
     const prev = get().preferences?.savedPresets || [];
     if (prev.length >= 100) {
       toast('سقفِ ۱۰۰ ساختِ سفارشی پر شده است.', 'info');
@@ -573,33 +749,42 @@ export const useBookmarkStore = create((set, get) => ({
       createdAt: new Date().toISOString(),
     };
     const next = [...prev, clean];
-    // مرحله ۱۸ — لایهٔ ۱، پیش از هر IPC: اگر savePreferences به
-    // هر دلیلی (مثلاً هیدراتِ ناموفق) نوشتن را رد کرد، ساخته همین‌جا
-    // زنده می‌ماند و در بارگذاریِ بعدی، با سینکِ برگشتی به دیتابیس
-    // برمی‌گردد.
     writePrefsLocalStorage({ ...(get().preferences || {}), savedPresets: next });
-    await get().savePreferences({ savedPresets: next });
+    set((state) => ({
+      preferences: {
+        ...(state.preferences || { ...DEFAULT_BOOKMARK_PREFERENCES, savedPresets: [] }),
+        savedPresets: next,
+      },
+      bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+    }));
+    queuePresetWrite(async () => {
+      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
+    }).catch(() => {});
     return clean;
-  }),
+  },
 
-  deletePreset: async (id) => queuePresetWrite(async () => {
-    if (!get().isHydrated) {
-      try { await get().loadPreferences(); } catch (_) {}
-    }
+  deletePreset: async (id) => {
     const prev = get().preferences?.savedPresets || [];
     const next = prev.filter((p) => p.id !== id);
     if (next.length === prev.length) return;
+    // مرحلهٔ ۵۷، مأموریت ۱ — حذفِ همگام و فوری (مانندِ savePreset).
     writePrefsLocalStorage({ ...(get().preferences || {}), savedPresets: next });
-    await get().savePreferences({ savedPresets: next });
-  }),
+    set((state) => ({
+      preferences: {
+        ...(state.preferences || { ...DEFAULT_BOOKMARK_PREFERENCES, savedPresets: [] }),
+        savedPresets: next,
+      },
+      bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+    }));
+    queuePresetWrite(async () => {
+      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
+    }).catch(() => {});
+  },
 
   // مرحله ۱۵: ویرایشِ یک ساختِ ذخیره‌شده — همان رکورد (همان id و
   // createdAt) به‌روز می‌شود تا کارت‌هایِ ساخته‌شده با آن، هویتشان
   // را از دست ندهند.
-  updatePreset: async (id, patch) => queuePresetWrite(async () => {
-    if (!get().isHydrated) {
-      try { await get().loadPreferences(); } catch (_) {}
-    }
+  updatePreset: async (id, patch) => {
     const prev = get().preferences?.savedPresets || [];
     const idx = prev.findIndex((p) => p.id === id);
     if (idx < 0) return null;
@@ -615,10 +800,20 @@ export const useBookmarkStore = create((set, get) => ({
     };
     const next = [...prev];
     next[idx] = merged;
+    // مرحلهٔ ۵۷، مأموریت ۱ — ویرایشِ همگام و فوری (مانندِ savePreset).
     writePrefsLocalStorage({ ...(get().preferences || {}), savedPresets: next });
-    await get().savePreferences({ savedPresets: next });
+    set((state) => ({
+      preferences: {
+        ...(state.preferences || { ...DEFAULT_BOOKMARK_PREFERENCES, savedPresets: [] }),
+        savedPresets: next,
+      },
+      bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+    }));
+    queuePresetWrite(async () => {
+      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
+    }).catch(() => {});
     return merged;
-  }),
+  },
 
   openStudio: (target) => set({ studioOpen: true, studioTarget: target || null }),
   closeStudio: () => set({ studioOpen: false, studioTarget: null }),

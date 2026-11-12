@@ -293,6 +293,16 @@ contextBridge.exposeInMainWorld('api', {
   downloadUpdate: () => ipcRenderer.invoke('download-update'),
   quitAndInstallUpdate: () => ipcRenderer.invoke('quit-and-install-update'),
 
+  // مرحلهٔ ۵۷ §۳ (m3): دانلودِ مستقیمِ فایلِ .exe از گیت‌هاب (برایِ
+  // حالتِ Portable/توسعه) و اجرایِ نصب‌کنندهٔ دانلودشده.
+  // قراردادِ payload با ipcHandlers یکی است (درسِ مرحلهٔ ۴۰: کلیدها
+  // دقیقاً همین‌ها هستند و جایِ دیگری عوض نمی‌شوند):
+  //   downloadUpdateDirect({ downloadUrl, version })
+  //   installDownloadedUpdate({ filePath })
+  // هر دو، بدونِ توکن و فقط با همان دامنهٔ گیت‌هاب کار می‌کنند.
+  downloadUpdateDirect: (payload) => ipcRenderer.invoke('download-update-direct', payload),
+  installDownloadedUpdate: (payload) => ipcRenderer.invoke('install-downloaded-update', payload),
+
   // شنونده پیشرفت استخراج بدون نشت حافظه
   onExtractionProgress: (callback) => {
     if (typeof callback !== 'function') return () => {};

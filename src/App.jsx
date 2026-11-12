@@ -226,6 +226,39 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [loadingFileName, setLoadingFileName] = useState('');
 
+  // مرحلهٔ ۵۷ §۳ (m3): مودالِ هوشمندِ بروزرسانی + بررسیِ خودکارِ
+  // شروعِ برنامه. stage ها: 'available' | 'downloading' |
+  // 'downloaded' | 'installing'. همهٔ هوک‌هایِ این بخش این‌جا،
+  // بالایِ کامپوننت و پیش از هر returnِ شرطی‌اند.
+  const [updateModal, setUpdateModal] = useState({
+    open: false,
+    stage: 'available',
+    currentVersion: '',
+    latestVersion: '',
+    releaseNotes: '',
+    publishedAt: '',
+    downloadUrl: '',
+    htmlUrl: '',
+    directFilePath: '',
+    progress: 0,
+    transferred: 0,
+    total: 0,
+    bytesPerSecond: 0,
+    error: '',
+  });
+  const [autoCheckEnabled, setAutoCheckEnabled] = useState(() => {
+    try {
+      if (coreApi && typeof coreApi.readAutoCheckUpdatesEnabled === 'function') return coreApi.readAutoCheckUpdatesEnabled();
+    } catch (_) {}
+    return true;
+  });
+  const updateRemindLaterRef = useRef('');
+  const updateAutoCheckedRef = useRef(false);
+  const updateAutoCheckTimerRef = useRef(null);
+  const updateAvailableUnsubscribeRef = useRef(null);
+  const updateStatusUnsubscribeRef = useRef(null);
+  const updateAutoCheckUnsubscribeRef = useRef(null);
+
   const isLeftPinnedByClickRef = useRef(false);
   const isRightPinnedByClickRef = useRef(false);
 
@@ -246,7 +279,7 @@ export default function App() {
 
   const isReadingMode = Boolean(comicData && currentView === 'reader');
   const isAnyModalActive = Boolean(
-    isSnippingActive || isAreaZoomActive || isQuickSettingsOpen || isScreenshotModalOpen
+    isSnippingActive || isAreaZoomActive || isQuickSettingsOpen || isScreenshotModalOpen || updateModal.open
   );
 
   const isReadingModeRef = useRef(isReadingMode);
@@ -274,6 +307,302 @@ export default function App() {
       }
     }
   }, [currentView]);
+
+  // مرحلهٔ ۵۷ §۳ (m3): تاریخِ انتشارِ ISO به تاریخِ فارسی.
+  const formatUpdateModalDate = (iso) => {
+    if (!iso) return '';
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return '';
+      return d.toLocaleDateString('fa-IR');
+    } catch (_) { return ''; }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): برچسبِ پیشرفتِ دانلودِ مودال با درصد، حجم و سرعت.
+  const formatUpdateModalProgressLabel = (modal) => {
+    const pct = Math.max(0, Math.min(100, Math.round(modal.progress || 0)));
+    if (modal.stage === 'downloaded') return 'دانلود کامل شد؛ آمادهٔ نصب است.';
+    let label = `در حال دانلود… ${pct}٪`;
+    try {
+      if (coreApi && typeof coreApi.formatBytes === 'function' && modal.total > 0) {
+        label += ` • ${coreApi.formatBytes(modal.transferred || 0)} از ${coreApi.formatBytes(modal.total)}`;
+      }
+      if (coreApi && typeof coreApi.formatDownloadSpeed === 'function' && modal.bytesPerSecond > 0) {
+        label += ` • ${coreApi.formatDownloadSpeed(modal.bytesPerSecond)}`;
+      }
+    } catch (_) {}
+    return label;
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): باز کردنِ مودالِ یادآوری وقتی نسخهٔ تازه
+  // پیدا می‌شود. نسخهٔ نادیده‌گرفته‌شده، فقط با بررسیِ دستی باز
+  // می‌شود؛ «یادآوری در نوبتِ بعدی» فقط همین نشست را ساکت می‌کند
+  // و دفعهٔ بعد دوباره یادآوری می‌شود.
+  const handleUpdateAvailableEvent = (detail) => {
+    if (!detail || typeof detail !== 'object') return;
+    const latestVersion = typeof detail.latestVersion === 'string' && detail.latestVersion
+      ? detail.latestVersion
+      : (typeof detail.version === 'string' ? detail.version : '');
+    if (!latestVersion) return;
+    const manual = detail.manual === true;
+    let skipped = '';
+    try {
+      if (coreApi && typeof coreApi.readSkippedUpdateVersion === 'function') skipped = coreApi.readSkippedUpdateVersion() || '';
+    } catch (_) { skipped = ''; }
+    let shouldOpen = true;
+    try {
+      if (coreApi && typeof coreApi.shouldOpenUpdateModal === 'function') {
+        shouldOpen = coreApi.shouldOpenUpdateModal({ latestVersion, manual, skippedVersion: skipped, remindedVersion: updateRemindLaterRef.current });
+      } else if (!manual && (skipped === latestVersion || updateRemindLaterRef.current === latestVersion)) {
+        shouldOpen = false;
+      }
+    } catch (_) { shouldOpen = true; }
+    if (!shouldOpen) return;
+    let cleanNotes = '';
+    try {
+      if (coreApi && typeof coreApi.cleanReleaseNotes === 'function') {
+        cleanNotes = coreApi.cleanReleaseNotes(typeof detail.releaseNotes === 'string' ? detail.releaseNotes : '');
+      } else if (typeof detail.releaseNotes === 'string') {
+        cleanNotes = detail.releaseNotes;
+      }
+    } catch (_) { cleanNotes = ''; }
+    setUpdateModal((prev) => {
+      if (prev.open && prev.latestVersion === latestVersion && prev.stage !== 'available') return prev;
+      return {
+        open: true,
+        stage: 'available',
+        currentVersion: typeof detail.currentVersion === 'string' ? detail.currentVersion : '',
+        latestVersion,
+        releaseNotes: cleanNotes,
+        publishedAt: typeof detail.publishedAt === 'string' ? detail.publishedAt : '',
+        downloadUrl: typeof detail.downloadUrl === 'string' ? detail.downloadUrl : '',
+        htmlUrl: typeof detail.htmlUrl === 'string' ? detail.htmlUrl : '',
+        directFilePath: '',
+        progress: 0,
+        transferred: 0,
+        total: 0,
+        bytesPerSecond: 0,
+        error: '',
+      };
+    });
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): پیشرفتِ زندهٔ دانلود (رویدادِ
+  // 'app-update-status') رویِ مودال؛ فقط وقتی مودال باز است اعمال
+  // می‌شود و مرحلهٔ 'installing' را برنمی‌گرداند.
+  const handleUpdateStatusEvent = (rawEvent) => {
+    let norm = null;
+    try {
+      if (coreApi && typeof coreApi.normalizeUpdateProgressEvent === 'function') norm = coreApi.normalizeUpdateProgressEvent(rawEvent);
+    } catch (_) { norm = null; }
+    if (!norm) return;
+    if (norm.kind === 'downloading') {
+      setUpdateModal((prev) => {
+        if (!prev.open || prev.stage === 'installing') return prev;
+        return { ...prev, stage: 'downloading', progress: Math.max(0, Math.min(100, norm.percent || 0)), transferred: norm.transferred || 0, total: norm.total || 0, bytesPerSecond: norm.bytesPerSecond || 0 };
+      });
+    } else if (norm.kind === 'downloaded') {
+      setUpdateModal((prev) => {
+        if (!prev.open || prev.stage === 'installing') return prev;
+        return { ...prev, stage: 'downloaded', progress: 100, transferred: norm.transferred || prev.transferred || 0, total: norm.total || prev.total || 0, bytesPerSecond: 0 };
+      });
+    } else if (norm.kind === 'error') {
+      setUpdateModal((prev) => {
+        if (!prev.open || prev.stage === 'installing') return prev;
+        return { ...prev, stage: 'available', progress: 0, error: norm.message || 'دانلودِ بروزرسانی انجام نشد.' };
+      });
+    }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ خودکارِ شروعِ برنامه — فقط یک بار و
+  // فقط وقتی کلیدِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها» روشن است.
+  // اگر نسخهٔ تازه‌ای بود و نادیده گرفته نشده بود، مودال باز می‌شود.
+  const runStartupUpdateCheck = async () => {
+    if (updateAutoCheckedRef.current) return;
+    updateAutoCheckedRef.current = true;
+    let enabled = true;
+    try {
+      if (coreApi && typeof coreApi.readAutoCheckUpdatesEnabled === 'function') enabled = coreApi.readAutoCheckUpdatesEnabled();
+    } catch (_) { enabled = true; }
+    if (!enabled) return;
+    let result = null;
+    try {
+      if (coreApi && typeof coreApi.checkForUpdates === 'function') result = await coreApi.checkForUpdates();
+    } catch (_) { result = null; }
+    if (!result) return;
+    let norm = null;
+    try {
+      if (coreApi && typeof coreApi.normalizeCheckForUpdatesResult === 'function') {
+        norm = coreApi.normalizeCheckForUpdatesResult(result, typeof result.version === 'string' ? result.version : '');
+      }
+    } catch (_) { norm = null; }
+    if (!norm || norm.updateAvailable !== true || !norm.latestVersion) return;
+    handleUpdateAvailableEvent({
+      updateAvailable: true,
+      latestVersion: norm.latestVersion,
+      releaseNotes: norm.releaseNotes,
+      publishedAt: norm.publishedAt,
+      downloadUrl: norm.downloadUrl,
+      htmlUrl: norm.htmlUrl,
+      currentVersion: norm.currentVersion || '',
+      manual: false,
+    });
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): دانلود از مودال. در نسخهٔ نصبی، موتورِ
+  // electron-updater؛ در حالتِ Portable/توسعه، دانلودِ مستقیمِ
+  // فایلِ .exe. پیشرفت و تکمیل، با رویداد می‌رسند.
+  const handleUpdateDownload = async () => {
+    let packaged = false;
+    try {
+      if (coreApi && typeof coreApi.getAppVersion === 'function') {
+        const v = await coreApi.getAppVersion();
+        packaged = Boolean(v && v.isPackaged);
+      }
+    } catch (_) { packaged = false; }
+    setUpdateModal((prev) => ({ ...prev, stage: 'downloading', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, error: '' }));
+    try {
+      if (packaged) {
+        if (!coreApi || typeof coreApi.downloadUpdate !== 'function') {
+          setUpdateModal((prev) => ({ ...prev, stage: 'available', error: 'سرویسِ دانلودِ بروزرسانی در این نسخه در دسترس نیست.' }));
+          return;
+        }
+        await coreApi.downloadUpdate();
+        // تکمیل، با رویدادِ 'update-downloaded' می‌رسد.
+      } else {
+        if (!updateModal.downloadUrl) {
+          setUpdateModal((prev) => ({ ...prev, stage: 'available', error: 'لینکِ دانلودِ نسخهٔ جدید پیدا نشد.' }));
+          return;
+        }
+        if (!coreApi || typeof coreApi.downloadUpdateDirect !== 'function') {
+          setUpdateModal((prev) => ({ ...prev, stage: 'available', error: 'سرویسِ دانلودِ مستقیم در این نسخه در دسترس نیست.' }));
+          return;
+        }
+        const result = await coreApi.downloadUpdateDirect({ downloadUrl: updateModal.downloadUrl, version: updateModal.latestVersion });
+        if (result && result.success) {
+          setUpdateModal((prev) => ({ ...prev, stage: 'downloaded', progress: 100, directFilePath: result.filePath || '', error: '' }));
+        } else {
+          setUpdateModal((prev) => ({ ...prev, stage: 'available', error: (result && result.message) || 'دانلودِ نسخهٔ جدید انجام نشد.' }));
+        }
+      }
+    } catch (err) {
+      setUpdateModal((prev) => ({ ...prev, stage: 'available', error: 'دانلودِ بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+    }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): نصبِ نسخهٔ دانلودشده. FLUSH_SYNC دیتابیس،
+  // داخلِ هندلرِ main و پیش از نصب/اجرایِ نصب‌کننده انجام می‌شود؛
+  // این‌جا فقط همان رپر صدا زده می‌شود. اگر برنامه برای نصب خارج
+  // نشد، مودال به مرحلهٔ 'downloaded' برمی‌گردد.
+  const handleUpdateInstall = async () => {
+    setUpdateModal((prev) => ({ ...prev, stage: 'installing', error: '' }));
+    try {
+      if (updateModal.directFilePath) {
+        if (!coreApi || typeof coreApi.installDownloadedUpdate !== 'function') {
+          showToast('سرویسِ نصبِ نسخهٔ دانلودشده در این نسخه در دسترس نیست.', { type: 'error' });
+          setUpdateModal((prev) => ({ ...prev, stage: 'downloaded' }));
+          return;
+        }
+        await coreApi.installDownloadedUpdate({ filePath: updateModal.directFilePath });
+      } else {
+        if (!coreApi || typeof coreApi.quitAndInstallUpdate !== 'function') {
+          showToast('سرویسِ نصبِ بروزرسانی در این نسخه در دسترس نیست.', { type: 'error' });
+          setUpdateModal((prev) => ({ ...prev, stage: 'downloaded' }));
+          return;
+        }
+        await coreApi.quitAndInstallUpdate();
+      }
+      setUpdateModal((prev) => ({ ...prev, stage: 'downloaded' }));
+    } catch (err) {
+      showToast('نصب و راه‌اندازیِ مجدد انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص'), { type: 'error' });
+      setUpdateModal((prev) => ({ ...prev, stage: 'downloaded' }));
+    }
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): «یادآوری در نوبتِ بعدی» — فقط همین نشست
+  // را ساکت می‌کند؛ با باز شدنِ بعدیِ برنامه، دوباره یادآوری می‌شود.
+  const handleUpdateRemindLater = () => {
+    updateRemindLaterRef.current = updateModal.latestVersion || '';
+    setUpdateModal((prev) => ({ ...prev, open: false }));
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): «نادیده گرفتنِ این نسخه» — نسخه در
+  // localStorage می‌ماند و مودال برای آن دیگر باز نمی‌شود، مگر با
+  // زدنِ دستیِ دکمهٔ بررسی در تنظیمات یا صفحهٔ دانلودها.
+  const handleUpdateSkip = () => {
+    try {
+      if (coreApi && typeof coreApi.writeSkippedUpdateVersion === 'function') {
+        coreApi.writeSkippedUpdateVersion(updateModal.latestVersion || '');
+      }
+    } catch (_) {}
+    setUpdateModal((prev) => ({ ...prev, open: false }));
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): سوییچِ داخلِ مودال — همان کلیدِ کارتِ
+  // تنظیمات؛ نوشتن در coreApi، رویدادِ هم‌گام‌سازی می‌فرستد.
+  const handleUpdateAutoCheckToggle = (next) => {
+    const value = next === true;
+    setAutoCheckEnabled(value);
+    try {
+      if (coreApi && typeof coreApi.writeAutoCheckUpdatesEnabled === 'function') {
+        coreApi.writeAutoCheckUpdatesEnabled(value);
+      }
+    } catch (_) {}
+  };
+
+  // مرحلهٔ ۵۷ §۳ (m3): اشتراکِ رویدادِ «نسخهٔ تازه» + پیشرفتِ
+  // دانلود + سوییچِ بررسیِ خودکار، و بررسیِ خودکارِ ۵ ثانیه‌ایِ
+  // شروعِ برنامه (فقط وقتی کلید روشن است). تایمرِ شروع، در main
+  // نیست، چون کلید در localStorageِ رندرر است و main به آن
+  // دسترسی ندارد؛ بررسیِ واقعی (REST + موتور) در main انجام می‌شود.
+  useEffect(() => {
+    let cancelled = false;
+    try {
+      if (coreApi && typeof coreApi.onUpdateAvailable === 'function') {
+        updateAvailableUnsubscribeRef.current = coreApi.onUpdateAvailable((detail) => {
+          if (cancelled) return;
+          handleUpdateAvailableEvent(detail);
+        });
+      }
+    } catch (_) { updateAvailableUnsubscribeRef.current = null; }
+    try {
+      if (coreApi && typeof coreApi.onUpdateStatus === 'function') {
+        updateStatusUnsubscribeRef.current = coreApi.onUpdateStatus((rawEvent) => {
+          if (cancelled) return;
+          handleUpdateStatusEvent(rawEvent);
+        });
+      }
+    } catch (_) { updateStatusUnsubscribeRef.current = null; }
+    try {
+      if (coreApi && typeof coreApi.onAutoCheckUpdatesChanged === 'function') {
+        updateAutoCheckUnsubscribeRef.current = coreApi.onAutoCheckUpdatesChanged((enabled) => {
+          if (cancelled) return;
+          setAutoCheckEnabled((prev) => (prev === enabled ? prev : enabled));
+        });
+      }
+    } catch (_) { updateAutoCheckUnsubscribeRef.current = null; }
+    try {
+      updateAutoCheckTimerRef.current = setTimeout(() => {
+        if (cancelled) return;
+        void runStartupUpdateCheck();
+      }, 5000);
+    } catch (_) {}
+    return () => {
+      cancelled = true;
+      try {
+        if (updateAutoCheckTimerRef.current) {
+          clearTimeout(updateAutoCheckTimerRef.current);
+          updateAutoCheckTimerRef.current = null;
+        }
+      } catch (_) {}
+      try { if (updateAvailableUnsubscribeRef.current) updateAvailableUnsubscribeRef.current(); } catch (_) {}
+      try { if (updateStatusUnsubscribeRef.current) updateStatusUnsubscribeRef.current(); } catch (_) {}
+      try { if (updateAutoCheckUnsubscribeRef.current) updateAutoCheckUnsubscribeRef.current(); } catch (_) {}
+      updateAvailableUnsubscribeRef.current = null;
+      updateStatusUnsubscribeRef.current = null;
+      updateAutoCheckUnsubscribeRef.current = null;
+    };
+  }, []);
 
   // مرحلهٔ ۵۲ §۱: ورود به تب‌هایِ کتابخانه/اخیر/علاقه‌مندی‌ها —
   // یک همگام‌سازیِ دسته‌ایِ فایل‌هایِ رفته (بهترین تلاش؛ استور،
@@ -1187,6 +1516,14 @@ export default function App() {
     );
   }
 
+  // مرحلهٔ ۵۷ §۳ (m3): بلوک‌هایِ قابلِ رندرِ یادداشتِ انتشارِ
+  // مودال (سرفصل/بولت/متن)؛ با هر بازشدنِ مودال، از اول ساخته
+  // می‌شود و اگر یادداشتی نباشد، خالی می‌ماند.
+  let updateNotesBlocks = [];
+  try {
+    if (coreApi && typeof coreApi.splitReleaseNotes === 'function') updateNotesBlocks = coreApi.splitReleaseNotes(updateModal.releaseNotes || '');
+  } catch (_) { updateNotesBlocks = []; }
+
   const renderCenterContent = () => {
     if (isReadingMode) {
       return (
@@ -1381,6 +1718,102 @@ export default function App() {
           <BookmarkStudioModal />
         </Suspense>
       </ChunkErrorBoundary>
+      {updateModal.open && (
+        <div style={styles.updateModalOverlay} role="dialog" aria-modal="true" aria-label="بروزرسانی جدید">
+          <div style={styles.updateModalBox}>
+            <h3 style={styles.updateModalTitle}>نسخهٔ جدید منتشر شده است</h3>
+            <div style={styles.updateModalVersionRow}>
+              <span style={styles.updateModalVersion}>
+                {updateModal.currentVersion ? `نسخهٔ فعلی: v${updateModal.currentVersion}` : 'نسخهٔ فعلی: نامشخص'}
+                {' — '}
+                {`نسخهٔ جدید: v${updateModal.latestVersion}`}
+              </span>
+              {updateModal.publishedAt && (
+                <span style={styles.updateModalDate}>{`منتشرشده در ${formatUpdateModalDate(updateModal.publishedAt)}`}</span>
+              )}
+            </div>
+
+            <div style={styles.updateModalNotesBox}>
+              {updateNotesBlocks.length === 0 && (
+                <p style={styles.updateModalNotesEmpty}>بدونِ یادداشتِ انتشار.</p>
+              )}
+              {updateNotesBlocks.filter((b) => b.kind !== 'bullet').map((b, i) => (b.kind === 'heading'
+                ? <h4 key={`update-note-h-${i}`} style={styles.updateModalNotesHeading}>{b.text}</h4>
+                : <p key={`update-note-t-${i}`} style={styles.updateModalNotesText}>{b.text}</p>))}
+              {updateNotesBlocks.filter((b) => b.kind === 'bullet').length > 0 && (
+                <ul style={styles.updateModalNotesList}>
+                  {updateNotesBlocks.filter((b) => b.kind === 'bullet').map((b, i) => (
+                    <li key={`update-note-b-${i}`}>{b.text}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {(updateModal.stage === 'downloading' || updateModal.stage === 'downloaded' || updateModal.stage === 'installing') && (
+              <div style={styles.updateModalProgressWrap}>
+                <div style={styles.updateModalProgressTrack}>
+                  <div style={{ ...styles.updateModalProgressFill, width: `${Math.max(0, Math.min(100, updateModal.progress || 0))}%` }} />
+                </div>
+                <span style={styles.updateModalProgressLabel}>{formatUpdateModalProgressLabel(updateModal)}</span>
+              </div>
+            )}
+
+            {updateModal.error && (
+              <p style={styles.updateModalError}>{updateModal.error}</p>
+            )}
+
+            <div style={styles.updateModalBtnRow}>
+              {(updateModal.stage === 'downloaded' || updateModal.stage === 'installing') ? (
+                <button
+                  type="button"
+                  onClick={handleUpdateInstall}
+                  disabled={updateModal.stage === 'installing'}
+                  style={{ ...styles.updateModalBtn, ...styles.updateModalBtnPrimary, ...((updateModal.stage === 'installing') ? { opacity: 0.55, cursor: 'default' } : {}) }}
+                >
+                  <span>{updateModal.stage === 'installing' ? 'در حال نصب…' : 'نصب و راه‌اندازی مجدد'}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleUpdateDownload}
+                  disabled={updateModal.stage === 'downloading'}
+                  style={{ ...styles.updateModalBtn, ...styles.updateModalBtnPrimary, ...((updateModal.stage === 'downloading') ? { opacity: 0.55, cursor: 'default' } : {}) }}
+                >
+                  <span>{updateModal.stage === 'downloading' ? 'در حال دانلود…' : 'دانلود و نصبِ خودکار (بروزرسانیِ اکنون)'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleUpdateRemindLater}
+                disabled={updateModal.stage === 'installing'}
+                style={styles.updateModalBtn}
+              >
+                <span>یادآوری در نوبتِ بعدی (Remind Me Later)</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleUpdateSkip}
+                disabled={updateModal.stage === 'installing'}
+                style={styles.updateModalBtn}
+              >
+                <span>نادیده گرفتنِ این نسخه (Skip This Version)</span>
+              </button>
+            </div>
+
+            <label style={styles.updateModalSwitchRow}>
+              <input
+                type="checkbox"
+                checked={autoCheckEnabled}
+                onChange={(e) => handleUpdateAutoCheckToggle(e.target.checked)}
+                style={styles.updateModalCheckbox}
+              />
+              <span style={styles.updateModalSwitchText}>بررسی و یادآوریِ خودکارِ آپدیت‌ها</span>
+            </label>
+            <p style={styles.updateModalHint}>پیش از نصب، دیتابیس فلاش می‌شود تا هیچ داده‌ای از دست نرود.</p>
+          </div>
+        </div>
+      )}
+
       <ToastHUD />
     </div>
   );
@@ -1747,6 +2180,171 @@ const styles = {
   dragSub: {
     fontFamily: 'var(--font-fa)',
     fontSize: '12.5px',
+    color: 'var(--muted)',
+    margin: 0,
+  },
+  // مرحلهٔ ۵۷ §۳ (m3): استایل‌هایِ مودالِ هوشمندِ بروزرسانی.
+  updateModalOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 9999,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(10, 15, 19, 0.96)',
+    padding: '16px',
+  },
+  updateModalBox: {
+    maxWidth: '520px',
+    width: '100%',
+    maxHeight: '86vh',
+    overflowY: 'auto',
+    backgroundColor: 'var(--panel)',
+    borderWidth: '1px',
+    borderStyle: 'solid',
+    borderColor: 'var(--border)',
+    borderRadius: '16px',
+    padding: '22px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
+    direction: 'rtl',
+    textAlign: 'right',
+  },
+  updateModalTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '16px',
+    fontWeight: 800,
+    color: 'var(--text)',
+    margin: 0,
+  },
+  updateModalVersionRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    flexWrap: 'wrap',
+  },
+  updateModalVersion: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13.5px',
+    fontWeight: 700,
+    color: 'var(--accent)',
+  },
+  updateModalDate: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    color: 'var(--muted)',
+  },
+  updateModalNotesBox: {
+    maxHeight: '220px',
+    overflowY: 'auto',
+    direction: 'rtl',
+    backgroundColor: 'var(--panel2)',
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    padding: '12px 14px',
+  },
+  updateModalNotesHeading: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13.5px',
+    fontWeight: 800,
+    color: 'var(--text)',
+    margin: '8px 0 4px',
+  },
+  updateModalNotesText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--text)',
+    lineHeight: 2,
+    margin: '4px 0',
+  },
+  updateModalNotesList: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--text)',
+    lineHeight: 2,
+    margin: '4px 0',
+    paddingRight: '18px',
+  },
+  updateModalNotesEmpty: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    margin: 0,
+  },
+  updateModalProgressWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  updateModalProgressTrack: {
+    height: '10px',
+    borderRadius: '999px',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    border: '1px solid var(--border)',
+    overflow: 'hidden',
+  },
+  updateModalProgressFill: {
+    height: '100%',
+    borderRadius: '999px',
+    backgroundColor: 'var(--accent)',
+    transition: 'width 0.2s ease',
+  },
+  updateModalProgressLabel: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    color: 'var(--muted)',
+  },
+  updateModalError: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: '#f87171',
+    margin: 0,
+  },
+  updateModalBtnRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+  },
+  updateModalBtn: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 700,
+    borderRadius: '10px',
+    padding: '10px 16px',
+    cursor: 'pointer',
+    border: '1px solid var(--border)',
+    backgroundColor: 'var(--panel2)',
+    color: 'var(--text)',
+  },
+  updateModalBtnPrimary: {
+    backgroundColor: '#22c55e',
+    borderColor: '#22c55e',
+    color: '#06110a',
+  },
+  updateModalSwitchRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    cursor: 'pointer',
+  },
+  updateModalCheckbox: {
+    width: '18px',
+    height: '18px',
+    accentColor: 'var(--accent)',
+    cursor: 'pointer',
+  },
+  updateModalSwitchText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--text)',
+  },
+  updateModalHint: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '11.5px',
     color: 'var(--muted)',
     margin: 0,
   },

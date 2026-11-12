@@ -9,17 +9,48 @@ let toastTimerId = null;
 // مرحلهٔ ۳۹ §۳: سیستمِ رنگِ سفارشی — رنگ‌هایِ موردِ علاقه، تمپلیت‌هایِ
 // رنگیِ شخصی و رنگِ آخرینِ هر ابزار. مرجعِ اول localStorage است
 // (کلیدِ comicReader.customColorSystem.v2) و دیتابیس، پشتیبانِ دوم.
+// مرحلهٔ ۵۷ مأموریتِ ۲: دو فیلدِ تازه به همین سیستم اضافه شد —
+// activePaletteId (پالتِ فعالِ نوار ابزار) و primaryToolbarColors
+// (رنگ‌هایِ اصلیِ نوارِ سریع)؛ هر دو در همان کلیدِ localStorage و
+// همان payloadی دیتابیس (customColorSystem) می‌مانند، پس مسیرِ
+// ماندگاری عوض نشده است.
 // =========================================================================
 const CUSTOM_COLOR_SYSTEM_KEY = 'comicReader.customColorSystem.v2';
 const TOOL_COLOR_KEYS = ['pen', 'highlighter', 'box', 'arrow', 'text', 'sticky'];
 const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+// مرحلهٔ ۵۷ مأموریتِ ۲: پالتِ فعالِ نوار ابزار + رنگ‌هایِ اصلیِ نوار.
+// شناسه‌هایِ معتبرِ پالت: 'default' (کلاسیک و استاندارد — همان ۸ رنگِ
+// COLORSی تولبار)، شناسهٔ یکی از دسته‌هایِ سرخودِ تولبار
+// ('medical' | 'neon' | 'cyberpunk' | 'pastel')، 'favorites'
+// (رنگ‌هایِ من) یا 'template:<id>' (یکی از تمپلیت‌هایِ کاربر).
+// primaryToolbarColors حداکثر ۱۰ رنگ دارد؛ خالی بودنِ آن یعنی نوار،
+// به ۸ رنگِ کلاسیک برمی‌گردد (fallback در تولبار).
+export const DEFAULT_PRIMARY_TOOLBAR_COLORS = ['#facc15', '#22d3ee', '#4ade80', '#fb7185', '#c084fc', '#fb923c', '#f8fafc', '#0f172a'];
+const BUILTIN_PALETTE_IDS = ['medical', 'neon', 'cyberpunk', 'pastel'];
+const MAX_PRIMARY_TOOLBAR_COLORS = 10;
+
+function sanitizePrimaryToolbarColors(colors) {
+  if (!Array.isArray(colors)) return null;
+  return colors.map(sanitizeColorHex).filter(Boolean).slice(0, MAX_PRIMARY_TOOLBAR_COLORS);
+}
+
+function sanitizeActivePaletteId(value, templates) {
+  if (value === 'default' || value === 'favorites') return value;
+  if (typeof value === 'string' && BUILTIN_PALETTE_IDS.includes(value)) return value;
+  if (typeof value === 'string' && value.startsWith('template:')) {
+    const id = value.slice('template:'.length);
+    if (Array.isArray(templates) && templates.some((t) => t && t.id === id)) return value;
+  }
+  return 'default';
+}
 
 function sanitizeColorHex(c) {
   return typeof c === 'string' && HEX6_RE.test(c) ? c : null;
 }
 
 function readCustomColorSystem() {
-  const fallback = { favoriteColors: [], customColorTemplates: [], toolColors: {} };
+  const fallback = { favoriteColors: [], customColorTemplates: [], toolColors: {}, activePaletteId: 'default', primaryToolbarColors: [...DEFAULT_PRIMARY_TOOLBAR_COLORS] };
   try {
     if (typeof localStorage === 'undefined') return fallback;
     const raw = localStorage.getItem(CUSTOM_COLOR_SYSTEM_KEY);
@@ -46,7 +77,14 @@ function readCustomColorSystem() {
         if (c) toolColors[k] = c;
       }
     }
-    return { favoriteColors, customColorTemplates, toolColors };
+    // مرحلهٔ ۵۷ مأموریتِ ۲: فیلدِ قدیمی (بدونِ این دو کلید) یعنی
+    // پالتِ پیش‌فرض؛ آرایهٔ خالیِ صریح حفظ می‌شود (نوار به کلاسیک
+    // برمی‌گردد) و شناسهٔ تمپلیتِ حذف‌شده، به 'default' برمی‌گردد.
+    const primaryToolbarColors = Array.isArray(parsed.primaryToolbarColors)
+      ? sanitizePrimaryToolbarColors(parsed.primaryToolbarColors)
+      : [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+    const activePaletteId = sanitizeActivePaletteId(parsed.activePaletteId, customColorTemplates);
+    return { favoriteColors, customColorTemplates, toolColors, activePaletteId, primaryToolbarColors };
   } catch (_) {
     return fallback;
   }
@@ -59,6 +97,8 @@ function persistCustomColorSystem(state) {
       favoriteColors: state.favoriteColors || [],
       customColorTemplates: state.customColorTemplates || [],
       toolColors: state.toolColors || {},
+      activePaletteId: state.activePaletteId || 'default',
+      primaryToolbarColors: state.primaryToolbarColors || [],
     }));
   } catch (_) {}
 }
@@ -438,9 +478,16 @@ export const useAppStore = create((set, get) => ({
 
   deleteCustomColorTemplate: (id) =>
     set((state) => {
+      // مرحلهٔ ۵۷ مأموریتِ ۲: اگر تمپلیتِ حذف‌شده، پالتِ فعالِ نوار
+      // بود، نوار به پالتِ کلاسیک برمی‌گردد تا به رنگ‌هایِ مرده
+      // اشاره نکند.
+      const wasActive = state.activePaletteId === `template:${id}`;
       const next = {
         ...state,
         customColorTemplates: (state.customColorTemplates || []).filter((t) => t.id !== id),
+        ...(wasActive
+          ? { activePaletteId: 'default', primaryToolbarColors: [...DEFAULT_PRIMARY_TOOLBAR_COLORS] }
+          : {}),
       };
       persistCustomColorSystem(next);
       scheduleColorDbSync();
@@ -460,6 +507,104 @@ export const useAppStore = create((set, get) => ({
           }
           return out;
         }),
+      };
+      // مرحلهٔ ۵۷ مأموریتِ ۲: اگر تمپلیتِ ویرایش‌شده، پالتِ فعالِ
+      // نوار است، نوارِ سریع همان‌جا با رنگ‌هایِ تازه همگام می‌شود.
+      if (state.activePaletteId === `template:${id}`) {
+        const edited = next.customColorTemplates.find((t) => t.id === id);
+        if (edited && Array.isArray(edited.colors) && edited.colors.length > 0) {
+          next.primaryToolbarColors = edited.colors.slice(0, MAX_PRIMARY_TOOLBAR_COLORS);
+        }
+      }
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      return next;
+    }),
+
+  // مرحلهٔ ۵۷ مأموریتِ ۲: پالتِ فعالِ نوار ابزار. آرگومانِ دوم
+  // (colors) فقط برایِ دسته‌هایِ سرخود لازم است، چون رنگ‌هایِ آن‌ها
+  // در تولبار تعریف شده‌اند؛ 'default' از
+  // DEFAULT_PRIMARY_TOOLBAR_COLORS، 'favorites' از رنگ‌هایِ من و
+  // 'template:<id>' از خودِ تمپلیت خوانده می‌شوند. true یعنی پالت
+  // عوض شد، false یعنی شناسه یا رنگ‌ها نامعتبر بودند (مثلِ تمپلیتِ
+  // خالی یا دستهٔ ناشناخته) و state دست نخورده ماند. دراور بعد از
+  // این فراخوانی باز می‌ماند تا کاربر بی‌درنگ پالتِ دیگری را هم
+  // امتحان کند.
+  setActivePaletteId: (paletteId, colors) => {
+    let ok = false;
+    set((state) => {
+      const templates = state.customColorTemplates || [];
+      let nextColors = null;
+      if (paletteId === 'default') {
+        nextColors = [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+      } else if (paletteId === 'favorites') {
+        const favs = (state.favoriteColors || []).slice(0, MAX_PRIMARY_TOOLBAR_COLORS);
+        nextColors = favs.length > 0 ? favs : [state.annotationColor || '#22d3ee'];
+      } else if (typeof paletteId === 'string' && paletteId.startsWith('template:')) {
+        const t = templates.find((x) => x && x.id === paletteId.slice('template:'.length));
+        if (!t || !Array.isArray(t.colors) || t.colors.length === 0) return state;
+        nextColors = t.colors.slice(0, MAX_PRIMARY_TOOLBAR_COLORS);
+      } else if (typeof paletteId === 'string' && BUILTIN_PALETTE_IDS.includes(paletteId)) {
+        const clean = sanitizePrimaryToolbarColors(colors);
+        if (!clean || clean.length === 0) return state;
+        nextColors = clean;
+      } else {
+        return state;
+      }
+      const next = { ...state, activePaletteId: paletteId, primaryToolbarColors: nextColors };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      ok = true;
+      return next;
+    });
+    return ok;
+  },
+
+  // مرحلهٔ ۵۷ مأموریتِ ۲: جایگزینیِ کاملِ رنگ‌هایِ نوارِ سریع
+  // (حداکثر ۱۰ رنگ؛ خالی یعنی fallback به کلاسیک در تولبار).
+  setPrimaryToolbarColors: (colors) => {
+    let ok = false;
+    set((state) => {
+      const clean = sanitizePrimaryToolbarColors(colors);
+      if (clean === null) return state;
+      const next = { ...state, primaryToolbarColors: clean };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      ok = true;
+      return next;
+    });
+    return ok;
+  },
+
+  // مرحلهٔ ۵۷ مأموریتِ ۲: افزودنِ یک رنگ به نوارِ سریع (دکمهٔ +).
+  // true اگر اضافه شد، false اگر نامعتبر، تکراری یا سقفِ ۱۰ رنگ پر بود.
+  addPrimaryToolbarColor: (color) => {
+    let added = false;
+    set((state) => {
+      const c = sanitizeColorHex(typeof color === 'string' ? color.trim() : '');
+      if (!c) return state;
+      const list = state.primaryToolbarColors || [];
+      if (list.some((x) => x.toLowerCase() === c.toLowerCase())) return state;
+      if (list.length >= MAX_PRIMARY_TOOLBAR_COLORS) return state;
+      const next = { ...state, primaryToolbarColors: [...list, c].slice(0, MAX_PRIMARY_TOOLBAR_COLORS) };
+      persistCustomColorSystem(next);
+      scheduleColorDbSync();
+      added = true;
+      return next;
+    });
+    return added;
+  },
+
+  // مرحلهٔ ۵۷ مأموریتِ ۲: حذفِ یک رنگ از نوارِ سریع (کلیکِ راست یا
+  // × در حالتِ ویرایش). خالی شدنِ کامل مجاز است؛ تولبار در آن حالت،
+  // ۸ رنگِ کلاسیک را نشان می‌دهد.
+  removePrimaryToolbarColor: (color) =>
+    set((state) => {
+      const next = {
+        ...state,
+        primaryToolbarColors: (state.primaryToolbarColors || []).filter(
+          (x) => x.toLowerCase() !== String(color || '').toLowerCase()
+        ),
       };
       persistCustomColorSystem(next);
       scheduleColorDbSync();
@@ -500,6 +645,30 @@ export const useAppStore = create((set, get) => ({
       next.favoriteColors = fav;
       next.customColorTemplates = tpl;
       next.toolColors = tc;
+      // مرحلهٔ ۵۷ مأموریتِ ۲: پالتِ فعال و رنگ‌هایِ نوار هم از
+      // دیتابیس برمی‌گردند. رکوردِ ذخیره‌شده با همین نسخه، همیشه هر
+      // دو را با هم دارد؛ اگر نوار ذخیره نشده بود، از رویِ پالت
+      // حل می‌شود (تمپلیت → رنگ‌هایِ تمپلیت، علاقه‌مندی‌ها → رنگ‌هایِ
+      // من، کلاسیک → پیش‌فرض) و اگر حل نشد، پالت به 'default' برمی‌گردد.
+      const savedPaletteId = sanitizeActivePaletteId(saved.activePaletteId, tpl);
+      const savedStrip = Array.isArray(saved.primaryToolbarColors)
+        ? sanitizePrimaryToolbarColors(saved.primaryToolbarColors)
+        : null;
+      next.activePaletteId = savedPaletteId;
+      if (savedStrip && savedStrip.length > 0) {
+        next.primaryToolbarColors = savedStrip;
+      } else if (savedPaletteId === 'default') {
+        next.primaryToolbarColors = [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+      } else if (savedPaletteId === 'favorites') {
+        next.primaryToolbarColors = fav.length > 0 ? fav.slice(0, MAX_PRIMARY_TOOLBAR_COLORS) : [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+      } else if (savedPaletteId.startsWith('template:')) {
+        const t = tpl.find((x) => x.id === savedPaletteId.slice('template:'.length));
+        next.primaryToolbarColors = t && t.colors.length > 0 ? t.colors.slice(0, MAX_PRIMARY_TOOLBAR_COLORS) : [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+        if (!t || t.colors.length === 0) next.activePaletteId = 'default';
+      } else {
+        next.activePaletteId = 'default';
+        next.primaryToolbarColors = [...DEFAULT_PRIMARY_TOOLBAR_COLORS];
+      }
       persistCustomColorSystem(next);
       set(next);
       return true;
@@ -524,6 +693,8 @@ export const useAppStore = create((set, get) => ({
             favoriteColors: s.favoriteColors || [],
             customColorTemplates: s.customColorTemplates || [],
             toolColors: s.toolColors || {},
+            activePaletteId: s.activePaletteId || 'default',
+            primaryToolbarColors: s.primaryToolbarColors || [],
           },
         },
       });

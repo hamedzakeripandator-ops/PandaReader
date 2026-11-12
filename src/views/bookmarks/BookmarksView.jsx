@@ -31,6 +31,9 @@ export default function BookmarksView({ onOpenComic }) {
   const allBookmarkFiles = useBookmarkStore((state) => state.allBookmarkFiles);
   const allBookmarksLoaded = useBookmarkStore((state) => state.allBookmarksLoaded);
   const loadAllBookmarks = useBookmarkStore((state) => state.loadAllBookmarks);
+  // مرحلهٔ ۵۷، مأموریت ۱ — شمارندهٔ واکنش‌گرِ جهش‌هایِ بوک‌مارک/پریست؛
+  // سیگنالِ صریحِ بی‌اعتبارسازی برایِ مشتقِ memoشدهٔ پایین است.
+  const bookmarkVersion = useBookmarkStore((state) => state.bookmarkVersion);
   const preferences = useBookmarkStore((state) => state.preferences);
   const loadPreferences = useBookmarkStore((state) => state.loadPreferences);
   const savePreset = useBookmarkStore((state) => state.savePreset);
@@ -72,7 +75,9 @@ export default function BookmarksView({ onOpenComic }) {
       }))
       .filter((e) => e.bookmarks.length > 0)
       .sort((a, b) => String(a.fileName).localeCompare(String(b.fileName)));
-  }, [allBookmarkFiles]);
+  // مرحلهٔ ۵۷، مأموریت ۱ — با هر جهش، بازمحاسبه می‌شود، حتی اگر
+  // ارجاعِ کش در مسیرِ آینده‌ای به‌روز نشده باشد.
+  }, [allBookmarkFiles, bookmarkVersion]);
 
   const totalCount = useMemo(
     () => bookEntries.reduce((sum, e) => sum + e.bookmarks.length, 0),

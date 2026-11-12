@@ -46,12 +46,12 @@ const TOOLS = [
 ];
 
 const COLORS = [
-  { hex: '#facc15', label: 'زرد' },
-  { hex: '#22d3ee', label: 'فیروزه‌ای' },
-  { hex: '#4ade80', label: 'سبز' },
-  { hex: '#fb7185', label: 'قرمز' },
-  { hex: '#c084fc', label: 'بنفش' },
-  { hex: '#fb923c', label: 'نارنجی' },
+  { hex: '#FFCC00', label: 'زرد' },
+  { hex: '#00D4FF', label: 'فیروزه‌ای' },
+  { hex: '#10B981', label: 'سبز' },
+  { hex: '#FF577F', label: 'قرمز' },
+  { hex: '#A855F7', label: 'بنفش' },
+  { hex: '#FF8A00', label: 'نارنجی' },
   { hex: '#f8fafc', label: 'سفید' },
   { hex: '#0f172a', label: 'مشکی' },
 ];
@@ -121,11 +121,11 @@ const PALETTE_CATEGORIES = [
     id: 'neon',
     label: 'نئون',
     colors: [
-      { hex: '#facc15', label: 'زرد فسفری' },
-      { hex: '#4ade80', label: 'سبز نئون' },
-      { hex: '#22d3ee', label: 'آبی فیروزه‌ای' },
-      { hex: '#f43f5e', label: 'سرخابی نئون' },
-      { hex: '#fb923c', label: 'نارنجی فسفری' },
+      { hex: '#FFCC00', label: 'زرد فسفری' },
+      { hex: '#10B981', label: 'سبز نئون' },
+      { hex: '#00D4FF', label: 'آبی فیروزه‌ای' },
+      { hex: '#FF577F', label: 'سرخابی نئون' },
+      { hex: '#FF8A00', label: 'نارنجی فسفری' },
     ],
   },
   {
@@ -133,7 +133,7 @@ const PALETTE_CATEGORIES = [
     label: 'سایبرپانک و دارک',
     colors: [
       { hex: '#00f2fe', label: 'فیروزه‌ای درخشان' },
-      { hex: '#d946ef', label: 'ماژنتا نئون' },
+      { hex: '#A855F7', label: 'ماژنتا نئون' },
       { hex: '#38bdf8', label: 'آبی آسمانی' },
       { hex: '#64748b', label: 'خاکستری اسلیتی' },
       { hex: '#1e293b', label: 'سرمه‌ای تیره' },
@@ -255,6 +255,19 @@ export function AnnotationToolbar({
   const customColorTemplates = useAppStore((s) => s.customColorTemplates || []);
   const createCustomColorTemplate = useAppStore((s) => s.createCustomColorTemplate);
   const deleteCustomColorTemplate = useAppStore((s) => s.deleteCustomColorTemplate);
+  const updateCustomColorTemplate = useAppStore((s) => s.updateCustomColorTemplate);
+  // مرحلهٔ ۵۷ مأموریتِ ۲: پالتِ فعالِ نوار ابزار + رنگ‌هایِ اصلیِ نوار
+  // (همه در customColorSystemی استور؛ ماندگاری: localStorage + دیتابیس).
+  const activePaletteId = useAppStore((s) => s.activePaletteId || 'default');
+  const primaryToolbarColors = useAppStore((s) => s.primaryToolbarColors || []);
+  const setActivePaletteId = useAppStore((s) => s.setActivePaletteId);
+  const addPrimaryToolbarColor = useAppStore((s) => s.addPrimaryToolbarColor);
+  const removePrimaryToolbarColor = useAppStore((s) => s.removePrimaryToolbarColor);
+  // مرحلهٔ ۵۷ مأموریتِ ۲: گرادیانِ اسکرول‌بارِ انتخاب‌شدهٔ کاربر از
+  // تنظیمات (فیلدهایِ سطحِ استورِ useSettingsStore؛ App.jsx هم
+  // همین‌طور می‌خواند) — برایِ اسکرول‌بارِ دراورِ رنگ.
+  const scrollbarColorStart = useSettingsStore((s) => s.scrollbarColorStart || '#22d3ee');
+  const scrollbarColorEnd = useSettingsStore((s) => s.scrollbarColorEnd || '#a78bfa');
   // مرحلهٔ ۵۶ مأموریتِ ۱: توست برای بازخوردِ ذخیرهٔ تمپلیت/رنگ.
   const showToast = useAppStore((s) => s.showToast);
   const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
@@ -372,7 +385,13 @@ export function AnnotationToolbar({
   };
   // مرحلهٔ ۳۹ §۳: تمپلیتِ فعال در نوارِ سریع + ساختِ تمپلیتِ تازه +
   // پیش‌نویسِ کدِ هگزِ انتخابگرِ پیشرفته.
-  const [activeTemplateId, setActiveTemplateId] = useState(null);
+  // مرحلهٔ ۵۷ مأموریتِ ۲: حالتِ ویرایشِ نوارِ سریع (× روی هر رنگ)
+  // و ویرایشِ درون‌خطیِ یک تمپلیت در دراور. پالتِ فعال دیگر stateی
+  // محلی نیست؛ در استور است (activePaletteId) تا بینِ رفرش‌ها بماند.
+  const [isEditingStrip, setIsEditingStrip] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState(null);
+  const [editingTemplateName, setEditingTemplateName] = useState('');
+  const [editingTemplateColors, setEditingTemplateColors] = useState([]);
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isCreatingTemplate, setIsCreatingTemplate] = useState(false);
   // مرحلهٔ ۵۶ مأموریتِ ۱: پیامِ خطایِ درون‌خطیِ فرمِ تمپلیت —
@@ -433,12 +452,24 @@ export function AnnotationToolbar({
   useEffect(() => {
     setHexDraft(annotationColor || '#06b6d4');
   }, [annotationColor]);
-  // مرحلهٔ ۳۹ §۳: رنگ‌هایِ نوارِ سریع — اگر تمپلیتی فعال است، رنگ‌هایِ
-  // همان تمپلیت؛ وگرنه پالتِ پیش‌فرض.
-  const activeTemplate = customColorTemplates.find((t) => t.id === activeTemplateId) || null;
-  const quickColors = activeTemplate
-    ? activeTemplate.colors.map((hex) => ({ hex, label: hex }))
-    : COLORS;
+  // مرحلهٔ ۵۷ مأموریتِ ۲: رنگ‌هایِ نوارِ سریع، همان
+  // primaryToolbarColorsی استور است؛ اگر خالی بود (کاربر همه را حذف
+  // کرده)، ۸ رنگِ کلاسیک نشان داده می‌شود (فقط نمایشی؛ در استور
+  // چیزی نوشته نمی‌شود).
+  const activePaletteLabel = (() => {
+    if (activePaletteId === 'default') return 'کلاسیک و استاندارد';
+    if (activePaletteId === 'favorites') return 'رنگ‌های من';
+    if (typeof activePaletteId === 'string' && activePaletteId.startsWith('template:')) {
+      const found = customColorTemplates.find((x) => x.id === activePaletteId.slice(9));
+      return found ? found.name : 'کلاسیک و استاندارد';
+    }
+    const cat = PALETTE_CATEGORIES.find((c) => c.id === activePaletteId);
+    return cat ? cat.label : 'کلاسیک و استاندارد';
+  })();
+  const stripHexes = primaryToolbarColors.length > 0
+    ? primaryToolbarColors
+    : COLORS.map((c) => c.hex);
+  const quickColors = stripHexes.map((hex) => ({ hex, label: hex }));
   // فاز ۳ پالت — بستنِ خودکار با کلیکِ بیرونی (تسک §۴): هر mousedownی
   // که نه روی دکمهٔ پالت باشد و نه روی پنلِ دراور، دراور را می‌بندد.
   // دکمه، خودش toggle می‌کند، پس از این بررسی مستثناست؛ و چون این
@@ -463,7 +494,19 @@ export function AnnotationToolbar({
   // می‌شود — ارزان، قابلِ پیش‌بینی، و بدونِ شنوندهٔ پرهزینهٔ حرکت.
   useEffect(() => {
     if (!colorDrawerOpen) return undefined;
-    const close = () => setColorDrawerOpen(false);
+    // مرحلهٔ ۵۷ مأموریتِ ۲: اسکرولِ داخلِ خودِ دراور، آن را نمی‌بندد.
+    // مسیرِ واقعیِ دزدیِ اسکرول همین‌جا بود: رویدادِ scroll با فازِ
+    // capture از window می‌گذرد (حتی رویدادِ اسکرولِ خودِ پنلِ
+    // دراور)، پس اولین چرخِ ماوس رویِ دراور، بی‌درنگ آن را می‌بست.
+    // شنوندهٔ wheelی بومیِ PdfViewer (فقط با Ctrl، برایِ زوم) و
+    // کانتینرِ اسکرولِ آن، در این مسیر نقشی ندارند: تولبار، خواهرِ
+    // کانتینرِ اسکرول است، نه فرزندِ آن، پس چرخِ رویِ دراور هرگز به
+    // آن شنونده نمی‌رسد؛ دزدی، همین بستنِ خودکار بود.
+    const close = (e) => {
+      if (e && e.target && typeof Node !== 'undefined' && e.target instanceof Node
+        && colorDrawerRef.current && colorDrawerRef.current.contains(e.target)) return;
+      setColorDrawerOpen(false);
+    };
     window.addEventListener('scroll', close, true);
     window.addEventListener('resize', close);
     return () => {
@@ -1410,6 +1453,167 @@ export function AnnotationToolbar({
     if (added) showToast('رنگِ فعلی در رنگ‌های من ذخیره شد.', { type: 'success' });
     else showToast('این رنگ قبلاً در رنگ‌های من است.', { type: 'info' });
   };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: رنگ‌هایِ یک پالت با شناسه — 'default' همان
+  // ۸ رنگِ کلاسیک است؛ 'favorites' رنگ‌هایِ من؛ 'template:<id>'
+  // تمپلیتِ کاربر؛ بقیه، دسته‌هایِ PALETTE_CATEGORIES. null یعنی
+  // پالت، رنگِ قابلِ نصبی ندارد.
+  const resolvePaletteColors = (paletteId) => {
+    if (paletteId === 'favorites') {
+      return favoriteColors.length > 0 ? [...favoriteColors] : [annotationColor];
+    }
+    if (typeof paletteId === 'string' && paletteId.startsWith('template:')) {
+      const found = customColorTemplates.find((x) => x.id === paletteId.slice(9));
+      return found && found.colors.length > 0 ? [...found.colors] : null;
+    }
+    const cat = PALETTE_CATEGORIES.find((c) => c.id === paletteId);
+    if (cat) return cat.colors.map((c) => c.hex);
+    return null;
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: نصبِ یک پالت در نوار ابزار — نوارِ سریع،
+  // بی‌درنگ به رنگ‌هایِ همان پالت عوض می‌شود و دراور باز می‌ماند تا
+  // کاربر بی‌درنگ پالتِ دیگری را هم امتحان کند (باز کردنِ دوبارهٔ
+  // پنل لازم نیست).
+  const activatePalette = (paletteId) => {
+    if (typeof setActivePaletteId !== 'function') {
+      if (typeof showToast === 'function') showToast('نصبِ پالت در این نسخه پشتیبانی نمی‌شود؛ فایلِ useAppStore.js را با نسخهٔ مرحلهٔ ۵۷ جایگزین کنید.', { type: 'error' });
+      return;
+    }
+    const colors = paletteId === 'default' ? null : resolvePaletteColors(paletteId);
+    if (paletteId !== 'default' && (!colors || colors.length === 0)) {
+      if (typeof showToast === 'function') showToast('این پالت رنگی ندارد؛ اول رنگ اضافه کن.', { type: 'error' });
+      return;
+    }
+    // برچسب، از رویِ پالتِ تازه‌نصب‌شده حساب می‌شود، نه پالتِ قبلیِ
+    // فعال (activePaletteLabel هنوز مقدارِ پیش از تعویض را دارد).
+    const targetLabel = (() => {
+      if (paletteId === 'default') return 'کلاسیک و استاندارد';
+      if (paletteId === 'favorites') return 'رنگ‌های من';
+      if (typeof paletteId === 'string' && paletteId.startsWith('template:')) {
+        const found = customColorTemplates.find((x) => x.id === paletteId.slice(9));
+        return found ? found.name : 'تمپلیت';
+      }
+      const cat = PALETTE_CATEGORIES.find((c) => c.id === paletteId);
+      return cat ? cat.label : 'پالت';
+    })();
+    const ok = setActivePaletteId(paletteId, colors);
+    if (typeof showToast !== 'function') return;
+    if (ok) showToast(`پالت «${targetLabel}» در نوار ابزار نصب شد.`, { type: 'success' });
+    else showToast('نصبِ پالت انجام نشد.', { type: 'error' });
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: دکمهٔ + کنارِ رنگ‌هایِ نوارِ سریع و داخلِ
+  // هر پالتِ کاربر — رنگِ فعلی را به نوارِ سریع اضافه می‌کند.
+  const addCurrentColorToStrip = () => {
+    if (typeof addPrimaryToolbarColor !== 'function') return;
+    const added = addPrimaryToolbarColor(annotationColor);
+    if (typeof showToast !== 'function') return;
+    if (added) showToast('رنگِ فعلی به نوار ابزار اضافه شد.', { type: 'success' });
+    else showToast('این رنگ در نوار ابزار هست یا نوار پر است (حداکثر ۱۰ رنگ).', { type: 'info' });
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: حذفِ یک رنگ از نوارِ سریع (کلیکِ راست یا
+  // × در حالتِ ویرایش).
+  const removeStripColor = (hex) => {
+    if (typeof removePrimaryToolbarColor !== 'function') return;
+    removePrimaryToolbarColor(hex);
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: ویرایشِ درون‌خطیِ تمپلیت — پیش‌نویسِ نام
+  // و رنگ‌ها در stateی محلی است تا لغو، چیزی را عوض نکند.
+  const startEditingTemplate = (t) => {
+    setEditingTemplateId(t.id);
+    setEditingTemplateName(t.name || '');
+    setEditingTemplateColors(Array.isArray(t.colors) ? [...t.colors] : []);
+  };
+  const saveEditingTemplate = () => {
+    if (typeof updateCustomColorTemplate !== 'function') {
+      if (typeof showToast === 'function') showToast('ویرایشِ تمپلیت در این نسخه پشتیبانی نمی‌شود؛ فایلِ useAppStore.js را با نسخهٔ مرحلهٔ ۵۷ جایگزین کنید.', { type: 'error' });
+      return;
+    }
+    const name = editingTemplateName.trim() || 'تمپلیت';
+    updateCustomColorTemplate(editingTemplateId, { name, colors: editingTemplateColors });
+    setEditingTemplateId(null);
+    if (typeof showToast === 'function') showToast(`تمپلیت «${name}» به‌روز شد.`, { type: 'success' });
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: دکمهٔ «نصب در نوار ابزار» کنارِ هر عنوانِ
+  // پالت؛ اگر همین پالت فعال باشد، «✓ پالتِ فعال» نشان می‌دهد.
+  // (✓ همان برچسبِ متنیِ مشخص‌شده در پرامپت است.)
+  const paletteInstallButton = (paletteId) => {
+    const isActive = activePaletteId === paletteId;
+    return (
+      <button
+        type="button"
+        title={isActive ? 'این پالت الان در نوار ابزار فعال است' : 'نصبِ این پالت در نوار ابزار'}
+        onClick={(e) => { e.stopPropagation(); activatePalette(paletteId); }}
+        style={{
+          ...btnBase,
+          height: 22,
+          padding: '0 8px',
+          borderRadius: 11,
+          background: isActive ? 'rgba(16,185,129,0.18)' : 'rgba(34,211,238,0.14)',
+          border: isActive ? '1px solid rgba(16,185,129,0.55)' : '1px solid rgba(34,211,238,0.45)',
+          color: isActive ? '#6ee7b7' : '#67e8f9',
+          fontSize: 11,
+          fontWeight: 700,
+          fontFamily: 'inherit',
+          flexShrink: 0,
+          cursor: 'pointer',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {isActive ? '✓ پالتِ فعال' : 'نصب در نوار ابزار'}
+      </button>
+    );
+  };
+  // مرحلهٔ ۵۷ مأموریتِ ۲: یک دایرهٔ رنگ در دراور (بخشِ کلاسیک) —
+  // دقیقاً همان ساختارِ دایره‌هایِ دسته‌ها (هاور، بجِ فعال، کلیک
+  // برای اعمالِ رنگ و بستنِ دراور).
+  const drawerColorSwatch = (groupKey, c) => {
+    const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
+    return (
+      <button
+        key={c.hex}
+        title={`${c.label} (${c.hex})`}
+        onMouseEnter={() => setHoverSwatch(`d:${groupKey}:${c.hex}`)}
+        onMouseLeave={() => setHoverSwatch(null)}
+        onClick={() => applyDrawerColor(c.hex)}
+        style={{
+          ...btnBase,
+          width: 24,
+          height: 24,
+          borderRadius: '50%',
+          flexShrink: 0,
+          padding: 0,
+          boxSizing: 'border-box',
+          background: 'transparent',
+          border: 'none',
+          boxShadow: 'none',
+          transform: 'none',
+          transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+        }}
+      >
+        <span
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            width: 24,
+            height: 24,
+            borderRadius: '50%',
+            pointerEvents: 'none',
+            background: c.hex,
+            border: active
+              ? '1.5px solid rgba(255,255,255,0.85)'
+              : '1px solid rgba(255,255,255,0.25)',
+            boxShadow: active ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${c.hex}` : hoverSwatch === `d:${groupKey}:${c.hex}` ? `0 6px 14px ${c.hex}` : 'none',
+            transform: hoverSwatch === `d:${groupKey}:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
+            transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+          }}
+        >
+          {active && (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+          )}
+        </span>
+      </button>
+    );
+  };
   // مرحله ۴۸ §۵: باز کردنِ پاپ‌اورِ زیرحالتِ انتخاب — موقعیتِ ثابت،
   // با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن (دقیقاً مثلِ
   // toggleColorDrawer): عمودی → کنارِ دکمه با قانونِ آینه‌ایِ §۱؛
@@ -1749,24 +1953,25 @@ export function AnnotationToolbar({
       {/* رنگ‌ها — مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است */}
       {!hideColorControls && (
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
-        {activeTemplate && (
+        {activePaletteId !== 'default' && (
           <button
             type="button"
             title="بازگشت به پالتِ پیش‌فرض"
-            onClick={() => setActiveTemplateId(null)}
+            onClick={() => activatePalette('default')}
             style={{ ...btnBase, height: 28, padding: '0 8px', borderRadius: 14, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
           >
-            {activeTemplate.name} ×
+            {activePaletteLabel} ×
           </button>
         )}
         {quickColors.map((c) => {
           const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
           return (
+            <span key={c.hex} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
             <button
-              key={c.hex}
               title={c.label}
               onMouseEnter={() => setHoverSwatch(`q:${c.hex}`)}
               onMouseLeave={() => setHoverSwatch(null)}
+              onContextMenu={(e) => { e.preventDefault(); removeStripColor(c.hex); }}
               onClick={() => {
                 setAnnotationColor(c.hex);
                 // فاز ۵: بایندینگِ دوطرفهٔ رنگ — علاوه بر ساختِ
@@ -1823,8 +2028,38 @@ export function AnnotationToolbar({
                 )}
               </span>
             </button>
+              {isEditingStrip && (
+                <button
+                  type="button"
+                  title={`حذف ${c.hex} از نوار ابزار`}
+                  onClick={(e) => { e.stopPropagation(); removeStripColor(c.hex); }}
+                  style={{ position: 'absolute', top: -7, left: -7, width: 16, height: 16, borderRadius: '50%', background: '#f43f5e', color: '#ffffff', border: '1px solid rgba(255,255,255,0.7)', fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, zIndex: 1 }}
+                >
+                  ×
+                </button>
+              )}
+            </span>
           );
         })}
+        {/* مرحلهٔ ۵۷ مأموریتِ ۲: + کنارِ رنگ‌هایِ نوارِ سریع (افزودنِ
+            رنگِ فعلی به نوار) و دکمهٔ ویرایش (× روی هر رنگ). حذف با
+            کلیکِ راست رویِ هر رنگ هم همیشه آزاد است. */}
+        <button
+          type="button"
+          title="افزودن رنگِ فعلی به نوار ابزار"
+          onClick={addCurrentColorToStrip}
+          style={{ ...btnBase, width: 28, height: 28, borderRadius: '50%', flexShrink: 0, background: 'transparent', border: '1px dashed rgba(255,255,255,0.4)', color: 'rgba(255,255,255,0.75)', fontSize: 16, lineHeight: 1, cursor: 'pointer' }}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          title={isEditingStrip ? 'پایانِ ویرایشِ نوار ابزار' : 'ویرایشِ نوار ابزار (حذفِ رنگ‌ها با ×)'}
+          onClick={() => setIsEditingStrip(!isEditingStrip)}
+          style={{ ...btnBase, height: 28, padding: '0 8px', borderRadius: 14, background: isEditingStrip ? 'rgba(244,63,94,0.16)' : 'transparent', border: isEditingStrip ? '1px solid rgba(244,63,94,0.5)' : '1px solid rgba(255,255,255,0.25)', color: isEditingStrip ? '#fda4af' : 'rgba(255,255,255,0.75)', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer', whiteSpace: 'nowrap' }}
+        >
+          {isEditingStrip ? 'پایان ویرایش' : 'ویرایش'}
+        </button>
         {/* فاز ۳ پالت — دکمهٔ دراورِ پالتِ تخصصی، کنارِ رنگ‌های
           دم‌دست. آیکونِ Paletteی لوسید با SVGی خام است، چون
           Icons.jsxی پروژه این آیکون را ندارد (الگوی Grip و
@@ -2471,6 +2706,7 @@ export function AnnotationToolbar({
     >
       <div
         ref={colorDrawerRef}
+        className="at-color-drawer-scroll"
         style={{
           width: 272,
           maxHeight: 'min(72vh, 460px)',
@@ -2480,8 +2716,8 @@ export function AnnotationToolbar({
           transformOrigin: colorDrawerPos.above ? '50% 100%' : '50% 0',
           overflowY: 'auto',
           scrollbarWidth: 'thin',
-          scrollbarColor: 'rgba(255,255,255,0.25) transparent',
-          padding: 10,
+          scrollbarColor: `${scrollbarColorStart} transparent`,
+          padding: '10px 10px 20px',
           borderRadius: 14,
           background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
           border: '1px solid rgba(255,255,255,0.12)',
@@ -2498,15 +2734,32 @@ export function AnnotationToolbar({
               : 'drawerInDown 0.2s cubic-bezier(0.16, 1, 0.3, 1)'),
         }}
         onPointerDown={(e) => e.stopPropagation()}
+        onWheel={(e) => e.stopPropagation()}
         onPointerMove={(e) => e.stopPropagation()}
         onPointerUp={(e) => e.stopPropagation()}
         onMouseMove={handleSpotMove}
         onMouseLeave={handleSpotLeave}
       >
+        {/* مرحلهٔ ۵۷ مأموریتِ ۲: پالتِ کلاسیک و استاندارد (همان ۸ رنگِ
+            نوارِ سریع) در بالایِ دراور، با دکمهٔ نصبِ خودش. */}
+        <div style={{ marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 6 }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)' }}>
+              کلاسیک و استاندارد
+            </div>
+            {paletteInstallButton('default')}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+            {COLORS.map((c) => drawerColorSwatch('classic', c))}
+          </div>
+        </div>
         {PALETTE_CATEGORIES.map((cat) => (
           <div key={cat.id} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-            <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
-              {cat.label}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginBottom: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)' }}>
+                {cat.label}
+              </div>
+              {paletteInstallButton(cat.id)}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
               {cat.colors.map((c) => {
@@ -2563,15 +2816,26 @@ export function AnnotationToolbar({
           </div>
         ))}
         <div>
-          <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
-            رنگ‌های من
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', flex: 1 }}>
+              رنگ‌های من
+            </div>
+            <button
+              type="button"
+              title="افزودن رنگِ فعلی به نوار ابزار"
+              onClick={addCurrentColorToStrip}
+              style={{ ...btnBase, width: 22, height: 22, borderRadius: '50%', flexShrink: 0, background: 'transparent', border: '1px dashed rgba(255,255,255,0.4)', color: 'rgba(255,255,255,0.75)', fontSize: 14, lineHeight: 1, cursor: 'pointer' }}
+            >
+              +
+            </button>
+            {paletteInstallButton('favorites')}
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             {favoriteColors.map((hex) => {
               const active = annotationColor.toLowerCase() === hex.toLowerCase();
               const hovered = hoverUserHex === hex;
               return (
-                <div key={hex} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+                <div key={hex} style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
                   <button
                     title={hex}
                     onClick={() => applyDrawerColor(hex)}
@@ -2617,6 +2881,16 @@ export function AnnotationToolbar({
                       )}
                     </span>
                   </button>
+                  {isEditingStrip && (
+                    <button
+                      type="button"
+                      title={`حذف ${hex} از رنگ‌های من`}
+                      onClick={(e) => { e.stopPropagation(); removeFavoriteColor(hex); }}
+                      style={{ position: 'absolute', top: -7, left: -7, width: 16, height: 16, borderRadius: '50%', background: '#f43f5e', color: '#ffffff', border: '1px solid rgba(255,255,255,0.7)', fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, zIndex: 1 }}
+                    >
+                      ×
+                    </button>
+                  )}
                   <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono', monospace", color: hovered ? '#ffffff' : 'rgba(255,255,255,0.5)', direction: 'ltr' }}>
                     {hex}
                   </span>
@@ -2677,12 +2951,13 @@ export function AnnotationToolbar({
             </div>
           )}
           {customColorTemplates.map((t) => (
-            <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <Fragment key={t.id}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
               <button
                 type="button"
                 title="اعمالِ این تمپلیت در نوارِ سریع"
-                onClick={() => { setActiveTemplateId(t.id); setColorDrawerOpen(false); }}
-                style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, background: activeTemplateId === t.id ? 'rgba(34,211,238,0.14)' : 'transparent', border: activeTemplateId === t.id ? '1px solid rgba(34,211,238,0.5)' : '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, textAlign: 'right' }}
+                onClick={() => activatePalette(`template:${t.id}`)}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, background: activePaletteId === `template:${t.id}` ? 'rgba(34,211,238,0.14)' : 'transparent', border: activePaletteId === `template:${t.id}` ? '1px solid rgba(34,211,238,0.5)' : '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '6px 8px', cursor: 'pointer', color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, textAlign: 'right' }}
               >
                 <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
                 <span style={{ display: 'flex', gap: 3, marginRight: 'auto', flexShrink: 0 }}>
@@ -2691,15 +2966,88 @@ export function AnnotationToolbar({
                   ))}
                 </span>
               </button>
+              {paletteInstallButton(`template:${t.id}`)}
+              <button
+                type="button"
+                title="ویرایشِ نام و رنگ‌هایِ تمپلیت"
+                onClick={() => startEditingTemplate(t)}
+                style={{ ...btnBase, height: 24, padding: '0 8px', borderRadius: 12, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.7)', fontSize: 11, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+              >
+                ویرایش
+              </button>
               <button
                 type="button"
                 title="حذفِ تمپلیت"
-                onClick={() => { deleteCustomColorTemplate(t.id); if (activeTemplateId === t.id) setActiveTemplateId(null); }}
+                onClick={() => { if (editingTemplateId === t.id) setEditingTemplateId(null); deleteCustomColorTemplate(t.id); }}
                 style={{ ...btnBase, width: 24, height: 24, borderRadius: '50%', background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.7)', fontSize: 13, flexShrink: 0, cursor: 'pointer' }}
               >
                 ×
               </button>
             </div>
+            {editingTemplateId === t.id && (
+              <div style={{ marginBottom: 8, padding: 8, border: '1px solid rgba(34,211,238,0.35)', borderRadius: 10, background: 'rgba(34,211,238,0.06)' }}>
+                <input
+                  type="text"
+                  value={editingTemplateName}
+                  onChange={(e) => setEditingTemplateName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); saveEditingTemplate(); }
+                    else if (e.key === 'Escape') { setEditingTemplateId(null); }
+                  }}
+                  placeholder="نامِ تمپلیت…"
+                  autoFocus
+                  style={{ width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, padding: '6px 8px' }}
+                />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '8px 0', alignItems: 'center' }}>
+                  {editingTemplateColors.map((hex) => (
+                    <span key={hex} style={{ position: 'relative', display: 'inline-flex' }}>
+                      <span title={hex} style={{ width: 22, height: 22, borderRadius: '50%', background: hex, border: '1px solid rgba(255,255,255,0.3)', display: 'inline-block' }} />
+                      <button
+                        type="button"
+                        title={`حذف ${hex} از تمپلیت`}
+                        onClick={() => setEditingTemplateColors(editingTemplateColors.filter((x) => x !== hex))}
+                        style={{ position: 'absolute', top: -6, left: -6, width: 16, height: 16, borderRadius: '50%', background: '#f43f5e', color: '#ffffff', border: '1px solid rgba(255,255,255,0.7)', fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <button
+                    type="button"
+                    title="افزودن رنگِ فعلی به این تمپلیت"
+                    onClick={() => {
+                      const c = annotationColor;
+                      if (/^#[0-9a-fA-F]{6}$/.test(c) && !editingTemplateColors.some((x) => x.toLowerCase() === c.toLowerCase()) && editingTemplateColors.length < 12) {
+                        setEditingTemplateColors([...editingTemplateColors, c]);
+                      }
+                    }}
+                    style={{ ...btnBase, height: 24, padding: '0 8px', borderRadius: 12, background: 'rgba(34,211,238,0.14)', border: '1px solid rgba(34,211,238,0.45)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+                  >
+                    + رنگِ فعلی
+                  </button>
+                </div>
+                {editingTemplateColors.length === 0 && (
+                  <div style={{ fontSize: 11, color: '#fca5a5', marginBottom: 6 }}>تمپلیت بدونِ رنگ ذخیره نمی‌شود؛ اول یک رنگ اضافه کن.</div>
+                )}
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => { if (editingTemplateColors.length > 0) saveEditingTemplate(); }}
+                    style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer', opacity: editingTemplateColors.length > 0 ? 1 : 0.5 }}
+                  >
+                    ثبت
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingTemplateId(null)}
+                    style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+                  >
+                    لغو
+                  </button>
+                </div>
+              </div>
+            )}
+            </Fragment>
           ))}
           {isCreatingTemplate ? (
             <div>
@@ -2992,7 +3340,7 @@ export function AnnotationToolbar({
           translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
           دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
           (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } @keyframes submenuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(4px) scale(0.97); } } @keyframes flyoutInDown { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.96); } } @keyframes flyoutInUp { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.96); } } @keyframes drawerInDown { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.97); } } @keyframes drawerInUp { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.97); } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); }`}</style>
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } @keyframes submenuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(4px) scale(0.97); } } @keyframes flyoutInDown { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.96); } } @keyframes flyoutInUp { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.96); } } @keyframes drawerInDown { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.97); } } @keyframes drawerInUp { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.97); } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); } .at-color-drawer-scroll::-webkit-scrollbar { width: 6px; } .at-color-drawer-scroll::-webkit-scrollbar-track { background: transparent; } .at-color-drawer-scroll::-webkit-scrollbar-thumb { background: linear-gradient(180deg, ${scrollbarColorStart} 0%, ${scrollbarColorEnd} 100%); border-radius: 999px; } .at-color-drawer-scroll::-webkit-scrollbar-thumb:hover { filter: brightness(1.18); }`}</style>
       {isVertical ? (
         // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
         // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً

@@ -70,8 +70,9 @@ let mainWindow;
 // نمی‌افتد. نمونهٔ موتور روی app.autoUpdater گذاشته می‌شود تا
 // ipcHandlers همان نمونه را ببیند، بدونِ require دوم و بدونِ
 // وابستگیِ چرخه‌ای. پیکربندیِ انتشار (publish) در این‌جا نیست:
-// مخزنِ انتشار و توکن، در مرحلهٔ بسته‌بندی (package.json) تعیین
-// می‌شوند و این کد، هیچ نامِ کاربری یا آدرسِ مخزنی را حدس نمی‌زند.
+// مخزنِ انتشار، در مرحلهٔ بسته‌بندی (package.json) تعیین می‌شود.
+// مخزن، عمومی است و بررسی و دانلودِ نسخه، هیچ توکنی نمی‌خواهد؛
+// این کد، هیچ توکنی ندارد و هیچ نامِ کاربری یا آدرسی را حدس نمی‌زند.
 let autoUpdater = null;
 try { ({ autoUpdater } = require('electron-updater')); } catch (_) { autoUpdater = null; }
 app.autoUpdater = autoUpdater;
@@ -90,6 +91,24 @@ function sendUpdateStatusToWindow(payload) {
   } catch (_) { /* ignore */ }
 }
 
+// مرحلهٔ ۵۷ §۳ (m3): یادداشت‌هایِ انتشارِ electron-updater
+// می‌توانند رشته، آرایه‌ای از رشته‌ها یا آرایه‌ای از { note }
+// باشند؛ همه به یک رشتهٔ تمیز برمی‌گردند تا رندرر، همان متنِ
+// REST را ببیند (تابعِ خالص؛ در Node هم تست می‌شود).
+function normalizeUpdaterReleaseNotes(notes) {
+  if (typeof notes === 'string') return notes;
+  if (Array.isArray(notes)) {
+    const parts = [];
+    for (let i = 0; i < notes.length; i++) {
+      const item = notes[i];
+      if (typeof item === 'string') parts.push(item);
+      else if (item && typeof item.note === 'string') parts.push(item.note);
+    }
+    return parts.join('\n');
+  }
+  return '';
+}
+
 // مرحلهٔ ۵۵ §۲ (m2): سیم‌کشیِ شش رویدادِ electron-updater به
 // رندرر. فقط یک بار سیم‌کشی می‌شود تا با ساخته‌شدنِ دوبارهٔ پنجره
 // (activate)، شنوندهٔ تکراری ساخته نشود؛ فرستادن، همیشه به پنجرهٔ
@@ -106,7 +125,7 @@ function setupAutoUpdater() {
     autoUpdater.on('update-available', (info) => forward('update-available', {
       version: (info && info.version) || '',
       releaseDate: (info && info.releaseDate) || '',
-      releaseNotes: typeof (info && info.releaseNotes) === 'string' ? info.releaseNotes : '',
+      releaseNotes: normalizeUpdaterReleaseNotes(info && info.releaseNotes),
     }));
     autoUpdater.on('update-not-available', (info) => forward('update-not-available', {
       version: (info && info.version) || '',
