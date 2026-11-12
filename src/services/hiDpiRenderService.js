@@ -67,16 +67,30 @@ class PdfRenderQueue {
     this.pending.sort((a, b) => (a.priority - b.priority) || (a.seq - b.seq));
   }
 
+  // مرحلهٔ ۶۰: لغو فوری کارهای سنگینِ دیپِ معوق برای خالی‌کردنِ صف به نفعِ صفحه فعال
+  cancelStaleDeep(filePath, keepKey) {
+    const norm = normFilePath(filePath);
+    for (const j of [...this.pending]) {
+      if (j.kind === 'deep' && normFilePath(j.filePath) === norm && j.key !== keepKey) {
+        this.cancel(j.key);
+      }
+    }
+  }
+
   enqueue(job) {
     if (!job || !job.key || typeof job.run !== 'function') return;
     // جایگزینیِ کارِ هم‌کلیدِ قبلی (در حالِ اجرا باشد، لغو می‌شود).
     this.cancel(job.key);
+    // مرحلهٔ ۶۰ — اگر کار با اولویت ۰ (صفحه فعال یا بازسازی دستی) است، کارهای دیپ معوق دیگر را لغو کن
+    if (job.priority <= 0 && job.kind === 'deep') {
+      this.cancelStaleDeep(job.filePath, job.key);
+    }
     const entry = {
       seq: this.seq++,
       key: job.key,
       filePath: job.filePath || '',
       kind: job.kind || 'base',
-      priority: job.priority || 3,
+      priority: job.priority ?? 3,
       delayMs: job.delayMs || 0,
       run: job.run,
       timer: null,

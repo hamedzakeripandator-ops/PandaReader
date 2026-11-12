@@ -46,6 +46,27 @@ function resolveUnpackedWorkerPath(packagedPath) {
   return packagedPath;
 }
 
+// تنظیم مسیرهای ماژول و متغیرهای محیطی برای ورکرها جهت یافتن ماژول‌های app.asar و app.asar.unpacked
+function getWorkerSpawnOptions(customEnv = {}) {
+  const extraPaths = [];
+  if (process.resourcesPath) {
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules'));
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar', 'node_modules'));
+  }
+  const rootNodeModules = path.resolve(__dirname, '..', 'node_modules');
+  extraPaths.push(rootNodeModules);
+  const existingNodePath = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
+  const mergedNodePath = Array.from(new Set([...extraPaths, ...existingNodePath])).filter(Boolean).join(path.delimiter);
+
+  return {
+    env: {
+      ...process.env,
+      ...customEnv,
+      NODE_PATH: mergedNodePath,
+    },
+  };
+}
+
 function getProtectedCacheDir() {
   try {
     const base = (ipcApp && ipcApp.comicDataDir) || process.env.COMIC_READER_DATA_DIR || (ipcApp && typeof ipcApp.getPath === 'function' ? ipcApp.getPath('userData') : '');
@@ -101,7 +122,7 @@ function runPdfCopyWorker({ kind, filePath, tempPath, sender, timeoutMs, passwor
   const workerPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'pdfCopyWorker.js'));
   let worker;
   try {
-    worker = new Worker(workerPath);
+    worker = new Worker(workerPath, getWorkerSpawnOptions());
   } catch (err) {
     const spawnErr = new Error('ساختِ ورکرِ کپیِ PDF انجام نشد: ' + String((err && err.message) || err));
     spawnErr.code = 'WORKER_SPAWN_FAILED';
@@ -188,7 +209,7 @@ function runAnnotatedExportWorker({ pdfPath, pages, outputPath, mode, password, 
   const workerPath = resolveUnpackedWorkerPath(path.join(__dirname, 'workers', 'pdfCopyWorker.js'));
   let worker;
   try {
-    worker = new Worker(workerPath);
+    worker = new Worker(workerPath, getWorkerSpawnOptions());
   } catch (err) {
     const spawnErr = new Error('ورکرِ خروجیِ PDF ساخته نشد: ' + String((err && err.message) || err));
     spawnErr.code = 'WORKER_SPAWN_FAILED';
@@ -392,8 +413,8 @@ function ensurePersistentDbWorker() {
     // مرحله ۷ ـ بخش الف: env صریحاً منتقل می‌شود تا ورکرِ
     // دیتابیس، COMIC_READER_DATA_DIR (حالتِ Portable) را حتماً
     // ببیند؛ مقدارِ پیش‌فرضِ worker_threads هم همین است، ولی
-    // این‌جا صریح و قابلِ اتکاست.
-    persistentDbWorker = new Worker(workerPath, { env: { ...process.env } });
+    // این‌جا صریح و قابلِ اتکاست. همچنین NODE_PATH برای مسیرهای app.asar و app.asar.unpacked تزریق می‌شود.
+    persistentDbWorker = new Worker(workerPath, getWorkerSpawnOptions());
 
     persistentDbWorker.on('message', (result) => {
       const { reqId, ...payloadData } = result || {};
@@ -1241,7 +1262,7 @@ module.exports = function(app) {
 
       let worker = null;
       try {
-        worker = new Worker(extractorPath);
+        worker = new Worker(extractorPath, getWorkerSpawnOptions());
       } catch (err) {
         resolve({ success: false, error: 'خطا در ایجاد ورکر استخراج: ' + err.message });
         return;
@@ -1522,7 +1543,7 @@ module.exports = function(app) {
       return new Promise((resolve) => {
         let worker = null;
         try {
-          worker = new Worker(extractorPath);
+          worker = new Worker(extractorPath, getWorkerSpawnOptions());
         } catch (err) {
           resolve({ success: false, error: err.message });
           return;

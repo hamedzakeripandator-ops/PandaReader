@@ -3,3 +3,16 @@ dist/
 dist-electron/
 .DS_Store
 *.log
+
+# پوشه‌های بکاپ و فایل‌های دیتابیس
+muse ai code/
+_backup_stage60/
+_backup_stage61/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.tmp
+*.bak
+*.crbackup
+project.zip

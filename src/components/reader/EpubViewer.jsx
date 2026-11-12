@@ -373,6 +373,24 @@ export default function EpubViewer({ filePath }) {
   const [highlights, setHighlights] = useState([]);
   const [selMenu, setSelMenu] = useState(null);
   const [markMenu, setMarkMenu] = useState(null);
+
+  // مرحلهٔ ۶۰ — همگام‌سازی پرچم منوی هایلایت/یادداشت با پنجره سراسری جهت مهار کلید Escape
+  useEffect(() => {
+    window.__readerMarkMenuOpen = Boolean(markMenu);
+    return () => {
+      window.__readerMarkMenuOpen = false;
+    };
+  }, [markMenu]);
+
+  useEffect(() => {
+    const handleCloseMarkMenu = () => {
+      setMarkMenu(null);
+    };
+    window.addEventListener('app:close-reader-mark-menu', handleCloseMarkMenu);
+    return () => {
+      window.removeEventListener('app:close-reader-mark-menu', handleCloseMarkMenu);
+    };
+  }, []);
   const [annotationsByPage, setAnnotationsByPage] = useState({});
   // مرحلهٔ ۴۴ §۴: وضعیتِ ذخیرهٔ EPUB (آینهٔ showSaveStatusی PdfViewer —
   // بنرِ شناور ندارد؛ پیام‌ها با Toast می‌آیند و تولبار از همین

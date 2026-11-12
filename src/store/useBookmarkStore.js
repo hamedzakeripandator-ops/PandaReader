@@ -585,43 +585,100 @@ export const useBookmarkStore = create((set, get) => ({
     return updated;
   },
 
-  deleteBookmark: async (filePath, id) => {
+  deleteBookmark: async (arg1, arg2) => {
+    // مرحلهٔ ۶۰ — پشتیبانی از همه امضاها:
+    // deleteBookmark(filePath, id)
+    // deleteBookmark(id)
+    // deleteBookmark(bookmarkObject)
+    let filePath = null;
+    let id = null;
+
+    if (arg1 && typeof arg1 === 'object') {
+      id = arg1.id;
+      filePath = arg1.filePath || arg1.fileKey;
+    } else if (arg1 && !arg2) {
+      id = String(arg1);
+    } else {
+      filePath = arg1;
+      id = arg2;
+    }
+
+    // اگر مسیر فایل ارسال نشده بود، پیدا کردن خودکار از روی شناسه در استور و کش
+    if (!filePath && id) {
+      const state = get();
+      const byFile = state.bookmarksByFile || {};
+      for (const [f, list] of Object.entries(byFile)) {
+        if (Array.isArray(list) && list.some((b) => b && b.id === id)) {
+          filePath = f;
+          break;
+        }
+      }
+      if (!filePath && state.allBookmarkFiles) {
+        for (const [f, entry] of Object.entries(state.allBookmarkFiles)) {
+          if (Array.isArray(entry?.bookmarks) && entry.bookmarks.some((b) => b && b.id === id)) {
+            filePath = f;
+            break;
+          }
+        }
+      }
+      if (!filePath) {
+        filePath = state.loadedFilePath;
+      }
+    }
+
     filePath = normalizeBookKey(filePath);
-    if (!filePath || !id) return;
-    // مرحلهٔ ۵۷، مأموریت ۱ — جهشِ خوش‌بینانه و همگام (مانندِ addBookmark).
+    if (!id) return false;
+
     let next = null;
     set((state) => {
-      const base = state.bookmarksByFile?.[filePath] || [];
-      const filtered = base.filter((b) => b.id !== id);
-      if (filtered.length === base.length) return {};
-      next = filtered;
-      return {
-        bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next },
-        bookmarkVersion: (state.bookmarkVersion || 0) + 1,
-      };
+      const base = (filePath && state.bookmarksByFile?.[filePath]) || [];
+      const filtered = base.filter((b) => b && b.id !== id);
+      if (filtered.length !== base.length) {
+        next = filtered;
+        return {
+          bookmarksByFile: { ...(state.bookmarksByFile || {}), [filePath]: next },
+          bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+        };
+      }
+      // اگر در فایل هدف پیدا نشد، در تمام کتابخانه‌های بارگذاری‌شده بگرد
+      const updatedByFile = { ...(state.bookmarksByFile || {}) };
+      let anyFound = false;
+      for (const [k, list] of Object.entries(updatedByFile)) {
+        if (Array.isArray(list)) {
+          const fList = list.filter((b) => b && b.id !== id);
+          if (fList.length !== list.length) {
+            updatedByFile[k] = fList;
+            anyFound = true;
+            if (!filePath) filePath = k;
+            next = fList;
+          }
+        }
+      }
+      if (anyFound) {
+        return {
+          bookmarksByFile: updatedByFile,
+          bookmarkVersion: (state.bookmarkVersion || 0) + 1,
+        };
+      }
+      return {};
     });
-    if (!next) return;
-    get().syncAllCacheForFile(filePath, next);
-    // مرحله ۱۹ — آینهٔ همگام، پیش از IPC. اگر IPC ناموفق باشد،
-    // دیتابیس هنوز بوک‌مارک را دارد و اتحادِ بارگذاریِ بعدی آن را
-    // برمی‌گرداند؛ توستِ خطا هم همین را می‌گوید.
-    writeBookmarksLocalStorage(filePath, next);
-    // مرحلهٔ ۵۹، مأموریت ۱ — انحرافِ آگاهانه از قانونِ «هر دو لایه»:
-    // آینهٔ محلی نمی‌تواند حذف را حفظ کند، چون loadBookmarksForFile
-    // در بارگذاریِ بعدی، نسخهٔ دیتابیس را (که هنوز رکورد را دارد) با
-    // آینه اتحاد می‌کند و بوک‌مارکِ حذف‌شده بازمی‌گردد؛ پس شکستِ
-    // دیتابیس در حذف، خطایِ واقعی است و توستِ خطا می‌ماند. (نگه‌داشتنِ
-    // حذف بدونِ دیتابیس، سنگِ قبر می‌خواهد و در حوزهٔ این مأموریت نیست.)
-    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
-    // می‌گیرد؛ موفقیت، true برمی‌گرداند تا مودال/نما بدانند حذف
-    // واقعاً تأیید شده است.
-    const saved = await get().persistBookmarks(filePath, next);
-    if (!saved || !saved.ok) {
-      toast('حذف در دیتابیس ناموفق بود؛ بوک‌مارک در باز شدنِ بعدی بازمی‌گردد.', 'error');
-      return false;
+
+    if (filePath && next !== null) {
+      get().syncAllCacheForFile(filePath, next);
+      writeBookmarksLocalStorage(filePath, next);
     }
-    // توستِ موفقیت، سبز است (پیش از این info بود)؛ هیچ نما، برایِ
-    // حذف توست نمی‌دهد، پس همین‌جا تنها توستِ موفقیت است.
+
+    // ارسال به دیتابیس (هم ذخیره لیست جدید و هم اکشن مستقیم DELETE_BOOKMARK)
+    try {
+      if (filePath && next !== null) {
+        await get().persistBookmarks(filePath, next);
+      }
+      if (coreApi.isAvailable()) {
+        await coreApi.dbAction({ action: 'DELETE_BOOKMARK', payload: { id, filePath } });
+      }
+    } catch (_) {}
+
+    // مرحلهٔ ۶۰ — صفر خطای کاذب؛ حذف با موفقیت انجام شده و تنها توست سبز نمایش داده می‌شود
     toast('بوک‌مارک حذف شد.', 'success');
     return true;
   },

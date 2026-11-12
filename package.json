@@ -37,8 +37,19 @@
       "**/*.node",
       "**/*.wasm",
       "**/node_modules/better-sqlite3/**/*",
-      "**/node_modules/@neslinesli93/qpdf-wasm/**/*",
+      "**/node_modules/bindings/**/*",
+      "**/node_modules/file-uri-to-path/**/*",
+      "**/node_modules/jszip/**/*",
+      "**/node_modules/pako/**/*",
+      "**/node_modules/lie/**/*",
+      "**/node_modules/immediate/**/*",
+      "**/node_modules/readable-stream/**/*",
+      "**/node_modules/setimmediate/**/*",
       "**/node_modules/node-unrar-js/**/*",
+      "**/node_modules/pdf-lib/**/*",
+      "**/node_modules/@pdf-lib/**/*",
+      "**/node_modules/tslib/**/*",
+      "**/node_modules/@neslinesli93/qpdf-wasm/**/*",
       "electron/workers/**/*",
       "electron/services/**/*",
       "electron/logger.js"
@@ -99,5 +110,5 @@
     "electron": "electron .",
     "publish": "vite build && electron-builder --win --x64 --publish always"
   },
-  "version": "1.0.2"
+  "version": "1.1.3"
 }

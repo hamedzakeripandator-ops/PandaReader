@@ -228,9 +228,9 @@ async function sanitizeChapterHtml(rawHtml, opts) {
   html = html.replace(/\s+href\s*=\s*'(javascript|vbscript|data:text\/html)[^']*'/gi, " href='#'");
   // جهتِ خودکارِ پاراگراف‌ها: فارسی راست‌به‌چپ، انگلیسی چپ‌به‌راست.
   html = html.replace(/<p\b(?![^>]*\bdir\s*=)/gi, '<p dir="auto"');
-  // تصاویر: استخراج به کش و بازنویسی به comic://.
+  // تصاویر: استخراج به کش و بازنویسی به comic:// (پشتیبانی کامل از هر دو تگ img و تگ‌های تصویری مانگا/کمیک <image>).
   if (zip && imagesDir) {
-    const imgRe = /<img\b[^>]*>/gi;
+    const imgRe = /<(?:img|image)\b[^>]*>/gi;
     const matches = [];
     let mm;
     while ((mm = imgRe.exec(html)) !== null) matches.push({ tag: mm[0], index: mm.index });
@@ -238,7 +238,10 @@ async function sanitizeChapterHtml(rawHtml, opts) {
     for (let i = matches.length - 1; i >= 0; i--) {
       const { tag, index } = matches[i];
       let newTag = tag.replace(/\s+srcset\s*=\s*"[^"]*"/gi, '').replace(/\s+srcset\s*=\s*'[^']*'/gi, '');
-      const srcM = newTag.match(/\ssrc\s*=\s*"([^"]*)"/i) || newTag.match(/\ssrc\s*=\s*'([^']*)'/i);
+      const srcM = newTag.match(/\ssrc\s*=\s*"([^"]*)"/i) 
+        || newTag.match(/\ssrc\s*=\s*'([^']*)'/i)
+        || newTag.match(/\s(?:xlink:)?href\s*=\s*"([^"]*)"/i)
+        || newTag.match(/\s(?:xlink:)?href\s*=\s*'([^']*)'/i);
       if (!srcM) continue;
       const src = srcM[1];
       if (!src || /^(data:|https?:|comic:)/i.test(src)) continue;
@@ -258,7 +261,15 @@ async function sanitizeChapterHtml(rawHtml, opts) {
         if (!fs.existsSync(absPath)) fs.writeFileSync(absPath, buf);
       } catch (_) { continue; }
       const comicUrl = `comic://media/?path=${encodeURIComponent(absPath)}`;
-      newTag = newTag.replace(srcM[0], ` src="${comicUrl}"`);
+      if (newTag.toLowerCase().startsWith('<image')) {
+        if (/xlink:href=/i.test(newTag)) {
+          newTag = newTag.replace(/\sxlink:href\s*=\s*(?:"[^"]*"|'[^']*')/i, ` xlink:href="${comicUrl}"`);
+        } else {
+          newTag = newTag.replace(/\s(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*')/i, ` href="${comicUrl}"`);
+        }
+      } else {
+        newTag = newTag.replace(/\ssrc\s*=\s*(?:"[^"]*"|'[^']*')/i, ` src="${comicUrl}"`);
+      }
       html = html.slice(0, index) + newTag + html.slice(index + tag.length);
     }
   }

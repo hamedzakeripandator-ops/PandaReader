@@ -5429,6 +5429,20 @@ const KonvaAnnotationLayer = React.memo(function KonvaAnnotationLayer({
     return () => window.removeEventListener('annotation-layer-order', onLayerOrder);
   }, [commit]);
 
+  // مرحلهٔ ۶۰ — اتصالِ دکمهٔ حذف در پیلِ ابزارِ انتخابِ تولبار:
+  // شنوندهٔ رویدادِ سراسریِ 'annotation:delete-selected' که تولبار با کلیکِ دکمهٔ «حذف» می‌فرستد.
+  useEffect(() => {
+    const onDeleteSelected = (e) => {
+      const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+      if (state.selectedAnnotationPage != null && Number(state.selectedAnnotationPage) !== Number(pageNumber)) {
+        return;
+      }
+      deleteSelectedAnnotations();
+    };
+    window.addEventListener('annotation:delete-selected', onDeleteSelected);
+    return () => window.removeEventListener('annotation:delete-selected', onDeleteSelected);
+  }, [deleteSelectedAnnotations, pageNumber]);
+
   // مرحله ۴۸ §۵: هادِ شناورِ اکشنِ انتخاب — فقط وقتی انتخاب قفل
   // است و انتخاب مالِ همین صفحه است. موقعیت: دقیقاً بالای کادرِ
   // اجتماعِ انتخاب (مرکزِ افقیِ کادر)، با چرخش به پایین اگر بالای

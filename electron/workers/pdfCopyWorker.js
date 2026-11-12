@@ -1,29 +1,57 @@
 'use strict';
 
-const { parentPort } = require('worker_threads');
-const fs = require('fs');
+// ============================================================================
+// راه‌اندازی و تزریق مسیرهای ماژول در محیط پروداکشن برای ورکرها (رفع خطای Cannot find module)
+// ============================================================================
 const path = require('path');
 const Module = require('module');
 
-// اتصال خودکار مسیرهای node_modules بین app.asar.unpacked (برای فایل‌های wasm مثل qpdf)
-// و app.asar (برای پکیج‌های جاوااسکریپتی مثل pdf-lib) در محیط بیلد شده
-const originalNodeModulePaths = Module._nodeModulePaths;
-Module._nodeModulePaths = function (from) {
-  const paths = originalNodeModulePaths.call(this, from);
-  const combined = [];
-  for (const p of paths) {
-    if (p.includes('app.asar.unpacked')) {
-      combined.push(p);
-      combined.push(p.replace('app.asar.unpacked', 'app.asar'));
-    } else if (p.includes('app.asar')) {
-      combined.push(p.replace('app.asar', 'app.asar.unpacked'));
-      combined.push(p);
-    } else {
-      combined.push(p);
+(function bootstrapAsarWorkerModulePaths() {
+  const extraPaths = [];
+  const unpackedRoot = path.resolve(__dirname, '..', '..');
+  extraPaths.push(path.join(unpackedRoot, 'node_modules'));
+  if (unpackedRoot.includes('app.asar.unpacked')) {
+    const asarRoot = unpackedRoot.replace('app.asar.unpacked', 'app.asar');
+    extraPaths.push(path.join(asarRoot, 'node_modules'));
+  }
+  if (process.resourcesPath) {
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar', 'node_modules'));
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules'));
+  }
+  for (const p of extraPaths) {
+    if (p && !module.paths.includes(p)) {
+      module.paths.unshift(p);
     }
   }
-  return Array.from(new Set(combined));
-};
+  const existingNodePath = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
+  const merged = Array.from(new Set([...extraPaths, ...existingNodePath])).filter(Boolean);
+  process.env.NODE_PATH = merged.join(path.delimiter);
+  if (typeof Module._initPaths === 'function') {
+    Module._initPaths();
+  }
+  if (typeof Module._nodeModulePaths === 'function') {
+    const origNodeModulePaths = Module._nodeModulePaths;
+    Module._nodeModulePaths = function (from) {
+      const paths = origNodeModulePaths.call(this, from);
+      const combined = [];
+      for (const p of paths) {
+        if (p.includes('app.asar.unpacked')) {
+          combined.push(p);
+          combined.push(p.replace('app.asar.unpacked', 'app.asar'));
+        } else if (p.includes('app.asar')) {
+          combined.push(p.replace('app.asar', 'app.asar.unpacked'));
+          combined.push(p);
+        } else {
+          combined.push(p);
+        }
+      }
+      return Array.from(new Set([...extraPaths, ...combined]));
+    };
+  }
+})();
+
+const { parentPort } = require('worker_threads');
+const fs = require('fs');
 
 function requireServiceModule(relPath) {
   const candidates = [

@@ -1,6 +1,55 @@
+// ============================================================================
+// راه‌اندازی و تزریق مسیرهای ماژول در محیط پروداکشن برای ورکرها (رفع خطای Cannot find module)
+// ============================================================================
+const path = require('path');
+const Module = require('module');
+
+(function bootstrapAsarWorkerModulePaths() {
+  const extraPaths = [];
+  const unpackedRoot = path.resolve(__dirname, '..', '..');
+  extraPaths.push(path.join(unpackedRoot, 'node_modules'));
+  if (unpackedRoot.includes('app.asar.unpacked')) {
+    const asarRoot = unpackedRoot.replace('app.asar.unpacked', 'app.asar');
+    extraPaths.push(path.join(asarRoot, 'node_modules'));
+  }
+  if (process.resourcesPath) {
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar', 'node_modules'));
+    extraPaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules'));
+  }
+  for (const p of extraPaths) {
+    if (p && !module.paths.includes(p)) {
+      module.paths.unshift(p);
+    }
+  }
+  const existingNodePath = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
+  const merged = Array.from(new Set([...extraPaths, ...existingNodePath])).filter(Boolean);
+  process.env.NODE_PATH = merged.join(path.delimiter);
+  if (typeof Module._initPaths === 'function') {
+    Module._initPaths();
+  }
+  if (typeof Module._nodeModulePaths === 'function') {
+    const origNodeModulePaths = Module._nodeModulePaths;
+    Module._nodeModulePaths = function (from) {
+      const paths = origNodeModulePaths.call(this, from);
+      const combined = [];
+      for (const p of paths) {
+        if (p.includes('app.asar.unpacked')) {
+          combined.push(p);
+          combined.push(p.replace('app.asar.unpacked', 'app.asar'));
+        } else if (p.includes('app.asar')) {
+          combined.push(p.replace('app.asar', 'app.asar.unpacked'));
+          combined.push(p);
+        } else {
+          combined.push(p);
+        }
+      }
+      return Array.from(new Set([...extraPaths, ...combined]));
+    };
+  }
+})();
+
 const { parentPort } = require('worker_threads');
 const fs = require('fs');
-const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const JSZip = require('jszip');
@@ -2042,6 +2091,7 @@ const SQLITE_ROUTED_ACTIONS = new Set([
   'GET_ANNOTATION_TOTALS',
   'GET_BOOKMARKS',
   'SAVE_BOOKMARKS',
+  'DELETE_BOOKMARK',
   'GET_ALL_BOOKMARKS',
   'GET_EPUB_HIGHLIGHTS',
   'SAVE_EPUB_HIGHLIGHTS',
@@ -2380,6 +2430,8 @@ CREATE TABLE IF NOT EXISTS kv_store (
       countAnnotations: sqliteDb.prepare('SELECT COUNT(*) AS n FROM annotations'),
       upsertBookmark: sqliteDb.prepare('INSERT OR REPLACE INTO bookmarks (id, file_key, page_num, y_ratio, label, color, template_id, created_at, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'),
       deleteBookmarksForFile: sqliteDb.prepare('DELETE FROM bookmarks WHERE file_key = ?'),
+      // مرحلهٔ ۶۰ — حذفِ مستقیمِ یک بوک‌مارک با شناسهٔ یکتا در SQLite
+      deleteBookmarkById: sqliteDb.prepare('DELETE FROM bookmarks WHERE id = ?'),
       listBookmarksForFile: sqliteDb.prepare('SELECT * FROM bookmarks WHERE file_key = ?'),
       listAllBookmarks: sqliteDb.prepare('SELECT * FROM bookmarks ORDER BY file_key'),
       countBookmarks: sqliteDb.prepare('SELECT COUNT(*) AS n FROM bookmarks'),
@@ -2986,7 +3038,42 @@ function handleSqliteAction(action, payload, db, sendReply) {
       });
       run();
       sqliteTouchMirror();
-      sendReply({ type: 'done', action, success: true, bookmarks: clean });
+      sendReply({ type: 'done', action, success: true, ok: true, bookmarks: clean });
+      break;
+    }
+
+    // مرحلهٔ ۶۰ — حذفِ یکتایِ بوک‌مارک در SQLite و آینهٔ JSON
+    case 'DELETE_BOOKMARK': {
+      const { id, filePath } = payload || {};
+      if (!id) {
+        sendReply({ type: 'error', action, message: 'شناسهٔ بوک‌مارک مشخص نیست.' });
+        return;
+      }
+      try {
+        if (sqliteStmts.deleteBookmarkById) {
+          sqliteStmts.deleteBookmarkById.run(toSqliteBindable(id));
+        }
+      } catch (err) {
+        console.warn('[database] خطا در حذفِ بوک‌مارک از SQLite:', err);
+      }
+      if (db.bookmarks) {
+        if (filePath) {
+          const norm = normalizePath(filePath);
+          if (norm && Array.isArray(db.bookmarks[norm])) {
+            db.bookmarks[norm] = db.bookmarks[norm].filter((b) => b && b.id !== id);
+            if (db.bookmarks[norm].length === 0) delete db.bookmarks[norm];
+          }
+        } else {
+          for (const k of Object.keys(db.bookmarks)) {
+            if (Array.isArray(db.bookmarks[k])) {
+              db.bookmarks[k] = db.bookmarks[k].filter((b) => b && b.id !== id);
+              if (db.bookmarks[k].length === 0) delete db.bookmarks[k];
+            }
+          }
+        }
+      }
+      sqliteTouchMirror();
+      sendReply({ type: 'done', action, success: true, ok: true, id });
       break;
     }
 
@@ -3489,11 +3576,20 @@ parentPort.on('message', (request) => {
       }
 
       case 'CLEAR_RECENTS': {
-        const removedFiles = Object.values(db.history || {})
-          .map((h) => coverFileFromUrl(h?.cover))
-          .filter(Boolean);
-        const removedNorms = Object.keys(db.history || {});
-        db.history = {};
+        // مرحلهٔ ۶۰ — حفظ ردیف‌های پین‌شده در موتور JSON دقیقاً همانند SQLite
+        const pinnedHistory = {};
+        const removedFiles = [];
+        const removedNorms = [];
+        for (const [normKey, h] of Object.entries(db.history || {})) {
+          if (h && (h.pinned || h.extra_json?.pinned)) {
+            pinnedHistory[normKey] = h;
+          } else {
+            removedNorms.push(normKey);
+            const cov = coverFileFromUrl(h?.cover);
+            if (cov) removedFiles.push(cov);
+          }
+        }
+        db.history = pinnedHistory;
         // مرحله ۲ ـ بخش ب: ورودی‌های کشِ کتاب‌هایی که با پاک‌شدنِ
         // تاریخچه از هر سه جدول رفته‌اند، حذف می‌شوند.
         removedNorms.forEach((normKey) => purgeCoverCacheEntryIfBookGone(db, normKey));
@@ -4547,7 +4643,31 @@ parentPort.on('message', (request) => {
         // نام، جابه‌جایی یا حذفِ بوک‌مارک، در همان میلی‌ثانیه رویِ
         // db.json می‌نشیند و به تایمرِ ۹۰۰ میلی‌ثانیه‌ای وابسته نیست.
         writeDB(db, true);
-        sendReply({ type: 'done', action, success: true, bookmarks: clean });
+        sendReply({ type: 'done', action, success: true, ok: true, bookmarks: clean });
+        break;
+      }
+
+      case 'DELETE_BOOKMARK': {
+        const { id, filePath } = payload || {};
+        if (!id) { sendReply({ type: 'error', action, message: 'شناسهٔ بوک‌مارک مشخص نیست.' }); break; }
+        if (db.bookmarks) {
+          if (filePath) {
+            const norm = normalizePath(filePath);
+            if (norm && Array.isArray(db.bookmarks[norm])) {
+              db.bookmarks[norm] = db.bookmarks[norm].filter((b) => b && b.id !== id);
+              if (db.bookmarks[norm].length === 0) delete db.bookmarks[norm];
+            }
+          } else {
+            for (const k of Object.keys(db.bookmarks)) {
+              if (Array.isArray(db.bookmarks[k])) {
+                db.bookmarks[k] = db.bookmarks[k].filter((b) => b && b.id !== id);
+                if (db.bookmarks[k].length === 0) delete db.bookmarks[k];
+              }
+            }
+          }
+        }
+        writeDB(db, true);
+        sendReply({ type: 'done', action, success: true, ok: true, id });
         break;
       }
 

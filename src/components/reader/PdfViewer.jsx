@@ -177,16 +177,15 @@ const POLYFILL_RAW_CODE = `
 // مهلتِ سکوتِ صف: اگر رندرِ پایه بیش از این مدت نه آماده شد، نه در حالِ اجرا بود
 // و نه در صفِ تازه بود، نگهبان آن را گیرکرده می‌شمارد و با اولویتِ بالا از نو صف می‌کند.
 const WATCHDOG_STALE_MS = 1500;
-// سقفِ یکنواختِ ضلعِ تصویرِ پایه (از مرحلهٔ ۳۴؛ برایِ جلوگیری از قفلِ حافظه).
-const PDF_BASE_MAX_SIDE = 1920;
+// سقفِ یکنواختِ ضلعِ تصویرِ پایه (مرحله ۶۱: افزایش سقف به ۲۶۰۰ برای وضوح فوق‌العاده در باز کردن اولیه).
+const PDF_BASE_MAX_SIDE = 2600;
 // آستانهٔ وضوحِ زوم: فقط وقتی زومِ نشسته بیش از ۲۰٪ از زومی که تصویرِ پایه با آن
 // واضح است بالاتر رفت، بازتازه‌سازیِ وضوح انجام می‌شود (تاریِ کمتر از این، دیده نمی‌شود).
 const PDF_ZOOM_CRISP_RATIO = 1.2;
-// مرحلهٔ ۵۸ — ماموریت ۶: سقفِ پاسِ وضوح برایِ صفحه‌هایِ دیده‌شده (فاصله تا ۱):
-// ضلعِ ۴۰۹۶ پیکسل و مساحتِ ۱۶٫۷ مگاپیکسل (نمونهٔ ۳۲۰۰×۴۵۰۰)؛ جایگزینِ
-// سقفِ کهنهٔ دیپ (۳۶۰۰ / ۸٫۵ مگاپیکسل) که در زومِ بالا، نخستین محدودکننده بود.
-const PDF_CRISP_MAX_SIDE = 4096;
-const PDF_CRISP_AREA_CAP = 16700000;
+// مرحله ۶۱ — بازسازی برداری کریستالی و شارپنس بدون افت کیفیت (4K UHD):
+// سقف ضلع ۳۸۴۰ پیکسل و مساحت ۱۴ مگاپیکسل برای وضوح برداری کریستالی متن و مانگا
+const PDF_CRISP_MAX_SIDE = 3840;
+const PDF_CRISP_AREA_CAP = 14000000;
 const PDF_CRISP_MAX_SCALE = 4.0;
 
 // حلِ نشانیِ فایلِ ورکرِ pdf.js نسبت به صفحهٔ جاری.
@@ -212,7 +211,7 @@ export function resolvePdfWorkerAssetUrl(rawWorkerUrl, pageHref) {
   }
 }
 
-// مقیاسِ رندرِ پایه؛ همان فرمول‌هایِ مرحلهٔ ۳۴/۳۸، به‌علاوهٔ شاخهٔ بازتازه‌سازیِ زوم.
+// مقیاسِ رندرِ پایه؛ فرمول مرحله ۶۱ برای کف کیفیت کریستالی و شفاف در باز کردن اولیه
 // crispZoom یعنی تصویر با این مقیاسِ پیکسلی، تا چه زومی واضح است:
 // crispZoom = scale / min(dpr, 2.5) و در بازتازه‌سازیِ زوم، scale = min(dpr, 2.5) * zoom.
 export function computeBaseRenderScale(input) {
@@ -224,9 +223,10 @@ export function computeBaseRenderScale(input) {
   if (src.zoomRefresh) {
     scale = cappedDpr * zoom;
   } else if (src.isFirstLoadPage) {
-    scale = Math.min(Math.max(dpr * 1.25, 1.9), 2.2);
+    // مرحله ۶۱: تضمین کف مقیاس وضوح شفاف برداری Math.max(dpr * 1.5, 2.0)
+    scale = Math.min(Math.max(dpr * 1.5, 2.0), 2.5);
   } else {
-    scale = Math.min(Math.max(dpr * 1.15, 1.75), 2.0);
+    scale = Math.min(Math.max(dpr * 1.25, 1.85), 2.2);
   }
   const vw = Number(src.viewportWidth) || 0;
   const vh = Number(src.viewportHeight) || 0;
@@ -669,6 +669,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const [deepUrl, setDeepUrl] = useState(null);
   const deepUrlRef = useRef(null);
   const deepDoneRef = useRef(null);
+  const lastHiDpiRenderTickRef = useRef(hiDpiRenderTick);
   // مرحلهٔ ۵۶ — ماموریت ۲: قفلِ پروازِ رندر و حافظهٔ نگهبان.
   // انحرافِ پرامپت: renderedPagesRef / renderingPagesRef در کدِ واقعی وجود ندارند؛
   // وضعیتِ رندر در baseReady و baseUrlRef و deepDoneRef و صفِ renderQueue پخش است.
@@ -832,9 +833,8 @@ const PdfPageItem = React.memo(function PdfPageItem({
             tmp.height = 0;
             return;
           }
-          // مرحلهٔ ۳۳ — انکدِ بومیِ canvas.toBlob (WebP با کیفیتِ
-          // ۰٫۹۰)؛ فقط وقتی toBlob خالی برگرداند، انکدرِ Workerِ
-          // مرحلهٔ ۲۹/۳۰ پشتیبان است (بدونِ کپیِ پیکسل در مسیرِ اصلی).
+          // مرحلهٔ ۶۱ — انکدِ بومیِ canvas.toBlob (WebP با کیفیتِ فوق شفاف ۰٫۹۸ بدون نویز)؛
+          // فقط وقتی toBlob خالی برگرداند، انکدرِ پشتیبان فراخوانی می‌شود.
           const url = await new Promise((resolve) => {
             try {
               tmp.toBlob(async (blob) => {
@@ -842,7 +842,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
                   try { resolve(URL.createObjectURL(blob)); return; } catch (_) {}
                 }
                 try { resolve(await encodeCanvasToWebpUrl(tmp)); } catch (_) { resolve(null); }
-              }, 'image/webp', 0.90);
+              }, 'image/webp', 0.98);
             } catch (_) {
               encodeCanvasToWebpUrl(tmp).then(resolve, () => resolve(null));
             }
@@ -1047,24 +1047,33 @@ const PdfPageItem = React.memo(function PdfPageItem({
         setDeepUrl(null);
       }
     }
-    // مرحلهٔ ۵۸ — ماموریت ۶: سقفِ ۳۶۰۰/۸٫۵ مگاپیکسلِ مرحلهٔ ۳۸ §۴ حذف شد؛
-    // سقفِ تازه (۴۰۹۶ پیکسل / ۱۶٫۷ مگاپیکسل) در computeCrispTargetScale
-    // اعمال می‌شود. طبقهٔ hiی ۵۱۲۰/۲۰M همچنان حذف است: بومِ ۲۰ مگاپیکسلی،
-    // قفلِ VRAM و هنگِ کاملِ برنامه می‌آورد.
+    // مرحلهٔ ۶۰ — بازنشانی اجباری هنگام کلیک دکمه «بازسازی کیفیت» (سیگنال hiDpiRenderTick):
+    // اگر کاربر دستی بازسازی را زد، امضا و کش را پاک می‌کنیم تا رندر حتماً دوباره اجرا شود.
+    if (hiDpiRenderTick && hiDpiRenderTick !== lastHiDpiRenderTickRef.current) {
+      lastHiDpiRenderTickRef.current = hiDpiRenderTick;
+      deepDoneRef.current = null;
+      if (deepUrlRef.current) {
+        revokeDeepPngUrl(cacheKey);
+        deepUrlRef.current = null;
+        setDeepUrl(null);
+      }
+    }
+    // مرحلهٔ ۶۰ — سقف ۲۸۸۰ در computeCrispTargetScale اعمال می‌شود.
     const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|std`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
       return undefined;
     }
-    const priority = 1;
+    // مرحلهٔ ۶۰ — اولویت ۰ برای صفحه فعال و بازسازی دستی؛ حذف تاخیر دیبانس برای اجرای فوری
+    const isManualRebuild = Boolean(hiDpiRenderTick && hiDpiRenderTick === lastHiDpiRenderTickRef.current);
+    const priority = dist === 0 ? 0 : 1;
+    const delayMs = (dist === 0 || isManualRebuild) ? 0 : 120;
     renderQueue.enqueue({
       key,
       filePath,
       kind: 'deep',
       priority,
-      // مرحلهٔ ۳۸ §۴: دیبانسِ ۳۲۰ میلی‌ثانیه پس از تغییرِ زوم —
-      // enqueueی هم‌کلید، کارِ قبلی را لغو می‌کند.
-      delayMs: 320,
+      delayMs,
       run: async (hooks) => {
         const deepRunId = (deepRunIdRef.current += 1);
         deepInflightRef.current = { runId: deepRunId };
@@ -1080,9 +1089,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           if (hooks.isCancelled()) return;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width <= 0 || baseViewport.height <= 0) return;
-          // مرحلهٔ ۵۸ — ماموریت ۶: مقیاس از تابعِ خالصِ computeCrispTargetScale
-          // می‌آید (همان فرمولِ کهنه برایِ صفحهٔ فعال + فرمولِ پرامپت برایِ
-          // همسایه، با سقفِ ۴۰۹۶/۱۶٫۷). dist همان فاصلهٔ اثر است.
+          // مرحلهٔ ۶۰: مقیاس از تابعِ خالصِ computeCrispTargetScale با سقف ۲۸۸۰/۶٫۵ مگاپیکسل
           const crisp = computeCrispTargetScale({
             distance: dist,
             viewportWidth: baseViewport.width,
@@ -1109,19 +1116,29 @@ const PdfPageItem = React.memo(function PdfPageItem({
             tmp.height = 0;
             return;
           }
-          // مرحلهٔ ۳۸ §۴: انکدِ دیپ با WebP بومیِ ۰٫۹۶ (سریع‌تر و
-          // سبک‌تر از PNG)؛ فقط اگر toBlob خالی برگرداند، انکدرِ
-          // Workerِ PNG پشتیبان است.
+          // مرحلهٔ ۶۱ — انکدِ فوق شفاف WebP با کیفیت ۰٫۹۸ (کریستالی، بدون آرتیفکت‌های JPEG) و فال‌بک lossless PNG
           let url = null;
           try {
             const webpBlob = await new Promise((resolve) => {
-              try { tmp.toBlob((b) => resolve(b || null), 'image/webp', 0.96); }
+              try { tmp.toBlob((b) => resolve(b || null), 'image/webp', 0.98); }
               catch (_) { resolve(null); }
             });
             if (webpBlob) {
               try { url = URL.createObjectURL(webpBlob); } catch (_) { url = null; }
             }
           } catch (_) { url = null; }
+          // در صورت عدم پشتیبانی WebP، فال‌بک شفاف بدون افت به PNG
+          if (!url) {
+            try {
+              const pngBlob = await new Promise((resolve) => {
+                try { tmp.toBlob((b) => resolve(b || null), 'image/png'); }
+                catch (_) { resolve(null); }
+              });
+              if (pngBlob) {
+                try { url = URL.createObjectURL(pngBlob); } catch (_) { url = null; }
+              }
+            } catch (_) { url = null; }
+          }
           if (!url) url = await encodeCanvasToLightweightPngUrl(tmp);
           tmp.width = 0;
           tmp.height = 0;
@@ -1823,9 +1840,9 @@ export default function PdfViewer({ filePath }) {
   useEffect(() => {
     if (!filePath) return undefined;
     const prev = prevSettledZoomRef.current;
-    if (prev && prev.file === filePath && prev.zoom === rasterZoomLevel) return undefined;
+    if (prev && prev.file === filePath && prev.zoom === rasterZoomLevel && prev.tick === hiDpiRenderTick) return undefined;
     const changedFile = !prev || prev.file !== filePath;
-    prevSettledZoomRef.current = { file: filePath, zoom: rasterZoomLevel };
+    prevSettledZoomRef.current = { file: filePath, zoom: rasterZoomLevel, tick: hiDpiRenderTick };
     if (changedFile) {
       if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
       if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
@@ -1833,10 +1850,15 @@ export default function PdfViewer({ filePath }) {
       setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
       return undefined;
     }
-    // تغییرِ واقعیِ زوم در همان فایل: نشستِ تازه. صفحه‌هایِ هدف،
-    // همان‌هایی‌اند که افکتِ HiDPI برایشان اجرا می‌شود.
-    // مرحله ۱۹: هدف‌هایِ HUD، همان صفحه‌هایِ نزدیک‌اند — بدونِ گیتِ
-    // needsHiDpi، چون پاسِ HiDPI حالا در تمامِ سطوحِ زوم اجرا می‌شود.
+    // مرحلهٔ ۶۰ — نمایش HUD فقط وقتی زوم بالای ۱٫۲ است و پاس بازسازی وضوح فعال می‌شود
+    if ((rasterZoomLevel || 0) <= 1.2) {
+      if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
+      if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+      return undefined;
+    }
+    // تغییرِ واقعیِ زوم یا کلیک بازسازیِ کیفیت در همان فایل: نشستِ تازه.
     const active = activePageRef.current || 1;
     const targets = new Set(
       (visiblePageNumbers || []).filter(
@@ -1848,11 +1870,15 @@ export default function PdfViewer({ filePath }) {
     if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
     zoomHudSessionRef.current = { targets, done: new Set() };
     setZoomHud({ visible: true, done: 0, total: targets.size, isDone: false });
-    zoomHudSafetyRef.current = setTimeout(() => { completeZoomHud(); }, 1200);
+    // مرحلهٔ ۶۰ — حذف تایمر ۱۲۰۰ میلی‌ثانیه‌ای فیک ۱۰۰٪؛ تایمر محافظ فقط برای پاک‌سازی پس از ۱۵ ثانیه در صورت خطا است.
+    zoomHudSafetyRef.current = setTimeout(() => {
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+    }, 15000);
     return () => {
       if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
     };
-  }, [filePath, rasterZoomLevel, completeZoomHud]);
+  }, [filePath, rasterZoomLevel, hiDpiRenderTick, completeZoomHud]);
 
   // مرحله ۱۵ — درگِ چهارجهته با ماوس (دکمهٔ چپ در مطالعهٔ عادی،
   // دکمهٔ وسط در هر حالتی؛ جزئیاتِ کامل در useDragPan).
@@ -4524,7 +4550,7 @@ const styles = {
     boxShadow: '0 4px 18px rgba(0, 0, 0, 0.45)',
     userSelect: 'none',
     WebkitUserDrag: 'none',
-    imageRendering: 'auto',
+    imageRendering: 'high-quality',
   },
   pagePlaceholder: {
     width: '100%',

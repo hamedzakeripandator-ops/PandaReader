@@ -63,6 +63,8 @@ async function bakeCbzPageImage(rawPath, itemsForPage, rotation) {
   canvas.height = nh;
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, nw, nh);
   if (rendered.highlightPng) {
     const hlImg = await loadImageElement(rendered.highlightPng);
@@ -74,8 +76,8 @@ async function bakeCbzPageImage(rawPath, itemsForPage, rotation) {
   }
   const ext = String(rawPath || '').split('.').pop().toLowerCase();
   let dataUrl = null;
-  if (ext === 'jpg' || ext === 'jpeg') dataUrl = canvas.toDataURL('image/jpeg', 0.92);
-  else if (ext === 'webp') dataUrl = canvas.toDataURL('image/webp', 0.92);
+  if (ext === 'jpg' || ext === 'jpeg') dataUrl = canvas.toDataURL('image/jpeg', 0.96);
+  else if (ext === 'webp') dataUrl = canvas.toDataURL('image/webp', 0.98);
   else dataUrl = canvas.toDataURL('image/png');
   const entryName = String(rawPath).split(/[\\/]/).pop() || '';
   try { canvas.width = 0; canvas.height = 0; } catch (_) {}
@@ -825,7 +827,11 @@ export default function VerticalViewer() {
     if (zoomHudGreenRef.current) clearTimeout(zoomHudGreenRef.current);
     zoomHudSessionRef.current = { targets, done: new Set() };
     setZoomHud({ visible: true, done: 0, total: targets.size, isDone: false });
-    zoomHudSafetyRef.current = setTimeout(() => { completeZoomHud(); }, 1200);
+    // مرحلهٔ ۶۰ — حذف تایمر ۱۲۰۰ میلی‌ثانیه‌ای فیک ۱۰۰٪؛ تایمر محافظ فقط برای لغو آرام پس از ۱۵ ثانیه است
+    zoomHudSafetyRef.current = setTimeout(() => {
+      zoomHudSessionRef.current = null;
+      setZoomHud({ visible: false, done: 0, total: 0, isDone: false });
+    }, 15000);
     return () => {
       if (zoomHudSafetyRef.current) clearTimeout(zoomHudSafetyRef.current);
     };
