@@ -35,9 +35,13 @@
     },
     "asarUnpack": [
       "**/*.node",
+      "**/*.wasm",
       "**/node_modules/better-sqlite3/**/*",
       "**/node_modules/@neslinesli93/qpdf-wasm/**/*",
-      "electron/workers/**/*"
+      "**/node_modules/node-unrar-js/**/*",
+      "electron/workers/**/*",
+      "electron/services/**/*",
+      "electron/logger.js"
     ],
     "nsis": {
       "oneClick": false,
@@ -95,5 +99,5 @@
     "electron": "electron .",
     "publish": "vite build && electron-builder --win --x64 --publish always"
   },
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

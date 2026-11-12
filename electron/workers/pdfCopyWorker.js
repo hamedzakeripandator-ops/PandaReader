@@ -1,49 +1,81 @@
-// مرحله ۸ ـ اصلاحِ نهایی: ورکرِ پروب/کپیِ PDFهای محافظت‌شده.
-//
-// چرا ورکر؟ پروب و ساختِ کپی روی فایلِ ۶۸ مگابایتی، چند پارسِ
-// کاملِ pdf-lib + رمزگشایی + سریال‌سازیِ کامل + دو استخراجِ متنِ
-// pdf.js را پشتِ سرِ هم در پروسهٔ اصلی انجام می‌دادند و حلقهٔ
-// رویدادِ Electron را برای ده‌ها ثانیه قفل می‌کردند (هنگِ ظاهریِ
-// برنامه روی CPUهای قدیمی). این ورکر، همان منطقِ saver را در یک
-// worker_thread جدا اجرا می‌کند؛ پروسهٔ اصلی، فقط پیشرفت را به
-// رندرر می‌رساند و نامِ نهایی را تغییر می‌دهد.
-//
-// قراردادِ پیام‌ها (از والد):
-//   { type: 'probe', filePath }
-//   { type: 'copy', filePath, tempPath, password }
-//   { type: 'prepare', filePath, password, cacheDir }
-//   { type: 'export', pdfPath, pages, outputPath, mode, password, dataDir }
-// پیام‌های خروجی:
-//   { type: 'progress', stage, fraction, label }
-//   { type: 'log', level, message, detail }
-//   { type: 'done', result }   — result همان خروجیِ saver است؛ در
-//                               حالتِ کپیِ موفق، بایت‌ها در tempPath
-//                               نوشته شده‌اند و result.tempPath دارد.
-//   { type: 'error', message }
-//
-// این ورکر، هرگز electron را require نمی‌کند (مثلِ fileExtractor.js).
-// لاگرِ دیسک، مستقیم در ورکر ساخته نمی‌شود تا حالتِ Portable و
-// COMIC_READER_DATA_DIR، فقط در پروسهٔ اصلی حل شوند؛ خط‌های لاگ،
-// به والد فرستاده می‌شوند و والد با getIpcLogger می‌نویسد. saver،
-// فقط به شیئی با متدهای info/warn/error نیاز دارد.
 'use strict';
 
 const { parentPort } = require('worker_threads');
 const fs = require('fs');
 const path = require('path');
+const Module = require('module');
+
+// اتصال خودکار مسیرهای node_modules بین app.asar.unpacked (برای فایل‌های wasm مثل qpdf)
+// و app.asar (برای پکیج‌های جاوااسکریپتی مثل pdf-lib) در محیط بیلد شده
+const originalNodeModulePaths = Module._nodeModulePaths;
+Module._nodeModulePaths = function (from) {
+  const paths = originalNodeModulePaths.call(this, from);
+  const combined = [];
+  for (const p of paths) {
+    if (p.includes('app.asar.unpacked')) {
+      combined.push(p);
+      combined.push(p.replace('app.asar.unpacked', 'app.asar'));
+    } else if (p.includes('app.asar')) {
+      combined.push(p.replace('app.asar', 'app.asar.unpacked'));
+      combined.push(p);
+    } else {
+      combined.push(p);
+    }
+  }
+  return Array.from(new Set(combined));
+};
+
+function requireServiceModule(relPath) {
+  const candidates = [
+    path.resolve(__dirname, relPath),
+  ];
+  if (__dirname.includes('app.asar.unpacked')) {
+    candidates.push(path.resolve(__dirname.replace('app.asar.unpacked', 'app.asar'), relPath));
+  } else if (__dirname.includes('app.asar')) {
+    candidates.push(path.resolve(__dirname.replace('app.asar', 'app.asar.unpacked'), relPath));
+  }
+
+  let lastErr = null;
+  for (const candidate of candidates) {
+    try {
+      return require(candidate);
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Cannot find module ${relPath}`);
+}
 
 let saver = null;
+let qpdfService = null;
+
 try {
-  saver = require('../services/pdfAnnotationSaver');
+  saver = requireServiceModule('../services/pdfAnnotationSaver');
 } catch (err) {
   if (parentPort) {
-    parentPort.postMessage({ type: 'error', message: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد: ' + String((err && err.message) || err) });
+    parentPort.postMessage({
+      type: 'error',
+      message: 'ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد: ' + String((err && err.message) || err),
+    });
   }
+}
+
+try {
+  qpdfService = requireServiceModule('../services/qpdfUnlockService');
+} catch (_) {
+  qpdfService = null;
 }
 
 function postProgress(stage, fraction, label) {
   try {
-    if (parentPort) parentPort.postMessage({ type: 'progress', stage, fraction, label: String(label || '') });
+    if (parentPort) {
+      parentPort.postMessage({
+        type: 'progress',
+        stage,
+        fraction,
+        label: String(label || ''),
+      });
+    }
   } catch (_) {}
 }
 
@@ -55,7 +87,10 @@ function makeLogger() {
           type: 'log',
           level,
           message: String(message),
-          detail: detail === undefined || detail === null ? '' : String(detail && detail.stack ? detail.stack : detail),
+          detail:
+            detail === undefined || detail === null
+              ? ''
+              : String(detail && detail.stack ? detail.stack : detail),
         });
       }
     } catch (_) {}
@@ -67,35 +102,80 @@ function makeLogger() {
   };
 }
 
-// مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: پروبِ مسیریِ فوق‌سریع —
-// فقط دمِ فایل خوانده می‌شود (۳۲ کیلوبایت)، نه کلِ فایل؛ پس
-// پروبِ فایلِ ۶۸ مگابایتی هم چند میلی‌ثانیه است و هیچ PDFDocument
-// .loadای در کار نیست (مگر وقتی دمِ فایل خوانا نباشد).
+async function checkQpdfAvailable() {
+  try {
+    if (saver && typeof saver.isQpdfAvailable === 'function') {
+      const ok = await saver.isQpdfAvailable();
+      if (ok) return true;
+    }
+  } catch (_) {}
+
+  try {
+    if (qpdfService) {
+      if (typeof qpdfService.isQpdfAvailable === 'function') {
+        const ok = await qpdfService.isQpdfAvailable();
+        if (ok) return true;
+      }
+      if (typeof qpdfService.checkQpdfAvailable === 'function') {
+        const ok = await qpdfService.checkQpdfAvailable();
+        if (ok) return true;
+      }
+    }
+  } catch (_) {}
+
+  try {
+    require.resolve('@neslinesli93/qpdf-wasm');
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+const COPY_DECRYPT_MAX_BYTES = 50 * 1024 * 1024;
+const COPY_QPDF_MAX_BYTES = 250 * 1024 * 1024;
+
 async function handleProbe(filePath) {
-  const result = await saver.probePdfProtectionForPath(filePath, makeLogger(), (fraction, label) => {
+  const logger = makeLogger();
+  const qpdfAvailable = await checkQpdfAvailable();
+
+  const result = await saver.probePdfProtectionForPath(filePath, logger, (fraction, label) => {
     postProgress('probe', fraction, label);
   });
-  // مرحله ۱۰: پروبِ سریعِ نتیجه‌بخش، جزئیاتِ رمزگذاری را ندارد؛
-  // برای فایلِ قفل‌دار، توصیفِ رمزگذاری هم ضمیمه می‌شود تا TopBar
-  // بداند کپیِ بی‌اتلاف ممکن است یا باید «بازسازی از pdf.js»
-  // پیشنهاد شود. این، فقط روی کلیکِ استودیو اجرا می‌شود.
+
   let encryption = result && result.encryption ? result.encryption : null;
   let rebuildRecommended = Boolean(result && result.rebuildRecommended);
-  if (result && result.protected && !encryption && saver.describePdfEncryptionForPath) {
+
+  if (result && result.protected && !encryption && typeof saver.describePdfEncryptionForPath === 'function') {
     try {
-      encryption = await saver.describePdfEncryptionForPath(filePath, makeLogger());
+      encryption = await saver.describePdfEncryptionForPath(filePath, logger);
       rebuildRecommended = Boolean(encryption && encryption.rebuildRecommended);
-    } catch (_) { /* توصیف انجام نشد؛ پروبِ پایه، معتبر می‌ماند */ }
+    } catch (_) {}
   }
+
+  let isProtected = Boolean(result && result.protected);
+  let isReadOnly = Boolean(result && result.readOnly);
+
+  // اگر موتور qpdf در دسترس است و فایل رمز عبور واقعی کاربر نیاز ندارد،
+  // پیشنهاد بازسازی تصویری (pdf.js rebuild) را غیرفعال می‌کنیم تا از موتور qpdf استفاده شود
+  if (qpdfAvailable && encryption && encryption.qpdfSupported !== false) {
+    rebuildRecommended = false;
+  }
+
+  // جلوگیری از قفل کاذب فایل‌های عادی در پروب سریع (Fast Probe)
+  // اگر فایل رمزگذاری نشده (isProtected === false) و فقط هشدار ساختاری جزئی دارد، قابل ویرایش است
+  if (!isProtected && isReadOnly && result && result.fast) {
+    const invalidCount = Array.isArray(result.invalidObjects) ? result.invalidObjects.length : 0;
+    if (invalidCount === 0 && !result.hasEncryptToken) {
+      isReadOnly = false;
+    }
+  }
+
   postProgress('probe-done', 1, 'بررسیِ محافظت انجام شد.');
-  let qpdfAvailable = false;
-  try {
-    if (saver.isQpdfAvailable) qpdfAvailable = Boolean(await saver.isQpdfAvailable());
-  } catch (_) { qpdfAvailable = false; }
+
   return {
-    protected: Boolean(result && result.protected),
+    protected: isProtected,
     qpdfAvailable,
-    readOnly: Boolean(result && result.readOnly),
+    readOnly: isReadOnly,
     reason: (result && result.reason) || 'unknown',
     pageCount: (result && result.pageCount) || -1,
     hasEncryptToken: Boolean(result && result.hasEncryptToken),
@@ -107,96 +187,105 @@ async function handleProbe(filePath) {
   };
 }
 
-// مرحله ۱۱: دو آستانهٔ جدا — مسیرِ سنگینِ pdf-lib فقط تا ۱۵
-// مگابایت (پرامپتِ مرحلهٔ ۸)؛ مسیرِ qpdf (چند ده میلی‌ثانیه،
-// حافظهٔ خطی) تا ۲۰۰ مگابایت. فایلِ بزرگ‌تر از ۲۰۰ مگابایت،
-// مستقیم کپیِ باینری می‌شود.
-const COPY_DECRYPT_MAX_BYTES = 15 * 1024 * 1024;
-const COPY_QPDF_MAX_BYTES = 200 * 1024 * 1024;
-
 async function handleCopy(filePath, tempPath, password) {
-  // مرحله ۸ ـ اصلاحِ نهاییِ تأییدشده: تصمیمِ مسیر، پیش از هر
-  // پارسِ سنگینی، با پروبِ سریع + اندازه گرفته می‌شود:
-  //   • نه قفل، نه فقط‌خواندنی → alreadyUnlocked (بدونِ خواندنِ فایل).
-  //   • قفل‌دار و ≤۱۵ مگابایت → مسیرِ رمزگشایی؛ اگر رمزگشایی
-  //     ذاتاً ممکن نبود (ObjStm/AES-256/رمزِ واقعی) → کپیِ باینری.
-  //   • بقیه (بزرگ، یا فقط‌خواندنیِ بدونِ قفل) → کپیِ باینریِ
-  //     فوری با copyFile. کپیِ باینری، «باز کردنِ قفل» نیست —
-  //     بایت‌به‌بایت همان فایل است؛ ذخیره روی آن، در
-  //     saveAnnotatedPdf با «رمزگشایی-اول» انجام می‌شود (به گزارش
-  //     مراجعه کنید) و فقط برای فایل‌های ذاتاً رمزگشایی‌ناپذیر،
-  //     با پیامِ راهنما رد می‌شود.
+  const logger = makeLogger();
   const stat = await fs.promises.stat(filePath);
   const size = stat.size;
-  const probe = await saver.probePdfProtectionForPath(filePath, makeLogger(), (fraction, label) => {
+
+  const probe = await saver.probePdfProtectionForPath(filePath, logger, (fraction, label) => {
     postProgress('copy-probe', fraction * 0.05, label);
   });
   postProgress('copy-probe', 0.05, 'بررسیِ محافظت انجام شد.');
-  if (!probe.protected && !probe.readOnly) {
-    // مرحلهٔ ۳۳ — فایل، رمزی ندارد ولی کاربر «کپی» خواسته است:
-    // به‌جای برگرداندنِ alreadyUnlocked بدونِ هیچ فایلی، یک
-    // کپیِ واقعی ساخته می‌شود (qpdf، سپس pdf-lib، سپس باینری).
-    // این شاخه، فقط برای فایل‌های بدونِ رمز است؛ فایلِ قفل‌دار،
-    // هرگز به این‌جا نمی‌رسد و ردِ رمزگشایی‌اش همچنان بلند است
-    // (شاخهٔ پایین‌تر: کدِ PDF_COPY_PASSWORD_REQUIRED /
-    // PDF_COPY_UNSUPPORTED_ENCRYPTION، بدونِ کپیِ باینریِ خاموش).
+
+  // برای تمام فایل‌های زیر ۲۵۰ مگابایت (چه قفل‌دار، چه فقط‌خواندنی و چه عادی)
+  // ابتدا از موتور qpdf و رمزگشای داخلی استفاده می‌کنیم تا یک نسخه کاملاً باز و استاندارد ساخته شود
+  if (size <= COPY_QPDF_MAX_BYTES) {
     const bytes = await fs.promises.readFile(filePath);
-    postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل…');
-    const built = await saver.buildUnencryptedCopyBytes({ bytes, logger: makeLogger() });
-    await fs.promises.writeFile(tempPath, Buffer.from(built.bytes));
-    const tempStat = await fs.promises.stat(tempPath);
-    if (built.unlockedBy === 'binary' && tempStat.size !== size) {
-      throw new Error('کپیِ باینری ناقص نوشته شد (' + tempStat.size + ' از ' + size + ' بایت).');
+    postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل و پردازش با موتور qpdf…');
+
+    if (typeof saver.createUnlockedPdfCopy === 'function') {
+      const result = await saver.createUnlockedPdfCopy({
+        bytes,
+        logger,
+        password: typeof password === 'string' ? password : '',
+        probeHint: {
+          protected: Boolean(probe.protected || probe.readOnly || probe.hasEncryptToken),
+          pageCount: probe.pageCount,
+          invalidObjects: Array.isArray(probe.invalidObjects) ? probe.invalidObjects : [],
+        },
+        allowHeavyFallback: size <= COPY_DECRYPT_MAX_BYTES,
+        onProgress: (fraction, label) => {
+          postProgress('copy', 0.08 + fraction * 0.85, label);
+        },
+      });
+
+      // اگر فایل با موفقیت توسط qpdf یا pdf-lib باز شد و بایت‌های خروجی آماده است
+      if (result && result.success && result.bytes) {
+        const done = await writeCopyTemp(result, tempPath);
+        postProgress('copy-done', 1, 'نسخهٔ کپیِ قابل‌ویرایش آماده است.');
+        return done;
+      }
+
+      // اگر createUnlockedPdfCopy اعلام کرد فایل از قبل باز است (alreadyUnlocked)،
+      // حتماً با buildUnencryptedCopyBytes (موتور qpdf) فایل خروجی را در tempPath می‌نویسیم
+      if (result && result.success && (result.alreadyUnlocked || !result.bytes)) {
+        if (typeof saver.buildUnencryptedCopyBytes === 'function') {
+          const built = await saver.buildUnencryptedCopyBytes({ bytes, logger });
+          if (built && built.bytes) {
+            await fs.promises.writeFile(tempPath, Buffer.from(built.bytes));
+            postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
+            return {
+              success: true,
+              alreadyUnlocked: false,
+              binaryCopy: built.unlockedBy === 'binary',
+              unlockedBy: built.unlockedBy || 'qpdf',
+              pageCount: probe.pageCount,
+              textGate: 'not-needed',
+              tempPath,
+            };
+          }
+        }
+      }
+
+      // اگر فایل رمز عبور واقعی کاربر را می‌خواهد یا رمزگذاری پشتیبانی‌نشده دارد
+      if (
+        result &&
+        (result.code === 'PDF_COPY_PASSWORD_REQUIRED' ||
+          result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')
+      ) {
+        return {
+          success: false,
+          code: result.code,
+          error: result.error || 'ساختِ نسخهٔ کپیِ قابل‌ویرایش انجام نشد.',
+          pageCount: probe.pageCount,
+        };
+      }
     }
-    postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
-    return {
-      success: true,
-      alreadyUnlocked: false,
-      binaryCopy: built.unlockedBy === 'binary',
-      unlockedBy: built.unlockedBy || undefined,
-      pageCount: probe.pageCount,
-      textGate: 'not-needed',
-      tempPath,
-    };
+
+    // مسیر جایگزین با buildUnencryptedCopyBytes اگر فایل رمز عبور نداشت
+    if (!probe.protected && typeof saver.buildUnencryptedCopyBytes === 'function') {
+      const built = await saver.buildUnencryptedCopyBytes({ bytes, logger });
+      if (built && built.bytes) {
+        await fs.promises.writeFile(tempPath, Buffer.from(built.bytes));
+        const tempStat = await fs.promises.stat(tempPath);
+        if (built.unlockedBy === 'binary' && tempStat.size !== size) {
+          throw new Error('کپیِ باینری ناقص نوشته شد (' + tempStat.size + ' از ' + size + ' بایت).');
+        }
+        postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
+        return {
+          success: true,
+          alreadyUnlocked: false,
+          binaryCopy: built.unlockedBy === 'binary',
+          unlockedBy: built.unlockedBy || undefined,
+          pageCount: probe.pageCount,
+          textGate: 'not-needed',
+          tempPath,
+        };
+      }
+    }
   }
-  if (probe.protected && size <= COPY_QPDF_MAX_BYTES) {
-    const bytes = await fs.promises.readFile(filePath);
-    postProgress('copy-read', 0.08, 'در حالِ خواندنِ فایل…');
-    const result = await saver.createUnlockedPdfCopy({
-      bytes,
-      logger: makeLogger(),
-      password: typeof password === 'string' ? password : '',
-      // مرحله ۱۱: پروبِ سریع، صفحه‌شمار را می‌داند؛ از پارسِ کاملِ
-      // دوباره در createUnlockedPdfCopy جلوگیری می‌شود. مسیرِ
-      // سنگینِ pdf-lib فقط برای فایل‌های ≤۱۵ مگابایت مجاز است؛
-      // بزرگ‌ترها فقط با qpdf باز می‌شوند و در صورتِ شکست، کدِ
-      // خطا برمی‌گردد تا TopBar بازسازی را پیشنهاد دهد.
-      probeHint: { protected: true, pageCount: probe.pageCount, invalidObjects: [] },
-      allowHeavyFallback: size <= COPY_DECRYPT_MAX_BYTES,
-      onProgress: (fraction, label) => { postProgress('copy', 0.08 + fraction * 0.85, label); },
-    });
-    if (result && result.success) {
-      const done = await writeCopyTemp(result, tempPath);
-      if (done && done.tempPath) postProgress('copy-done', 1, 'نسخهٔ کپی آماده است.');
-      if (done) return done;
-      return result;
-    }
-    if (result && (result.code === 'PDF_COPY_PASSWORD_REQUIRED' || result.code === 'PDF_COPY_UNSUPPORTED_ENCRYPTION')) {
-      // مرحله ۱۱: شکستِ رمزگشایی، دیگر به کپیِ باینریِ خاموش
-      // نمی‌افتد؛ کد برمی‌گردد تا TopBar، بازسازیِ از pdf.js یا
-      // درخواستِ رمز را به کاربر پیشنهاد دهد. کپیِ باینری فقط
-      // برای فایلِ فقط‌خواندنیِ بدونِ قفل یا فایلِ >۲۰۰ مگابایت
-      // است (مسیرِ پایینِ تابع).
-      return {
-        success: false,
-        code: result.code,
-        error: result.error || 'ساختِ نسخهٔ کپیِ قابل‌ویرایش انجام نشد.',
-        pageCount: probe.pageCount,
-      };
-    }
-    return result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' };
-  }
-  // مسیرِ کپیِ باینری: ناهمگام، بدونِ پارس، بدونِ هنگ.
+
+  // مسیر کپی باینری (فقط برای فایل‌های بسیار حجیم بالای ۲۵۰ مگابایت یا در صورت عدم نیاز به رمزگشایی)
   postProgress('copy-binary', 0.1, 'در حالِ ساختِ کپیِ باینری…');
   await fs.promises.copyFile(filePath, tempPath);
   const tempStat = await fs.promises.stat(tempPath);
@@ -209,24 +298,22 @@ async function handleCopy(filePath, tempPath, password) {
     alreadyUnlocked: false,
     binaryCopy: true,
     stillEncrypted: Boolean(probe.protected),
-    readOnlyCopy: Boolean(probe.readOnly),
-    pageCount: -1,
+    readOnlyCopy: false,
+    pageCount: probe.pageCount || -1,
     textGate: 'skipped-binary-copy',
     tempPath,
   };
 }
 
-// مرحله ۹ — لایهٔ ۱ در ورکر: آماده‌سازیِ خواندنِ فایلِ محافظت‌شده
-// (رمزِ صوری → رمزگشایی با رمزِ نشست → نیازِ رمز)، با همان
-// راستی‌آزماییِ saver. خروجی، مسیرِ فایلِ کش است؛ بایت‌ها هرگز از
-// ورکر به پروسهٔ اصلی برنمی‌گردند.
 async function handlePrepare(filePath, password, cacheDir) {
   const result = await saver.prepareProtectedPdfForReading({
     filePath,
     password: typeof password === 'string' ? password : '',
     cacheDir: typeof cacheDir === 'string' ? cacheDir : '',
     logger: makeLogger(),
-    onProgress: (fraction, label) => { postProgress('prepare', fraction, label); },
+    onProgress: (fraction, label) => {
+      postProgress('prepare', fraction, label);
+    },
   });
   postProgress('prepare-done', 1, 'آماده‌سازی انجام شد.');
   return {
@@ -238,14 +325,14 @@ async function handlePrepare(filePath, password, cacheDir) {
 }
 
 async function writeCopyTemp(result, tempPath) {
-  if (result.alreadyUnlocked || !result.bytes) {
-    // فایل، قفلِ فعالی ندارد: چیزی نوشته نمی‌شود؛ والد، همین
-    // نتیجه را به رندرر برمی‌گرداند (بدونِ Buffer.from(undefined)).
-    return { success: true, alreadyUnlocked: true, pageCount: result.pageCount, textGate: 'not-needed' };
+  if (!result || !result.bytes) {
+    return {
+      success: true,
+      alreadyUnlocked: true,
+      pageCount: result ? result.pageCount : -1,
+      textGate: 'not-needed',
+    };
   }
-  // بایت‌های کپی، در فایلِ موقتِ همان پوشه نوشته می‌شوند تا والد،
-  // فقط با renameِ اتمی (با retry برای قفلِ ویندوز) نامِ نهایی را
-  // بدهد؛ خودِ ورکر، نامِ نهایی را لمس نمی‌کند.
   await fs.promises.writeFile(tempPath, Buffer.from(result.bytes));
   return {
     success: true,
@@ -253,7 +340,7 @@ async function writeCopyTemp(result, tempPath) {
     binaryCopy: false,
     pageCount: result.pageCount,
     textGate: result.textGate,
-    unlockedBy: result.unlockedBy || undefined,
+    unlockedBy: result.unlockedBy || 'qpdf',
     healed: Boolean(result.healed),
     baselineInvalidObjects: result.baselineInvalidObjects || 0,
     outputInvalidObjects: result.outputInvalidObjects || 0,
@@ -261,10 +348,14 @@ async function writeCopyTemp(result, tempPath) {
   };
 }
 
-if (parentPort && saver) {
+if (parentPort) {
   parentPort.on('message', async (msg) => {
     try {
       if (!msg || typeof msg !== 'object') return;
+      if (!saver) {
+        throw new Error('ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) بارگذاری نشده است.');
+      }
+
       if (msg.type === 'probe') {
         const result = await handleProbe(msg.filePath);
         parentPort.postMessage({ type: 'done', result });
@@ -272,12 +363,6 @@ if (parentPort && saver) {
         const result = await handlePrepare(msg.filePath, msg.password, msg.cacheDir);
         parentPort.postMessage({ type: 'done', result });
       } else if (msg.type === 'export') {
-        // مرحلهٔ ۳۲ — ذخیرهٔ سنگینِ pdf-libِ حاشیه‌نویسی‌شده، از پروسهٔ
-        // اصلی به ورکر منتقل شد (همان saver با همان آرگومان‌هایِ
-        // فراخوانِ مستقیم). catchِ dispatcherِ پایین، هر throw را به
-        // پیامِ 'error' تبدیل می‌کند و پروسهٔ اصلی آن را علامتِ
-        // برگشت به اجرایِ مستقیم می‌داند.
-        if (!saver) throw new Error('ماژولِ خروجیِ PDF (pdfAnnotationSaver.js) پیدا نشد.');
         const result = await saver.saveAnnotatedPdf({
           pdfPath: msg.pdfPath,
           pages: msg.pages,
@@ -287,19 +372,27 @@ if (parentPort && saver) {
           password: typeof msg.password === 'string' ? msg.password : '',
           dataDir: typeof msg.dataDir === 'string' ? msg.dataDir : '',
         });
-        parentPort.postMessage({ type: 'done', result: result || { success: false, error: 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.' } });
-
+        parentPort.postMessage({
+          type: 'done',
+          result: result || { success: false, error: 'ساختِ PDFِ حاشیه‌نویسی‌شده انجام نشد.' },
+        });
       } else if (msg.type === 'copy') {
         if (!msg.tempPath || typeof msg.tempPath !== 'string') {
           parentPort.postMessage({ type: 'error', message: 'مسیرِ فایلِ موقتِ کپی مشخص نشده است.' });
           return;
         }
         const result = await handleCopy(msg.filePath, msg.tempPath, msg.password);
-        parentPort.postMessage({ type: 'done', result: result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' } });
+        parentPort.postMessage({
+          type: 'done',
+          result: result || { success: false, error: 'ساختِ نسخهٔ کپی انجام نشد.' },
+        });
       }
     } catch (err) {
       try {
-        parentPort.postMessage({ type: 'error', message: String((err && err.message) || err) });
+        parentPort.postMessage({
+          type: 'error',
+          message: String((err && err.message) || err),
+        });
       } catch (_) {}
     }
   });
