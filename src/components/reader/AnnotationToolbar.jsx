@@ -96,6 +96,29 @@ function hslToHex(h, s, l) {
   return `#${to(f(hh + 1 / 3))}${to(f(hh))}${to(f(hh - 1 / 3))}`;
 }
 
+// مرحلهٔ ۵۸ مأموریتِ ۴: موتورِ مرزِ امنِ نمایِ دراور و پاپ‌اورها —
+// پنل، همیشه باید داخلِ [SAFE_TOP ،window.innerHeight - 16] و
+// [SAFE_LEFT ،window.innerWidth - 16] بماند و هرگز زیرِ TopBar
+// (۶۴ پیکسلِ بالای صفحه) یا بیرونِ لبهٔ پایین نرود. تابع، خالص
+// است (بدونِ خواندنِ state) تا تستِ Node هم بتواند مستقیم صدایش
+// بزند؛ ورودیِ viewport اختیاری است و پیش‌فرض، window است.
+export const SAFE_TOP = 64;
+export const SAFE_LEFT = 16;
+export const SAFE_VIEWPORT_GAP = 16;
+export function computeSafePopoverPosition(desiredTop, panelHeight, desiredLeft, panelWidth, viewportWidth, viewportHeight) {
+  const vw = Number(viewportWidth) || (typeof window !== 'undefined' ? window.innerWidth : 1024);
+  const vh = Number(viewportHeight) || (typeof window !== 'undefined' ? window.innerHeight : 768);
+  const safeBottom = vh - SAFE_VIEWPORT_GAP;
+  const safeRight = vw - SAFE_VIEWPORT_GAP;
+  const maxHeight = Math.min(440, vh - SAFE_TOP - 24);
+  const height = Math.max(0, Math.min(Number(panelHeight) || 0, maxHeight));
+  const width = Math.max(0, Number(panelWidth) || 0);
+  const clampedTop = Math.max(SAFE_TOP, Math.min(Number(desiredTop) || SAFE_TOP, safeBottom - height));
+  const maxLeft = Math.max(SAFE_LEFT, safeRight - width);
+  const clampedLeft = Math.max(SAFE_LEFT, Math.min(Number(desiredLeft) || SAFE_LEFT, maxLeft));
+  return { top: clampedTop, left: clampedLeft, maxHeight };
+}
+
 // فاز ۳ پالت — دسته‌بندی‌های تخصصیِ دراور (دقیقاً همان ۲۵ رنگِ
 // فهرست‌شده در تسک: پزشکی ۸ + نئون ۵ + سایبرپانک ۶ + پاستلی ۶.
 // توجهِ صادقانه: عنوانِ تسک «پالت ۳۰ رنگ» می‌گوید، ولی فهرستِ
@@ -176,10 +199,19 @@ const ARROW_STYLES = [
 // نه فونتِ باندل‌شده). پیش‌فرضِ استور هم "'Estedad', sans-serif" است،
 // پس پیلِ استعداد از اول فعال نشان داده می‌شود (مشکلِ قدیمیِ «هیچ پیلی
 // فعال نیست» که در فاز ۴ مستند شده بود، با همین تغییر رفع می‌شود).
+// مرحلهٔ ۵۸ مأموریتِ ۵ (تصحیحِ صادقانهٔ برچسب‌ها): پرامپت، سه برچسبِ
+// «وزیرمتن (پیش‌فرض)»، «خوانا (نسخ)» و «کد (مونو)» خواسته بود، ولی
+// هیچ‌کدام رویِ فونت‌هایِ باندل‌شده صادق نیست: وزیرمتن باندل نشده
+// (پس برچسبِ «وزیرمتن» دروغ می‌گوید که چه فونتی رندر می‌شود) و هیچ
+// فونتِ نسخی هم باندل نشده (منروپ، فونتِ لاتینِ عناوین است، نه نسخ).
+// پس برچسب‌ها صادقانه ماندند: استعداد (که پیش‌فرضِ واقعیِ استور
+// است و در سربرگِ کنسولِ تایپو هم «پیش‌فرض: استعداد» نوشته می‌شود)،
+// منروپ با نشانِ «لاتین»، و مونو با «کد (مونو)». اگر وزیرمتن یا
+// ایران‌یکان روزی باندل شدند، همین‌جا اضافه می‌شوند.
 const FONT_OPTIONS = [
   { id: "'Estedad', sans-serif", label: 'استعداد' },
-  { id: "'Manrope', sans-serif", label: 'منروپ' },
-  { id: "'JetBrains Mono', monospace", label: 'مونو' },
+  { id: "'Manrope', sans-serif", label: 'منروپ (لاتین)' },
+  { id: "'JetBrains Mono', monospace", label: 'کد (مونو)' },
 ];
 
 // ============================================================================
@@ -263,11 +295,6 @@ export function AnnotationToolbar({
   const setActivePaletteId = useAppStore((s) => s.setActivePaletteId);
   const addPrimaryToolbarColor = useAppStore((s) => s.addPrimaryToolbarColor);
   const removePrimaryToolbarColor = useAppStore((s) => s.removePrimaryToolbarColor);
-  // مرحلهٔ ۵۷ مأموریتِ ۲: گرادیانِ اسکرول‌بارِ انتخاب‌شدهٔ کاربر از
-  // تنظیمات (فیلدهایِ سطحِ استورِ useSettingsStore؛ App.jsx هم
-  // همین‌طور می‌خواند) — برایِ اسکرول‌بارِ دراورِ رنگ.
-  const scrollbarColorStart = useSettingsStore((s) => s.scrollbarColorStart || '#22d3ee');
-  const scrollbarColorEnd = useSettingsStore((s) => s.scrollbarColorEnd || '#a78bfa');
   // مرحلهٔ ۵۶ مأموریتِ ۱: توست برای بازخوردِ ذخیرهٔ تمپلیت/رنگ.
   const showToast = useAppStore((s) => s.showToast);
   const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
@@ -367,22 +394,13 @@ export function AnnotationToolbar({
   // ثابتِ دراور (با اندازه‌گیریِ دکمه در لحظهٔ باز شدن)، پالتِ شخصی،
   // و refهای دکمه/پنل/ورودیِ رنگ برای بستن با کلیکِ بیرونی.
   const [colorDrawerOpen, setColorDrawerOpen] = useState(false);
-  // مرحله ۴۸ §۵: پاپ‌اورِ زیرحالتِ انتخاب — وضعیتِ باز بودن، موقعیتِ
-  // ثابت (با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن، دقیقاً مثلِ
-  // دراورِ پالت)، و refهای دکمه/پنل برای بستن با کلیکِ بیرونی.
-  // چیپ‌های متنیِ پهنِ کنارِ دکمهٔ select (مرحله ۴۴) حذف شدند و دو
-  // گزینه (کادری/کمند) با آیکونِ SVG به این پاپ‌اور رفتند.
-  const [selectPopoverOpen, setSelectPopoverOpen] = useState(false);
-  const [selectPopoverPos, setSelectPopoverPos] = useState(null);
-  const selectBtnRef = useRef(null);
-  const selectPopoverRef = useRef(null);
-  const selectPopoverOpenRef = useRef(false);
-  // تابعِ ساده (هوک نیست) تا در افکت‌ها و هندلرها بدونِ وابستگی
-  // به closureی تازه صدا زده شود؛ ref، آینهٔ همگامِ وضعیت است.
-  const closeSelectPopover = () => {
-    selectPopoverOpenRef.current = false;
-    setSelectPopoverOpen(false);
-  };
+  // مرحلهٔ ۵۸ مأموریتِ ۳: پاپ‌اورِ شناورِ زیرحالتِ انتخاب (مرحلهٔ ۴۸
+  // §۵) کاملاً حذف شد — کلیک روی select فقط ابزارِ انتخاب را فعال
+  // می‌کند و هر پاپ‌اورِ بازی را می‌بندد؛ دو گزینهٔ باکسی/کمند با
+  // همان آیکون‌های SVG، به بخشِ ۱ (کنترلِ یکپارچهٔ حالتِ ابزار) در
+  // پانلِ بنتوی secondaryContent رفتند (به selectSubModeOptions
+  // مراجعه کنید). stateها، refها و افکت‌هایِ آن پاپ‌اور هم با آن
+  // حذف شدند تا هیچ state یا هندلرِ مرده‌ای نماند.
   // مرحلهٔ ۳۹ §۳: تمپلیتِ فعال در نوارِ سریع + ساختِ تمپلیتِ تازه +
   // پیش‌نویسِ کدِ هگزِ انتخابگرِ پیشرفته.
   // مرحلهٔ ۵۷ مأموریتِ ۲: حالتِ ویرایشِ نوارِ سریع (× روی هر رنگ)
@@ -409,7 +427,7 @@ export function AnnotationToolbar({
   // نگهبانِ گیر نکردنِ حالتِ عبورند (اگر پایانِ ژست از لایه نرسید).
   const [isGesturePassThrough, setIsGesturePassThrough] = useState(false);
   useEffect(() => {
-    const onGestureStart = () => { setColorDrawerOpen(false); closeSelectPopover(); setIsGesturePassThrough(true); };
+    const onGestureStart = () => { setColorDrawerOpen(false); setIsGesturePassThrough(true); };
     const onGestureEnd = () => setIsGesturePassThrough(false);
     window.addEventListener('annotation-gesture-start', onGestureStart);
     window.addEventListener('annotation-gesture-end', onGestureEnd);
@@ -431,6 +449,25 @@ export function AnnotationToolbar({
   const paletteBtnRef = useRef(null);
   const colorDrawerRef = useRef(null);
   const colorInputRef = useRef(null);
+  // مرحلهٔ ۵۸ مأموریتِ ۴: کلمپِ دوبارهٔ موقعیتِ دراورِ رنگ در
+  // بازهٔ امنِ نما — با ارتفاعِ واقعیِ اندازه‌گیری‌شدهٔ پنل (نه
+  // تخمینِ لحظهٔ باز شدن). با گاردِ برابری: اگر چیزی عوض نشده،
+  // همان stateی قبلی برگردانده می‌شود تا حلقهٔ ResizeObserver
+  // (که خودش با تغییرِ top دوباره صدا می‌زند) بی‌نهایت نشود.
+  // top/left در colorDrawerPos همیشه عدد‌اند (به toggleColorDrawer
+  // مراجعه کنید)، پس این‌جا رشته‌ایِ «50%» نداریم.
+  const reclampColorDrawer = useCallback(() => {
+    setColorDrawerPos((prev) => {
+      if (!prev) return prev;
+      const panel = colorDrawerRef.current;
+      const panelHeight = panel && panel.offsetHeight
+        ? panel.offsetHeight
+        : Math.min(440, (typeof window !== 'undefined' ? window.innerHeight : 768) - SAFE_TOP - 24);
+      const next = computeSafePopoverPosition(prev.top, panelHeight, prev.left, 272);
+      if (next.top === prev.top && next.left === prev.left) return prev;
+      return { ...prev, top: next.top, left: next.left };
+    });
+  }, []);
   // مرحلهٔ ۳۹ §۳: مهاجرتِ یک‌بارهٔ پالتِ ۴ رنگیِ قدیمی (کلیدِ
   // annotationUserPalette) به سیستمِ رنگِ v2 استور (حداکثر ۴۸ رنگ +
   // پشتیبانِ دیتابیس)؛ بعد از مهاجرت، کلیدِ قدیمی پاک می‌شود.
@@ -489,9 +526,12 @@ export function AnnotationToolbar({
     return () => window.removeEventListener('mousedown', onDown);
   }, [colorDrawerOpen]);
   // فاز ۳ پالت — دراور با position: fixed رندر می‌شود (تا overflowی
-  // نوارِ افقی، آن را نبرد)؛ پس هر اسکرول یا تغییرِ اندازهٔ پنجره،
-  // مختصاتش را کهنه می‌کند. به‌جای دنبال کردنِ مختصات، دراور بسته
-  // می‌شود — ارزان، قابلِ پیش‌بینی، و بدونِ شنوندهٔ پرهزینهٔ حرکت.
+  // نوارِ افقی، آن را نبرد)؛ پس هر اسکرولِ بیرونی، مختصاتش را کهنه
+  // می‌کند و دراور بسته می‌شود (ارزان و قابلِ پیش‌بینی). اما تغییرِ
+  // اندازهٔ پنجره، دیگر آن را نمی‌بندد — مرحلهٔ ۵۸ مأموریتِ ۴: با
+  // موتورِ مرزِ امن (reclampColorDrawer) دوباره داخلِ بازهٔ امن
+  // کلمپ می‌شود تا همیشه دیده شود و هرگز زیرِ TopBar یا بیرونِ
+  // لبهٔ پایین نرود.
   useEffect(() => {
     if (!colorDrawerOpen) return undefined;
     // مرحلهٔ ۵۷ مأموریتِ ۲: اسکرولِ داخلِ خودِ دراور، آن را نمی‌بندد.
@@ -507,54 +547,23 @@ export function AnnotationToolbar({
         && colorDrawerRef.current && colorDrawerRef.current.contains(e.target)) return;
       setColorDrawerOpen(false);
     };
+    const reclampOnResize = () => { reclampColorDrawer(); };
     window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
+    window.addEventListener('resize', reclampOnResize);
     return () => {
       window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
+      window.removeEventListener('resize', reclampOnResize);
     };
-  }, [colorDrawerOpen]);
-  // مرحلهٔ ۵۱ §۴: اگر ابزار با هر مسیری (کلیک، کلیدِ میانبر، یا
-  // فراخوانندهٔ دیگرِ setAnnotationTool) به دست یا پاک‌کن عوض شد،
-  // دراورِ رنگ بسته می‌شود؛ این دو ابزار هرگز دراور ندارند. setState
-  // با همان مقدارِ فعلی، ری‌رندر نمی‌سازد، پس گاردِ برابری لازم نیست.
+  }, [colorDrawerOpen, reclampColorDrawer]);
+  // مرحلهٔ ۵۱ §۴ + مرحلهٔ ۵۸ مأموریتِ ۳: اگر ابزار با هر مسیری
+  // (کلیک، کلیدِ میانبر، یا فراخوانندهٔ دیگرِ setAnnotationTool)
+  // به دست، انتخاب یا پاک‌کن عوض شد، دراورِ رنگ بسته می‌شود؛
+  // دست و پاک‌کن هرگز دراور ندارند و کلیک روی select هم (طبقِ
+  // مأموریتِ ۳) فقط ابزار را فعال می‌کند و هر پاپ‌اورِ بازی را
+  // می‌بندد. setState با همان مقدارِ فعلی، ری‌رندر نمی‌سازد، پس
+  // گاردِ برابری لازم نیست.
   useEffect(() => {
-    if (annotationTool === 'hand' || annotationTool === 'eraser') setColorDrawerOpen(false);
-  }, [annotationTool]);
-  // مرحله ۴۸ §۵: بستنِ پاپ‌اورِ انتخاب با کلیکِ بیرونی — دقیقاً مثلِ
-  // دراورِ پالت: هر mousedownی که نه روی دکمهٔ select باشد و نه روی
-  // خودِ پاپ‌اور، آن را می‌بندد (کلیک روی دکمه، خودش toggle می‌کند).
-  useEffect(() => {
-    if (!selectPopoverOpen) return undefined;
-    const onDown = (e) => {
-      const target = e && e.target;
-      if (!target) return;
-      if (selectBtnRef.current && selectBtnRef.current.contains(target)) return;
-      if (selectPopoverRef.current && selectPopoverRef.current.contains(target)) return;
-      closeSelectPopover();
-    };
-    window.addEventListener('mousedown', onDown);
-    return () => window.removeEventListener('mousedown', onDown);
-  }, [selectPopoverOpen]);
-  // مرحله ۴۸ §۵: بستنِ پاپ‌اور با اسکرول/تغییرِ اندازه (مختصاتِ ثابت
-  // کهنه می‌شود) و با Escape — دقیقاً مثلِ دراورِ پالت.
-  useEffect(() => {
-    if (!selectPopoverOpen) return undefined;
-    const close = () => closeSelectPopover();
-    const onKey = (e) => { if (e.key === 'Escape') closeSelectPopover(); };
-    window.addEventListener('scroll', close, true);
-    window.addEventListener('resize', close);
-    window.addEventListener('keydown', onKey);
-    return () => {
-      window.removeEventListener('scroll', close, true);
-      window.removeEventListener('resize', close);
-      window.removeEventListener('keydown', onKey);
-    };
-  }, [selectPopoverOpen]);
-  // مرحله ۴۸ §۵: بستنِ پاپ‌اور با عوض شدنِ ابزارِ فعال — پاپ‌اور فقط
-  // برای ابزارِ select معنا دارد.
-  useEffect(() => {
-    if (annotationTool !== 'select') closeSelectPopover();
+    if (annotationTool === 'hand' || annotationTool === 'select' || annotationTool === 'eraser') setColorDrawerOpen(false);
   }, [annotationTool]);
 
   // معماریِ قطعی — هوک‌های جدید، همه این‌جا و قبل از returnِ
@@ -598,8 +607,8 @@ export function AnnotationToolbar({
   // خودش داخلِ همان پنل است، پس دراورِ باز، بی‌صاحب می‌ماند).
   // فرمول، همان showSecondary است که پایین‌تر تعریف می‌شود.
   useEffect(() => {
-    if (!((annotationTool !== 'select' || hasSelection) && !panelClosed)) setColorDrawerOpen(false);
-  }, [annotationTool, hasSelection, panelClosed]);
+    if (!(annotationTool !== 'hand' && !panelClosed)) setColorDrawerOpen(false);
+  }, [annotationTool, panelClosed]);
   // تنفس: درگ یا دراورِ باز، کم‌نور شدن را لغو می‌کند؛ و پاک‌سازیِ
   // تایمرها هنگامِ unmount.
   useEffect(() => {
@@ -751,7 +760,7 @@ export function AnnotationToolbar({
   // The formulas mirror showSecondary/colorDrawerOpen below (same
   // inputs, computed here because hooks must stay above the early
   // return); the canonical consts after the return stay untouched.
-  const showSecondaryForAnim = (annotationTool !== 'select' || hasSelection) && !panelClosed;
+  const showSecondaryForAnim = annotationTool !== 'hand' && !panelClosed;
   const [flyoutMounted, setFlyoutMounted] = useState(false);
   const [flyoutExiting, setFlyoutExiting] = useState(false);
   useEffect(() => {
@@ -784,6 +793,30 @@ export function AnnotationToolbar({
     }, 200);
     return () => clearTimeout(t);
   }, [colorDrawerOpen, drawerMounted]);
+
+  // مرحلهٔ ۵۸ مأموریتِ ۴: کلمپِ دوبارهٔ دراور وقتی ارتفاعِ پنل
+  // (با باز شدنِ سازندهٔ تمپلیت یا هر تغییرِ محتوایِ دیگر) یا
+  // اندازهٔ پنجره عوض می‌شود — ResizeObserver، تغییرِ اندازهٔ
+  // خودِ پنل را می‌بیند و reclampColorDrawer با ارتفاعِ واقعیِ
+  // اندازه‌گیری‌شده، پنل را در بازهٔ امن نگه می‌دارد. گاردِ
+  // برابریِ داخلِ reclampColorDrawer جلوی حلقه را می‌گیرد.
+  useEffect(() => {
+    if (!colorDrawerOpen || !drawerMounted) return undefined;
+    const panel = colorDrawerRef.current;
+    if (!panel || typeof ResizeObserver === 'undefined') return undefined;
+    reclampColorDrawer();
+    const observer = new ResizeObserver(() => { reclampColorDrawer(); });
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [colorDrawerOpen, drawerMounted, reclampColorDrawer]);
+  // مرحلهٔ ۵۸ مأموریتِ ۴: باز/بسته شدنِ سازندهٔ تمپلیت یا ویرایشِ
+  // درون‌خطیِ تمپلیت، ارتفاعِ دراور را عوض می‌کند — اگر پنل از
+  // بازهٔ امن بیرون رفت، همین‌جا دوباره کلمپ می‌شود (ResizeObserver
+  // هم همین را پوشش می‌دهد؛ این افکت، مسیرِ صریحِ همان رویداد است).
+  useEffect(() => {
+    if (!colorDrawerOpen) return;
+    reclampColorDrawer();
+  }, [colorDrawerOpen, isCreatingTemplate, editingTemplateId, reclampColorDrawer]);
 
   // تایید دو مرحله‌ای برای پاک کردن همه (بدون window.confirm زشت)
   const [armClear, setArmClear] = useState(false);
@@ -1077,11 +1110,12 @@ export function AnnotationToolbar({
   // سمتِ راست باز می‌شوند (به سمتِ مرکز)؛ وگرنه به سمتِ چپ.
   const dockX = toolbarPos ? toolbarPos.x : (isVertical ? viewportW - 80 : viewportW / 2);
   const isDockOnLeft = dockX < viewportW / 2;
-  // میکروانیمیشن‌ها §۲ و §۳ — نمایان بودنِ پنلِ فرعی: وقتی ابزار،
-  // انتخاب نیست، یا در حالتِ انتخاب، آیتمی انتخاب شده، و پنل با
-  // دوبار کلیک بسته نشده باشد. در غیر این صورت، فقط داکِ جمع‌وجور
-  // دیده می‌شود (ابزارها + بازگردانی + جهت + Done).
-  const showSecondary = (annotationTool !== 'select' || hasSelection) && !panelClosed;
+  // میکروانیمیشن‌ها §۲ و §۳ + مرحلهٔ ۵۸ مأموریتِ ۳ و ۵ — نمایان
+  // بودنِ پانلِ بنتوی ابزار: برای همهٔ ابزارها جز دست (دست، هیچ
+  // پانلی ندارد و فقط صفحه را جابه‌جا می‌کند)، وقتی پنل با دوبار
+  // کلیک بسته نشده باشد. در غیر این صورت، فقط داکِ جمع‌وجور دیده
+  // می‌شود (ابزارها + بازگردانی + جهت + Done).
+  const showSecondary = annotationTool !== 'hand' && !panelClosed;
   // هم‌رنگ‌سازیِ مرز و درخشش با رنگِ فعال (§۴٫۲): hexی ۶رقمی را
   // به rgba با آلفای خواسته‌شده تبدیل می‌کند؛ اگر رنگ، hex نبود،
   // همان مقدار برگردانده می‌شود تا چیزی خراب نشود.
@@ -1197,19 +1231,10 @@ export function AnnotationToolbar({
     window.addEventListener('pointercancel', onUp, true);
   };
 
-  // مرحله 44 §3: استایلِ چیپِ زیرحالتِ انتخاب (باکسی فیروزه‌ای، کمند بنفش).
-  const selectChipStyle = (isActive, accent) => ({
-    border: 'none',
-    cursor: 'pointer',
-    padding: '6px 8px',
-    borderRadius: 9,
-    fontSize: 11,
-    whiteSpace: 'nowrap',
-    background: isActive ? accent.bg : 'transparent',
-    color: isActive ? accent.fg : 'rgba(255,255,255,0.6)',
-    outline: isActive ? `1.5px solid ${accent.line}` : '1px solid rgba(255,255,255,0.14)',
-    outlineOffset: -1,
-  });
+  // مرحلهٔ ۵۸ مأموریتِ ۵: selectChipStyle (چیپ‌های رنگیِ باکسی/
+  // کمندِ پاپ‌اورِ مرحلهٔ ۴۸) حذف شد — کنترلِ یکپارچهٔ بخشِ ۱،
+  // برای هر دو گزینه یکدستِ فیروزه‌ای است (به bentoSegmentedBtn
+  // مراجعه کنید) و دیگر accentِ جداگانه ندارد.
 
   // مرحله ۴۸ §۵: آیکون‌های SVG دو گزینهٔ پاپ‌اورِ انتخاب — دکمه‌های
   // متنیِ مرحله ۴۴ هیچ آیکونی نداشتند (فقط متن بودند)، پس هر دو
@@ -1227,6 +1252,16 @@ export function AnnotationToolbar({
     </svg>
   );
 
+  // مرحلهٔ ۵۸ مأموریتِ ۳ و ۵: گزینه‌های زیرحالتِ انتخاب (باکسی/
+  // کمند) — همان دو گزینه با آیکونِ SVG؛ پاپ‌اورِ شناورِ مرحلهٔ ۴۸
+  // §۵ حذف شد و این گزینه‌ها حالا دادهٔ کنترلِ یکپارچهٔ بخشِ ۱
+  // پانلِ بنتو (secondaryContent) هستند — accentها برای سازگاری
+  // نگه داشته شده‌اند، ولی دکمهٔ فعال در بنتو یکدستِ فیروزه‌ای است.
+  const selectSubModeOptions = [
+    { id: 'box', label: 'انتخاب کادری (مستطیلی)', accent: { bg: 'rgba(34,211,238,0.22)', fg: '#67e8f9', line: '#22d3ee' }, Icon: SelectBoxIcon },
+    { id: 'lasso', label: 'انتخاب آزاد (کمند)', accent: { bg: 'rgba(167,139,250,0.22)', fg: '#c4b5fd', line: '#a78bfa' }, Icon: SelectLassoIcon },
+  ];
+
   const toolsButtons = (
     <>
       {/* ابزارها */}
@@ -1236,7 +1271,6 @@ export function AnnotationToolbar({
           <Fragment key={id}>
           <button
             key={id}
-            ref={id === 'select' ? selectBtnRef : null}
             data-tool-btn="1"
             data-tool-id={id}
             aria-label={label}
@@ -1272,19 +1306,16 @@ export function AnnotationToolbar({
               if (id !== activeId || panelClosed) setPanelClosed(false);
               hideTooltip();
               setAnnotationTool(id);
-              // مرحلهٔ ۵۱ §۴: کلیک روی دست یا پاک‌کن، دراورِ رنگ را
-              // فوری می‌بندد (اگر از ابزارِ قبلی باز مانده باشد)؛ این
-              // دو ابزار، رنگ/ضخامت/شفافیت ندارند و دراور هرگز برای
-              // آن‌ها باز نمی‌شود (به گاردِ toggleColorDrawer و افکتِ
-              // بستن با تغییرِ ابزار هم مراجعه کنید).
-              if (id === 'hand' || id === 'eraser') setColorDrawerOpen(false);
-              // مرحله ۴۸ §۵: پاپ‌اورِ زیرحالتِ انتخاب — کلیک روی ابزارِ
-              // select (تازه‌فعال‌شده یا از قبل فعال)، پاپ‌اور را باز
-              // می‌کند؛ کلیکِ دوباره روی selectِ فعال، آن را می‌بندد.
-              if (id === 'select') {
-                if (selectPopoverOpenRef.current) closeSelectPopover();
-                else openSelectPopover(e.currentTarget);
-              }
+              // مرحلهٔ ۵۱ §۴ + مرحلهٔ ۵۸ مأموریتِ ۳: کلیک روی دست،
+              // انتخاب یا پاک‌کن، دراورِ رنگ را فوری می‌بندد (اگر از
+              // ابزارِ قبلی باز مانده باشد)؛ دست و پاک‌کن،
+              // رنگ/ضخامت/شفافیت ندارند و دراور هرگز برای آن‌ها باز
+              // نمی‌شود، و کلیک روی select هم هیچ پاپ‌اوری باز
+              // نمی‌کند — فقط ابزارِ انتخاب را فعال می‌کند (به گاردِ
+              // toggleColorDrawer و افکتِ بستن با تغییرِ ابزار هم
+              // مراجعه کنید). حالتِ باکسی/کمند، در بخشِ ۱ پانلِ
+              // بنتو انتخاب می‌شود، نه با پاپ‌اورِ شناور.
+              if (id === 'hand' || id === 'select' || id === 'eraser') setColorDrawerOpen(false);
             }}
             onDoubleClick={() => {
               // بستن/باز کردن با دوبار کلیک، فقط برای ابزاری که
@@ -1359,9 +1390,10 @@ export function AnnotationToolbar({
               <Icon size={18} />
             </span>
           </button>
-          {/* مرحله ۴۸ §۵: چیپ‌های متنیِ پهنِ زیرحالتِ انتخاب از این‌جا
-              حذف شدند — دو گزینه با آیکونِ SVG به پاپ‌اورِ شناورِ
-              select رفتند (به selectPopover در پایینِ فایل مراجعه کنید). */}
+          {/* مرحله ۴۸ §۵ + مرحلهٔ ۵۸ مأموریتِ ۳: چیپ‌های متنیِ پهنِ زیرحالتِ انتخاب از این‌جا
+              حذف شدند — دو گزینه با آیکونِ SVG، حالا در بخشِ ۱ پانلِ بنتوی secondaryContent
+              هستند (به selectSubModeOptions مراجعه کنید)؛ پاپ‌اورِ شناورِ select در مرحلهٔ ۵۸
+              کاملاً حذف شد. */}
           </Fragment>
         );
       })}
@@ -1533,8 +1565,9 @@ export function AnnotationToolbar({
     if (typeof showToast === 'function') showToast(`تمپلیت «${name}» به‌روز شد.`, { type: 'success' });
   };
   // مرحلهٔ ۵۷ مأموریتِ ۲: دکمهٔ «نصب در نوار ابزار» کنارِ هر عنوانِ
-  // پالت؛ اگر همین پالت فعال باشد، «✓ پالتِ فعال» نشان می‌دهد.
-  // (✓ همان برچسبِ متنیِ مشخص‌شده در پرامپت است.)
+  // پالت؛ اگر همین پالت فعال باشد، «پالتِ فعال» نشان می‌دهد (مرحلهٔ
+  // ۵۸: کاراکترِ تیک که در مرحلهٔ ۵۷ آمده بود، حذف شد — گلیفِ ممنوع
+  // است؛ تمایزِ حالتِ فعال، با رنگِ سبز و برچسبِ «پالتِ فعال» است).
   const paletteInstallButton = (paletteId) => {
     const isActive = activePaletteId === paletteId;
     return (
@@ -1558,7 +1591,7 @@ export function AnnotationToolbar({
           whiteSpace: 'nowrap',
         }}
       >
-        {isActive ? '✓ پالتِ فعال' : 'نصب در نوار ابزار'}
+        {isActive ? 'پالتِ فعال' : 'نصب در نوار ابزار'}
       </button>
     );
   };
@@ -1614,44 +1647,14 @@ export function AnnotationToolbar({
       </button>
     );
   };
-  // مرحله ۴۸ §۵: باز کردنِ پاپ‌اورِ زیرحالتِ انتخاب — موقعیتِ ثابت،
-  // با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن (دقیقاً مثلِ
-  // toggleColorDrawer): عمودی → کنارِ دکمه با قانونِ آینه‌ایِ §۱؛
-  // افقی → پایینِ دکمه با چرخشِ هوشمند به بالا اگر جا نباشد.
-  const openSelectPopover = (btnEl) => {
-    const rect = btnEl
-      ? btnEl.getBoundingClientRect()
-      : (selectBtnRef.current ? selectBtnRef.current.getBoundingClientRect() : null);
-    const POP_W = 248;
-    const POP_H = 132;
-    if (!rect) {
-      setSelectPopoverPos(isVertical
-        ? { top: '50%', left: 10, transform: 'translate(0, -50%)', above: false }
-        : { top: 80, left: '50%', transform: 'translateX(-50%)', above: false });
-    } else if (isVertical) {
-      const cy = rect.top + rect.height / 2;
-      const fitsLeft = rect.left - 10 >= POP_W;
-      const fitsRight = viewportW - rect.right - 10 >= POP_W;
-      const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
-      if (openRight) {
-        setSelectPopoverPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - POP_W)), transform: 'translate(0, -50%)', above: false });
-      } else {
-        setSelectPopoverPos({ top: cy, left: Math.max(rect.left - 10, POP_W), transform: 'translate(-100%, -50%)', above: false });
-      }
-    } else {
-      const cx = Math.max(POP_W / 2 + 8, Math.min(rect.left + rect.width / 2, window.innerWidth - POP_W / 2 - 8));
-      const spaceBelow = viewportH - rect.bottom;
-      const spaceAbove = rect.top;
-      if (spaceBelow < POP_H + 12 && spaceAbove > spaceBelow) {
-        setSelectPopoverPos({ top: rect.top - 10, left: cx, transform: 'translateX(-50%) translateY(-100%)', above: true });
-      } else {
-        setSelectPopoverPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)', above: false });
-      }
-    }
-    selectPopoverOpenRef.current = true;
-    setSelectPopoverOpen(true);
-  };
-
+  // مرحلهٔ ۵۸ مأموریتِ ۴: دراور با موتورِ مرزِ امن باز می‌شود —
+  // موقعیت، دیگر با translateها ( ‎-50% / ‎-100% ) نگه داشته
+  // نمی‌شود، بلکه گوشهٔ بالا-چپِ پنل مستقیم حساب و با
+  // computeSafePopoverPosition در بازهٔ امنِ [64 ،innerHeight-16]
+  // و [16 ،innerWidth-16] کلمپ می‌شود؛ ارتفاعِ تخمینیِ پنل هم
+  // همان maxHeightی فرمول است (min(440, vh - 88)) و بعد از mount،
+  // ResizeObserver با ارتفاعِ واقعیِ اندازه‌گیری‌شده دوباره کلمپ
+  // می‌کند. عرضِ دراور، همان ۲۷۲ پیکسلِ فشردهٔ مرحلهٔ ۵۷ می‌ماند.
   const toggleColorDrawer = () => {
     // مرحلهٔ ۵۱ §۴: برای دست و پاک‌کن، دراورِ رنگ هرگز باز نمی‌شود؛
     // اگر به‌هر دلیل صدا زده شد، فقط می‌بندد.
@@ -1670,48 +1673,129 @@ export function AnnotationToolbar({
     // باز شدن، همان سمتِ فلای‌اوت است (قانونِ آینه‌ایِ §۱: داک در
     // نیمهٔ چپ → سمتِ راستِ دکمه؛ وگرنه سمتِ چپ)، با fallback به
     // سمتِ دیگر اگر سمتِ خواسته‌شده جا نداشت، و clamp در لبه‌ها.
+    const DRAWER_WIDTH = 272;
+    const vw = window.innerWidth || 1024;
+    const vh = window.innerHeight || 768;
+    const estHeight = Math.min(440, vh - SAFE_TOP - 24);
     const rect = paletteBtnRef.current ? paletteBtnRef.current.getBoundingClientRect() : null;
     if (!rect) {
-      setColorDrawerPos(isVertical
-        ? { top: '50%', left: 10, transform: 'translate(0, -50%)', above: false }
-        : { top: 80, left: '50%', transform: 'translateX(-50%)', above: false });
+      const pos = computeSafePopoverPosition(80, estHeight, (vw - DRAWER_WIDTH) / 2, DRAWER_WIDTH, vw, vh);
+      setColorDrawerPos({ top: pos.top, left: pos.left, transform: 'none', above: false });
     } else if (isVertical) {
       const cy = rect.top + rect.height / 2;
-      const fitsLeft = rect.left - 10 >= 272;
-      const fitsRight = viewportW - rect.right - 10 >= 272;
+      const fitsLeft = rect.left - 10 >= DRAWER_WIDTH;
+      const fitsRight = vw - rect.right - 10 >= DRAWER_WIDTH;
       const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
-      if (openRight) {
-        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 272)), transform: 'translate(0, -50%)', above: false });
-      } else {
-        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 272), transform: 'translate(-100%, -50%)', above: false });
-      }
+      const desiredLeft = openRight ? rect.right + 10 : rect.left - 10 - DRAWER_WIDTH;
+      const pos = computeSafePopoverPosition(cy - estHeight / 2, estHeight, desiredLeft, DRAWER_WIDTH, vw, vh);
+      setColorDrawerPos({ top: pos.top, left: pos.left, transform: 'none', above: false });
     } else {
-      const cx = Math.max(144, Math.min(rect.left + rect.width / 2, window.innerWidth - 144));
+      const cx = Math.max(144, Math.min(rect.left + rect.width / 2, vw - 144));
+      const desiredLeft = cx - DRAWER_WIDTH / 2;
       // Stage 8 Part A (Axis 3): smart flip — if there is not enough
-      // room below the bar (drawer ~460px) but more room above, the
+      // room below the bar (drawer ~440px) but more room above, the
       // drawer opens ABOVE the bar so it is never clipped by the
-      // bottom edge of the monitor.
-      const spaceBelow = viewportH - rect.bottom;
+      // bottom edge of the monitor. The safe clamp below is the
+      // final guard even when the flip misjudges the real height.
+      const spaceBelow = vh - rect.bottom;
       const spaceAbove = rect.top;
-      if (spaceBelow < 470 && spaceAbove > spaceBelow) {
-        setColorDrawerPos({ top: rect.top - 10, left: cx, transform: 'translateX(-50%) translateY(-100%)', above: true });
-      } else {
-        setColorDrawerPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)', above: false });
-      }
+      const above = spaceBelow < estHeight + 10 && spaceAbove > spaceBelow;
+      const desiredTop = above ? rect.top - 10 - estHeight : rect.bottom + 10;
+      const pos = computeSafePopoverPosition(desiredTop, estHeight, desiredLeft, DRAWER_WIDTH, vw, vh);
+      setColorDrawerPos({ top: pos.top, left: pos.left, transform: 'none', above });
     }
     setColorDrawerOpen(true);
   };
 
+  // مرحلهٔ ۵۸ مأموریتِ ۵: یاری‌رسان‌هایِ چیدمانِ بنتو — کنترلِ
+  // یکپارچهٔ حالتِ ابزار (پس‌زمینهٔ یکدستِ تیره، دکمهٔ فعالِ
+  // فیروزه‌ای، سهم‌هایِ برابر در عرضِ کاملِ ردیف) و جداکنندهٔ
+  // شرطیِ بخش‌ها (فقط وقتی بخشی بالای آن هست). این‌ها تابعِ
+  // ساده‌اند، نه هوک.
+  const bentoSegmentedWrap = (columns) => ({
+    display: 'grid',
+    gridTemplateColumns: `repeat(${columns}, 1fr)`,
+    gap: 3,
+    width: '100%',
+    background: 'rgba(15,23,42,0.75)',
+    border: '1px solid rgba(255,255,255,0.10)',
+    borderRadius: 10,
+    padding: 3,
+    boxSizing: 'border-box',
+  });
+  const bentoSegmentedBtn = (active) => ({
+    ...btnBase,
+    height: 32,
+    borderRadius: 8,
+    fontSize: 12,
+    fontFamily: 'inherit',
+    whiteSpace: 'nowrap',
+    background: active ? 'rgba(34,211,238,0.22)' : 'transparent',
+    color: active ? '#67e8f9' : 'rgba(255,255,255,0.65)',
+    outline: active ? '1.5px solid #22d3ee' : 'none',
+    outlineOffset: -1,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  });
+  const bentoSepIf = (on) => (on ? { borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 10 } : {});
+  const showThickness = !hideStrokeControls && !hideColorControls;
+  const showOpacity = !hideColorControls;
+  // بخشِ ۱ برای این ابزار هست؟ (برای جداکنندهٔ شرطیِ بخش‌های بعد)
+  const hasModeSection = annotationTool === 'select' || annotationTool === 'box'
+    || annotationTool === 'arrow' || selectedAnnotationTool === 'arrow' || isTypoMode;
+  const zoomHasSectionsAbove = hasModeSection || !hideColorControls || showThickness || showOpacity;
+  // مرحلهٔ ۵۸ مأموریتِ ۵: پانلِ بنتو — همهٔ پاپ‌اورهای ابزار، رویِ
+  // یک چیدمانِ ثابتِ ۲۸۸ پیکسلیِ متقارن بازسازی شدند: بخشِ ۱
+  // کنترلِ یکپارچهٔ حالتِ ابزار (فقط وقتی ابزار، حالتی دارد)،
+  // بخشِ ۲ رنگِ ابزار با سربرگ و گریدِ ۸ ستونهٔ سوآچ‌ها، بخشِ ۳
+  // ضخامت + شفافیت در یک جعبهٔ فشرده، و بخشِ ۴ فوترِ فشردهٔ زوم.
+  // برای دست، پانل اصلاً رندر نمی‌شود (به showSecondary مراجعه
+  // کنید — مأموریتِ ۳). راهنمای دوبار کلیکِ قدیمی حذف شد.
   const secondaryContent = (
-    <>
-      {/* فاز ۲: زیرمنوی کادربندی — فقط وقتی ابزار box فعال است */}
+    <div
+      dir="rtl"
+      style={{
+        width: 288,
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        alignItems: 'stretch',
+      }}
+    >
+      {/* بخشِ ۱ — حالتِ ابزار: انتخاب (باکسی/کمند) */}
+      {annotationTool === 'select' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, animation: 'submenuIn 0.2s ease' }}>
+          <div style={bentoSegmentedWrap(2)}>
+            {selectSubModeOptions.map((opt) => {
+              const active = selectSubMode === opt.id;
+              const OptIcon = opt.Icon;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  aria-pressed={active}
+                  aria-label={opt.label}
+                  title={opt.label}
+                  onClick={() => { setSelectSubMode(opt.id); }}
+                  style={{ ...bentoSegmentedBtn(active), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '0 6px' }}
+                >
+                  <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+                    <OptIcon size={16} />
+                  </span>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{opt.id === 'box' ? 'کادری' : 'کمند'}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* بخشِ ۱ — حالتِ ابزار: کادربندی */}
       {annotationTool === 'box' && (
-        <div
-          key="submenu-box"
-          style={{ display: 'flex', flexDirection: isVertical ? 'column' : 'row', gap: isVertical ? 8 : 4, alignItems: 'center', animation: 'submenuIn 0.2s ease' }}
-        >
-          {divider}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, animation: 'submenuIn 0.2s ease' }}>
+          <div style={bentoSegmentedWrap(3)}>
             {BOX_STYLES.map((bs) => {
               const active = annotationBoxStyle === bs.id;
               return (
@@ -1723,65 +1807,36 @@ export function AnnotationToolbar({
                     setAnnotationBoxStyle(bs.id);
                     broadcastSelectedBoxPatch({ boxStyle: bs.id });
                   }}
-                  style={{
-                    ...btnBase,
-                    height: 32,
-                    padding: '0 10px',
-                    borderRadius: 9,
-                    fontSize: 12,
-                    fontFamily: 'inherit',
-                    whiteSpace: 'nowrap',
-                    background: active ? 'rgba(34,211,238,0.20)' : 'transparent',
-                    color: active ? '#67e8f9' : 'rgba(255,255,255,0.6)',
-                    outline: active ? '1.5px solid #22d3ee' : 'none',
-                    outlineOffset: -1,
-                  }}
+                  style={bentoSegmentedBtn(active)}
                 >
                   {bs.label}
                 </button>
               );
             })}
-            {/* دکمه تاگل پر کردن داخل کادر */}
-            <button
-              className="at-pill"
-              title={annotationHasFill ? 'رنگ داخل: روشن (کلیک برای خاموش)' : 'رنگ داخل: خاموش (کلیک برای روشن)'}
-              onClick={() => {
-                toggleAnnotationFill();
-                // مقدار جدید بعد از set همگام Zustand در getState در دسترس است
-                const next = typeof useAppStore.getState === 'function'
-                  ? useAppStore.getState().annotationHasFill
-                  : !annotationHasFill;
-                broadcastSelectedBoxPatch({ hasFill: Boolean(next) });
-              }}
-              style={{
-                ...btnBase,
-                height: 32,
-                padding: '0 10px',
-                borderRadius: 9,
-                fontSize: 12,
-                fontFamily: 'inherit',
-                whiteSpace: 'nowrap',
-                background: annotationHasFill ? 'rgba(34,211,238,0.20)' : 'transparent',
-                color: annotationHasFill ? '#67e8f9' : 'rgba(255,255,255,0.4)',
-                outline: annotationHasFill ? '1.5px solid #22d3ee' : '1px dashed rgba(255,255,255,0.2)',
-                outlineOffset: -1,
-              }}
-            >
-              {annotationHasFill ? '◉ توپر' : '○ توخالی'}
-            </button>
           </div>
+          <button
+            className="at-pill"
+            title={annotationHasFill ? 'رنگ داخل: روشن (کلیک برای خاموش)' : 'رنگ داخل: خاموش (کلیک برای روشن)'}
+            onClick={() => {
+              toggleAnnotationFill();
+              // مقدار جدید بعد از set همگام Zustand در getState در دسترس است
+              const next = typeof useAppStore.getState === 'function'
+                ? useAppStore.getState().annotationHasFill
+                : !annotationHasFill;
+              broadcastSelectedBoxPatch({ hasFill: Boolean(next) });
+            }}
+            style={{ ...bentoSegmentedBtn(annotationHasFill), width: '100%' }}
+          >
+            {annotationHasFill ? '◉ توپر' : '○ توخالی'}
+          </button>
         </div>
       )}
 
-      {/* فاز ۳ + Refinement Step 2: زیرمنوی فلش — وقتی ابزار arrow فعال است
+      {/* بخشِ ۱ — حالتِ ابزار: فلش — وقتی ابزار arrow فعال است
           یا آیتمِ انتخاب‌شده فلش است (طبقِ TASK: tool OR selectedAnnotationTool) */}
       {(annotationTool === 'arrow' || selectedAnnotationTool === 'arrow') && (
-        <div
-          key="submenu-arrow"
-          style={{ display: 'flex', flexDirection: isVertical ? 'column' : 'row', gap: isVertical ? 8 : 4, alignItems: 'center', animation: 'submenuIn 0.2s ease' }}
-        >
-          {divider}
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, animation: 'submenuIn 0.2s ease' }}>
+          <div style={bentoSegmentedWrap(2)}>
             {ARROW_STYLES.map((as) => {
               const active = annotationArrowStyle === as.id;
               return (
@@ -1795,24 +1850,14 @@ export function AnnotationToolbar({
                     }
                     broadcastSelectedArrowPatch({ arrowStyle: as.id });
                   }}
-                  style={{
-                    ...btnBase,
-                    height: 32,
-                    padding: '0 10px',
-                    borderRadius: 9,
-                    fontSize: 12,
-                    fontFamily: 'inherit',
-                    whiteSpace: 'nowrap',
-                    background: active ? 'rgba(34,211,238,0.20)' : 'transparent',
-                    color: active ? '#67e8f9' : 'rgba(255,255,255,0.6)',
-                    outline: active ? '1.5px solid #22d3ee' : 'none',
-                    outlineOffset: -1,
-                  }}
+                  style={bentoSegmentedBtn(active)}
                 >
                   {as.label}
                 </button>
               );
             })}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
             <button
               className="at-pill"
               title="نقطهٔ مبدأ فلش: ته‌گرد یا ساده"
@@ -1823,19 +1868,7 @@ export function AnnotationToolbar({
                 }
                 broadcastSelectedPropertyPatch({ hasStartDot: next });
               }}
-              style={{
-                ...btnBase,
-                height: 32,
-                padding: '0 10px',
-                borderRadius: 9,
-                fontSize: 12,
-                fontFamily: 'inherit',
-                whiteSpace: 'nowrap',
-                background: annotationHasStartDot ? 'rgba(34,211,238,0.20)' : 'transparent',
-                color: annotationHasStartDot ? '#67e8f9' : 'rgba(255,255,255,0.6)',
-                outline: annotationHasStartDot ? '1.5px solid #22d3ee' : 'none',
-                outlineOffset: -1,
-              }}
+              style={bentoSegmentedBtn(annotationHasStartDot)}
             >
               {annotationHasStartDot ? '◉ ته‌گرد' : '○ ساده'}
             </button>
@@ -1849,19 +1882,7 @@ export function AnnotationToolbar({
                 }
                 broadcastSelectedPropertyPatch({ hasEndArrow: next });
               }}
-              style={{
-                ...btnBase,
-                height: 32,
-                padding: '0 10px',
-                borderRadius: 9,
-                fontSize: 12,
-                fontFamily: 'inherit',
-                whiteSpace: 'nowrap',
-                background: annotationHasEndArrow ? 'rgba(34,211,238,0.20)' : 'transparent',
-                color: annotationHasEndArrow ? '#67e8f9' : 'rgba(255,255,255,0.6)',
-                outline: annotationHasEndArrow ? '1.5px solid #22d3ee' : 'none',
-                outlineOffset: -1,
-              }}
+              style={bentoSegmentedBtn(annotationHasEndArrow)}
             >
               {annotationHasEndArrow ? (<><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ display: 'inline-block', verticalAlign: 'middle', marginLeft: 5 }}><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg><span>با فلش</span></>) : '— خط'}
             </button>
@@ -1869,15 +1890,13 @@ export function AnnotationToolbar({
         </div>
       )}
 
-      {/* فاز ۴: زیرمنوی متن — وقتی ابزار متن فعال است، یا آیتمِ انتخاب‌شده
-          متنی است (شرطِ گستردهٔ قدیمی؛ چون تعویضِ ابزار، انتخاب را پاک
-          می‌کند، شرطِ فقط-tool برای ویرایشِ متنِ انتخاب‌شده کافی نیست). */}
-      {/* گام ۲ میانی: کنسولِ فونت برای متن و استیکی (isTypoMode) — ورود
-          با keyframesی typoConsoleIn، بدونِ انیمیتِ width/margin. */}
+      {/* بخشِ ۱ — حالتِ ابزار: فونتِ متن/استیکی (کنسولِ تایپو) */}
       {isTypoMode && (
-        <>
-          {divider}
-          <div key={annotationTool} style={{ display: 'flex', gap: 4, alignItems: 'center', animation: 'typoConsoleIn 0.25s ease' }}>
+        <div key={annotationTool} style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'typoConsoleIn 0.25s ease' }}>
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
+            فونتِ متن — پیش‌فرض: استعداد
+          </div>
+          <div style={bentoSegmentedWrap(3)}>
             {FONT_OPTIONS.map((f) => {
               const active = annotationFontFamily === f.id;
               return (
@@ -1891,43 +1910,276 @@ export function AnnotationToolbar({
                     }
                     broadcastTypoPatch({ fontFamily: f.id });
                   }}
-                  style={{
-                    ...btnBase,
-                    height: 32,
-                    padding: '0 10px',
-                    borderRadius: 9,
-                    fontSize: 12,
-                    fontFamily: 'inherit',
-                    whiteSpace: 'nowrap',
-                    background: active ? 'rgba(34,211,238,0.20)' : 'transparent',
-                    color: active ? '#67e8f9' : 'rgba(255,255,255,0.6)',
-                    outline: active ? '1.5px solid #22d3ee' : 'none',
-                    outlineOffset: -1,
-                  }}
+                  style={bentoSegmentedBtn(active)}
                 >
                   {f.label}
                 </button>
               );
             })}
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>
+              اندازه:
+            </span>
+            <input
+              type="range"
+              min={14}
+              max={76}
+              step={1}
+              value={annotationFontSize}
+              onChange={(e) => {
+                const val = Math.max(14, Math.min(76, parseInt(e.target.value, 10) || 22));
+                if (typeof setAnnotationFontSize === 'function') {
+                  setAnnotationFontSize(val);
+                }
+                broadcastTypoPatch({ fontSize: val });
+              }}
+              className="at-range"
+              style={{ flex: 1, minWidth: 0, accentColor: '#22d3ee', cursor: 'pointer' }}
+            />
+            <span
+              style={{
+                fontSize: 12,
+                color: '#67e8f9',
+                minWidth: 44,
+                textAlign: 'center',
+                background: 'rgba(34,211,238,0.12)',
+                borderRadius: 7,
+                padding: '2px 6px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {annotationFontSize}px
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* بخشِ ۲ — رنگِ ابزار: سربرگ + گریدِ ۸ ستونهٔ سوآچ‌ها.
+          دکمه‌های ویرایش و +، دیگر ردیفِ سوآچ را نمی‌شکنند؛ در
+          سربرگ‌اند. مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است. */}
+      {!hideColorControls && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, ...bentoSepIf(hasModeSection) }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap' }}>
+              رنگِ ابزار
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <button
+                ref={paletteBtnRef}
+                type="button"
+                title={`پالت‌ها — پالتِ فعال: ${activePaletteLabel} — باز کردنِ دراورِ پالتِ تخصصی`}
+                onClick={toggleColorDrawer}
+                style={{
+                  ...btnBase,
+                  height: 26,
+                  padding: '0 8px',
+                  borderRadius: 13,
+                  background: colorDrawerOpen ? 'rgba(34,211,238,0.22)' : 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  color: colorDrawerOpen ? '#67e8f9' : 'rgba(255,255,255,0.8)',
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: 'inherit',
+                  flexShrink: 0,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 5,
+                  maxWidth: 128,
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0 }}>
+                  <path d="M12 22a1 1 0 0 1 0-20a10 9 0 0 1 10 9a5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" />
+                  <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
+                  <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
+                  <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
+                  <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
+                </svg>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>پالت‌ها: {activePaletteLabel}</span>
+              </button>
+              <button
+                type="button"
+                title="افزودن رنگِ فعلی به نوار ابزار"
+                onClick={addCurrentColorToStrip}
+                style={{ ...btnBase, width: 24, height: 24, borderRadius: '50%', flexShrink: 0, background: 'transparent', border: '1px dashed rgba(255,255,255,0.4)', color: 'rgba(255,255,255,0.75)', fontSize: 14, lineHeight: 1, cursor: 'pointer' }}
+              >
+                +
+              </button>
+              <button
+                type="button"
+                title={isEditingStrip ? 'پایانِ ویرایشِ نوار ابزار' : 'ویرایشِ نوار ابزار (حذفِ رنگ‌ها با ×)'}
+                onClick={() => setIsEditingStrip(!isEditingStrip)}
+                style={{ ...btnBase, height: 26, padding: '0 8px', borderRadius: 13, background: isEditingStrip ? 'rgba(244,63,94,0.16)' : 'transparent', border: isEditingStrip ? '1px solid rgba(244,63,94,0.5)' : '1px solid rgba(255,255,255,0.25)', color: isEditingStrip ? '#fda4af' : 'rgba(255,255,255,0.75)', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer', whiteSpace: 'nowrap' }}
+              >
+                {isEditingStrip ? 'پایان ویرایش' : 'ویرایش'}
+              </button>
+            </span>
+          </div>
+          {activePaletteId !== 'default' && (
+            <button
+              type="button"
+              title="بازگشت به پالتِ پیش‌فرض"
+              onClick={() => activatePalette('default')}
+              style={{ ...btnBase, alignSelf: 'flex-start', height: 26, padding: '0 8px', borderRadius: 13, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+            >
+              {activePaletteLabel} ×
+            </button>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 6, justifyItems: 'center' }}>
+            {quickColors.map((c) => {
+              const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
+              return (
+                <span key={c.hex} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+                  <button
+                    title={c.label}
+                    onMouseEnter={() => setHoverSwatch(`q:${c.hex}`)}
+                    onMouseLeave={() => setHoverSwatch(null)}
+                    onContextMenu={(e) => { e.preventDefault(); removeStripColor(c.hex); }}
+                    onClick={() => {
+                      setAnnotationColor(c.hex);
+                      // فاز ۵: بایندینگِ دوطرفهٔ رنگ — علاوه بر ساختِ
+                      // ابزارِ بعدی، آیتمِ انتخاب‌شده هم به‌روز می‌شود.
+                      // اگر انتخابی نباشد، broadcastSelectedPropertyPatch
+                      // هیچ رویدادی شلیک نمی‌کند.
+                      broadcastSelectedPropertyPatch({ color: c.hex });
+                    }}
+                    style={{
+                      ...btnBase,
+                      width: 28,
+                      height: 28,
+                      padding: 0,
+                      boxSizing: 'border-box',
+                      flexShrink: 0,
+                      borderRadius: '50%',
+                      background: 'transparent',
+                      // فاز ۳ پالت — نشانگرِ رنگِ فعال (تسک §۱): به‌جای
+                      // رینگِ فیروزه‌ایِ قبلی، بجِ سفید + درخششِ هم‌رنگ.
+                      border: 'none',
+                      boxShadow: 'none',
+                      transform: 'none',
+                      transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                    }}
+                  >
+                    {/* فاز ۴ — Fixed Hitbox: دکمه ۲۸×۲۸ ثابت است و هیچ
+                      transformای ندارد؛ دایرهٔ رنگ، spanی داخلی با
+                      pointerEvents خنثی است تا Hitbox هرگز تکان نخورد. */}
+                    <span
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        width: 20,
+                        height: 20,
+                        borderRadius: '50%',
+                        pointerEvents: 'none',
+                        background: c.hex,
+                        border: active
+                          ? '1.5px solid rgba(255,255,255,0.85)'
+                          : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
+                        boxShadow: active
+                          // مرحلهٔ ۳۸ §۵: رنگِ انتخاب‌شده تیره + حلقهٔ سفید + تیک.
+                          ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${c.hex}`
+                          : hoverSwatch === `q:${c.hex}`
+                            ? `0 6px 14px ${c.hex}`
+                            : '0 0 0 1px rgba(255,255,255,0.2)',
+                        transform: hoverSwatch === `q:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
+                        transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
+                      }}
+                    >
+                      {active && (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
+                      )}
+                    </span>
+                  </button>
+                  {isEditingStrip && (
+                    <button
+                      type="button"
+                      title={`حذف ${c.hex} از نوار ابزار`}
+                      onClick={(e) => { e.stopPropagation(); removeStripColor(c.hex); }}
+                      style={{ position: 'absolute', top: -7, left: -7, width: 16, height: 16, borderRadius: '50%', background: '#f43f5e', color: '#ffffff', border: '1px solid rgba(255,255,255,0.7)', fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, zIndex: 1 }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* بخشِ ۳ — ضخامت + شفافیت در یک جعبهٔ فشرده.
+          مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن، کلِ بخش پنهان است؛ برای
+          متن/استیکی/باکس، ردیفِ ضخامت پنهان است و فقط شفافیت می‌ماند. */}
+      {(showThickness || showOpacity) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 10, background: 'rgba(255,255,255,0.03)' }}>
+          {showThickness && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4 }}>
+              {SIZES.map((v) => {
+                const active = annotationStrokeWidth === v;
+                const dot = Math.min(18, 5 + v * 1.2);
+                return (
+                  <button
+                    key={v}
+                    className="at-pill"
+                    title={`ضخامت ${v}`}
+                    onClick={() => {
+                      setAnnotationStrokeWidth(v);
+                      // فاز ۵: بایندینگِ دوطرفهٔ ضخامت — مثلِ رنگ.
+                      // توجه: برای آیتمِ متنی، شنوندهٔ لایه strokeWidth را
+                      // می‌پذیرد ولی رندرِ متن از strokeWidth استفاده
+                      // نمی‌کند؛ پس تغییرِ ضخامت روی متنِ انتخاب‌شده،
+                      // فقط میدان را ذخیره می‌کند و ظاهرِ متن را عوض
+                      // نمی‌کند (نقشهٔ قدیمیِ strokeWidth برای متن، از
+                      // fontSize ساخته می‌شود — به گزارشِ اسکنِ فاز ۵، §۱٫۳).
+                      broadcastSelectedPropertyPatch({ strokeWidth: v });
+                    }}
+                    style={{
+                      ...btnBase,
+                      width: '100%',
+                      height: 32,
+                      borderRadius: 9,
+                      background: active ? 'rgba(34,211,238,0.20)' : 'transparent',
+                      outline: active ? '1.5px solid #22d3ee' : 'none',
+                      outlineOffset: -1,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: dot,
+                        height: dot,
+                        borderRadius: '50%',
+                        background: active ? '#67e8f9' : 'rgba(255,255,255,0.5)',
+                        flexShrink: 0,
+                      }}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {showOpacity && (
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>
-                اندازه:
+                شفافیت:
               </span>
               <input
                 type="range"
-                min={14}
-                max={76}
-                step={1}
-                value={annotationFontSize}
+                min={15}
+                max={100}
+                step={5}
+                value={Math.round((Number(annotationOpacity) || 0.85) * 100)}
                 onChange={(e) => {
-                  const val = Math.max(14, Math.min(76, parseInt(e.target.value, 10) || 22));
-                  if (typeof setAnnotationFontSize === 'function') {
-                    setAnnotationFontSize(val);
+                  const pct = Math.max(15, Math.min(100, parseInt(e.target.value, 10) || 85));
+                  const val = pct / 100;
+                  if (typeof setAnnotationOpacity === 'function') {
+                    setAnnotationOpacity(val);
                   }
-                  broadcastTypoPatch({ fontSize: val });
+                  broadcastSelectedPropertyPatch({ opacity: val });
                 }}
                 className="at-range"
-                style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
+                style={{ flex: 1, minWidth: 0, accentColor: '#22d3ee', cursor: 'pointer' }}
               />
               <span
                 style={{
@@ -1941,311 +2193,57 @@ export function AnnotationToolbar({
                   whiteSpace: 'nowrap',
                 }}
               >
-                {annotationFontSize}px
+                {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
               </span>
             </div>
-          </div>
-        </>
+          )}
+        </div>
       )}
 
-      {divider}
-
-      {/* رنگ‌ها — مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است */}
-      {!hideColorControls && (
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
-        {activePaletteId !== 'default' && (
-          <button
-            type="button"
-            title="بازگشت به پالتِ پیش‌فرض"
-            onClick={() => activatePalette('default')}
-            style={{ ...btnBase, height: 28, padding: '0 8px', borderRadius: 14, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
-          >
-            {activePaletteLabel} ×
-          </button>
-        )}
-        {quickColors.map((c) => {
-          const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
-          return (
-            <span key={c.hex} style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
+      {/* بخشِ ۴ — فوترِ فشردهٔ زوم (مرحلهٔ ۳۵ §۵: هماهنگیِ اندازهٔ
+          استیکی‌نوت با زوم + تنظیمِ دستیِ مقیاسِ استیکی. تاگل،
+          مقیاسِ رندرِ معکوسِ زوم را فعال می‌کند؛ دکمه‌های − و +،
+          مقیاسِ دستیِ استیکیِ انتخاب‌شده را عوض می‌کنند. برای
+          متن، اندازه با کنترلِ فونتِ بخشِ ۱ تنظیم می‌شود.) */}
+      <div style={{ ...bentoSepIf(zoomHasSectionsAbove) }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, height: 32 }}>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={zoomAdaptiveAnnotations}
+              onChange={(e) => { if (typeof setZoomAdaptiveAnnotations === 'function') setZoomAdaptiveAnnotations(e.target.checked); }}
+              style={{ accentColor: '#22d3ee', cursor: 'pointer' }}
+            />
+            تطبیق با زوم
+          </label>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <button
-              title={c.label}
-              onMouseEnter={() => setHoverSwatch(`q:${c.hex}`)}
-              onMouseLeave={() => setHoverSwatch(null)}
-              onContextMenu={(e) => { e.preventDefault(); removeStripColor(c.hex); }}
+              type="button"
+              aria-label="کوچک‌تر کردن استیکی"
               onClick={() => {
-                setAnnotationColor(c.hex);
-                // فاز ۵: بایندینگِ دوطرفهٔ رنگ — علاوه بر ساختِ
-                // ابزارِ بعدی، آیتمِ انتخاب‌شده هم به‌روز می‌شود.
-                // اگر انتخابی نباشد، broadcastSelectedPropertyPatch
-                // هیچ رویدادی شلیک نمی‌کند.
-                broadcastSelectedPropertyPatch({ color: c.hex });
+                const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) - 0.25) * 100) / 100));
+                if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
+                broadcastSelectedPropertyPatch({ customScale: next });
               }}
-              style={{
-                ...btnBase,
-                width: 28,
-                height: 28,
-                padding: 0,
-                boxSizing: 'border-box',
-                flexShrink: 0,
-                borderRadius: '50%',
-                background: 'transparent',
-                // فاز ۳ پالت — نشانگرِ رنگِ فعال (تسک §۱): به‌جای
-                // رینگِ فیروزه‌ایِ قبلی، بجِ سفید + درخششِ هم‌رنگ.
-                border: 'none',
-                boxShadow: 'none',
-                transform: 'none',
-                transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
-              }}
-            >
-              {/* فاز ۴ — Fixed Hitbox: دکمه ۲۸×۲۸ ثابت است و هیچ
-                transformای ندارد؛ دایرهٔ رنگ، spanی داخلی با
-                pointerEvents خنثی است تا Hitbox هرگز تکان نخورد. */}
-              <span
-                style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  width: 20,
-                  height: 20,
-                  borderRadius: '50%',
-                  pointerEvents: 'none',
-                  background: c.hex,
-                  border: active
-                    ? '1.5px solid rgba(255,255,255,0.85)'
-                    : c.hex === '#f8fafc' ? '1px solid rgba(0,0,0,0.2)' : 'none',
-                  boxShadow: active
-                    // مرحلهٔ ۳۸ §۵: رنگِ انتخاب‌شده تیره + حلقهٔ سفید + تیک.
-                    ? `inset 0 0 0 999px rgba(0, 0, 0, 0.35), 0 0 0 2px #ffffff, 0 0 10px ${c.hex}`
-                    : hoverSwatch === `q:${c.hex}`
-                      ? `0 6px 14px ${c.hex}`
-                      : '0 0 0 1px rgba(255,255,255,0.2)',
-                  transform: hoverSwatch === `q:${c.hex}` ? 'scale(1.16) translateY(-2px)' : 'scale(1)',
-                  transition: 'all 0.2s cubic-bezier(0.34, 1.56, 0.64, 1)',
-                }}
-              >
-                {active && (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
-                  <polyline points="20 6 9 17 4 12" />
-                </svg>
-                )}
-              </span>
-            </button>
-              {isEditingStrip && (
-                <button
-                  type="button"
-                  title={`حذف ${c.hex} از نوار ابزار`}
-                  onClick={(e) => { e.stopPropagation(); removeStripColor(c.hex); }}
-                  style={{ position: 'absolute', top: -7, left: -7, width: 16, height: 16, borderRadius: '50%', background: '#f43f5e', color: '#ffffff', border: '1px solid rgba(255,255,255,0.7)', fontSize: 11, lineHeight: 1, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0, zIndex: 1 }}
-                >
-                  ×
-                </button>
-              )}
+              style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+            >−</button>
+            <span style={{ fontSize: 12, color: '#67e8f9', minWidth: 44, textAlign: 'center', background: 'rgba(34,211,238,0.12)', borderRadius: 7, padding: '2px 6px', whiteSpace: 'nowrap' }}>
+              {Math.round((Number(stickyManualScale) || 1) * 100)}٪
             </span>
-          );
-        })}
-        {/* مرحلهٔ ۵۷ مأموریتِ ۲: + کنارِ رنگ‌هایِ نوارِ سریع (افزودنِ
-            رنگِ فعلی به نوار) و دکمهٔ ویرایش (× روی هر رنگ). حذف با
-            کلیکِ راست رویِ هر رنگ هم همیشه آزاد است. */}
-        <button
-          type="button"
-          title="افزودن رنگِ فعلی به نوار ابزار"
-          onClick={addCurrentColorToStrip}
-          style={{ ...btnBase, width: 28, height: 28, borderRadius: '50%', flexShrink: 0, background: 'transparent', border: '1px dashed rgba(255,255,255,0.4)', color: 'rgba(255,255,255,0.75)', fontSize: 16, lineHeight: 1, cursor: 'pointer' }}
-        >
-          +
-        </button>
-        <button
-          type="button"
-          title={isEditingStrip ? 'پایانِ ویرایشِ نوار ابزار' : 'ویرایشِ نوار ابزار (حذفِ رنگ‌ها با ×)'}
-          onClick={() => setIsEditingStrip(!isEditingStrip)}
-          style={{ ...btnBase, height: 28, padding: '0 8px', borderRadius: 14, background: isEditingStrip ? 'rgba(244,63,94,0.16)' : 'transparent', border: isEditingStrip ? '1px solid rgba(244,63,94,0.5)' : '1px solid rgba(255,255,255,0.25)', color: isEditingStrip ? '#fda4af' : 'rgba(255,255,255,0.75)', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer', whiteSpace: 'nowrap' }}
-        >
-          {isEditingStrip ? 'پایان ویرایش' : 'ویرایش'}
-        </button>
-        {/* فاز ۳ پالت — دکمهٔ دراورِ پالتِ تخصصی، کنارِ رنگ‌های
-          دم‌دست. آیکونِ Paletteی لوسید با SVGی خام است، چون
-          Icons.jsxی پروژه این آیکون را ندارد (الگوی Grip و
-          Columns/Rows در همین فایل)؛ مسیرها از بستهٔ jaspr_icons_pack
-          (همان منبعی که برای Pinی لوسید راستی‌آزمایی شده بود) گرفته
-          شده‌اند. */}
-        <button
-          ref={paletteBtnRef}
-          title="پالت رنگ تخصصی"
-          onClick={toggleColorDrawer}
-          style={{
-            ...btnBase,
-            width: 30,
-            height: 30,
-            borderRadius: '50%',
-            flexShrink: 0,
-            background: colorDrawerOpen ? 'rgba(34,211,238,0.22)' : 'transparent',
-            color: colorDrawerOpen ? '#67e8f9' : 'rgba(255,255,255,0.75)',
-            outline: colorDrawerOpen ? '1.5px solid #22d3ee' : '1px solid rgba(255,255,255,0.25)',
-            outlineOffset: -1,
-          }}
-        >
-          <svg
-            width="17"
-            height="17"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M12 22a1 1 0 0 1 0-20a10 9 0 0 1 10 9a5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" />
-            <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
-            <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
-            <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
-            <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
-          </svg>
-        </button>
-      </div>
-      )}
-
-      {!hideStrokeControls && !hideColorControls && (
-        <>
-      {divider}
-
-      {/* اندازه */}
-      <div style={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-        {SIZES.map((v) => {
-          const active = annotationStrokeWidth === v;
-          const dot = Math.min(18, 5 + v * 1.2);
-          return (
             <button
-              key={v}
-              className="at-pill"
-              title={`ضخامت ${v}`}
+              type="button"
+              aria-label="بزرگ‌تر کردن استیکی"
               onClick={() => {
-                setAnnotationStrokeWidth(v);
-                // فاز ۵: بایندینگِ دوطرفهٔ ضخامت — مثلِ رنگ.
-                // توجه: برای آیتمِ متنی، شنوندهٔ لایه strokeWidth را
-                // می‌پذیرد ولی رندرِ متن از strokeWidth استفاده
-                // نمی‌کند؛ پس تغییرِ ضخامت روی متنِ انتخاب‌شده،
-                // فقط میدان را ذخیره می‌کند و ظاهرِ متن را عوض
-                // نمی‌کند (نقشهٔ قدیمیِ strokeWidth برای متن، از
-                // fontSize ساخته می‌شود — به گزارشِ اسکنِ فاز ۵، §۱٫۳).
-                broadcastSelectedPropertyPatch({ strokeWidth: v });
+                const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) + 0.25) * 100) / 100));
+                if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
+                broadcastSelectedPropertyPatch({ customScale: next });
               }}
-              style={{
-                ...btnBase,
-                width: 32,
-                height: 32,
-                borderRadius: 9,
-                background: active ? 'rgba(34,211,238,0.20)' : 'transparent',
-                outline: active ? '1.5px solid #22d3ee' : 'none',
-                outlineOffset: -1,
-              }}
-            >
-              <span
-                style={{
-                  width: dot,
-                  height: dot,
-                  borderRadius: '50%',
-                  background: active ? '#67e8f9' : 'rgba(255,255,255,0.5)',
-                  flexShrink: 0,
-                }}
-              />
-            </button>
-          );
-        })}
+              style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
+            >+</button>
+          </div>
+        </div>
       </div>
-        </>
-      )}
-
-      {/* Refinement Step 2: اسلایدرِ شفافیت — کنارِ پالتِ اندازه‌ها.
-          روی تغییر: هم استور به‌روز می‌شود (برای شکل‌های بعدی) و هم
-          broadcastSelectedPropertyPatch({ opacity }) برای اعمالِ زنده
-          روی تمامِ آیتم‌های انتخاب‌شده (شنوندهٔ لایه، opacity را
-          می‌پذیرد و بعد از مرحلهٔ ۳، به همهٔ انتخاب‌شده‌ها گسترش
-          می‌دهد). محدوده ۱۵٪ تا ۱۰۰٪ با گامِ ۵٪، مثلِ TASK.
-          مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن، کلِ بلوک پنهان است. */}
-      {!hideColorControls && (
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px' }}>
-        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap' }}>
-          شفافیت:
-        </span>
-        <input
-          type="range"
-          min={15}
-          max={100}
-          step={5}
-          value={Math.round((Number(annotationOpacity) || 0.85) * 100)}
-          onChange={(e) => {
-            const pct = Math.max(15, Math.min(100, parseInt(e.target.value, 10) || 85));
-            const val = pct / 100;
-            if (typeof setAnnotationOpacity === 'function') {
-              setAnnotationOpacity(val);
-            }
-            broadcastSelectedPropertyPatch({ opacity: val });
-          }}
-          className="at-range"
-          style={{ width: 110, accentColor: '#22d3ee', cursor: 'pointer' }}
-        />
-        <span
-          style={{
-            fontSize: 12,
-            color: '#67e8f9',
-            minWidth: 44,
-            textAlign: 'center',
-            background: 'rgba(34,211,238,0.12)',
-            borderRadius: 7,
-            padding: '2px 6px',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {Math.round((Number(annotationOpacity) || 0.85) * 100)}٪
-        </span>
-      </div>
-      )}
-      {/* مرحلهٔ ۳۵ §۵: تطبیقِ خودکارِ اندازهٔ استیکی‌نوت با زوم +
-          تنظیمِ دستیِ مقیاسِ استیکی. تاگل، مقیاسِ رندرِ معکوسِ زوم
-          را فعال می‌کند؛ دکمه‌های − و +، مقیاسِ دستیِ استیکیِ
-          انتخاب‌شده را (از همان رویدادِ annotation:update-selected)
-          عوض می‌کنند. برای متن، اندازه با کنترلِ فونتِ موجود و
-          تقسیمِ خودکارِ هنگامِ ساخت تنظیم می‌شود. */}
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '0 2px', flexWrap: 'wrap' }}>
-        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={zoomAdaptiveAnnotations}
-            onChange={(e) => { if (typeof setZoomAdaptiveAnnotations === 'function') setZoomAdaptiveAnnotations(e.target.checked); }}
-            style={{ accentColor: '#22d3ee', cursor: 'pointer' }}
-          />
-          تطبیق خودکار با زوم
-        </label>
-        <button
-          type="button"
-          aria-label="کوچک‌تر کردن استیکی"
-          onClick={() => {
-            const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) - 0.25) * 100) / 100));
-            if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
-            broadcastSelectedPropertyPatch({ customScale: next });
-          }}
-          style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
-        >−</button>
-        <span style={{ fontSize: 12, color: '#67e8f9', minWidth: 44, textAlign: 'center', background: 'rgba(34,211,238,0.12)', borderRadius: 7, padding: '2px 6px', whiteSpace: 'nowrap' }}>
-          {Math.round((Number(stickyManualScale) || 1) * 100)}٪
-        </span>
-        <button
-          type="button"
-          aria-label="بزرگ‌تر کردن استیکی"
-          onClick={() => {
-            const next = Math.max(0.25, Math.min(3, Math.round(((Number(stickyManualScale) || 1) + 0.25) * 100) / 100));
-            if (typeof setStickyManualScale === 'function') setStickyManualScale(next);
-            broadcastSelectedPropertyPatch({ customScale: next });
-          }}
-          style={{ width: 22, height: 22, borderRadius: 7, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: '#ffffff', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }}
-        >+</button>
-      </div>
-      {/* میکروانیمیشن‌ها §۳ — راهنمای ریزِ دوبار کلیک: در ستونِ
-          عمودی، آخرین آیتمِ فلای‌اوت (پایینِ پنل) و در نوارِ افقی،
-          آخرین المانِ ردیفِ گزینه‌های فرعی است. */}
-      <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', textAlign: 'center', whiteSpace: 'nowrap', fontFamily: 'inherit' }}>
-        بسته شدن با دوبار کلیک
-      </div>
-    </>
+    </div>
   );
   const actionsContent = (
     <>
@@ -2689,6 +2687,11 @@ export function AnnotationToolbar({
   // دارد تا کلیک‌هایش به کانتینرِ حاشیه‌نویسی نرسد.
   // Stage 8 Part A (Axis 5): drawerMounted keeps the drawer alive
   // for the 200ms exit animation after colorDrawerOpen closes.
+  // مرحلهٔ ۵۸ مأموریتِ ۴: بیشینهٔ ارتفاعِ دراور از فرمولِ مرزِ امن —
+  // min(440, vh - 64 - 24) — تا پنل، همیشه بینِ TopBar و لبهٔ
+  // پایین جا شود؛ viewportH با resize به‌روز می‌شود، پس این مقدار
+  // هم زنده است.
+  const drawerMaxHeight = Math.min(440, viewportH - SAFE_TOP - 24);
   const colorDrawer = drawerMounted && colorDrawerPos && (
     <div
       dir="rtl"
@@ -2709,14 +2712,12 @@ export function AnnotationToolbar({
         className="at-color-drawer-scroll"
         style={{
           width: 272,
-          maxHeight: 'min(72vh, 460px)',
+          maxHeight: drawerMaxHeight,
           pointerEvents: drawerExiting ? 'none' : 'auto',
           // transformOrigin follows the smart flip so the drawer grows
           // out of the bar edge it opened from.
           transformOrigin: colorDrawerPos.above ? '50% 100%' : '50% 0',
           overflowY: 'auto',
-          scrollbarWidth: 'thin',
-          scrollbarColor: `${scrollbarColorStart} transparent`,
           padding: '10px 10px 20px',
           borderRadius: 14,
           background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
@@ -3243,95 +3244,6 @@ export function AnnotationToolbar({
     </div>
   );
 
-  // مرحله ۴۸ §۵: پاپ‌اورِ شناورِ زیرحالتِ انتخاب — همان شیشه و
-  // انیمیشنِ submenuInی زیرمنوهای باکس/فلش و همان مکانیکِ موقعیتِ
-  // ثابتِ دراورِ پالت (position: fixed + اندازه‌گیریِ دکمه). دو
-  // گزینه با آیکونِ SVG و نشانِ فعال (پس‌زمینهٔ رنگی + outline +
-  // تیکِ SVG)؛ انتخابِ گزینه، پاپ‌اور را می‌بندد.
-  const selectSubModeOptions = [
-    { id: 'box', label: 'انتخاب کادری (مستطیلی)', accent: { bg: 'rgba(34,211,238,0.22)', fg: '#67e8f9', line: '#22d3ee' }, Icon: SelectBoxIcon },
-    { id: 'lasso', label: 'انتخاب آزاد (کمند)', accent: { bg: 'rgba(167,139,250,0.22)', fg: '#c4b5fd', line: '#a78bfa' }, Icon: SelectLassoIcon },
-  ];
-  const selectPopover = selectPopoverOpen && selectPopoverPos && (
-    <div
-      dir="rtl"
-      style={{
-        position: 'fixed',
-        top: selectPopoverPos.top,
-        left: selectPopoverPos.left,
-        transform: selectPopoverPos.transform,
-        zIndex: 40,
-        // کانتینرِ بیرونی، فقط موقعیت نگه می‌دارد (مثلِ دراورِ پالت).
-        pointerEvents: 'none',
-      }}
-    >
-      <div
-        ref={selectPopoverRef}
-        role="menu"
-        aria-label="حالت انتخاب"
-        style={{
-          width: 248,
-          maxHeight: 'calc(100vh - 40px)',
-          pointerEvents: 'auto',
-          transformOrigin: selectPopoverPos.above ? '50% 100%' : '50% 0',
-          overflowY: 'auto',
-          scrollbarWidth: 'none',
-          padding: 8,
-          borderRadius: 14,
-          background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
-          border: '1px solid rgba(255,255,255,0.12)',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-          backdropFilter: 'blur(20px)',
-          WebkitBackdropFilter: 'blur(20px)',
-          userSelect: 'none',
-          animation: 'submenuIn 0.2s ease',
-        }}
-        onPointerDown={(e) => e.stopPropagation()}
-        onPointerMove={(e) => e.stopPropagation()}
-        onPointerUp={(e) => e.stopPropagation()}
-      >
-        <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6, padding: '2px 6px' }}>
-          حالت انتخاب
-        </div>
-        {selectSubModeOptions.map((opt) => {
-          const active = selectSubMode === opt.id;
-          const OptIcon = opt.Icon;
-          return (
-            <button
-              key={opt.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={active}
-              aria-label={opt.label}
-              title={opt.label}
-              onClick={() => { setSelectSubMode(opt.id); closeSelectPopover(); }}
-              style={{
-                ...btnBase,
-                ...selectChipStyle(active, opt.accent),
-                display: 'flex',
-                width: '100%',
-                alignItems: 'center',
-                gap: 8,
-                height: 38,
-                padding: '0 10px',
-                borderRadius: 10,
-                fontSize: 12,
-                fontFamily: 'inherit',
-                textAlign: 'right',
-              }}
-            >
-              <span style={{ display: 'inline-flex', flexShrink: 0 }}>
-                <OptIcon size={18} />
-              </span>
-              <span style={{ flex: 1 }}>{opt.label}</span>
-              {active && <Icons.Check size={14} />}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-
   return (
     <>
       {/* گام ۲ میانی: keyframesی ورودِ کنسولِ فونت. ترنزیشنِ CSS روی المانی
@@ -3340,7 +3252,7 @@ export function AnnotationToolbar({
           translateY(4px) scale(0.97) به none) با keyframes پیاده شد؛ بدونِ
           دست زدن به width/margin و بدونِ لمسِ transformی ریشه که مرکزچینی
           (translateX(-50%)) را نگه می‌دارد. */}
-      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } @keyframes submenuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(4px) scale(0.97); } } @keyframes flyoutInDown { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.96); } } @keyframes flyoutInUp { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.96); } } @keyframes drawerInDown { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.97); } } @keyframes drawerInUp { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.97); } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); } .at-color-drawer-scroll::-webkit-scrollbar { width: 6px; } .at-color-drawer-scroll::-webkit-scrollbar-track { background: transparent; } .at-color-drawer-scroll::-webkit-scrollbar-thumb { background: linear-gradient(180deg, ${scrollbarColorStart} 0%, ${scrollbarColorEnd} 100%); border-radius: 999px; } .at-color-drawer-scroll::-webkit-scrollbar-thumb:hover { filter: brightness(1.18); }`}</style>
+      <style>{`@keyframes typoConsoleIn { from { opacity: 0; transform: translateY(4px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes submenuIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } } @keyframes submenuOut { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(4px) scale(0.97); } } @keyframes flyoutInDown { from { opacity: 0; transform: translateY(-6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.96); } } @keyframes flyoutInUp { from { opacity: 0; transform: translateY(6px) scale(0.96); } to { opacity: 1; transform: none; } } @keyframes flyoutOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.96); } } @keyframes drawerInDown { from { opacity: 0; transform: translateY(-6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutDown { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px) scale(0.97); } } @keyframes drawerInUp { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } } @keyframes drawerOutUp { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(6px) scale(0.97); } } .at-pill { transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1), filter 0.2s ease; } .at-pill:hover { transform: scale(1.06); filter: brightness(1.3); } .at-range { transition: filter 0.2s ease; } .at-range:hover { filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.6)); }`}</style>
       {isVertical ? (
         // پولیش: حالتِ عمودی — یک قابِ wrap که کلِ مجموعه را در سمتِ راست
         // و وسطِ ارتفاع نگه می‌دارد (position/top/right/transform دقیقاً
@@ -3497,7 +3409,6 @@ export function AnnotationToolbar({
         </div>
       )}
       {colorDrawer}
-      {selectPopover}
       {toolDrag && dragGhostTool && (
         <div
           style={{

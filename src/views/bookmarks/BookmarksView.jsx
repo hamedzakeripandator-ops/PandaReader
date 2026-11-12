@@ -98,6 +98,13 @@ export default function BookmarksView({ onOpenComic }) {
     await deleteBookmark(filePath, id);
   };
 
+  // مرحلهٔ ۵۸، مأموریت ۱ — حذفِ پریست، فقط وقتی توستِ سبز می‌گیرد
+  // که دیتابیس واقعاً تأیید کرده باشد (پیش از این، هیچ بازخوردی نبود).
+  const handleDeletePreset = async (id) => {
+    const deleted = await deletePreset(id);
+    if (deleted) showToast('این ساخت حذف شد.', { type: 'success' });
+  };
+
   const resetPresetForm = () => {
     setPresetName('');
     setPresetImage(null);
@@ -333,7 +340,7 @@ export default function BookmarksView({ onOpenComic }) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => deletePreset(preset.id)}
+                    onClick={() => handleDeletePreset(preset.id)}
                     style={styles.presetDel}
                     title="حذفِ این ساخت"
                   >

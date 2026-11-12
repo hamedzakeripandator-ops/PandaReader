@@ -16,7 +16,7 @@ import annotationLocalBackup from '../../services/annotationLocalBackup';
 // می‌شود و عنوان/دسته، فقط در یک جا تعریف شده است.
 
 
-// مرحلهٔ ۵۵ §۳: مرکزِ بروزرسانی (PandaReader Update Center) —
+// مرحلهٔ ۵۵ §۳ + مرحلهٔ ۵۸ §۲ (m2): مرکزِ بروزرسانیِ خودکار (GitHub Auto-Update) —
 // قراردادِ IPC (سمتِ main/preload، کارِ m2):
 //   کانال‌ها: 'get-app-version' ،'check-for-updates' ،'download-update' ،
 //   'quit-and-install-update' ،'app-update-status'.
@@ -152,7 +152,9 @@ export function normalizeUpdateResult(result) {
 
 // مرحلهٔ ۵۵ §۳: ماشینِ وضعیتِ کارتِ بروزرسانی — تابعِ خالص.
 // وضعیت‌ها: 'idle' | 'checking' | 'up-to-date' | 'available' |
-// 'downloading' | 'downloaded' | 'error'.
+// 'downloading' | 'downloaded' | 'error' | 'no-releases'.
+// 'no-releases' یعنی گیت‌هاب ۴۰۴ داد (هنوز انتشاری نیست) و خطا نیست؛
+// فقط از نتیجهٔ مستقیمِ checkForUpdates می‌آید، نه از رویدادِ موتور.
 // رشته‌هایِ دقیقِ پرامپت، فقط این‌جا تعریف شده‌اند:
 //   checking: «در حال بررسی ارتباط با گیت‌هاب...»
 //   up-to-date: «نرم‌افزار شما به آخرین نسخه بروز است.»
@@ -265,6 +267,41 @@ export default function SettingsView() {
   };
 
   // مرحلهٔ ۵۷ §۳ (m3): برچسبِ پیشرفتِ دانلود با درصد، حجم و سرعت.
+  // مرحلهٔ ۵۸ §۲ (m2): رندرِ یادداشتِ انتشارِ آخرین نسخه — بلوک‌هایِ
+  // splitReleaseNotes (سرفصل/گلوله/متن)؛ اگر coreApiِ قدیمی آن را
+  // نداشت، متنِ خامِ تمیزشده نشان داده می‌شود.
+  const renderReleaseNotes = () => {
+    if (!updateState.releaseNotes) return null;
+    let blocks = [];
+    try {
+      if (coreApi && typeof coreApi.splitReleaseNotes === 'function') blocks = coreApi.splitReleaseNotes(updateState.releaseNotes);
+    } catch (_) { blocks = []; }
+    if (!blocks || blocks.length === 0) {
+      return (
+        <div style={styles.releaseNotesBox}>
+          <p style={styles.releaseNotesText}>{updateState.releaseNotes}</p>
+        </div>
+      );
+    }
+    return (
+      <div style={styles.releaseNotesBox}>
+        <div style={styles.releaseNotesTitle}>یادداشتِ انتشارِ نسخهٔ جدید</div>
+        {blocks.map((block, idx) => (
+          block.kind === 'heading' ? (
+            <div key={idx} style={styles.releaseNotesHeading}>{block.text}</div>
+          ) : block.kind === 'bullet' ? (
+            <div key={idx} style={styles.releaseNotesBulletRow}>
+              <span style={styles.releaseNotesBullet} />
+              <span style={styles.releaseNotesText}>{block.text}</span>
+            </div>
+          ) : (
+            <div key={idx} style={styles.releaseNotesText}>{block.text}</div>
+          )
+        ))}
+      </div>
+    );
+  };
+
   const formatDownloadProgressLabel = (state) => {
     const pct = Math.max(0, Math.min(100, Math.round(state.progress || 0)));
     let label = `در حال دانلود… ${pct}٪`;
@@ -510,7 +547,13 @@ export default function SettingsView() {
     setUpdateState((prev) => ({ ...prev, status: 'checking', progress: 0, message: 'در حال بررسی ارتباط با گیت‌هاب...' }));
     armUpdateCheckTimeout();
     try {
-      const results = await Promise.all([api.checkForUpdates(), loadLocalVersion()]);
+      // مرحلهٔ ۵۸ §۲ (m2): بررسی، با fallback سه‌لایه (IPCِ net.fetchِ
+      // پروکسی‌شناس، بعد https، بعد fetch رندرر)؛ هر کلیک، دوباره
+      // از گیت‌هاب می‌خواند و هیچ کشی در میان نیست.
+      const checkFn = (coreApi && typeof coreApi.checkForUpdatesWithFallback === 'function')
+        ? coreApi.checkForUpdatesWithFallback
+        : api.checkForUpdates;
+      const results = await Promise.all([checkFn(), loadLocalVersion()]);
       if (!updateMountedRef.current) return;
       const norm = normalizeCheckResult(results[0]);
       clearUpdateCheckTimeout();
@@ -519,7 +562,12 @@ export default function SettingsView() {
         setUpdateState((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد.' }));
         return;
       }
-      if (norm.updateAvailable === true && norm.latestVersion) {
+      if (norm.status === 'no-releases') {
+        // مرحلهٔ ۵۸ §۲ (m2): گیت‌هاب ۴۰۴ داد — هنوز هیچ انتشارِ
+        // عمومی نیست. خطایِ شبکه نیست؛ پیام، مؤدبانه و خنثی است و
+        // مودال هم باز نمی‌شود.
+        setUpdateState((prev) => ({ ...prev, status: 'no-releases', latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', progress: 0, message: norm.message || 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.' }));
+      } else if (norm.updateAvailable === true && norm.latestVersion) {
         setUpdateState((prev) => ({ ...prev, status: 'available', version: norm.latestVersion, latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, directFilePath: '', progress: 0, message: '' }));
         try {
           if (coreApi && typeof coreApi.emitUpdateAvailable === 'function') {
@@ -527,7 +575,13 @@ export default function SettingsView() {
           }
         } catch (_) {}
       } else if (norm.updateAvailable === false) {
-        setUpdateState((prev) => ({ ...prev, status: 'up-to-date', latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, progress: 0, message: 'نرم‌افزار شما به آخرین نسخه بروز است.' }));
+        // مرحلهٔ ۵۸ §۲ (m2): نصب‌شده، برابر یا تازه‌تر از گیت‌هاب است —
+        // سبزِ «به‌روز»، با هر دو نسخه، نه خطا.
+        const currentShown = norm.currentVersion || (results[1] && results[1].version) || updateInfo.version || '';
+        const upToDateMsg = (currentShown && norm.latestVersion)
+          ? `برنامهٔ شما به‌روز است (نسخهٔ فعلی: v${currentShown} — آخرین نسخهٔ گیت‌هاب: v${norm.latestVersion})`
+          : 'نرم‌افزار شما به آخرین نسخه بروز است.';
+        setUpdateState((prev) => ({ ...prev, status: 'up-to-date', latestVersion: norm.latestVersion, releaseNotes: norm.releaseNotes, publishedAt: norm.publishedAt, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, progress: 0, message: upToDateMsg }));
       } else if (norm.latestVersion) {
         // نسخهٔ فعلی خوانده نشد؛ فقط آخرین نسخهٔ گیت‌هاب نشان داده
         // می‌شود و مودال هم با نسخهٔ فعلیِ نامشخص باز می‌شود.
@@ -1561,9 +1615,9 @@ export default function SettingsView() {
       <div style={styles.sectionCard}>
         <div style={styles.cardTopRow}>
           <div>
-            <h3 style={styles.cardTitle}>نسخه و بروزرسانی نرم‌افزار (PandaReader Update Center)</h3>
+            <h3 style={styles.cardTitle}>مرکز بروزرسانی خودکار (GitHub Auto-Update)</h3>
             <p style={styles.cardDesc}>
-              نسخهٔ جدید را مستقیم از گیت‌هاب بررسی و دانلود کنید؛ نصبِ نسخهٔ جدید، برنامه را بسته و دوباره باز می‌کند.
+              نسخهٔ جدید را مستقیم از گیت‌هاب بررسی و دانلود کنید؛ بررسی از پشتهٔ شبکهٔ کرومیوم انجام می‌شود و پروکسیِ سیستمیِ ویندوز را می‌بیند. نصبِ نسخهٔ جدید، برنامه را بسته و دوباره باز می‌کند.
             </p>
           </div>
           <div style={styles.headerIcon}>
@@ -1641,7 +1695,7 @@ export default function SettingsView() {
         {/* مرحلهٔ ۵۷ §۳ (m3): سوییچِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها» — همان کلیدِ مودالِ یادآوری؛ با localStorage هم‌گام می‌ماند. */}
         <div style={styles.prefSwitchRow}>
           <div>
-            <div style={styles.prefTitle}>بررسی و یادآوریِ خودکارِ آپدیت‌ها</div>
+            <div style={styles.prefTitle}>بررسی و یادآوریِ خودکار هنگامِ ورود به برنامه</div>
             <div style={styles.prefSub}>
               بررسی خودکار بروزرسانی در شروع برنامه؛ ۵ ثانیه پس از باز شدن، آخرین نسخه در گیت‌هاب بررسی می‌شود.
             </div>
@@ -1668,7 +1722,8 @@ export default function SettingsView() {
           <div style={styles.backupStatusRow}>
             <span style={styles.backupStatus}>
               {updateState.status === 'checking' && 'در حال بررسی ارتباط با گیت‌هاب...'}
-              {updateState.status === 'up-to-date' && 'نرم‌افزار شما به آخرین نسخه بروز است.'}
+              {updateState.status === 'up-to-date' && (updateState.message || 'نرم‌افزار شما به آخرین نسخه بروز است.')}
+              {updateState.status === 'no-releases' && (updateState.message || 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.')}
               {updateState.status === 'available' && `نسخهٔ جدید ${updateState.version || ''} منتشر شده است؛ برای دریافت، «دانلود بروزرسانی» را بزنید.`}
               {updateState.status === 'downloaded' && 'دانلود کامل شد؛ با «نصب و راه‌اندازی مجدد»، نسخهٔ جدید نصب می‌شود.'}
               {updateState.status === 'error' && (updateState.message || 'بررسی بروزرسانی انجام نشد.')}
@@ -1676,9 +1731,11 @@ export default function SettingsView() {
           </div>
         )}
 
+        {(updateState.status === 'available' || updateState.status === 'up-to-date' || updateState.status === 'downloaded') && renderReleaseNotes()}
+
         {updateState.status === 'idle' && (
           <div style={styles.backupStatusRow}>
-            <span style={styles.backupStatus}>برای بررسی نسخهٔ جدید، روی «بررسی بروزرسانی جدید از گیت‌هاب» بزنید.</span>
+            <span style={styles.backupStatus}>برای بررسی نسخهٔ جدید، روی «بررسی نسخهٔ جدید از گیت‌هاب» بزنید.</span>
           </div>
         )}
       </div>
@@ -2232,5 +2289,48 @@ const styles = {
     backgroundColor: '#22c55e',
     borderColor: '#22c55e',
     color: '#06110a',
+  },
+  // مرحلهٔ ۵۸ §۲ (m2): استایل‌هایِ باکسِ یادداشتِ انتشار.
+  releaseNotesBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    padding: '12px 14px',
+  },
+  releaseNotesTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 800,
+    color: 'var(--text)',
+  },
+  releaseNotesHeading: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 800,
+    color: 'var(--accent)',
+    marginTop: '4px',
+  },
+  releaseNotesBulletRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '8px',
+  },
+  releaseNotesBullet: {
+    width: '6px',
+    height: '6px',
+    borderRadius: '50%',
+    backgroundColor: 'var(--accent)',
+    flexShrink: 0,
+    marginTop: '7px',
+  },
+  releaseNotesText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    lineHeight: '1.7',
+    margin: 0,
   },
 };

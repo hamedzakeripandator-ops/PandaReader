@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import useAppStore from '../../store/useAppStore';
 import Icons from '../../components/common/Icons';
 import { coreApi } from '../../services/coreApi';
@@ -58,16 +58,34 @@ export default function DownloadsView() {
   // از پروسهٔ اصلی می‌خواند (کانالِ get-app-info). تایمرِ ساختگیِ
   // «بررسیِ سرور» (۱۶۰۰ میلی‌ثانیه، همیشه «به‌روز») و دانلودِ
   // ساختگیِ +۲۰٪ هر ۳۵۰ میلی‌ثانیه، کاملاً حذف شدند.
-  // مرحلهٔ ۵۷ §۳ (m3): آخرین انتشار، زنده از REST عمومیِ گیت‌هابِ
-  // hamedzakeripandator-ops/PandaReader خوانده می‌شود (بدونِ توکن)؛
-  // دکمهٔ «به‌روزرسانیِ اطلاعات»، هم اطلاعاتِ محلی را تازه می‌کند
-  // و هم همان لحظه، آخرین نسخه را چک می‌کند.
+  // مرحلهٔ ۵۷ §۳ (m3) + مرحلهٔ ۵۸ §۲ (m2): این صفحه، دو کارتِ
+  // جداست — کارتِ «اطلاعاتِ نسخه و سلامتِ سیستم»، فقط آفلاین است
+  // (اطلاعاتِ همین نصب از get-app-info؛ هیچ تماسی با اینترنت) و
+  // کارتِ جداگانهٔ «مرکز بروزرسانی خودکار (GitHub Auto-Update)» است
+  // که آخرین انتشار را زنده از REST عمومیِ گیت‌هابِ
+  // hamedzakeripandator-ops/PandaReader می‌خواند (بدونِ توکن)؛
+  // دکمهٔ «به‌روزرسانی اطلاعاتِ سیستم»، فقط اطلاعاتِ محلی را تازه
+  // می‌کند و بررسیِ نسخهٔ جدید، فقط با دکمهٔ مستقلِ کارتِ
+  // بروزرسانی انجام می‌شود.
   const [appInfo, setAppInfo] = useState(null);
   const [infoLoading, setInfoLoading] = useState(true);
   const [infoError, setInfoError] = useState('');
 
   // مرحلهٔ ۵۷ §۳ (m3): وضعیتِ زندهٔ آخرین انتشارِ گیت‌هاب.
   const [latestRelease, setLatestRelease] = useState({ status: 'idle', latestVersion: '', publishedAt: '', releaseNotes: '', downloadUrl: '', htmlUrl: '', message: '' });
+
+  // مرحلهٔ ۵۸ §۲ (m2): وضعیتِ کارتِ جداگانهٔ بروزرسانی — سوییچِ
+  // بررسیِ خودکار (همان کلیدِ مودال و کارتِ تنظیمات) + وضعیتِ
+  // دانلود/نصبِ نسخهٔ جدید؛ mountedRef، نگهبانِ آن‌مانت‌شدگی برایِ
+  // هندلرهایِ ناهمگامِ دانلود است.
+  const [autoCheckEnabled, setAutoCheckEnabled] = useState(() => {
+    try {
+      if (coreApi && typeof coreApi.readAutoCheckUpdatesEnabled === 'function') return coreApi.readAutoCheckUpdatesEnabled();
+    } catch (_) {}
+    return true;
+  });
+  const [downloadState, setDownloadState] = useState({ status: 'idle', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, directFilePath: '', message: '' });
+  const mountedRef = useRef(true);
   const [releaseChecking, setReleaseChecking] = useState(false);
 
   const loadAppInfo = async () => {
@@ -97,10 +115,13 @@ export default function DownloadsView() {
     } catch (_) { return ''; }
   };
 
-  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ آخرین انتشارِ گیت‌هاب (REST عمومی،
-  // بدونِ توکن). manual یعنی کاربر خودش دکمه را زده است و مودالِ
-  // یادآوری، حتی برایِ نسخهٔ نادیده‌گرفته‌شده هم باز می‌شود؛ در
-  // بررسیِ خودکارِ باز شدنِ صفحه، manual برابر false است.
+  // مرحلهٔ ۵۷ §۳ (m3) + مرحلهٔ ۵۸ §۲ (m2): بررسیِ آخرین انتشارِ
+  // گیت‌هاب (REST عمومی، بدونِ توکن) با fallback سه‌لایه
+  // (IPCِ net.fetchِ پروکسی‌شناس، بعد https، بعد fetch رندرر)؛
+  // هر کلیک، دوباره و بدونِ کش می‌خواند. manual یعنی کاربر خودش
+  // دکمه را زده است و مودالِ یادآوری، حتی برایِ نسخهٔ
+  // نادیده‌گرفته‌شده هم باز می‌شود؛ در بررسیِ خودکارِ باز شدنِ
+  // صفحه، manual برابر false است.
   const checkLatestRelease = async (manual) => {
     if (!coreApi || typeof coreApi.checkForUpdates !== 'function') {
       setLatestRelease((prev) => ({ ...prev, status: 'error', message: 'سرویسِ بروزرسانی در این نسخه در دسترس نیست.' }));
@@ -109,15 +130,27 @@ export default function DownloadsView() {
     setReleaseChecking(true);
     setLatestRelease((prev) => ({ ...prev, status: 'checking', message: '' }));
     try {
-      const result = await coreApi.checkForUpdates();
+      // مرحلهٔ ۵۸ §۲ (m2): اگر IPC خطا داد، fetch رندرر جایِ آن را
+      // می‌گیرد؛ اگر coreApiِ قدیمی wrapper را نداشت، همان IPC.
+      const checkFn = (typeof coreApi.checkForUpdatesWithFallback === 'function')
+        ? coreApi.checkForUpdatesWithFallback
+        : coreApi.checkForUpdates;
+      const result = await checkFn();
       let norm = null;
       try {
         if (typeof coreApi.normalizeCheckForUpdatesResult === 'function') {
-          norm = coreApi.normalizeCheckForUpdatesResult(result, '');
+          norm = coreApi.normalizeCheckForUpdatesResult(result, (appInfo && appInfo.version) || '');
         }
       } catch (_) { norm = null; }
       if (!norm) {
         setLatestRelease((prev) => ({ ...prev, status: 'error', message: 'بررسی بروزرسانی انجام نشد.' }));
+        return;
+      }
+      if (norm.status === 'no-releases') {
+        // مرحلهٔ ۵۸ §۲ (m2): گیت‌هاب ۴۰۴ داد — هنوز هیچ انتشارِ
+        // عمومی نیست. خطایِ شبکه نیست؛ مؤدبانه و خنثی نشان داده
+        // می‌شود و مودال هم باز نمی‌شود.
+        setLatestRelease({ status: 'no-releases', latestVersion: '', publishedAt: '', releaseNotes: '', downloadUrl: '', htmlUrl: '', message: norm.message || 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.' });
         return;
       }
       if (norm.updateAvailable === true && norm.latestVersion) {
@@ -128,7 +161,13 @@ export default function DownloadsView() {
           }
         } catch (_) {}
       } else if (norm.updateAvailable === false) {
-        setLatestRelease({ status: 'up-to-date', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: '' });
+        // مرحلهٔ ۵۸ §۲ (m2): نصب‌شده، برابر یا تازه‌تر از گیت‌هاب
+        // است — سبزِ «به‌روز»، با هر دو نسخه، نه خطا.
+        const currentShown = norm.currentVersion || (appInfo && appInfo.version) || '';
+        const upToDateMsg = (currentShown && norm.latestVersion)
+          ? `برنامهٔ شما به‌روز است (نسخهٔ فعلی: v${currentShown} — آخرین نسخهٔ گیت‌هاب: v${norm.latestVersion})`
+          : '';
+        setLatestRelease({ status: 'up-to-date', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: upToDateMsg });
       } else if (norm.latestVersion) {
         setLatestRelease({ status: 'available', latestVersion: norm.latestVersion, publishedAt: norm.publishedAt, releaseNotes: norm.releaseNotes, downloadUrl: norm.downloadUrl, htmlUrl: norm.htmlUrl, message: '' });
         try {
@@ -146,12 +185,12 @@ export default function DownloadsView() {
     }
   };
 
-  // مرحلهٔ ۵۷ §۳ (m3): دکمهٔ آبیِ «به‌روزرسانیِ اطلاعات» — هر کلیک،
-  // هم اطلاعاتِ محلیِ سیستم را تازه می‌کند و هم آخرین انتشارِ
-  // گیت‌هاب را چک می‌کند.
-  const handleRefreshAll = async () => {
+  // مرحلهٔ ۵۸ §۲ (m2): دکمهٔ آبیِ «به‌روزرسانی اطلاعاتِ سیستم» —
+  // فقط آفلاین: اطلاعاتِ محلیِ همین نصب را تازه می‌کند و هیچ تماسی
+  // با گیت‌هاب نمی‌گیرد. بررسیِ نسخهٔ جدید، فقط با دکمهٔ مستقلِ
+  // «بررسی نسخهٔ جدید در گیت‌هاب» در کارتِ بروزرسانی انجام می‌شود.
+  const handleRefreshSystem = async () => {
     await loadAppInfo();
-    await checkLatestRelease(true);
   };
 
   useEffect(() => {
@@ -167,7 +206,54 @@ export default function DownloadsView() {
       setInfoLoading(false);
       if (!cancelled) void checkLatestRelease(false);
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; mountedRef.current = false; };
+  }, []);
+
+  // مرحلهٔ ۵۸ §۲ (m2): هم‌گام‌ماندنِ سوییچِ بررسیِ خودکار با مودالِ
+  // یادآوری و کارتِ تنظیمات؛ نگهبانِ برابری، setStateِ تکراری را
+  // نمی‌گذارد.
+  useEffect(() => {
+    let off = null;
+    try {
+      if (coreApi && typeof coreApi.onAutoCheckUpdatesChanged === 'function') {
+        off = coreApi.onAutoCheckUpdatesChanged((enabled) => {
+          if (!mountedRef.current) return;
+          setAutoCheckEnabled((prev) => (prev === enabled ? prev : enabled));
+        });
+      }
+    } catch (_) { off = null; }
+    return () => {
+      try { if (typeof off === 'function') off(); } catch (_) {}
+    };
+  }, []);
+
+  // مرحلهٔ ۵۸ §۲ (m2): پیشرفتِ زندهٔ دانلود با رویدادِ
+  // 'app-update-status'؛ فقط وضعیتِ دانلودِ همین کارت را عوض
+  // می‌کند و مرحلهٔ 'installing' را برنمی‌گرداند.
+  useEffect(() => {
+    let off = null;
+    try {
+      if (coreApi && typeof coreApi.onUpdateStatus === 'function') {
+        off = coreApi.onUpdateStatus((rawEvent) => {
+          if (!mountedRef.current) return;
+          let norm = null;
+          try {
+            if (typeof coreApi.normalizeUpdateProgressEvent === 'function') norm = coreApi.normalizeUpdateProgressEvent(rawEvent);
+          } catch (_) { norm = null; }
+          if (!norm) return;
+          if (norm.kind === 'downloading') {
+            setDownloadState((prev) => ({ ...prev, status: 'downloading', progress: Math.max(0, Math.min(100, norm.percent || 0)), transferred: norm.transferred || 0, total: norm.total || 0, bytesPerSecond: norm.bytesPerSecond || 0, message: '' }));
+          } else if (norm.kind === 'downloaded') {
+            setDownloadState((prev) => ({ ...prev, status: 'downloaded', progress: 100, transferred: norm.transferred || prev.transferred || 0, total: norm.total || prev.total || 0, bytesPerSecond: 0, message: '' }));
+          } else if (norm.kind === 'error') {
+            setDownloadState((prev) => ({ ...prev, status: 'error', message: norm.message || 'دانلودِ بروزرسانی انجام نشد.' }));
+          }
+        });
+      }
+    } catch (_) { off = null; }
+    return () => {
+      try { if (typeof off === 'function') off(); } catch (_) {}
+    };
   }, []);
 
   const handleOpenDataFolder = async () => {
@@ -185,6 +271,138 @@ export default function DownloadsView() {
     }
   };
 
+  // مرحلهٔ ۵۸ §۲ (m2): سوییچِ «بررسی و یادآوریِ خودکار هنگامِ
+  // ورود به برنامه» — همان کلیدِ مودالِ یادآوری و کارتِ تنظیمات؛
+  // نوشتن در coreApi، رویدادِ هم‌گام‌سازی می‌فرستد تا همه‌جا همان
+  // لحظه عوض شود.
+  const handleAutoCheckToggle = (next) => {
+    const value = next === true;
+    setAutoCheckEnabled(value);
+    try {
+      if (coreApi && typeof coreApi.writeAutoCheckUpdatesEnabled === 'function') {
+        coreApi.writeAutoCheckUpdatesEnabled(value);
+      }
+    } catch (_) {}
+  };
+
+  // مرحلهٔ ۵۸ §۲ (m2): برچسبِ پیشرفتِ دانلود با درصد، حجم و سرعت.
+  const formatDownloadProgressLabel = (state) => {
+    const pct = Math.max(0, Math.min(100, Math.round(state.progress || 0)));
+    let label = `در حال دانلود… ${pct}٪`;
+    try {
+      if (coreApi && typeof coreApi.formatBytes === 'function' && state.total > 0) {
+        label += ` • ${coreApi.formatBytes(state.transferred || 0)} از ${coreApi.formatBytes(state.total)}`;
+      }
+      if (coreApi && typeof coreApi.formatDownloadSpeed === 'function' && state.bytesPerSecond > 0) {
+        label += ` • ${coreApi.formatDownloadSpeed(state.bytesPerSecond)}`;
+      }
+    } catch (_) {}
+    return label;
+  };
+
+  // مرحلهٔ ۵۸ §۲ (m2): رندرِ یادداشتِ انتشارِ آخرین نسخه — بلوک‌هایِ
+  // splitReleaseNotes (سرفصل/گلوله/متن)؛ اگر coreApiِ قدیمی آن را
+  // نداشت، متنِ خام نشان داده می‌شود.
+  const renderReleaseNotes = () => {
+    if (!latestRelease.releaseNotes) return null;
+    let blocks = [];
+    try {
+      if (coreApi && typeof coreApi.splitReleaseNotes === 'function') blocks = coreApi.splitReleaseNotes(latestRelease.releaseNotes);
+    } catch (_) { blocks = []; }
+    if (!blocks || blocks.length === 0) {
+      return (
+        <div style={styles.notesBox}>
+          <p style={styles.notesText}>{latestRelease.releaseNotes}</p>
+        </div>
+      );
+    }
+    return (
+      <div style={styles.notesBox}>
+        <div style={styles.notesTitle}>یادداشتِ انتشارِ نسخهٔ جدید</div>
+        {blocks.map((block, idx) => (
+          block.kind === 'heading' ? (
+            <div key={idx} style={styles.notesHeading}>{block.text}</div>
+          ) : block.kind === 'bullet' ? (
+            <div key={idx} style={styles.notesBulletRow}>
+              <span style={styles.bullet} />
+              <span style={styles.notesText}>{block.text}</span>
+            </div>
+          ) : (
+            <div key={idx} style={styles.notesText}>{block.text}</div>
+          )
+        ))}
+      </div>
+    );
+  };
+
+  // مرحلهٔ ۵۸ §۲ (m2): دانلودِ نسخهٔ جدید از کارتِ بروزرسانی.
+  // در نسخهٔ نصبی، موتورِ electron-updater؛ در حالتِ
+  // Portable/توسعه، دانلودِ مستقیمِ فایلِ .exe از گیت‌هاب.
+  // تکمیلِ دانلود با رویدادِ 'update-downloaded' یا با نتیجهٔ
+  // مستقیمِ invoke می‌رسد و دکمهٔ نصب را روشن می‌کند.
+  const handleDownloadLatest = async () => {
+    if (!latestRelease.latestVersion || !coreApi) return;
+    const packaged = Boolean(appInfo && appInfo.isPackaged);
+    setDownloadState((prev) => ({ ...prev, status: 'downloading', progress: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' }));
+    try {
+      if (packaged) {
+        if (typeof coreApi.downloadUpdate !== 'function') {
+          setDownloadState((prev) => ({ ...prev, status: 'error', message: 'سرویسِ دانلودِ بروزرسانی در این نسخه در دسترس نیست.' }));
+          return;
+        }
+        await coreApi.downloadUpdate();
+        return;
+      }
+      if (typeof coreApi.downloadUpdateDirect !== 'function') {
+        setDownloadState((prev) => ({ ...prev, status: 'error', message: 'سرویسِ دانلودِ مستقیم در این نسخه در دسترس نیست.' }));
+        return;
+      }
+      if (!latestRelease.downloadUrl) {
+        setDownloadState((prev) => ({ ...prev, status: 'error', message: 'لینکِ دانلودِ نسخهٔ جدید پیدا نشد.' }));
+        return;
+      }
+      const result = await coreApi.downloadUpdateDirect({ downloadUrl: latestRelease.downloadUrl, version: latestRelease.latestVersion });
+      if (!mountedRef.current) return;
+      if (result && result.success) {
+        setDownloadState((prev) => ({ ...prev, status: 'downloaded', progress: 100, directFilePath: result.filePath || '', message: '' }));
+      } else {
+        setDownloadState((prev) => ({ ...prev, status: 'error', message: (result && result.message) || 'دانلودِ نسخهٔ جدید انجام نشد.' }));
+      }
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setDownloadState((prev) => ({ ...prev, status: 'error', message: 'دانلودِ بروزرسانی انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص') }));
+    }
+  };
+
+  // مرحلهٔ ۵۸ §۲ (m2): نصبِ نسخهٔ دانلودشده و راه‌اندازیِ مجدد.
+  // اگر فایلِ .exe مستقیم دانلود شده باشد، نصب‌کنندهٔ همان فایل
+  // اجرا می‌شود (فلاشِ دیتابیس، داخلِ هندلر و پیش از اجراست)؛
+  // وگرنه مسیرِ electron-updater (quitAndInstall) می‌رود.
+  const handleInstallLatest = async () => {
+    if (!coreApi) return;
+    if (downloadState.directFilePath) {
+      if (typeof coreApi.installDownloadedUpdate !== 'function') {
+        showToast('سرویسِ نصبِ نسخهٔ دانلودشده در این نسخه در دسترس نیست.', { type: 'error' });
+        return;
+      }
+      try {
+        await coreApi.installDownloadedUpdate({ filePath: downloadState.directFilePath });
+      } catch (err) {
+        showToast('نصب و راه‌اندازیِ مجدد انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص'), { type: 'error' });
+      }
+      return;
+    }
+    if (typeof coreApi.quitAndInstallUpdate !== 'function') {
+      showToast('سرویسِ نصبِ بروزرسانی در این نسخه در دسترس نیست.', { type: 'error' });
+      return;
+    }
+    try {
+      await coreApi.quitAndInstallUpdate();
+    } catch (err) {
+      showToast('نصب و راه‌اندازیِ مجدد انجام نشد: ' + (err && err.message ? err.message : 'خطای نامشخص'), { type: 'error' });
+    }
+  };
+
   return (
     <div style={styles.container}>
       {/* هدر بالای مرکز آپدیت */}
@@ -196,9 +414,9 @@ export default function DownloadsView() {
           <div>
             <h2 style={styles.title}>اطلاعاتِ نسخه و سلامتِ سیستم</h2>
             <span style={styles.subtitle}>
-              نسخه، محیطِ اجرا و وضعیتِ دیتای همین نصب{' '}
+              نسخهٔ نصب‌شده، محیطِ اجرا و وضعیتِ دیتای همین نصب{' '}
               <span style={{ fontFamily: 'var(--font-latin)', fontWeight: 700 }}>ComicReader</span>
-              {' '}— نسخه‌های جدید، مستقیم از گیت‌هابِ PandaReader بررسی می‌شوند و آخرین نسخهٔ منتشرشده، همین‌جا دیده می‌شود.
+              {' '}— بدونِ هیچ تماسی با اینترنت؛ بررسیِ نسخهٔ جدید، در کارتِ جداگانهٔ «مرکز بروزرسانی خودکار» انجام می‌شود.
             </span>
           </div>
         </div>
@@ -215,8 +433,8 @@ export default function DownloadsView() {
           </button>
           <button
             type="button"
-            onClick={handleRefreshAll}
-            disabled={infoLoading || releaseChecking}
+            onClick={handleRefreshSystem}
+            disabled={infoLoading}
             style={styles.checkBtn}
           >
             {infoLoading ? (
@@ -227,7 +445,7 @@ export default function DownloadsView() {
             ) : (
               <>
                 <Icons.RefreshCw size={15} />
-                <span>به‌روزرسانیِ اطلاعات</span>
+                <span>به‌روزرسانی اطلاعاتِ سیستم</span>
               </>
             )}
           </button>
@@ -253,21 +471,13 @@ export default function DownloadsView() {
           <h3 style={styles.statusTitle}>
             {infoLoading && 'در حال خواندنِ اطلاعاتِ محیط…'}
             {!infoLoading && infoError && infoError}
-            {!infoLoading && !infoError && latestRelease.status === 'available' && latestRelease.latestVersion &&
-              `نسخهٔ جدید v${latestRelease.latestVersion} در گیت‌هاب منتشر شده است.`}
-            {!infoLoading && !infoError && latestRelease.status === 'up-to-date' &&
-              'شما به آخرین نسخه بروز هستید.'}
-            {!infoLoading && !infoError && latestRelease.status === 'checking' &&
-              'در حال بررسیِ آخرین نسخه در گیت‌هاب…'}
-            {!infoLoading && !infoError && latestRelease.status === 'error' &&
-              (latestRelease.message || 'بررسیِ آخرین نسخه در گیت‌هاب انجام نشد.')}
-            {!infoLoading && !infoError && latestRelease.status === 'idle' &&
+            {!infoLoading && !infoError && appInfo && appInfo.version &&
+              `نسخهٔ نصب‌شده: v${appInfo.version}`}
+            {!infoLoading && !infoError && (!appInfo || !appInfo.version) &&
               'اطلاعاتِ زیر، وضعیتِ واقعیِ همین نصب است.'}
           </h3>
           <p style={styles.statusDesc}>
-            {latestRelease.latestVersion
-              ? `آخرین نسخه در گیت‌هاب: v${latestRelease.latestVersion}${latestRelease.publishedAt ? ` — منتشرشده در ${formatReleaseDate(latestRelease.publishedAt)}` : ''}؛ دانلود و نصب از پنجرهٔ یادآوری یا کارتِ بروزرسانی در تنظیمات انجام می‌شود و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.`
-              : 'آخرین نسخه، مستقیم از گیت‌هابِ PandaReader بررسی می‌شود؛ دانلود و نصب از پنجرهٔ یادآوری یا کارتِ بروزرسانی در تنظیمات انجام می‌شود و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.'}
+            اطلاعاتِ این کارت، فقط از همین نصب خوانده می‌شود و هیچ تماسی با اینترنت نمی‌گیرد؛ جزئیاتِ کاملِ محیط، در بخشِ «محیطِ اجرا و سلامتِ سیستم» است و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.
           </p>
         </div>
 
@@ -279,6 +489,120 @@ export default function DownloadsView() {
             </span>
           </div>
         </div>
+      </div>
+
+      {/* مرحلهٔ ۵۸ §۲ (m2): کارتِ جداگانهٔ «مرکز بروزرسانی خودکار
+          (GitHub Auto-Update)» — تنها جایی در این صفحه که با گیت‌هاب
+          تماس می‌گیرد: نسخهٔ فعلی در برابرِ آخرین نسخهٔ گیت‌هاب،
+          دکمهٔ مستقلِ بررسی (هر کلیک، دوباره و بدونِ کش می‌خواند)،
+          سوییچِ بررسیِ خودکارِ ورود، یادداشتِ انتشار، و دانلود/نصب. */}
+      <div style={styles.updateCard}>
+        <div style={styles.updateHeaderRow}>
+          <span style={{ color: 'var(--accent)', display: 'flex' }}>
+            <Icons.Download size={18} />
+          </span>
+          <div>
+            <h3 style={styles.changelogHeader}>مرکز بروزرسانی خودکار (GitHub Auto-Update)</h3>
+            <p style={styles.statusDesc}>
+              نسخهٔ جدید، مستقیم از گیت‌هابِ PandaReader بررسی می‌شود؛ دانلود و نصب، از همین‌جا یا پنجرهٔ یادآوری انجام می‌شود و دیتا و تنظیمات، در پوشهٔ دیتا باقی می‌مانند.
+            </p>
+          </div>
+        </div>
+
+        <div style={styles.updateVersionsRow}>
+          <span style={styles.updateVersionText}>
+            {appInfo && appInfo.version ? `نسخهٔ فعلی: v${appInfo.version}` : 'نسخهٔ فعلی: نامشخص'}
+          </span>
+          <span style={styles.updateVersionText}>
+            {latestRelease.latestVersion ? `آخرین نسخهٔ گیت‌هاب: v${latestRelease.latestVersion}` : 'آخرین نسخهٔ گیت‌هاب: هنوز بررسی نشده است'}
+          </span>
+          {latestRelease.publishedAt ? (
+            <span style={styles.updateVersionSub}>منتشرشده در {formatReleaseDate(latestRelease.publishedAt)}</span>
+          ) : null}
+        </div>
+
+        <div style={{ ...styles.updateStatusLine, color: latestRelease.status === 'up-to-date' ? '#10b981' : (latestRelease.status === 'error' ? 'var(--danger)' : 'var(--muted)') }}>
+          {latestRelease.status === 'checking' && 'در حال بررسیِ آخرین نسخه در گیت‌هاب…'}
+          {latestRelease.status === 'available' && latestRelease.latestVersion &&
+            `نسخهٔ جدید v${latestRelease.latestVersion} در گیت‌هاب منتشر شده است.`}
+          {latestRelease.status === 'up-to-date' && (latestRelease.message || 'شما به آخرین نسخه بروز هستید.')}
+          {latestRelease.status === 'no-releases' && (latestRelease.message || 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.')}
+          {latestRelease.status === 'error' && (latestRelease.message || 'بررسیِ آخرین نسخه در گیت‌هاب انجام نشد.')}
+          {latestRelease.status === 'idle' && 'برای بررسی نسخهٔ جدید، روی «بررسی نسخهٔ جدید در گیت‌هاب» بزنید.'}
+        </div>
+
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            onClick={() => void checkLatestRelease(true)}
+            disabled={releaseChecking || downloadState.status === 'downloading'}
+            style={{ ...styles.checkBtn, ...((releaseChecking || downloadState.status === 'downloading') ? styles.checkBtnDisabled : {}) }}
+          >
+            {releaseChecking ? (
+              <>
+                <Icons.Loader size={15} />
+                <span>در حال بررسی…</span>
+              </>
+            ) : (
+              <>
+                <Icons.RefreshCw size={15} />
+                <span>بررسی نسخهٔ جدید در گیت‌هاب</span>
+              </>
+            )}
+          </button>
+          {latestRelease.status === 'available' && (
+            <button
+              type="button"
+              onClick={handleDownloadLatest}
+              disabled={downloadState.status === 'downloading'}
+              style={styles.checkBtn}
+            >
+              <Icons.Download size={15} />
+              <span>{appInfo && appInfo.isPackaged ? 'دانلود بروزرسانی' : 'دانلود فایل نصب (.exe)'}</span>
+            </button>
+          )}
+          {downloadState.status === 'downloaded' && (
+            <button
+              type="button"
+              onClick={handleInstallLatest}
+              style={{ ...styles.checkBtn, ...styles.installBtn }}
+            >
+              <Icons.RefreshCw size={15} />
+              <span>نصب و راه‌اندازی مجدد (Install & Restart)</span>
+            </button>
+          )}
+        </div>
+
+        <div style={styles.optionsRow}>
+          <div style={styles.optionLabelWrap}>
+            <span style={styles.optionLabel}>بررسی و یادآوریِ خودکار هنگامِ ورود به برنامه</span>
+            <span style={styles.optionSub}>۵ ثانیه پس از باز شدنِ برنامه، آخرین نسخه در گیت‌هاب بررسی می‌شود.</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={autoCheckEnabled}
+            onChange={(e) => handleAutoCheckToggle(e.target.checked)}
+            aria-label="بررسی و یادآوری خودکار هنگام ورود به برنامه"
+            style={{ width: '18px', height: '18px', accentColor: 'var(--accent)', cursor: 'pointer' }}
+          />
+        </div>
+
+        {downloadState.status === 'downloading' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div style={styles.progressBarTrack}>
+              <div style={{ ...styles.progressBarFill, width: `${Math.max(0, Math.min(100, downloadState.progress || 0))}%` }} />
+            </div>
+            <span style={styles.percentText}>{formatDownloadProgressLabel(downloadState)}</span>
+          </div>
+        )}
+        {downloadState.status === 'downloaded' && (
+          <p style={styles.statusDesc}>دانلود کامل شد؛ با «نصب و راه‌اندازی مجدد»، نسخهٔ جدید نصب می‌شود.</p>
+        )}
+        {downloadState.status === 'error' && downloadState.message ? (
+          <p style={styles.statusDesc}>{downloadState.message}</p>
+        ) : null}
+
+        {latestRelease.releaseNotes ? renderReleaseNotes() : null}
       </div>
 
       {/* مرحله ۷ ـ بخش الف: اطلاعاتِ واقعیِ محیط و سلامتِ سیستم */}
@@ -719,5 +1043,86 @@ const styles = {
     borderRadius: '50%',
     backgroundColor: 'var(--accent)',
     flexShrink: 0,
+  },
+  // مرحلهٔ ۵۸ §۲ (m2): استایل‌هایِ کارتِ جداگانهٔ بروزرسانی.
+  updateCard: {
+    backgroundColor: 'var(--panel)',
+    borderRadius: '18px',
+    border: '1px solid var(--border)',
+    padding: '20px 24px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '14px',
+    boxShadow: '0 10px 24px rgba(0, 0, 0, 0.4)',
+  },
+  updateHeaderRow: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '10px',
+  },
+  updateVersionsRow: {
+    display: 'flex',
+    alignItems: 'baseline',
+    gap: '6px 16px',
+    flexWrap: 'wrap',
+  },
+  updateVersionText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13.5px',
+    fontWeight: 700,
+    color: 'var(--text)',
+  },
+  updateVersionSub: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12px',
+    color: 'var(--muted)',
+  },
+  updateStatusLine: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13.5px',
+    fontWeight: 700,
+  },
+  checkBtnDisabled: {
+    opacity: 0.55,
+    cursor: 'not-allowed',
+    boxShadow: 'none',
+  },
+  installBtn: {
+    backgroundColor: '#22c55e',
+    boxShadow: '0 4px 14px rgba(34, 197, 94, 0.3)',
+  },
+  notesBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+    backgroundColor: 'rgba(255, 255, 255, 0.03)',
+    border: '1px solid var(--border)',
+    borderRadius: '12px',
+    padding: '12px 14px',
+  },
+  notesTitle: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 800,
+    color: 'var(--text)',
+  },
+  notesHeading: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '13px',
+    fontWeight: 800,
+    color: 'var(--accent)',
+    marginTop: '4px',
+  },
+  notesBulletRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  notesText: {
+    fontFamily: 'var(--font-fa)',
+    fontSize: '12.5px',
+    color: 'var(--muted)',
+    lineHeight: '1.7',
+    margin: 0,
   },
 };

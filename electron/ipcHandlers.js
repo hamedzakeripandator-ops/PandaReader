@@ -1,4 +1,4 @@
-const { ipcMain, dialog, shell, clipboard, nativeImage, BrowserWindow } = require('electron');
+const { ipcMain, dialog, shell, clipboard, nativeImage, BrowserWindow, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { Worker } = require('worker_threads');
@@ -1343,7 +1343,22 @@ module.exports = function(app) {
 
   ipcMain.handle('db-action', async (event, requestData) => {
     const { action, payload } = requestData || {};
-    const result = await executeDbAction(action, payload);
+    // مرحلهٔ ۵۸، مأموریت ۱ — قراردادِ payload (درسِ مرحلهٔ ۴۰):
+    // همهٔ فراخواننده‌هایِ عادی، فیلدها را در payload می‌فرستند، ولی
+    // استورِ بوک‌مارک، آن‌ها را هم‌سطحِ action می‌فرستاد و این هندلر،
+    // فقط payload را به ورکر می‌داد؛ پس ورکر، filePath و bookmarks را
+    // هیچ‌وقت نمی‌دید و هر SAVE_BOOKMARKS، با «مسیرِ فایل نامعتبر
+    // است» خطا می‌خورد. اگر payload نبود، بقیهٔ فیلدهایِ هم‌سطح
+    // (به‌جز action) همان payload حساب می‌شوند؛ وقتی payload هست،
+    // رفتار دقیقاً مثلِ قبل است و هیچ فراخوانندهٔ دیگری عوض نمی‌شود.
+    let effectivePayload = payload;
+    if (!effectivePayload || typeof effectivePayload !== 'object' || Array.isArray(effectivePayload)) {
+      effectivePayload = {};
+      Object.entries(requestData || {}).forEach(([key, value]) => {
+        if (key !== 'action' && key !== 'payload') effectivePayload[key] = value;
+      });
+    }
+    const result = await executeDbAction(action, effectivePayload);
     // مرحله ۱۵ — آینهٔ تمپلیت‌ها در پوشهٔ نرم‌افزار: هر بار که
     // تنظیماتِ بوک‌مارک ذخیره می‌شود، همان savedPresets در
     // bookmark-backgrounds/bookmark-presets.json هم نوشته می‌شود
@@ -1352,8 +1367,8 @@ module.exports = function(app) {
     // خراب نمی‌کند؛ مرجعِ حقیقت، همچنان db.json است.
     if (
       action === 'SAVE_BOOKMARK_PREFERENCES' &&
-      payload && payload.preferences &&
-      Array.isArray(payload.preferences.savedPresets)
+      effectivePayload && effectivePayload.preferences &&
+      Array.isArray(effectivePayload.preferences.savedPresets)
     ) {
       try {
         const { appBgDir } = getBookmarkBackgroundsDirs();
@@ -1361,7 +1376,7 @@ module.exports = function(app) {
           if (!fs.existsSync(appBgDir)) fs.mkdirSync(appBgDir, { recursive: true });
           const tmpPath = path.join(appBgDir, 'bookmark-presets.json.tmp');
           const finalPath = path.join(appBgDir, 'bookmark-presets.json');
-          fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), presets: payload.preferences.savedPresets }, null, 2), 'utf-8');
+          fs.writeFileSync(tmpPath, JSON.stringify({ version: 1, savedAt: new Date().toISOString(), presets: effectivePayload.preferences.savedPresets }, null, 2), 'utf-8');
           fs.renameSync(tmpPath, finalPath);
         }
       } catch (_) {}
@@ -2909,12 +2924,15 @@ function getEpubService() {
   // از گیت‌هاب. موتورِ electron-updater، در main.js با require امن
   // خوانده شده و روی app.autoUpdater گذاشته شده است؛ این‌جا همان
   // نمونه خوانده می‌شود و هیچ require دومی نیست. از مرحلهٔ ۵۷،
-  // بررسی، دوموتوره است: اول REST عمومیِ گیت‌هاب (بدونِ توکن،
-  // تایم‌اوتِ ۱۵ ثانیه) که نسخهٔ دقیق، یادداشتِ کامل و لینکِ
-  // مستقیمِ .exe را می‌دهد، و بعد — فقط در نسخهٔ نصبی — موتورِ
-  // electron-updater، تا مسیرِ نصبِ خودکار هم آماده باشد. در
-  // حالتِ Portable/توسعه هم، نسخهٔ تازه از REST دیده می‌شود و
-  // دانلودِ مستقیمِ .exe جایِ موتور را می‌گیرد. فلاشِ دیتابیس
+  // بررسی، اول REST عمومیِ گیت‌هاب بود (بدونِ توکن، تایم‌اوتِ
+  // ۱۵ ثانیه) که نسخهٔ دقیق، یادداشتِ کامل و لینکِ مستقیمِ .exe
+  // را می‌دهد؛ از مرحلهٔ ۵۸، همان REST سه‌لایه خوانده می‌شود:
+  // اول net.fetch الکترون (پشتهٔ کرومیوم؛ پروکسیِ سیستمیِ
+  // ویندوز / V2Ray را می‌بیند)، بعد https مستقیمِ نود، و اگر
+  // IPC خطا داد، fetch رندرر در coreApi. بعد — فقط در نسخهٔ
+  // نصبی — موتورِ electron-updater، تا مسیرِ نصبِ خودکار هم آماده
+  // باشد. در حالتِ Portable/توسعه هم، نسخهٔ تازه از REST دیده
+  // می‌شود و دانلودِ مستقیمِ .exe جایِ موتور را می‌گیرد. فلاشِ دیتابیس
   // پیش از نصب، همان flushAndTerminateDbWorker موجود است
   // (FLUSH_SYNC + ACK یا تایم‌اوتِ ۲۵۰۰ میلی‌ثانیه)؛ مسیرِ
   // فلاشِ دومی ساخته نشده است. توجه: flushAndTerminateDbWorker
@@ -2931,9 +2949,12 @@ function getEpubService() {
   function getUpdaterAppVersion() {
     try { return app.getVersion(); } catch (_) { return ''; }
   }
-  // مرحلهٔ ۵۷ §۳ (m3): موتورِ دومِ بروزرسانی — REST عمومیِ گیت‌هاب.
+  // مرحلهٔ ۵۷ §۳ (m3) + مرحلهٔ ۵۸ §۲ (m2): موتورِ REST عمومیِ گیت‌هاب.
   // مخزن، عمومی است؛ پس بررسیِ آخرین انتشار، بدونِ هیچ توکنی انجام
-  // می‌شود و این فایل، هیچ هدرِ احرازِ هویتی نمی‌سازد. تابع‌هایِ
+  // می‌شود و این فایل، هیچ هدرِ احرازِ هویتی نمی‌سازد. لایهٔ اولِ
+  // انتقال، net.fetch الکترون است (پشتهٔ کرومیوم، پروکسی‌شناس) و
+  // لایهٔ دوم، همان https مستقیمِ نود است. ۴۰۴ یعنی «هنوز هیچ
+  // انتشاری در Releases نیست» و خطایِ شبکه نیست. تابع‌هایِ
   // خالصِ این بخش (مقایسهٔ نسخه و تمیزکردنِ یادداشت‌ها)، همان معنایِ
   // نسخه‌هایِ coreApi را دارند و با همان فیixtureها تست می‌شوند؛
   // کپیِ آن‌ها در این‌جا عمدی است، چون پروسهٔ اصلی نمی‌تواند فایلِ
@@ -3027,7 +3048,7 @@ function getEpubService() {
         }
         const httpsMod = require('https');
         req = httpsMod.get(requestUrl, {
-          headers: { 'User-Agent': 'PandaReader-App', Accept: 'application/vnd.github+json' },
+          headers: { 'User-Agent': 'PandaReader-App', Accept: 'application/vnd.github.v3+json' },
         }, (res) => {
           const chunks = [];
           res.on('data', (chunk) => { chunks.push(chunk); });
@@ -3036,7 +3057,15 @@ function getEpubService() {
             settled = true;
             const text = Buffer.concat(chunks).toString('utf8');
             if (res.statusCode < 200 || res.statusCode >= 300) {
-              reject(new Error('گیت‌هاب، پاسخِ ' + res.statusCode + ' داد.'));
+              // مرحلهٔ ۵۸ §۲ (m2): ۴۰۴، «انتشاری نیست» است، نه خطایِ شبکه؛
+              // با پرچمِ noReleases نشانه‌گذاری می‌شود تا هندلر، پیامِ
+              // مؤدبانه برگرداند، نه خطایِ قرمزِ شبکه.
+              const httpErr = new Error(res.statusCode === 404
+                ? 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.'
+                : 'گیت‌هاب، پاسخِ ' + res.statusCode + ' داد.');
+              httpErr.statusCode = res.statusCode;
+              if (res.statusCode === 404) httpErr.noReleases = true;
+              reject(httpErr);
               return;
             }
             try { resolve(JSON.parse(text)); } catch (_) { reject(new Error('پاسخِ گیت‌هاب، JSON معتبر نبود.')); }
@@ -3051,11 +3080,78 @@ function getEpubService() {
     });
   }
 
+  // مرحلهٔ ۵۸ §۲ (m2): GET سادهٔ JSON با net.fetch الکترون — پشتهٔ
+  // شبکهٔ کرومیوم، پس پروکسیِ سیستمیِ ویندوز (و V2Ray در حالتِ
+  // System Proxy) را می‌بیند؛ https مستقیمِ نود آن را نمی‌دید و در
+  // ایران، پشتِ پروکسی، وصل نمی‌شد. بدونِ توکن؛ Accept همان
+  // قراردادِ REST گیت‌هاب است. ۴۰۴ با پرچمِ noReleases برمی‌گردد.
+  // تایم‌اوتِ ۱۵ ثانیه با AbortSignal.
+  async function netFetchJson(requestUrl, timeoutMs) {
+    if (!net || typeof net.fetch !== 'function') {
+      throw new Error('net.fetch در این نسخهٔ الکترون در دسترس نیست.');
+    }
+    const parsed = new URL(requestUrl);
+    if (parsed.protocol !== 'https:') {
+      throw new Error('آدرسِ گیت‌هاب معتبر نیست.');
+    }
+    let controller = null;
+    let timer = null;
+    try {
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        timer = setTimeout(() => {
+          try { controller.abort(); } catch (_) {}
+        }, timeoutMs);
+      }
+      const init = {
+        method: 'GET',
+        headers: { 'User-Agent': 'PandaReader-App', Accept: 'application/vnd.github.v3+json' },
+        cache: 'no-store',
+      };
+      if (controller) init.signal = controller.signal;
+      const res = await net.fetch(requestUrl, init);
+      const status = res && typeof res.status === 'number' ? res.status : 0;
+      if (status < 200 || status >= 300) {
+        const netErr = new Error(status === 404
+          ? 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.'
+          : 'گیت‌هاب، پاسخِ ' + status + ' داد.');
+        netErr.statusCode = status;
+        if (status === 404) netErr.noReleases = true;
+        throw netErr;
+      }
+      const text = await res.text();
+      try { return JSON.parse(text); } catch (_) {
+        throw new Error('پاسخِ گیت‌هاب، JSON معتبر نبود.');
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        throw new Error('مهلتِ ۱۵ ثانیه‌ایِ تماس با گیت‌هاب گذشت.');
+      }
+      throw err;
+    } finally {
+      try { if (timer) clearTimeout(timer); } catch (_) {}
+    }
+  }
+
+  // مرحلهٔ ۵۸ §۲ (m2): خواندنِ JSON گیت‌هاب با دو لایه: اول net.fetch
+  // (پروکسی‌شناس) و فقط وقتی خطا، «انتقالی» بود (بدونِ statusCode،
+  // یعنی اصلاً پاسخی نرسید)، همان https مستقیمِ نود. خطایی که
+  // statusCode دارد (مثلِ ۴۰۴ یا ۴۰۳)، پاسخِ قطعیِ سرور است و
+  // دوباره با لایهٔ دوم تکرار نمی‌شود تا پیامِ درست، گم نشود.
+  async function fetchGithubReleaseJson(requestUrl, timeoutMs) {
+    try {
+      return await netFetchJson(requestUrl, timeoutMs);
+    } catch (err) {
+      if (err && typeof err.statusCode === 'number') throw err;
+      return httpsGetJson(requestUrl, timeoutMs);
+    }
+  }
+
   // آخرین انتشارِ عمومی را می‌خواند و فقط فیلدهایِ لازم را
   // برمی‌گرداند: نسخه، یادداشتِ تمیز، تاریخِ انتشار، لینکِ صفحه و
   // لینکِ مستقیمِ فایلِ .exe. هیچ توکنی فرستاده نمی‌شود.
   async function fetchLatestGithubRelease() {
-    const json = await httpsGetJson(GITHUB_LATEST_RELEASE_URL, GITHUB_REST_TIMEOUT_MS);
+    const json = await fetchGithubReleaseJson(GITHUB_LATEST_RELEASE_URL, GITHUB_REST_TIMEOUT_MS);
     if (!json || typeof json !== 'object' || typeof json.tag_name !== 'string' || !json.tag_name) {
       throw new Error('پاسخِ گیت‌هاب، انتشارِ معتبری نداشت.');
     }
@@ -3198,21 +3294,27 @@ function getEpubService() {
     return { version: getUpdaterAppVersion(), isPackaged: Boolean(app && app.isPackaged) };
   });
 
-  // مرحلهٔ ۵۷ §۳ (m3): بررسیِ دوموتوره. همیشه اول REST عمومیِ
-  // گیت‌هاب خوانده می‌شود (بدونِ توکن، تایم‌اوتِ ۱۵ ثانیه) و نسخهٔ
-  // دقیق، یادداشتِ کاملِ انتشار و لینکِ مستقیمِ .exe از همان‌جا
-  // می‌آید؛ پس در حالتِ Portable و توسعه هم، نسخهٔ تازه دیده
-  // می‌شود. بعد، فقط در نسخهٔ نصبی، electron-updater هم صدا زده
-  // می‌شود تا مسیرِ نصبِ خودکار آماده باشد؛ نتیجهٔ نهایی، همیشه
-  // همان REST است و خطایِ موتور، بررسی را خراب نمی‌کند.
+  // مرحلهٔ ۵۷ §۳ (m3) + مرحلهٔ ۵۸ §۲ (m2): بررسیِ سه‌لایه. همیشه اول REST عمومیِ
+  // گیت‌هاب خوانده می‌شود (بدونِ توکن، تایم‌اوتِ ۱۵ ثانیه؛ اول net.fetchِ
+  // پروکسی‌شناس، بعد https مستقیم) و نسخهٔ دقیق، یادداشتِ کاملِ انتشار و لینکِ
+  // مستقیمِ .exe از همان‌جا می‌آید؛ پس در حالتِ Portable و توسعه هم، نسخهٔ تازه
+  // دیده می‌شود. اگر REST با خطایِ انتقالی شکست خورد، رندرر با fetch کرومیوم
+  // دوباره می‌خواند (لایهٔ سوم، در coreApi)؛ پس این هندلر، خطا را همان‌طور
+  // که هست برمی‌گرداند تا رندرر تصمیم بگیرد. ۴۰۴ اما، خطا نیست: یعنی هنوز
+  // هیچ انتشاری در Releases نیست و پاسخ، 'no-releases' مؤدبانه است. بعد،
+  // فقط در نسخهٔ نصبی، electron-updater هم صدا زده می‌شود تا مسیرِ نصبِ
+  // خودکار آماده باشد؛ نتیجهٔ نهایی، همیشه همان REST است و خطایِ موتور،
+  // بررسی را خراب نمی‌کند.
   ipcMain.handle('check-for-updates', async () => {
     const version = getUpdaterAppVersion();
     let latest = null;
     let restError = '';
+    let restNoReleases = false;
     try {
       latest = await fetchLatestGithubRelease();
     } catch (err) {
       restError = String((err && err.message) || err || 'خطا در تماس با گیت‌هاب');
+      restNoReleases = Boolean(err && err.noReleases === true);
     }
     if (app && app.isPackaged) {
       const updater = getAppAutoUpdater();
@@ -3224,6 +3326,12 @@ function getEpubService() {
           ]);
         } catch (_) { /* خطایِ موتور، با رویدادِ error گزارش می‌شود */ }
       }
+    }
+    if (!latest && restNoReleases) {
+      // مرحلهٔ ۵۸ §۲ (m2): گیت‌هاب ۴۰۴ داد — مخزن، هنوز هیچ انتشارِ
+      // عمومی ندارد. این، خطایِ شبکه نیست و هرگز نباید قرمز نشان
+      // داده شود؛ success درست است و updateAvailable، null.
+      return { success: true, status: 'no-releases', version, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'rest', message: 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.' };
     }
     if (!latest) {
       return { success: false, status: 'error', version, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'rest', message: restError || 'بررسی بروزرسانی انجام نشد؛ اتصال اینترنت را بررسی کنید.' };

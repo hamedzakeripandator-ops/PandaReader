@@ -153,10 +153,13 @@ export default function BookmarkStudioModal() {
     }
   };
 
+  // مرحلهٔ ۵۸، مأموریت ۱ — مودال، فقط وقتی بسته می‌شود که حذف در
+  // دیتابیس واقعاً تأیید شده باشد؛ در شکست، توستِ خطا را استور
+  // می‌دهد و مودال باز می‌ماند تا کاربر دوباره تلاش کند.
   const handleDelete = async () => {
     if (!editingBookmark) return;
-    await deleteBookmark(target.filePath, editingBookmark.id);
-    closeStudio();
+    const deleted = await deleteBookmark(target.filePath, editingBookmark.id);
+    if (deleted) closeStudio();
   };
 
   // مرحله ۱۵: افزودنِ عکس با انتخاب‌گرِ فایلِ وب — همان منطقِ

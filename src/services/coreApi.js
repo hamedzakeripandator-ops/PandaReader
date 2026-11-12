@@ -202,6 +202,109 @@ export const coreApi = {
     }
   },
 
+  // مرحلهٔ ۵۸ §۲ (m2): لایهٔ سومِ بررسی — fetch مستقیمِ رندرر
+  // (کرومیوم؛ پروکسیِ سیستمیِ ویندوز / V2Ray را می‌بیند). فقط وقتی
+  // اجرا می‌شود که IPCِ check-for-updates خطا داده باشد؛ پس هر
+  // شکستِ main، بی‌پاسخ نمی‌ماند. بدونِ توکن؛ cache: 'no-store'
+  // یعنی هر کلیک، دوباره از گیت‌هاب می‌خواند و هیچ کشی نیست.
+  // تایم‌اوتِ ۱۵ ثانیه با AbortController. ۴۰۴ یعنی «هنوز هیچ
+  // انتشاری نیست» و همان پاسخِ مؤدبانهٔ 'no-releases' برمی‌گردد،
+  // نه خطایِ شبکه. در این مسیر، نمی‌توان User-Agent گذاشت
+  // (هدرِ ممنوعهٔ مرورگر است)؛ گیت‌هاب، بدونِ آن هم جواب می‌دهد.
+  fetchLatestReleaseViaRenderer: async (currentVersion) => {
+    const current = coreApi.stripVersionPrefix(currentVersion);
+    if (typeof window === 'undefined' || typeof window.fetch !== 'function') {
+      return { success: false, status: 'error', version: current, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'renderer-fetch', message: 'مرورگرِ داخلی در دسترس نیست.' };
+    }
+    let controller = null;
+    let timer = null;
+    try {
+      if (typeof AbortController !== 'undefined') {
+        controller = new AbortController();
+        timer = setTimeout(() => {
+          try { controller.abort(); } catch (_) {}
+        }, 15000);
+      }
+      const init = {
+        method: 'GET',
+        headers: { Accept: 'application/vnd.github.v3+json' },
+        cache: 'no-store',
+      };
+      if (controller) init.signal = controller.signal;
+      const res = await window.fetch(coreApi.githubLatestReleaseUrl, init);
+      const status = res && typeof res.status === 'number' ? res.status : 0;
+      if (status === 404) {
+        return { success: true, status: 'no-releases', version: current, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'renderer-fetch', message: 'هنوز نسخهٔ عمومی در بخش Releases گیت‌هاب منتشر نشده است.' };
+      }
+      if (!res || !res.ok) {
+        return { success: false, status: 'error', version: current, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'renderer-fetch', message: 'گیت‌هاب، پاسخِ ' + status + ' داد.' };
+      }
+      const json = await res.json();
+      const norm = coreApi.normalizeLatestRelease(json, current);
+      if (!norm || !norm.version) {
+        return { success: false, status: 'error', version: current, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'renderer-fetch', message: 'پاسخِ گیت‌هاب، انتشارِ معتبری نداشت.' };
+      }
+      return {
+        success: true,
+        status: norm.updateAvailable === true ? 'available' : (norm.updateAvailable === false ? 'up-to-date' : 'checked'),
+        version: current,
+        updateAvailable: norm.updateAvailable,
+        latestVersion: norm.version,
+        tagName: norm.tagName,
+        releaseNotes: norm.releaseNotes,
+        publishedAt: norm.publishedAt,
+        htmlUrl: norm.htmlUrl,
+        downloadUrl: norm.downloadUrl,
+        source: 'renderer-fetch',
+      };
+    } catch (err) {
+      const aborted = err && (err.name === 'AbortError' || err.name === 'TimeoutError');
+      return { success: false, status: 'error', version: current, updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', source: 'renderer-fetch', message: aborted ? 'مهلتِ ۱۵ ثانیه‌ایِ تماس با گیت‌هاب گذشت.' : (err && err.message ? String(err.message) : 'خطا در تماس با گیت‌هاب') };
+    } finally {
+      try { if (timer) clearTimeout(timer); } catch (_) {}
+    }
+  },
+
+  // مرحلهٔ ۵۸ §۲ (m2): بررسیِ بروزرسانی با fallback — اول IPC
+  // (main: net.fetch پروکسی‌شناس، بعد https) و فقط وقتی IPC،
+  // success:false یا status:'error' داد (یا throw کرد)، fetch
+  // رندرر. پاسخِ قطعیِ 'no-releases' از IPC، خطا نیست و هرگز
+  // fallback نمی‌خورد؛ همان‌طور که هست برمی‌گردد. اگر هر دو لایه
+  // شکست خوردند، همان خطایِ IPC (اولویت‌دار) برمی‌گردد تا پیام،
+  // همان پیامِ آشنایِ main باشد.
+  checkForUpdatesWithFallback: async () => {
+    let ipcResult = null;
+    let ipcFailed = false;
+    try {
+      ipcResult = await coreApi.checkForUpdates();
+    } catch (_) {
+      ipcFailed = true;
+    }
+    const ipcUsable = !ipcFailed
+      && ipcResult
+      && typeof ipcResult === 'object'
+      && ipcResult.success !== false
+      && ipcResult.status !== 'error';
+    if (ipcUsable) return ipcResult;
+    let currentVersion = '';
+    try {
+      const v = await coreApi.getAppVersion();
+      if (v && typeof v.version === 'string') currentVersion = v.version;
+    } catch (_) { currentVersion = ''; }
+    if (!currentVersion && ipcResult && typeof ipcResult.version === 'string') {
+      currentVersion = ipcResult.version;
+    }
+    try {
+      const fb = await coreApi.fetchLatestReleaseViaRenderer(currentVersion);
+      if (fb && fb.success) return fb;
+      if (ipcResult && typeof ipcResult === 'object') return ipcResult;
+      return fb;
+    } catch (_) {
+      if (ipcResult && typeof ipcResult === 'object') return ipcResult;
+      return { success: false, status: 'error', version: currentVersion, message: 'بررسی بروزرسانی انجام نشد.' };
+    }
+  },
+
   downloadUpdate: async () => {
     const api = getApi();
     if (!api?.downloadUpdate) return { success: false, status: 'dev-mode', version: '', message: 'محیط الکترون در دسترس نیست.' };
@@ -234,7 +337,8 @@ export const coreApi = {
     }
   },
 
-  // مرحلهٔ ۵۷ §۳ (m3): موتورِ دومِ بروزرسانی — REST عمومیِ گیت‌هاب.
+  // مرحلهٔ ۵۷ §۳ (m3) + مرحلهٔ ۵۸ §۲ (m2): موتورِ REST عمومیِ گیت‌هاب؛
+  // لایهٔ سومِ آن، fetch رندرر (fetchLatestReleaseViaRenderer) است.
   // مخزنِ hamedzakeripandator-ops/PandaReader عمومی است و بررسیِ
   // آخرین انتشار، با همین فراخوانِ بدونِ توکن انجام می‌شود؛ پس این
   // فایل، هیچ توکنی ندارد و هیچ هدرِ احرازِ هویتی نمی‌فرستد.
@@ -410,6 +514,11 @@ export const coreApi = {
       currentVersion: current,
       status: typeof result.status === 'string' ? result.status : 'checked',
       message: typeof result.message === 'string' ? result.message : '',
+      // مرحلهٔ ۵۸ §۲ (m2): 'no-releases' همان‌طور که هست عبور می‌کند؛
+      // latestVersion خالی است، پس updateAvailable همان null می‌ماند
+      // و مصرف‌کننده، آن را خطا نمی‌بیند. source هم ('rest' یا
+      // 'renderer-fetch') برایِ گزارش‌گیری عبور می‌کند.
+      source: typeof result.source === 'string' ? result.source : '',
     };
   },
 

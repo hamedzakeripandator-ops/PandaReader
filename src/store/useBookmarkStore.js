@@ -249,6 +249,29 @@ function toast(message, type = 'info') {
   } catch (_) {}
 }
 
+// مرحلهٔ ۵۸، مأموریت ۱ — یک‌شکل‌سازیِ پاسخِ دیتابیس: ورکر، موفقیت را
+// با { type: 'done', success: true } و شکست را با { type: 'error', message }
+// برمی‌گرداند (پاسخِ خطا، هیچ فیلدِ success ندارد)؛ بررسیِ قدیمیِ
+// res.success === false، شکستِ واقعیِ ورکر را نمی‌دید و موفقیتِ کاذب
+// نشان می‌داد. این تابع، هر سه شکل (type و success و ok) را به یک
+// قراردادِ { ok, error, data } برمی‌گرداند تا فراخواننده، فقط ok را ببیند.
+// پاسخی که هیچ‌کدام از نشانه‌هایِ موفقیت را ندارد، شکست حساب می‌شود تا
+// هیچ‌وقت، موفقیتِ کاذب ساخته نشود.
+function normalizeDbResult(res) {
+  if (!res || typeof res !== 'object') return { ok: false, error: 'پاسخی از دیتابیس نرسید.' };
+  if (res.type === 'error') {
+    return { ok: false, error: typeof res.message === 'string' && res.message ? res.message : 'خطا در عملیات دیتابیس' };
+  }
+  if (res.ok === false || res.success === false) {
+    const msg = typeof res.error === 'string' && res.error
+      ? res.error
+      : (typeof res.message === 'string' && res.message ? res.message : 'عملیاتِ دیتابیس ناموفق بود.');
+    return { ok: false, error: msg };
+  }
+  if (res.type === 'done' || res.ok === true || res.success === true) return { ok: true, data: res };
+  return { ok: false, error: 'پاسخِ دیتابیس به شکلِ موردِ انتظار نبود.' };
+}
+
 export const useBookmarkStore = create((set, get) => ({
   bookmarksByFile: {},
   loadedFilePath: null,
@@ -288,7 +311,7 @@ export const useBookmarkStore = create((set, get) => ({
     const lsPresets = lsPrefs ? lsPrefs.savedPresets : [];
     let dbRaw = null;
     try {
-      const res = await coreApi.dbAction({ action: 'GET_BOOKMARK_PREFERENCES' });
+      const res = await coreApi.dbAction({ action: 'GET_BOOKMARK_PREFERENCES', payload: {} });
       if (res && res.preferences && typeof res.preferences === 'object') dbRaw = res.preferences;
     } catch (_) {}
     if (!dbRaw) {
@@ -385,7 +408,7 @@ export const useBookmarkStore = create((set, get) => ({
       return;
     }
     try {
-      const res = await coreApi.dbAction({ action: 'GET_BOOKMARKS', filePath });
+      const res = await coreApi.dbAction({ action: 'GET_BOOKMARKS', payload: { filePath } });
       const dbList = Array.isArray(res && res.bookmarks)
         ? res.bookmarks.map(sanitizeBookmark).filter(Boolean)
         : [];
@@ -416,14 +439,18 @@ export const useBookmarkStore = create((set, get) => ({
     }
   },
 
+  // مرحلهٔ ۵۸، مأموریت ۱ — قراردادِ بازگشت، { ok, error, data } است
+  // (normalizeDbResult)؛ مقدارِ خامِ ورکر، دیگر برنمی‌گردد تا هیچ
+  // فراخواننده‌ای، { type: 'error' } را با موفقیت اشتباه نگیرد.
+  // فیلدها هم در payload فرستاده می‌شوند (قراردادِ همهٔ فراخواننده‌ها).
   persistBookmarks: async (filePath, list) => {
     filePath = normalizeBookKey(filePath);
-    if (!coreApi.isAvailable() || !filePath) return { success: false };
+    if (!coreApi.isAvailable() || !filePath) return { ok: false, error: 'ارتباط با دیتابیس برقرار نیست.' };
     try {
-      const res = await coreApi.dbAction({ action: 'SAVE_BOOKMARKS', filePath, bookmarks: list });
-      return res || { success: false };
+      const res = await coreApi.dbAction({ action: 'SAVE_BOOKMARKS', payload: { filePath, bookmarks: list } });
+      return normalizeDbResult(res);
     } catch (err) {
-      return { success: false, error: String((err && err.message) || err) };
+      return { ok: false, error: String((err && err.message) || err) };
     }
   },
 
@@ -460,8 +487,11 @@ export const useBookmarkStore = create((set, get) => ({
     // بوک‌مارک را از آینه هم پاک می‌کرد). فقط مقدارِ برگشتی null
     // می‌شود تا فراخواننده (مودال/منو) موفقیتِ کاذب نشان ندهد.
     writeBookmarksLocalStorage(filePath, next);
-    const res = await get().persistBookmarks(filePath, next);
-    if (!res || res.success === false) {
+    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
+    // می‌گیرد و null برمی‌گرداند؛ در موفقیت، هیچ توستِ خطایی نیست.
+    // توستِ سبزِ موفقیت، در مودال است تا توست، دوتایی نشود.
+    const saved = await get().persistBookmarks(filePath, next);
+    if (!saved || !saved.ok) {
       toast('ذخیره در دیتابیس ناموفق بود؛ بوک‌مارک در حافظهٔ محلی نگه داشته شد.', 'error');
       return null;
     }
@@ -495,8 +525,10 @@ export const useBookmarkStore = create((set, get) => ({
     // حتی با شکستِ IPC، در حافظهٔ محلی امن می‌ماند و در بارگذاریِ
     // بعدی به دیتابیس برمی‌گردد؛ state به prev برنمی‌گردد.
     writeBookmarksLocalStorage(filePath, next);
-    const res = await get().persistBookmarks(filePath, next);
-    if (!res || res.success === false) {
+    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
+    // می‌گیرد و null برمی‌گرداند؛ توستِ سبزِ موفقیت، در مودال است.
+    const saved = await get().persistBookmarks(filePath, next);
+    if (!saved || !saved.ok) {
       toast('ذخیرهٔ تغییر در دیتابیس ناموفق بود؛ تغییر در حافظهٔ محلی نگه داشته شد.', 'error');
       return null;
     }
@@ -524,12 +556,18 @@ export const useBookmarkStore = create((set, get) => ({
     // دیتابیس هنوز بوک‌مارک را دارد و اتحادِ بارگذاریِ بعدی آن را
     // برمی‌گرداند؛ توستِ خطا هم همین را می‌گوید.
     writeBookmarksLocalStorage(filePath, next);
-    const res = await get().persistBookmarks(filePath, next);
-    if (!res || res.success === false) {
+    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
+    // می‌گیرد؛ موفقیت، true برمی‌گرداند تا مودال/نما بدانند حذف
+    // واقعاً تأیید شده است.
+    const saved = await get().persistBookmarks(filePath, next);
+    if (!saved || !saved.ok) {
       toast('حذف در دیتابیس ناموفق بود؛ بوک‌مارک در باز شدنِ بعدی بازمی‌گردد.', 'error');
-      return;
+      return false;
     }
-    toast('بوک‌مارک حذف شد.', 'info');
+    // توستِ موفقیت، سبز است (پیش از این info بود)؛ هیچ نما، برایِ
+    // حذف توست نمی‌دهد، پس همین‌جا تنها توستِ موفقیت است.
+    toast('بوک‌مارک حذف شد.', 'success');
+    return true;
   },
 
   savePreferences: async (patch) => {
@@ -541,7 +579,7 @@ export const useBookmarkStore = create((set, get) => ({
     }
     if (!get().isHydrated) {
       toast('تنظیماتِ بوک‌مارک هنوز بارگذاری نشده؛ ذخیره انجام نشد.', 'error');
-      return get().preferences;
+      return { ok: false, preferences: get().preferences, error: 'تنظیماتِ بوک‌مارک هنوز بارگذاری نشده است.' };
     }
     const prev = get().preferences || { ...DEFAULT_BOOKMARK_PREFERENCES, savedPresets: [] };
     const raw = { ...prev, ...(patch || {}) };
@@ -588,13 +626,22 @@ export const useBookmarkStore = create((set, get) => ({
       preferences: next,
       bookmarkVersion: prefsChanged ? (get().bookmarkVersion || 0) + 1 : (get().bookmarkVersion || 0),
     });
-    if (!coreApi.isAvailable()) return next;
+    // مرحلهٔ ۵۸، مأموریت ۱ — نتیجهٔ ورکر خوانده می‌شود (پیش از این،
+    // نتیجه نادیده گرفته می‌شد و شکستِ واقعی، بی‌صدا می‌ماند)؛ فقط
+    // شکستِ واقعی توستِ خطا می‌گیرد. بازگشت: { ok, preferences, error }.
+    if (!coreApi.isAvailable()) return { ok: false, preferences: next, error: 'ارتباط با دیتابیس برقرار نیست.' };
     try {
-      await coreApi.dbAction({ action: 'SAVE_BOOKMARK_PREFERENCES', preferences: next });
-    } catch (_) {
+      const res = await coreApi.dbAction({ action: 'SAVE_BOOKMARK_PREFERENCES', payload: { preferences: next } });
+      const saved = normalizeDbResult(res);
+      if (!saved.ok) {
+        toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد.', 'error');
+        return { ok: false, preferences: next, error: saved.error };
+      }
+    } catch (err) {
       toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد.', 'error');
+      return { ok: false, preferences: next, error: String((err && err.message) || err) };
     }
-    return next;
+    return { ok: true, preferences: next };
   },
 
   // مرحله ۱۴: همگام‌سازیِ کشِ سراسری با تغییرِ یک کتاب؛ شمارندهٔ
@@ -646,7 +693,7 @@ export const useBookmarkStore = create((set, get) => ({
       return localMap;
     }
     try {
-      const res = await coreApi.dbAction({ action: 'GET_ALL_BOOKMARKS' });
+      const res = await coreApi.dbAction({ action: 'GET_ALL_BOOKMARKS', payload: {} });
       const files = Array.isArray(res && res.files) ? res.files : [];
       const map = {};
       files.forEach((f) => {
@@ -757,16 +804,25 @@ export const useBookmarkStore = create((set, get) => ({
       },
       bookmarkVersion: (state.bookmarkVersion || 0) + 1,
     }));
-    queuePresetWrite(async () => {
-      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
-    }).catch(() => {});
+    // مرحلهٔ ۵۸، مأموریت ۱ — دیده‌شدنِ فوری، همچنان همگام است (set
+    // بالا)، ولی بازگشت، پس از تأییدِ واقعیِ دیتابیس است؛ پس توستِ
+    // سبزِ نما، فقط برایِ ذخیرهٔ تأییدشده می‌آید و شکستِ واقعی،
+    // null برمی‌گرداند (توستِ خطا را savePreferences می‌دهد).
+    let writeOk = false;
+    try {
+      const result = await queuePresetWrite(async () => get().savePreferences({ savedPresets: get().preferences?.savedPresets || next }));
+      writeOk = Boolean(result && result.ok);
+    } catch (_) {
+      writeOk = false;
+    }
+    if (!writeOk) return null;
     return clean;
   },
 
   deletePreset: async (id) => {
     const prev = get().preferences?.savedPresets || [];
     const next = prev.filter((p) => p.id !== id);
-    if (next.length === prev.length) return;
+    if (next.length === prev.length) return false;
     // مرحلهٔ ۵۷، مأموریت ۱ — حذفِ همگام و فوری (مانندِ savePreset).
     writePrefsLocalStorage({ ...(get().preferences || {}), savedPresets: next });
     set((state) => ({
@@ -776,9 +832,16 @@ export const useBookmarkStore = create((set, get) => ({
       },
       bookmarkVersion: (state.bookmarkVersion || 0) + 1,
     }));
-    queuePresetWrite(async () => {
-      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
-    }).catch(() => {});
+    // مرحلهٔ ۵۸، مأموریت ۱ — دیده‌شدنِ فوری، همچنان همگام است؛
+    // بازگشت، پس از تأییدِ واقعیِ دیتابیس است (true یعنی حذف تأیید شد).
+    let writeOk = false;
+    try {
+      const result = await queuePresetWrite(async () => get().savePreferences({ savedPresets: get().preferences?.savedPresets || next }));
+      writeOk = Boolean(result && result.ok);
+    } catch (_) {
+      writeOk = false;
+    }
+    return writeOk;
   },
 
   // مرحله ۱۵: ویرایشِ یک ساختِ ذخیره‌شده — همان رکورد (همان id و
@@ -809,9 +872,16 @@ export const useBookmarkStore = create((set, get) => ({
       },
       bookmarkVersion: (state.bookmarkVersion || 0) + 1,
     }));
-    queuePresetWrite(async () => {
-      await get().savePreferences({ savedPresets: get().preferences?.savedPresets || next });
-    }).catch(() => {});
+    // مرحلهٔ ۵۸، مأموریت ۱ — دیده‌شدنِ فوری، همچنان همگام است؛
+    // بازگشت، پس از تأییدِ واقعیِ دیتابیس است (در شکست، null برمی‌گردد).
+    let writeOk = false;
+    try {
+      const result = await queuePresetWrite(async () => get().savePreferences({ savedPresets: get().preferences?.savedPresets || next }));
+      writeOk = Boolean(result && result.ok);
+    } catch (_) {
+      writeOk = false;
+    }
+    if (!writeOk) return null;
     return merged;
   },
 

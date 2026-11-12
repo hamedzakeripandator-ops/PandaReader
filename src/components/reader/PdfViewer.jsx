@@ -182,6 +182,12 @@ const PDF_BASE_MAX_SIDE = 1920;
 // آستانهٔ وضوحِ زوم: فقط وقتی زومِ نشسته بیش از ۲۰٪ از زومی که تصویرِ پایه با آن
 // واضح است بالاتر رفت، بازتازه‌سازیِ وضوح انجام می‌شود (تاریِ کمتر از این، دیده نمی‌شود).
 const PDF_ZOOM_CRISP_RATIO = 1.2;
+// مرحلهٔ ۵۸ — ماموریت ۶: سقفِ پاسِ وضوح برایِ صفحه‌هایِ دیده‌شده (فاصله تا ۱):
+// ضلعِ ۴۰۹۶ پیکسل و مساحتِ ۱۶٫۷ مگاپیکسل (نمونهٔ ۳۲۰۰×۴۵۰۰)؛ جایگزینِ
+// سقفِ کهنهٔ دیپ (۳۶۰۰ / ۸٫۵ مگاپیکسل) که در زومِ بالا، نخستین محدودکننده بود.
+const PDF_CRISP_MAX_SIDE = 4096;
+const PDF_CRISP_AREA_CAP = 16700000;
+const PDF_CRISP_MAX_SCALE = 4.0;
 
 // حلِ نشانیِ فایلِ ورکرِ pdf.js نسبت به صفحهٔ جاری.
 // حفرهٔ واقعیِ نسخهٔ پیشین: new URL(pdfjsWorker, location.href) وقتی Vite با base
@@ -227,6 +233,55 @@ export function computeBaseRenderScale(input) {
   const maxSide = Math.max(vw, vh) * scale;
   if (maxSide > PDF_BASE_MAX_SIDE && Math.max(vw, vh) > 0) scale = PDF_BASE_MAX_SIDE / Math.max(vw, vh);
   return { scale, crispZoom: scale / cappedDpr };
+}
+
+// مرحلهٔ ۵۸ — ماموریت ۶: مقیاسِ هدفِ پاسِ وضوح برایِ صفحه‌هایِ دیده‌شده.
+// تابعِ خالص (بدونِ React/DOM) تا در Node هم با همان کدِ واقعی آزمون شود.
+// فاصله بیش از ۱، null برمی‌گرداند: آن صفحه‌ها فقط پاسِ پایه (سقفِ ضلعِ ۱۹۲۰)
+// را می‌گیرند تا حافظه محدود بماند.
+// فرمولِ پرامپت برایِ همسایه (فاصله ۱): min(4.0, zoom * max(dpr, 1.5))؛
+// کفِ چگالیِ نمایش (requiredScale، منطقِ مرحلهٔ ۱۹/۵۶) هم حفظ شده، چون
+// فرمولِ تنها در زومِ بالا با dprی بالا، از چگالیِ فیزیکیِ نمایش کم می‌آورد
+// (مثلاً زومِ ۳ با dprی ۲، به حدودِ ۷٫۵ نیاز دارد، نه ۴٫۰)؛ هر دو کف،
+// سپس با سقفِ ۴۰۹۶ پیکسل / ۱۶٫۷ مگاپیکسل بسته می‌شوند.
+// صفحهٔ فعال (فاصله ۰) فرمولِ کهنهٔ دیپ را نگه می‌دارد: کفِ ۳٫۰ و ضریبِ ۱٫۲،
+// فقط سقفش از ۳۶۰۰/۸٫۵ به ۴۰۹۶/۱۶٫۷ بالا رفته است.
+export function computeCrispTargetScale(input) {
+  const src = input || {};
+  const distance = typeof src.distance === 'number' ? src.distance : 99;
+  if (distance > 1) return null;
+  const vw = Number(src.viewportWidth) || 0;
+  const vh = Number(src.viewportHeight) || 0;
+  if (vw <= 0 || vh <= 0) return null;
+  const zoom = Math.max(0.1, Number(src.renderZoomLevel) || 1);
+  const dpr = Number(src.dpr) || 1;
+  const pageWidth = Number(src.pageWidth) || 0;
+  const dprCapped = Math.min(Math.max(dpr, 2.0), 2.5);
+  const requiredScale = pageWidth > 0
+    ? (pageWidth * dprCapped * 1.25) / Math.max(1, vw)
+    : 0;
+  let targetScale;
+  if (distance === 0) {
+    targetScale = Math.max(quantizeZoom(zoom) * dprCapped * 1.2, requiredScale, 3.0);
+  } else {
+    const promptScale = Math.min(PDF_CRISP_MAX_SCALE, zoom * Math.max(dpr, 1.5));
+    targetScale = Math.max(promptScale, requiredScale);
+  }
+  const rawW = vw * targetScale;
+  const rawH = vh * targetScale;
+  const sideScale = Math.max(rawW, rawH) > PDF_CRISP_MAX_SIDE
+    ? PDF_CRISP_MAX_SIDE / Math.max(rawW, rawH)
+    : 1;
+  const areaScale = (rawW * rawH) > PDF_CRISP_AREA_CAP
+    ? Math.sqrt(PDF_CRISP_AREA_CAP / (rawW * rawH))
+    : 1;
+  targetScale = targetScale * Math.min(sideScale, areaScale);
+  return {
+    scale: targetScale,
+    width: Math.max(1, Math.floor(vw * targetScale)),
+    height: Math.max(1, Math.floor(vh * targetScale)),
+    capped: sideScale < 1 || areaScale < 1,
+  };
 }
 
 // تصمیمِ نگهبانِ صفحهٔ گیرکرده؛ برمی‌گرداند: 'restore-cache' | 'retry' | null.
@@ -662,7 +717,8 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // «نشست»ِ HUD، وقتی دیپ برایِ این صفحه در راه است، زود شلیک
   // نشود).
   const deepGateRef = useRef({ deepRuns: false });
-  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) === 0 && (renderZoomLevel || 0) > 1.2) };
+  // مرحلهٔ ۵۸ — ماموریت ۶: دیپ حالا برایِ فاصله تا ۱ هم می‌دود، پس گیت هم تا ۱ است.
+  deepGateRef.current = { deepRuns: !!(shouldRender && (distanceRef.current ?? 99) <= 1 && (renderZoomLevel || 0) > 1.2) };
 
   // مرحلهٔ ۳۱ — تنها نقطهٔ آزادسازیِ شیءهایِ صفحه: unmountِ
   // آیتم (خروج از پنجرهٔ DOM_OVERSCAN). وابستگیِ خالی، یعنی
@@ -946,8 +1002,13 @@ const PdfPageItem = React.memo(function PdfPageItem({
   // مرحلهٔ ۳۳ — پاسِ دوم: دیپ‌رندرِ سوپرسمپلِ PNG (موتورِ
   // مرحلهٔ ۱۹)، پس از آماده شدنِ پایه و فقط در سکونِ کاملِ
   // اسکرول (سیگنالِ hiDpiRenderTick با ۴۲۰ میلی‌ثانیه سکون):
-  // فقط و فقط وقتی زومِ نشسته بالایِ ۱٫۲ باشد و فقط برایِ خودِ
-  // صفحهٔ فعال (distance === 0). در زومِ عادی (<= ۱٫۲) این پاس
+  // فقط و فقط وقتی زومِ نشسته بالایِ ۱٫۲ باشد و فقط برایِ
+  // صفحه‌هایِ دیده‌شده (distance <= 1).
+  // مرحلهٔ ۵۸ — ماموریت ۶: گسترش از distance === 0 به distance <= 1 —
+  // همسایه‌هایِ دیده‌شده دیگر رویِ پایهٔ کم‌وضوح (سقفِ ضلعِ ۱۹۲۰) نمی‌مانند.
+  // نکته: hiDpiRenderTick فقط به صفحهٔ فعال می‌رسد (والد آن را برایِ
+  // صفحه‌هایِ دیگر ۰ می‌فرستد)؛ ماشهٔ همسایه‌ها، زومِ نشستهٔ ۱۴۰ میلی‌ثانیه‌ای
+  // و baseReady است، نه تیکِ سکونِ اسکرول. در زومِ عادی (<= ۱٫۲) این پاس
   // اصلاً اجرا نمی‌شود و مطالعه، تک‌پاس (فقط پایه) است.
   // فرمولِ دقیقِ مرحلهٔ ۱۹؛ انکدِ PNG با Worker؛ تعویض پس از
   // decode، بدونِ چشمک. خروج از صفحهٔ فعال، نشانیِ دیپ را
@@ -959,10 +1020,12 @@ const PdfPageItem = React.memo(function PdfPageItem({
     const dist = distanceRef.current ?? 99;
     const cacheKey = `${filePath}:${pageNumber}`;
     const key = `deep:${filePath}:${pageNumber}`;
-    // مرحلهٔ ۳۳ — دیپ فقط در زومِ بالایِ ۱٫۲ و فقط صفحهٔ فعال:
+    // مرحلهٔ ۳۳ — دیپ فقط در زومِ بالایِ ۱٫۲ و فقط صفحه‌هایِ دیده‌شده:
     // در زومِ عادی (<= ۱٫۲) این پاس اصلاً اجرا نمی‌شود و تصویرِ
     // پایهٔ تک‌پاس، همان چیزی است که دیده می‌شود.
-    if (!shouldRender || !pdfDoc || dist !== 0 || (renderZoomLevel || 0) <= 1.2) {
+    // مرحلهٔ ۵۸ — ماموریت ۶: dist !== 0 به dist > 1 رسید؛ صفحه با فاصلهٔ
+    // بیش از ۱، نشانیِ دیپش را از دست می‌دهد و به پایه برمی‌گردد (سقفِ حافظه).
+    if (!shouldRender || !pdfDoc || dist > 1 || (renderZoomLevel || 0) <= 1.2) {
       renderQueue.cancel(key);
       revokeDeepPngUrl(cacheKey);
       deepUrlRef.current = null;
@@ -984,11 +1047,10 @@ const PdfPageItem = React.memo(function PdfPageItem({
         setDeepUrl(null);
       }
     }
-    // مرحلهٔ ۳۸ §۴: سقفِ واحدِ دیپ برایِ همهٔ زوم‌ها — ۳۶۰۰ پیکسل /
-    // ۸٫۵ مگاپیکسل (طبقهٔ hiی ۵۱۲۰/۲۰M حذف شد: بومِ ۲۰ مگاپیکسلیِ
-    // PNG در زومِ بالا، قفلِ VRAM و هنگِ کاملِ برنامه).
-    const deepSideCap = 3600;
-    const deepAreaCap = 8500000;
+    // مرحلهٔ ۵۸ — ماموریت ۶: سقفِ ۳۶۰۰/۸٫۵ مگاپیکسلِ مرحلهٔ ۳۸ §۴ حذف شد؛
+    // سقفِ تازه (۴۰۹۶ پیکسل / ۱۶٫۷ مگاپیکسل) در computeCrispTargetScale
+    // اعمال می‌شود. طبقهٔ hiی ۵۱۲۰/۲۰M همچنان حذف است: بومِ ۲۰ مگاپیکسلی،
+    // قفلِ VRAM و هنگِ کاملِ برنامه می‌آورد.
     const signature = `${filePath}|${pageNumber}|${quantizeZoom(renderZoomLevel)}|${pageWidth}|std`;
     if (deepDoneRef.current === signature && deepUrlRef.current) {
       if (typeof onHiDpiSettled === 'function') onHiDpiSettled(pageNumber);
@@ -1018,16 +1080,19 @@ const PdfPageItem = React.memo(function PdfPageItem({
           if (hooks.isCancelled()) return;
           const baseViewport = page.getViewport({ scale: 1.0 });
           if (baseViewport.width <= 0 || baseViewport.height <= 0) return;
-          const dpr = Math.min(Math.max(window.devicePixelRatio || 1, 2.0), 2.5);
-          const requiredScale = pageWidth > 0
-            ? (pageWidth * dpr * 1.25) / Math.max(1, baseViewport.width)
-            : 0;
-          let targetScale = Math.max(quantizeZoom(renderZoomLevel) * dpr * 1.2, requiredScale, 3.0);
-          const rawW = baseViewport.width * targetScale;
-          const rawH = baseViewport.height * targetScale;
-          const sideScale = Math.max(rawW, rawH) > deepSideCap ? deepSideCap / Math.max(rawW, rawH) : 1;
-          const areaScale = (rawW * rawH) > deepAreaCap ? Math.sqrt(deepAreaCap / (rawW * rawH)) : 1;
-          targetScale = targetScale * Math.min(sideScale, areaScale);
+          // مرحلهٔ ۵۸ — ماموریت ۶: مقیاس از تابعِ خالصِ computeCrispTargetScale
+          // می‌آید (همان فرمولِ کهنه برایِ صفحهٔ فعال + فرمولِ پرامپت برایِ
+          // همسایه، با سقفِ ۴۰۹۶/۱۶٫۷). dist همان فاصلهٔ اثر است.
+          const crisp = computeCrispTargetScale({
+            distance: dist,
+            viewportWidth: baseViewport.width,
+            viewportHeight: baseViewport.height,
+            renderZoomLevel: renderZoomLevel || 1,
+            dpr: window.devicePixelRatio || 1,
+            pageWidth,
+          });
+          if (!crisp) return;
+          const targetScale = crisp.scale;
           const viewport = page.getViewport({ scale: targetScale });
           const tmp = document.createElement('canvas');
           tmp.width = Math.max(1, Math.floor(viewport.width));

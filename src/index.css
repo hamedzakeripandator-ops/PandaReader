@@ -266,6 +266,31 @@ textarea {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+/* مرحلهٔ ۵۸ مأموریتِ ۴: اسکرول‌بارِ باریکِ دراورِ رنگ — ۵ پیکسل،
+   بدونِ دکمه‌های بالا/پایین (قانونِ سراسریِ
+   ::-webkit-scrollbar-button از پیش display: none است)، با شستیِ
+   گرادیانی از همان متغیرهایِ تمِ کاربر (--cr-sb-start و
+   --cr-sb-end) که قانون‌هایِ سراسریِ بالا هم از آن‌ها می‌خوانند.
+   توجه: دراور، دیگر scrollbar-width/scrollbar-color ندارد، چون
+   scrollbar-color در کرومیوم، استایلِ webkit را از کار می‌انداخت
+   و نوارِ ضخیمِ زردِ ویندوز با دکمه‌های مثلثی نشان می‌داد. */
+.at-color-drawer-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+
+.at-color-drawer-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.at-color-drawer-scroll::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--cr-sb-start, #22d3ee) 0%, var(--cr-sb-end, #a78bfa) 100%);
+  border-radius: 999px;
+}
+
+.at-color-drawer-scroll::-webkit-scrollbar-thumb:hover {
+  filter: brightness(1.18);
+}
+
 
 /* انیمیشن چرخش آیکون‌های لودینگ */
 @keyframes iconSpin {

@@ -427,7 +427,11 @@ export default function App() {
     if (!enabled) return;
     let result = null;
     try {
-      if (coreApi && typeof coreApi.checkForUpdates === 'function') result = await coreApi.checkForUpdates();
+      // مرحلهٔ ۵۸ §۲ (m2): بررسیِ خودکارِ شروع، با همان fallback
+      // سه‌لایه (IPCِ net.fetch، بعد https، بعد fetch رندرر)؛ اگر
+      // coreApiِ قدیمی wrapper را نداشت، همان checkForUpdates.
+      if (coreApi && typeof coreApi.checkForUpdatesWithFallback === 'function') result = await coreApi.checkForUpdatesWithFallback();
+      else if (coreApi && typeof coreApi.checkForUpdates === 'function') result = await coreApi.checkForUpdates();
     } catch (_) { result = null; }
     if (!result) return;
     let norm = null;
