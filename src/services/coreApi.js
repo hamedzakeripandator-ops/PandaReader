@@ -234,6 +234,349 @@ export const coreApi = {
     }
   },
 
+  // مرحلهٔ ۵۷ §۳ (m3): موتورِ دومِ بروزرسانی — REST عمومیِ گیت‌هاب.
+  // مخزنِ hamedzakeripandator-ops/PandaReader عمومی است و بررسیِ
+  // آخرین انتشار، با همین فراخوانِ بدونِ توکن انجام می‌شود؛ پس این
+  // فایل، هیچ توکنی ندارد و هیچ هدرِ احرازِ هویتی نمی‌فرستد.
+  // تابع‌هایِ خالصِ این بخش (مقایسهٔ نسخه، تمیزکردنِ یادداشت‌ها،
+  // نرمال‌سازیِ پاسخِ REST)، در Node هم از همین فایل تست می‌شوند.
+  githubLatestReleaseUrl: 'https://api.github.com/repos/hamedzakeripandator-ops/PandaReader/releases/latest',
+  skippedUpdateVersionKey: 'pandaReader.skippedVersion',
+  autoCheckUpdatesKey: 'pandaReader.autoCheckUpdates',
+
+  // «v1.0.3» و «1.0.3» یکی‌اند؛ پیشوندِ v و فاصله‌هایِ اضافه حذف
+  // می‌شوند تا مقایسه، همیشه رویِ عددها انجام شود.
+  stripVersionPrefix: (version) => {
+    if (typeof version !== 'string') return '';
+    return version.trim().replace(/^[vV]/, '').trim();
+  },
+
+  // مقایسهٔ معناییِ دو نسخه: ۱ یعنی اولی تازه‌تر است، ۱- یعنی
+  // قدیمی‌تر، ۰ یعنی برابر. بخش‌هایِ عددی با هم سنجیده می‌شوند؛
+  // پسوندِ پیش‌انتشار (مثلِ beta) از نسخهٔ نهایی قدیمی‌تر است.
+  compareVersions: (a, b) => {
+    const splitParts = (v) => {
+      const noBuild = coreApi.stripVersionPrefix(v).split('+')[0];
+      const dashAt = noBuild.indexOf('-');
+      const core = dashAt === -1 ? noBuild : noBuild.slice(0, dashAt);
+      const pre = dashAt === -1 ? '' : noBuild.slice(dashAt + 1);
+      const nums = core.split('.').map((part) => {
+        const n = parseInt(part, 10);
+        return Number.isFinite(n) ? n : 0;
+      });
+      return { nums, pre };
+    };
+    const left = splitParts(a);
+    const right = splitParts(b);
+    const len = Math.max(left.nums.length, right.nums.length);
+    for (let i = 0; i < len; i++) {
+      const l = left.nums[i] || 0;
+      const r = right.nums[i] || 0;
+      if (l > r) return 1;
+      if (l < r) return -1;
+    }
+    if (left.pre === right.pre) return 0;
+    if (!left.pre) return 1;
+    if (!right.pre) return -1;
+    if (left.pre < right.pre) return -1;
+    return 1;
+  },
+
+  // یادداشتِ انتشارِ گیت‌هاب (body) معمولاً مارک‌داون و گاهی HTML
+  // دارد؛ تگ‌ها و entityها حذف می‌شوند تا در باکسِ RTL، تمیز
+  // خوانده شود. خط‌هایِ خالیِ پشتِ سرِ هم، به یک خطِ خالی می‌رسند.
+  cleanReleaseNotes: (body) => {
+    if (typeof body !== 'string') return '';
+    let text = body.replace(/<br\s*\/?>/gi, '\n');
+    text = text.replace(/<[^>]*>/g, '');
+    text = text.replace(/&#(\d+);/g, (m, code) => {
+      const n = parseInt(code, 10);
+      if (!Number.isFinite(n) || n <= 0 || n > 0x10ffff) return '';
+      try { return String.fromCodePoint(n); } catch (_) { return ''; }
+    });
+    text = text.replace(/&#x([0-9a-fA-F]+);/g, (m, code) => {
+      const n = parseInt(code, 16);
+      if (!Number.isFinite(n) || n <= 0 || n > 0x10ffff) return '';
+      try { return String.fromCodePoint(n); } catch (_) { return ''; }
+    });
+    text = text.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#39;/g, "'");
+    const lines = text.split('\n').map((line) => line.replace(/[ \t]+$/, ''));
+    const out = [];
+    let blankRun = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === '') {
+        blankRun += 1;
+        if (blankRun <= 1) out.push('');
+      } else {
+        blankRun = 0;
+        out.push(lines[i]);
+      }
+    }
+    while (out.length > 0 && out[0].trim() === '') out.shift();
+    while (out.length > 0 && out[out.length - 1].trim() === '') out.pop();
+    return out.join('\n');
+  },
+
+  // سطرهایِ یادداشتِ تمیزشده را به بلوک‌هایِ قابلِ رندر می‌شکند:
+  // 'heading' برایِ سرفصل‌هایِ #، 'bullet' برایِ خط‌هایِ - و * و •
+  // و 'text' برایِ بقیه. تابعِ خالص است و JSX تولید نمی‌کند.
+  splitReleaseNotes: (text) => {
+    const cleaned = coreApi.cleanReleaseNotes(text);
+    if (!cleaned) return [];
+    const blocks = [];
+    const lines = cleaned.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        blocks.push({ kind: 'heading', text: heading[2].trim() });
+        continue;
+      }
+      const bullet = line.match(/^([-*•])\s+(.*)$/);
+      if (bullet) {
+        blocks.push({ kind: 'bullet', text: bullet[2].trim() });
+        continue;
+      }
+      blocks.push({ kind: 'text', text: line });
+    }
+    return blocks;
+  },
+
+  // از فهرستِ assets انتشار، فایلِ نصبِ ویندوز (.exe) را برمی‌گرداند؛
+  // «Setup» در اولویت است، وگرنه اولین .exe. اگر نبود، رشتهٔ خالی.
+  pickExeAsset: (assets) => {
+    if (!Array.isArray(assets)) return '';
+    const exes = assets.filter((a) => a && typeof a.name === 'string' && /\.exe$/i.test(a.name));
+    const preferred = exes.find((a) => /setup/i.test(a.name)) || exes[0];
+    if (!preferred || typeof preferred.browser_download_url !== 'string') return '';
+    return preferred.browser_download_url;
+  },
+
+  // شکلِ واقعیِ پاسخِ REST (tag_name ،body ،published_at ،assets)
+  // را به همان شکلی برمی‌گرداند که هندلرِ check-for-updates و
+  // رندرر می‌فهمند. updateAvailable وقتی null است که نسخهٔ فعلی
+  // خوانده نشده باشد و مقایسه ممکن نباشد.
+  normalizeLatestRelease: (json, currentVersion) => {
+    if (!json || typeof json !== 'object') return null;
+    const tagName = typeof json.tag_name === 'string' ? json.tag_name : '';
+    const version = coreApi.stripVersionPrefix(tagName);
+    const releaseNotes = coreApi.cleanReleaseNotes(typeof json.body === 'string' ? json.body : '');
+    const current = coreApi.stripVersionPrefix(currentVersion);
+    let updateAvailable = null;
+    if (current && version) {
+      updateAvailable = coreApi.compareVersions(version, current) > 0;
+    }
+    return {
+      tagName,
+      version,
+      releaseNotes,
+      publishedAt: typeof json.published_at === 'string' ? json.published_at : '',
+      htmlUrl: typeof json.html_url === 'string' ? json.html_url : '',
+      downloadUrl: coreApi.pickExeAsset(json.assets),
+      updateAvailable,
+      source: 'rest',
+    };
+  },
+
+  // پاسخِ مستقیمِ هندلرِ check-for-updates (بعد از ادغامِ REST و
+  // electron-updater) را نرمال می‌کند تا کارتِ تنظیمات، صفحهٔ
+  // دانلودها و مودالِ App، هر سه یک شکل ببینند.
+  normalizeCheckForUpdatesResult: (result, currentVersion) => {
+    if (!result || typeof result !== 'object') {
+      return { updateAvailable: null, latestVersion: '', releaseNotes: '', publishedAt: '', downloadUrl: '', htmlUrl: '', currentVersion: coreApi.stripVersionPrefix(currentVersion), status: 'error', message: '' };
+    }
+    const current = coreApi.stripVersionPrefix(typeof result.version === 'string' ? result.version : currentVersion);
+    let latest = '';
+    if (typeof result.latestVersion === 'string' && result.latestVersion) {
+      latest = coreApi.stripVersionPrefix(result.latestVersion);
+    } else if (result.updateInfo && typeof result.updateInfo.version === 'string') {
+      latest = coreApi.stripVersionPrefix(result.updateInfo.version);
+    }
+    let updateAvailable = typeof result.updateAvailable === 'boolean' ? result.updateAvailable : null;
+    if (updateAvailable === null && latest && current) {
+      updateAvailable = coreApi.compareVersions(latest, current) > 0;
+    }
+    const rawNotes = typeof result.releaseNotes === 'string'
+      ? result.releaseNotes
+      : (typeof result.releaseBody === 'string' ? result.releaseBody : '');
+    return {
+      updateAvailable,
+      latestVersion: latest,
+      releaseNotes: coreApi.cleanReleaseNotes(rawNotes),
+      publishedAt: typeof result.publishedAt === 'string' ? result.publishedAt : '',
+      downloadUrl: typeof result.downloadUrl === 'string' ? result.downloadUrl : '',
+      htmlUrl: typeof result.htmlUrl === 'string' ? result.htmlUrl : '',
+      currentVersion: current,
+      status: typeof result.status === 'string' ? result.status : 'checked',
+      message: typeof result.message === 'string' ? result.message : '',
+    };
+  },
+
+  // رویدادِ خامِ 'app-update-status' را به پیشرفتِ یک‌شکلِ
+  // { kind, version, percent, transferred, total, bytesPerSecond }
+  // برمی‌گرداند؛ مودالِ دانلود در App از این تابع می‌خواند.
+  normalizeUpdateProgressEvent: (raw) => {
+    const empty = { kind: 'unknown', version: '', percent: 0, transferred: 0, total: 0, bytesPerSecond: 0, message: '' };
+    if (!raw || typeof raw !== 'object') return empty;
+    const keyRaw = raw.type || raw.status || raw.event || raw.kind || '';
+    const key = String(keyRaw).trim().toLowerCase().replace(/_/g, '-');
+    const version = typeof raw.version === 'string' ? raw.version : '';
+    let percent = 0;
+    if (typeof raw.percent === 'number') percent = raw.percent;
+    else if (typeof raw.progress === 'number') percent = raw.progress;
+    else if (typeof raw.transferred === 'number' && typeof raw.total === 'number' && raw.total > 0) {
+      percent = (raw.transferred / raw.total) * 100;
+    }
+    const transferred = typeof raw.transferred === 'number' ? raw.transferred : 0;
+    const total = typeof raw.total === 'number' ? raw.total : 0;
+    const bytesPerSecond = typeof raw.bytesPerSecond === 'number' ? raw.bytesPerSecond : 0;
+    const message = typeof raw.message === 'string' ? raw.message : '';
+    if (key === 'checking' || key === 'checking-for-update') return { ...empty, kind: 'checking', version, message };
+    if (key === 'update-available' || key === 'available') return { ...empty, kind: 'available', version, message };
+    if (key === 'update-not-available' || key === 'not-available' || key === 'up-to-date') return { ...empty, kind: 'not-available', version, message };
+    if (key === 'download-progress' || key === 'downloading') return { kind: 'downloading', version, percent, transferred, total, bytesPerSecond, message };
+    if (key === 'update-downloaded' || key === 'downloaded') return { ...empty, kind: 'downloaded', version, percent: 100, transferred, total, bytesPerSecond, message };
+    if (key === 'error') return { ...empty, kind: 'error', version, message };
+    return empty;
+  },
+
+  // نمایشِ خوانایِ بایت: 0 B ،12.5 KB ،3.2 MB. ارقام، لاتین‌اند
+  // تا در کنارِ «٪» و واحدها، در متنِ RTL به‌هم نریزند.
+  formatBytes: (bytes) => {
+    const n = typeof bytes === 'number' && Number.isFinite(bytes) ? Math.max(0, bytes) : 0;
+    if (n <= 0) return '0 B';
+    if (n < 1024) return Math.round(n) + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+    return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+  },
+
+  formatDownloadSpeed: (bytesPerSecond) => {
+    return coreApi.formatBytes(bytesPerSecond) + '/s';
+  },
+
+  // --- حافظهٔ محلیِ انتخاب‌هایِ بروزرسانی (localStorage) ---
+  // نسخهٔ نادیده‌گرفته‌شده: مودال برای آن نسخه دیگر باز نمی‌شود،
+  // مگر با زدنِ دستیِ دکمهٔ بررسی در تنظیمات/دانلودها.
+  readSkippedUpdateVersion: () => {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return '';
+      return window.localStorage.getItem('pandaReader.skippedVersion') || '';
+    } catch (_) { return ''; }
+  },
+
+  writeSkippedUpdateVersion: (version) => {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return;
+      const value = coreApi.stripVersionPrefix(version);
+      if (value) window.localStorage.setItem('pandaReader.skippedVersion', value);
+      else window.localStorage.removeItem('pandaReader.skippedVersion');
+    } catch (_) {}
+  },
+
+  // قانونِ باز شدنِ مودالِ یادآوری (تابعِ خالص؛ در Node تست می‌شود):
+  // بدونِ نسخه، هرگز؛ نسخهٔ نادیده‌گرفته‌شده، فقط با بررسیِ دستی؛
+  // «یادآوری در نوبتِ بعدی» فقط همین نشست را ساکت می‌کند.
+  shouldOpenUpdateModal: ({ latestVersion, manual, skippedVersion, remindedVersion }) => {
+    if (!latestVersion) return false;
+    const latest = coreApi.stripVersionPrefix(latestVersion);
+    if (!latest) return false;
+    if (!manual && skippedVersion && coreApi.stripVersionPrefix(skippedVersion) === latest) return false;
+    if (!manual && remindedVersion && coreApi.stripVersionPrefix(remindedVersion) === latest) return false;
+    return true;
+  },
+
+  // کلیدِ «بررسی و یادآوریِ خودکارِ آپدیت‌ها»؛ پیش‌فرض، روشن است.
+  // هر تغییر، رویدادِ 'panda-reader-auto-check-changed' می‌فرستد تا
+  // سوییچِ داخلِ مودال و کارتِ تنظیمات، هم‌گام بمانند.
+  readAutoCheckUpdatesEnabled: () => {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return true;
+      const raw = window.localStorage.getItem('pandaReader.autoCheckUpdates');
+      if (raw === null || raw === undefined || raw === '') return true;
+      return raw === '1' || raw === 'true';
+    } catch (_) { return true; }
+  },
+
+  writeAutoCheckUpdatesEnabled: (enabled) => {
+    const value = enabled === true;
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('pandaReader.autoCheckUpdates', value ? '1' : '0');
+      }
+    } catch (_) {}
+    try {
+      if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new window.CustomEvent('panda-reader-auto-check-changed', { detail: { enabled: value } }));
+      }
+    } catch (_) {}
+  },
+
+  onAutoCheckUpdatesChanged: (callback) => {
+    if (typeof window === 'undefined' || typeof callback !== 'function') return () => {};
+    const handler = (event) => {
+      try {
+        const enabled = event && event.detail ? event.detail.enabled : coreApi.readAutoCheckUpdatesEnabled();
+        callback(enabled === true);
+      } catch (_) {}
+    };
+    try { window.addEventListener('panda-reader-auto-check-changed', handler); } catch (_) { return () => {}; }
+    return () => {
+      try { window.removeEventListener('panda-reader-auto-check-changed', handler); } catch (_) {}
+    };
+  },
+
+  // --- پلِ رویدادِ «نسخهٔ تازه پیدا شد» بینِ کارتِ تنظیمات/
+  // صفحهٔ دانلودها و مودالِ سراسریِ App ---
+  // detail: { updateAvailable, latestVersion, releaseNotes,
+  // publishedAt, downloadUrl, htmlUrl, currentVersion, manual }
+  // manual یعنی کاربر خودش دکمهٔ بررسی را زده است (مودال، حتی برایِ
+  // نسخهٔ نادیده‌گرفته‌شده هم باز می‌شود)؛ در بررسیِ خودکار، false است.
+  emitUpdateAvailable: (info) => {
+    try {
+      if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function') return;
+      window.dispatchEvent(new window.CustomEvent('panda-reader-update-available', { detail: info || {} }));
+    } catch (_) {}
+  },
+
+  onUpdateAvailable: (callback) => {
+    if (typeof window === 'undefined' || typeof callback !== 'function') return () => {};
+    const handler = (event) => {
+      try { callback((event && event.detail) || {}); } catch (_) {}
+    };
+    try { window.addEventListener('panda-reader-update-available', handler); } catch (_) { return () => {}; }
+    return () => {
+      try { window.removeEventListener('panda-reader-update-available', handler); } catch (_) {}
+    };
+  },
+
+  // دانلودِ مستقیمِ فایلِ .exe از گیت‌هاب (حالتِ Portable/توسعه که
+  // electron-updater در آن نیست). بدونِ withTimeout است، چون دانلود
+  // دقیقه‌ها طول می‌کشد و پیشرفتش با رویداد می‌رسد (همان الگویِ
+  // downloadUpdate در همین فایل).
+  downloadUpdateDirect: async (payload) => {
+    const api = getApi();
+    if (!api?.downloadUpdateDirect) return { success: false, status: 'dev-mode', version: '', message: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.downloadUpdateDirect(payload);
+    } catch (err) {
+      return { success: false, status: 'error', version: '', message: err?.message || 'خطا در دانلودِ مستقیمِ نسخهٔ جدید' };
+    }
+  },
+
+  // اجرایِ نصب‌کنندهٔ دانلودشده؛ فلاشِ دیتابیس، در سمتِ main و پیش
+  // از اجرایِ نصب‌کننده انجام می‌شود (همان هندلرِ quitAndInstall).
+  installDownloadedUpdate: async (payload) => {
+    const api = getApi();
+    if (!api?.installDownloadedUpdate) return { success: false, status: 'dev-mode', version: '', message: 'محیط الکترون در دسترس نیست.' };
+    try {
+      return await api.installDownloadedUpdate(payload);
+    } catch (err) {
+      return { success: false, status: 'error', version: '', message: err?.message || 'خطا در نصبِ نسخهٔ دانلودشده' };
+    }
+  },
+
   showItemInFolder: async (filePath) => {
     const api = getApi();
     if (!api?.showItemInFolder) return { success: false, error: 'محیط الکترون در دسترس نیست.' };
