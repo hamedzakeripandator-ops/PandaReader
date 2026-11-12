@@ -8,6 +8,10 @@ const NESTED_ARCHIVE_REGEX = /\.(zip|cbz)$/i;
 // سقف عمق تودرتویی زیپ‌در‌زیپ — جلوگیری از بازگشت بی‌نهایت / بمب آرشیوی
 const MAX_NESTED_DEPTH = 3;
 const WRITE_BATCH_SIZE = 8;
+// اندازهٔ دستهٔ استخراج RAR — هر دسته فقط ۸ فایل را به رم می‌کشد (مثل ZIP) تا
+// آرشیوهای ۱ گیگابایتی ورکر را با OOM نکشند. مقدارش با WRITE_BATCH_SIZE یکی
+// است ولی ثابتِ جداگانه دارد تا اگر روزی لازم شد مستقل تنظیم شود.
+const RAR_BATCH_SIZE = 8;
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
 // فیلتر هوشمند فایل‌های مخفی مکینتاش، فایل‌های سیستمی و تصاویر بندانگشتی معیوب
@@ -335,32 +339,48 @@ async function extractRar(fileBuffer, outputDir, coverOnly = false, archiveLabel
     throw new Error('استخراج بافر کاور اول ناموفق بود.');
   }
 
-  const extracted = extractor.extract({
-    files: fileHeaders.map((h) => h.name)
-  });
-
-  const rawExtractedMap = new Map();
-  for (const file of extracted.files) {
-    if (file.extraction) {
-      rawExtractedMap.set(file.fileHeader.name, Buffer.from(file.extraction));
-    }
-  }
-
+  // مرحلهٔ ۵۹ §۳٫۱ — استخراجِ دسته‌ایِ RAR: هر دسته فقط RAR_BATCH_SIZE فایل
+  // را به رم می‌کشد و بلافاصله پس از نوشتن روی دیسک، بافرش دور ریخته
+  // می‌شود؛ رم در کلِ استخراج، به ۸ صفحهٔ هم‌زمان محدود می‌ماند.
+  // نکتهٔ node-unrar-js (نسخهٔ ۲٫۰٫۲): مقدارِ برگشتیِ extract() ایتریتورِ
+  // تنبل است و شیءِ C++‎ آرشیو تا وقتی ایتریتور تا انتها پیموده نشود آزاد
+  // نمی‌شود (هشدارِ نشتِ حافظه در مستنداتِ کتابخانه)؛ فراخوانیِ دوبارهٔ
+  // ‎extract()‎ روی همان extractor هم تضمین‌شده نیست، پس برای هر دسته یک
+  // extractorِ تازه از روی همان ArrayBuffer ساخته می‌شود (هزینه‌اش فقط
+  // بازخوانیِ هدرِ آرشیو است، نه کپیِ دوبارهٔ کلِ فایل). نتیجهٔ تستِ
+  // رفتارِ «یک‌بارمصرف» بودنِ extractor در گزارشِ مرحلهٔ ۵۹ (m5) ثبت
+  // شده است.
   const imageFiles = new Array(totalFiles);
   let firstCoverBuffer = null;
   let firstCoverMime = 'image/jpeg';
 
-  for (let batchStart = 0; batchStart < totalFiles; batchStart += WRITE_BATCH_SIZE) {
-    const batchEnd = Math.min(totalFiles, batchStart + WRITE_BATCH_SIZE);
+  for (let batchStart = 0; batchStart < totalFiles; batchStart += RAR_BATCH_SIZE) {
+    const batchEnd = Math.min(totalFiles, batchStart + RAR_BATCH_SIZE);
+    const batchNames = fileHeaders.slice(batchStart, batchEnd).map((h) => h.name);
+
+    // extractorِ تازه برای این دسته (همان دادهٔ ورودی، بدونِ کپیِ دوباره).
+    const batchExtractor = await unrar.createExtractorFromData({ data: arrayBuffer });
+    const batchExtracted = batchExtractor.extract({ files: batchNames });
+
+    // فقط بافرهای همین دسته در رم می‌مانند؛ ایتریتور تا انتها پیموده
+    // می‌شود تا شیءِ C++‎ آرشیو آزاد شود، و با تمام‌شدنِ دسته، Map دور
+    // انداخته می‌شود و GC بافرها را آزاد می‌کند.
+    const batchMap = new Map();
+    for (const file of batchExtracted.files) {
+      if (file.extraction) {
+        batchMap.set(file.fileHeader.name, Buffer.from(file.extraction));
+      }
+    }
+
     const batchPromises = [];
 
     for (let i = batchStart; i < batchEnd; i++) {
       batchPromises.push(
         (async (idx) => {
           const headerName = fileHeaders[idx].name;
-          const buffer = rawExtractedMap.get(headerName);
+          const buffer = batchMap.get(headerName);
           if (!buffer) return;
-          rawExtractedMap.delete(headerName);
+          batchMap.delete(headerName);
 
           if (idx === 0) {
             firstCoverBuffer = buffer;

@@ -912,7 +912,7 @@ export default function SettingsView() {
 
   return (
     <div style={styles.container}>
-      <div style={styles.containerInner}>
+      <div dir="rtl" style={styles.containerInner}>
       {/* هدر بالای تنظیمات */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -1765,6 +1765,9 @@ const styles = {
     direction: 'rtl',
     flex: 1,
     minWidth: 0,
+    // مرحلهٔ ۵۹ (m3): فاصله از نوارِ اسکرولِ سمتِ راست، تا متن
+    // به نوارِ اسکرول نچسبد.
+    paddingRight: '10px',
   },
 
   header: {

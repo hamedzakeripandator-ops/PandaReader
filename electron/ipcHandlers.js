@@ -430,12 +430,33 @@ function ensurePersistentDbWorker() {
   }
 }
 
+// مرحلهٔ ۵۹ §۲.۴: سقف‌هایِ زمانیِ دیتابیس — عملیاتِ عادی ۱۵۰۰۰ و
+// عملیاتِ سنگین ۴۵۰۰۰ میلی‌ثانیه (۵ ثانیهٔ قبلی، رویِ هاردِ اکسترنال
+// یا کتابخانهٔ بزرگ، SYNC و GET_ALL_COVER_CACHES را می‌کشت).
+// فهرستِ سنگین، همان فهرستِ src/services/coreApi.js است (دو نسخهٔ
+// همسان؛ main با require و رندرر با ESM کار می‌کنند و ماژولِ مشترکی
+// ندارند — اگر یکی عوض شد، دیگری هم باید عوض شود).
+// SYNC_MISSING_FILES در این بیس، اکشنِ ورکر نیست (ورکر،
+// SYNC_AND_CLEAN_MISSING_FILES و PRUNE_MISSING_FILES را دارد)؛ هر سه
+// نام در فهرست‌اند تا هر کدام که رسید، سقفِ سنگین بگیرد.
+// ساختِ پشتیبان (۶۰۰۰۰) و بازیابی (۱۲۰۰۰۰) همچنان با تایم‌اوتِ
+// صریحِ خودشان صدا می‌شوند، چون از سقفِ سنگین هم بلندترند.
+const HEAVY_DB_ACTIONS = new Set([
+  'BUILD_BACKUP',
+  'RESTORE_BACKUP',
+  'SYNC_MISSING_FILES',
+  'SYNC_AND_CLEAN_MISSING_FILES',
+  'PRUNE_MISSING_FILES',
+  'GET_ALL_COVER_CACHES',
+]);
+const DB_TIMEOUT_MS = 15000;
+const DB_HEAVY_TIMEOUT_MS = 45000;
+
 // مرحله ۵ ـ بخش الف: همان executeDbAction، ولی با تایم‌اوتِ پارامتری؛
 // چون ساختِ پشتیبان (خواندنِ همهٔ کاورها + فشرده‌سازی) و بازیابی
-// (اعتبارسنجی + جایگزینی) ذاتاً از ۵ ثانیه طولانی‌ترند و نباید با
-// تایم‌اوتِ عملیاتِ عادیِ دیتابیس کشته شوند. قراردادِ ۵ ثانیه‌ایِ
-// عملیاتِ عادی دست نخورده است (executeDbAction همان ۵۰۰۰ را می‌دهد).
-function executeDbRequest(action, payload, timeoutMs = 5000) {
+// (اعتبارسنجی + جایگزینی) ذاتاً طولانی‌ترند و نباید با تایم‌اوتِ
+// عملیاتِ عادیِ دیتابیس کشته شوند.
+function executeDbRequest(action, payload, timeoutMs = DB_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const worker = ensurePersistentDbWorker();
     if (!worker) {
@@ -445,10 +466,11 @@ function executeDbRequest(action, payload, timeoutMs = 5000) {
 
     const reqId = ++dbRequestSeq;
 
-    // مرحله ۱ ـ بخش الف: قراردادِ تایم‌اوتِ دیتابیس — main: ۵۰۰۰،
-    // رندرر: ۵۵۰۰ میلی‌ثانیه. پس خطای کنترل‌شدهٔ main همیشه زودتر از
-    // تایم‌اوتِ رندرر می‌رسد و رندرر، نیم ثانیه زودتر خطای کاذب نشان
-    // نمی‌دهد (باگِ قبلی: ۴۰۰۰ در برابرِ ۳۵۰۰).
+    // مرحله ۱ ـ بخش الف: قراردادِ تایم‌اوتِ دیتابیس — main: ۱۵۰۰۰
+    // (سنگین: ۴۵۰۰۰)، رندرر: ۱۵۵۰۰ (سنگین: ۴۵۵۰۰) میلی‌ثانیه. پس
+    // خطای کنترل‌شدهٔ main همیشه زودتر از تایم‌اوتِ رندرر می‌رسد و
+    // رندرر، نیم ثانیه زودتر خطای کاذب نشان نمی‌دهد (باگِ قبلی:
+    // ۴۰۰۰ در برابرِ ۳۵۰۰).
     const timer = setTimeout(() => {
       if (pendingDbCallbacks.has(reqId)) {
         pendingDbCallbacks.delete(reqId);
@@ -462,7 +484,11 @@ function executeDbRequest(action, payload, timeoutMs = 5000) {
 }
 
 function executeDbAction(action, payload) {
-  return executeDbRequest(action, payload, 5000);
+  return executeDbRequest(
+    action,
+    payload,
+    HEAVY_DB_ACTIONS.has(action) ? DB_HEAVY_TIMEOUT_MS : DB_TIMEOUT_MS
+  );
 }
 
 // نوشتنِ اتمیکِ بافر: tmpِ یکتا در همان پوشه + fsync + rename با

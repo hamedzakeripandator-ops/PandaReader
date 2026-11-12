@@ -429,7 +429,16 @@ export const useLibraryStore = create((set, get) => ({
           const mergedMap = new Map();
           const customMap = {};
 
-          [...libRes.library, ...localLib].forEach((item) => {
+          // مرحلهٔ ۵۹ §۲.۵: دیتابیس، مرجعِ یگانه است. وقتی دیتابیس
+          // خالی جواب می‌دهد (مثلاً پس از clearLibrary)، آینهٔ
+          // localStorage هم به همان خالی همگام می‌شود و هیچ کتابی از
+          // localLib زنده نمی‌شود؛ وگرنه کتابِ حذف‌شده، با هر بوت
+          // برمی‌گشت. وقتی دیتابیس پر است، فقط کتاب‌هایِ فقط-محلی
+          // (که هنوز در دیتابیس ثبت نشده‌اند) به آن اضافه می‌شوند.
+          const dbLibrary = libRes.library.length === 0
+            ? []
+            : [...libRes.library, ...localLib];
+          dbLibrary.forEach((item) => {
             const rawP = item.path || item.filePath;
             const norm = normalizePath(rawP);
             if (norm && !mergedMap.has(norm)) {
@@ -527,7 +536,14 @@ export const useLibraryStore = create((set, get) => ({
             const byNameColor = favFolderByNameColor.get(`${(libFolder.name || '').trim()}|${libFolder.color || ''}`);
             return byNameColor ? byNameColor.id : null;
           };
-          [...favRes.favorites, ...localFavs].forEach((item) => {
+          // مرحلهٔ ۵۹ §۲.۵: همان قانونِ کتابخانه برایِ علاقه‌مندی‌ها —
+          // دیتابیسِ خالی، یعنی علاقه‌مندی‌ها عمداً پاک شده‌اند و آینهٔ
+          // محلی هم خالی می‌شود؛ وگرنه علاقه‌مندیِ پاک‌شده از
+          // localStorage زنده می‌شد.
+          const dbFavorites = favRes.favorites.length === 0
+            ? []
+            : [...favRes.favorites, ...localFavs];
+          dbFavorites.forEach((item) => {
             const rawP = item.path || item.filePath;
             const norm = normalizePath(rawP);
             if (norm && !mergedFavsMap.has(norm)) {
@@ -874,9 +890,24 @@ export const useLibraryStore = create((set, get) => ({
     });
   },
 
-  clearLibrary: () => {
-    set({ library: [], libraryItems: [] });
+  // مرحلهٔ ۵۹ §۲.۵: پاک‌سازیِ واقعیِ کتابخانه — اول خوش‌بینانه خالی
+  // می‌شود (استیت + localStorage + علاقه‌مندی‌ها و پوشه‌ها)، بعد اکشنِ
+  // CLEAR_LIBRARY به ورکر می‌رسد تا db.json و پرچم‌هایِ SQLite هم
+  // خالی شوند. اگر ورکر خطا داد، initLibrary دوباره از دیتابیس
+  // می‌خواند تا رابط، چیزی خلافِ واقعیت نشان ندهد. تاریخچه دست
+  // نمی‌خورد (پاک‌کردنِ کتابخانه، پاک‌کردنِ «اخیر» نیست).
+  clearLibrary: async () => {
+    set({ library: [], libraryItems: [], favorites: [], libraryFolders: [], favoriteFolders: [] });
     writeLocal(STORAGE_KEYS.LIBRARY, []);
+    writeLocal(STORAGE_KEYS.FAVORITES, []);
+    writeLocal(STORAGE_KEYS.FOLDERS, []);
+    writeLocal(STORAGE_KEYS.FAVORITE_FOLDERS, []);
+    try {
+      const res = await coreApi.dbAction({ action: 'CLEAR_LIBRARY' });
+      if (res?.type === 'error') throw new Error(res.message || 'CLEAR_LIBRARY failed');
+    } catch (_) {
+      try { await get().initLibrary(); } catch (_) {}
+    }
   },
 
   // بررسی وضعیت پین بودن آیتم در کتابخانه

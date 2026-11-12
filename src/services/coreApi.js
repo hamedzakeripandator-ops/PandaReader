@@ -6,12 +6,32 @@ const getApi = () => {
 };
 
 // تابع کمکی برای اعمال سقف زمانی (Timeout Guard) روی پرامیس‌های IPC
-function withTimeout(promise, timeoutMs = 6000, fallbackValue = null) {
+function withTimeout(promise, timeoutMs = 15000, fallbackValue = null) {
   return Promise.race([
     promise,
     new Promise((resolve) => setTimeout(() => resolve(fallbackValue), timeoutMs))
   ]);
 }
+
+// مرحلهٔ ۵۹ §۲.۴: سقف‌هایِ زمانیِ دیتابیس — عملیاتِ عادی ۱۵۰۰۰ و
+// عملیاتِ سنگین ۴۵۰۰۰ میلی‌ثانیه. فهرستِ سنگین، همان فهرستِ
+// electron/ipcHandlers.js است (دو نسخهٔ همسان؛ main با require و
+// رندرر با ESM کار می‌کنند و ماژولِ مشترکی ندارند — اگر یکی عوض شد،
+// دیگری هم باید عوض شود). رندرر، ۵۰۰ میلی‌ثانیه دیرتر از main
+// تایم‌اوت می‌کند (۱۵۵۰۰/۴۵۵۰۰) تا خطایِ کنترل‌شدهٔ main همیشه
+// زودتر از تایم‌اوتِ رندرر برسد و تایم‌اوتِ رندرر، فقط پشتیبانِ
+// هنگ‌کردنِ main باشد (قراردادِ قدیمیِ ۵۰۰۰/۵۵۰۰).
+const HEAVY_DB_ACTIONS = new Set([
+  'BUILD_BACKUP',
+  'RESTORE_BACKUP',
+  'SYNC_MISSING_FILES',
+  'SYNC_AND_CLEAN_MISSING_FILES',
+  'PRUNE_MISSING_FILES',
+  'GET_ALL_COVER_CACHES',
+]);
+const DB_TIMEOUT_MS = 15000;
+const DB_HEAVY_TIMEOUT_MS = 45000;
+const DB_TIMEOUT_MARGIN_MS = 500;
 
 export const coreApi = {
   isAvailable: () => Boolean(getApi()),
@@ -119,11 +139,12 @@ export const coreApi = {
     }
   },
 
-  // مرحله ۱ ـ بخش الف: قراردادِ تایم‌اوتِ دیتابیس — main: ۵۰۰۰،
-  // رندرر: ۵۵۰۰ میلی‌ثانیه. پس خطای کنترل‌شدهٔ main همیشه زودتر از
-  // تایم‌اوتِ رندرر می‌رسد و رندرر، نیم ثانیه زودتر خطای کاذب نشان
-  // نمی‌دهد (باگِ قبلی: ۳۵۰۰ در برابرِ ۴۰۰۰). تایم‌اوتِ رندرر حالا
-  // فقط یک پشتیبان است برای وقتی که خودِ main هم هنگ کرده باشد.
+  // مرحله ۱ ـ بخش الف: قراردادِ تایم‌اوتِ دیتابیس — main: ۱۵۰۰۰
+  // (سنگین: ۴۵۰۰۰)، رندرر: ۱۵۵۰۰ (سنگین: ۴۵۵۰۰) میلی‌ثانیه. پس
+  // خطای کنترل‌شدهٔ main همیشه زودتر از تایم‌اوتِ رندرر می‌رسد و
+  // رندرر، نیم ثانیه زودتر خطای کاذب نشان نمی‌دهد (باگِ قبلی:
+  // ۳۵۰۰ در برابرِ ۴۰۰۰). تایم‌اوتِ رندرر حالا فقط یک پشتیبان است
+  // برای وقتی که خودِ main هم هنگ کرده باشد.
   // جفت‌شدنِ درخواست و پاسخ در دو لایه تضمین شده است: رندرر↔main با
   // خودِ مکانیزمِ invoke الکترون، و main↔ورکر با reqIdی یکتا که ورکر
   // عیناً در پاسخ برمی‌گرداند (و پاسخِ دیررسِ بدونِ callback، در
@@ -133,7 +154,10 @@ export const coreApi = {
     if (!api?.dbAction) return { type: 'error', message: 'ارتباط با دیتابیس برقرار نشد.' };
     try {
       const call = api.dbAction(requestData);
-      return await withTimeout(call, 5500, { type: 'error', message: 'تایم‌اوت عملیات دیتابیس' });
+      const baseTimeout = HEAVY_DB_ACTIONS.has(requestData?.action)
+        ? DB_HEAVY_TIMEOUT_MS
+        : DB_TIMEOUT_MS;
+      return await withTimeout(call, baseTimeout + DB_TIMEOUT_MARGIN_MS, { type: 'error', message: 'تایم‌اوت عملیات دیتابیس' });
     } catch (err) {
       return { type: 'error', message: err?.message || 'خطا در عملیات دیتابیس' };
     }

@@ -178,6 +178,21 @@ export default function useKeyboard(callbacks = {}) {
 
       // ۲. سلسله‌مراتب اولویت‌بندی شده کلید Escape
       if (e.key === 'Escape' || e.code === 'Escape') {
+        // مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۴٫۳ ممیزی): منویِ هایلایت/یادداشتِ
+        // ریدر (markMenu) استیتِ محلیِ EpubViewer است، نه استور؛ پس
+        // هماهنگی از راهِ پرچمِ window و رویدادِ سفارشی است، دقیقاً
+        // به سبکِ window.__epubOverlayOpen. اگر منو باز است، Escape
+        // اول فقط رویدادِ بستنِ منو را می‌فرستد و کتاب بسته نمی‌شود.
+        // بستنِ واقعیِ منو به شنوندهٔ همین رویداد در EpubViewer نیاز
+        // دارد (ویرایشِ آن فایل بیرونِ این مأموریت است)؛ تا آن
+        // شنونده اضافه نشود، این شاخه فقط از بسته‌شدنِ کتاب جلوگیری
+        // می‌کند و منو با دکمهٔ «بستنِ» خودش بسته می‌شود.
+        if (window.__readerMarkMenuOpen) {
+          e.preventDefault();
+          e.stopPropagation();
+          window.dispatchEvent(new CustomEvent('app:close-reader-mark-menu'));
+          return;
+        }
         // مرحله ۴ ـ بخش ب: نوارِ جستجوی PDF، لایهٔ روئیِ گذراست. اگر
         // باز است و فوکوس از اینپوتش بیرون آمده (مثلاً کاربر دکمهٔ
         // بعدی/قبلی را زده یا روی صفحه کلیک کرده)، Escape اول نوار
@@ -713,9 +728,16 @@ export default function useKeyboard(callbacks = {}) {
       // بسته باشد. پیش از این، فقط حروفِ هاردکدشدهٔ قدیمی مستثنا
       // بودند و کلیدِ جدیدِ ابزار، به جستجو می‌رفت.
       const isStudioToolKey = resolveStudioToolId(settingsState, e) !== null;
+      // مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۳٫۳ ممیزی): Type-to-Search هرگز در
+      // نمایِ ریدر فعال نمی‌شود. در حالتِ مطالعه، هر کلیدِ تایپی باید
+      // نادیده گرفته شود (جستجویِ درون‌سندیِ PDF/EPUB مسیرِ خودش را
+      // دارد)؛ وگرنه فوکوس از کتاب پریده و نوارِ سرچِ کتابخانه باز
+      // می‌شود. گیت، صراحتاً رویِ همین شرط بسته شده است، نه رویِ
+      // شاخه‌هایِ دیگرِ currentView در این فایل.
       if (
         !isTextInputFocused &&
         !isControlOrNavKey &&
+        appState.currentView !== 'reader' &&
         !appState.isAnnotationActive &&
         !appState.isAreaZoomActive &&
         !isStudioToolKey

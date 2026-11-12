@@ -1725,6 +1725,10 @@ export default function App() {
       {updateModal.open && (
         <div style={styles.updateModalOverlay} role="dialog" aria-modal="true" aria-label="بروزرسانی جدید">
           <div style={styles.updateModalBox}>
+            {/* مرحلهٔ ۵۹ (m3): باکسِ مودال، چپ‌به‌راست است تا نوارِ اسکرول
+                در لبهٔ سمتِ راست رندر شود؛ همهٔ محتوا داخلِ
+                updateModalBoxInnerِ راست‌به‌چپ است. */}
+            <div dir="rtl" style={styles.updateModalBoxInner}>
             <h3 style={styles.updateModalTitle}>نسخهٔ جدید منتشر شده است</h3>
             <div style={styles.updateModalVersionRow}>
               <span style={styles.updateModalVersion}>
@@ -1738,6 +1742,10 @@ export default function App() {
             </div>
 
             <div style={styles.updateModalNotesBox}>
+              {/* مرحلهٔ ۵۹ (m3): باکسِ یادداشتِ انتشار، چپ‌به‌راست است تا
+                  نوارِ اسکرول در لبهٔ سمتِ راست رندر شود؛ همهٔ محتوا
+                  داخلِ updateModalNotesInnerِ راست‌به‌چپ است. */}
+              <div dir="rtl" style={styles.updateModalNotesInner}>
               {updateNotesBlocks.length === 0 && (
                 <p style={styles.updateModalNotesEmpty}>بدونِ یادداشتِ انتشار.</p>
               )}
@@ -1751,6 +1759,7 @@ export default function App() {
                   ))}
                 </ul>
               )}
+              </div>
             </div>
 
             {(updateModal.stage === 'downloading' || updateModal.stage === 'downloaded' || updateModal.stage === 'installing') && (
@@ -1814,6 +1823,7 @@ export default function App() {
               <span style={styles.updateModalSwitchText}>بررسی و یادآوریِ خودکارِ آپدیت‌ها</span>
             </label>
             <p style={styles.updateModalHint}>پیش از نصب، دیتابیس فلاش می‌شود تا هیچ داده‌ای از دست نرود.</p>
+            </div>
           </div>
         </div>
       )}
@@ -2215,8 +2225,22 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: '12px',
+    direction: 'ltr',
+    textAlign: 'right',
+  },
+  // مرحلهٔ ۵۹ (m3): محتوای درونیِ مودالِ بروزرسانی — ستونِ راست‌به‌چپِ
+  // فارسی با همان فاصله‌ها (gap)؛ فقط خودِ باکسِ اسکرول‌خور،
+  // چپ‌به‌راست است تا کرومیوم، نوارِ اسکرول را در لبهٔ سمتِ راست
+  // رندر کند؛ paddingRight از چسبیدنِ متن به نوارِ اسکرول جلوگیری می‌کند.
+  updateModalBoxInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '12px',
     direction: 'rtl',
     textAlign: 'right',
+    flex: 1,
+    minWidth: 0,
+    paddingRight: '10px',
   },
   updateModalTitle: {
     fontFamily: 'var(--font-fa)',
@@ -2245,11 +2269,18 @@ const styles = {
   updateModalNotesBox: {
     maxHeight: '220px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     backgroundColor: 'var(--panel2)',
     border: '1px solid var(--border)',
     borderRadius: '12px',
     padding: '12px 14px',
+  },
+  // مرحلهٔ ۵۹ (m3): محتوای درونیِ باکسِ یادداشتِ انتشار — راست‌به‌چپِ
+  // فارسی؛ paddingRight از چسبیدنِ متن به نوارِ اسکرول جلوگیری می‌کند.
+  updateModalNotesInner: {
+    direction: 'rtl',
+    textAlign: 'right',
+    paddingRight: '10px',
   },
   updateModalNotesHeading: {
     fontFamily: 'var(--font-fa)',

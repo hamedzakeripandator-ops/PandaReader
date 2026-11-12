@@ -106,6 +106,24 @@ function normalizePath(p) {
   return p.trim().replace(/[\\/]+/g, '\\').toLowerCase();
 }
 
+// مرحلهٔ ۵۹، مأموریت ۱ — مقدارِ قابلِ بایند به SQLite: better-sqlite3
+// فقط عدد، رشته، bigint، بافر و null می‌پذیرد و undefined یا بولین یا
+// شیء را با TypeError رد می‌کند؛ پس هر مقدار، پیش از هر .run() در
+// مسیرِ بوک‌مارک، از این‌جا می‌گذرد (دفاعِ عمقی؛ رکوردِ پاک‌سازی‌شده
+// معمولاً همین حالا هم مقدارِ معتبر دارد).
+function toSqliteBindable(val) {
+  if (val === undefined || val === null) return null;
+  if (typeof val === 'boolean') return val ? 1 : 0;
+  if (typeof val === 'number') return Number.isFinite(val) ? val : null;
+  if (typeof val === 'bigint') return val;
+  if (typeof val === 'string') return val;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(val)) return val;
+  if (typeof val === 'object') {
+    try { return JSON.stringify(val); } catch (_) { return null; }
+  }
+  return String(val);
+}
+
 function isPermanentCover(str) {
   if (!str || typeof str !== 'string') return false;
   const s = str.trim();
@@ -1332,7 +1350,8 @@ function swapCoversDirectory(stagingDir) {
 /**
  * اعتبارسنجی و اعمالِ فایلِ پشتیبان. همهٔ بررسی‌ها پیش از هر تغییری
  * انجام می‌شوند؛ ترتیبِ تغییرات: ۱) کپیِ ایمنیِ دیتابیسِ فعلی،
- * ۲) جایگزینیِ اتمیکِ دیتابیس از مسیرِ writeDB، ۳) جابه‌جاییِ کاورها.
+ * ۲) همگام‌سازیِ SQLite با دادهٔ بازیابی‌شده، ۳) جایگزینیِ اتمیکِ
+ * دیتابیس از مسیرِ writeDB، ۴) جابه‌جاییِ کاورها.
  * @returns {Promise<{coverCount: number, dbSha256: string}>}
  */
 async function applyRestoreFromZip(zipBuffer) {
@@ -1424,12 +1443,49 @@ async function applyRestoreFromZip(zipBuffer) {
   if (fs.existsSync(DB_FILE)) {
     try { fs.copyFileSync(DB_FILE, DB_PRE_RESTORE_FILE); } catch (_) {}
   }
-  // ۲) جایگزینیِ اتمیکِ دیتابیس از مسیرِ writeDB (حافظهٔ ورکر همگام می‌ماند).
+  // ۲) همگام‌سازیِ SQLite با دیتابیسِ بازیابی‌شده (مرحلهٔ ۵۹ §۲.۱):
+  // پیش از این، فقط db.json جایگزین می‌شد و library.sqlite دست‌نخورده
+  // می‌ماند؛ در ری‌استارتِ بعدی، چون پرچمِ مهاجرت «۱» بود، مهاجرت رد
+  // می‌شد و resyncMirrorFromSqlite دادهٔ بازیابی‌شده را با ردیف‌هایِ
+  // قدیمیِ SQLite بازنویسی می‌کرد (تخریبِ داده). حالا هر ۷ جدولِ
+  // داده‌ای در یک تراکنشِ واحد خالی می‌شوند، پرچمِ مهاجرت صفر می‌شود و
+  // migrateJsonToSqlite(migratedDb) همان دادهٔ بازیابی‌شده را دوباره
+  // می‌سازد؛ پس SQLite دقیقاً برابرِ بکاپ می‌شود. کشِ متنِ EPUB
+  // (epub_text_cache) عمداً خالی نمی‌شود: در بکاپ نیست، با mtime
+  // اعتبارسنجی می‌شود و خودش بازسازی می‌شود.
+  // این مرحله، عمداً پیش از writeDB می‌آید: اگر همگام‌سازیِ SQLite
+  // شکست بخورد، هنوز هیچ‌چیز (نه db.json، نه کاورها) عوض نشده و
+  // بازیابی، تمیز لغو می‌شود. اگر بعد از writeDB بود، شکستش db.jsonِ
+  // بازیابی‌شده را با SQLiteِ کهنه رها می‌کرد — همان سناریویِ تخریب.
+  // تراکنشِ داخلیِ migrateJsonToSqlite، داخلِ این تراکنشِ بیرونی
+  // به‌صورتِ تودرتو اجرا می‌شود (better-sqlite3 از تراکنشِ تودرتو
+  // پشتیبانی می‌کند).
+  if (sqliteReady && sqliteDb) {
+    try {
+      const restoreSqliteTx = sqliteDb.transaction(() => {
+        sqliteDb.exec(
+          'DELETE FROM history;' +
+          'DELETE FROM annotations;' +
+          'DELETE FROM bookmarks;' +
+          'DELETE FROM epub_highlights;' +
+          'DELETE FROM reading_days;' +
+          'DELETE FROM reading_by_book;' +
+          'DELETE FROM kv_store;'
+        );
+        sqliteSetKv(SQLITE_MIGRATION_KEY, '0');
+        migrateJsonToSqlite(migratedDb);
+      });
+      restoreSqliteTx();
+    } catch (err) {
+      throw new Error('همگام‌سازیِ SQLite با نسخهٔ پشتیبان انجام نشد؛ بازیابی لغو شد و اطلاعاتِ فعلی دست‌نخورده ماند: ' + (err && err.message ? err.message : String(err)));
+    }
+  }
+  // ۳) جایگزینیِ اتمیکِ دیتابیس از مسیرِ writeDB (حافظهٔ ورکر همگام می‌ماند).
   const written = writeDB(migratedDb, true);
   if (!written) {
     throw new Error('جایگزینیِ دیتابیس انجام نشد؛ اطلاعات فعلی دست‌نخورده باقی ماند.');
   }
-  // ۳) کاورها: اول در پوشهٔ staging، بعد جابه‌جاییِ اتمیکِ پوشه.
+  // ۴) کاورها: اول در پوشهٔ staging، بعد جابه‌جاییِ اتمیکِ پوشه.
   if (fs.existsSync(COVERS_STAGING_DIR)) {
     fs.rmSync(COVERS_STAGING_DIR, { recursive: true, force: true });
   }
@@ -1756,7 +1812,7 @@ function sanitizeBookmarkRecord(raw) {
   if (!Number.isFinite(page) || page < 1) return null;
   const yRaw = Number(raw.yRatio);
   const yRatio = Number.isFinite(yRaw) ? Math.max(0, Math.min(0.92, yRaw)) : 0;
-  return {
+  const clean = {
     id: typeof raw.id === 'string' && raw.id ? raw.id : ('bm_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)),
     page: Math.floor(page),
     yRatio,
@@ -1767,6 +1823,37 @@ function sanitizeBookmarkRecord(raw) {
     name: typeof raw.name === 'string' ? raw.name.slice(0, 60) : '',
     createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : new Date().toISOString(),
   };
+  // مرحلهٔ ۵۹، مأموریت ۱ — فیلدهایِ ظاهریِ اختیاری: رنگ، استایلِ
+  // سفارشی و شناسهٔ پریست، فقط وقتی در ورودی‌اند حفظ می‌شوند تا
+  // extra_json پس از ری‌استارت هم آن‌ها را داشته باشد؛ نبودنشان،
+  // هیچ فیلدی اضافه نمی‌کند و رکوردهایِ قدیمی دست نمی‌خورند.
+  if (typeof raw.color === 'string' && raw.color) clean.color = raw.color.slice(0, 40);
+  if (typeof raw.presetId === 'string' && raw.presetId) clean.presetId = raw.presetId.slice(0, 80);
+  if (raw.customStyle && typeof raw.customStyle === 'object' && !Array.isArray(raw.customStyle)) {
+    try {
+      const styleJson = JSON.stringify(raw.customStyle);
+      if (styleJson && styleJson.length <= 2000) clean.customStyle = JSON.parse(styleJson);
+    } catch (_) {}
+  }
+  return clean;
+}
+
+// مرحلهٔ ۵۹، مأموریت ۱ — فهرستِ بایندِ upsertBookmark: هر ۹ مقدار،
+// پیش از .run() از toSqliteBindable می‌گذرند؛ ستونِ color هم رنگِ
+// واقعیِ رکورد را می‌گیرد (پیش از این، ''یِ ثابت بود و رنگ فقط در
+// extra_json می‌ماند — تازه آن هم نه، چون پاک‌ساز رنگ را می‌انداخت).
+function buildBookmarkBindValues(bm, norm) {
+  return [
+    toSqliteBindable(bm && bm.id),
+    toSqliteBindable(norm),
+    toSqliteBindable(bm && bm.page),
+    toSqliteBindable(bm && bm.yRatio),
+    toSqliteBindable(bm && bm.name ? bm.name : ''),
+    toSqliteBindable(bm && typeof bm.color === 'string' ? bm.color : ''),
+    toSqliteBindable(bm && bm.template),
+    toSqliteBindable(Date.parse((bm && bm.createdAt) || '') || 0),
+    toSqliteBindable(JSON.stringify(bm || {})),
+  ];
 }
 
 // مرحله ۱۴: «ساختِ کاربر» (پریستِ سفارشی) — ترکیبِ تمپلیت +
@@ -2046,7 +2133,13 @@ function sqliteBookmarkRowToRecord(row) {
     const parsed = JSON.parse(row.extra_json || 'null');
     if (parsed && typeof parsed === 'object') {
       const clean = sanitizeBookmarkRecord(parsed);
-      if (clean) return clean;
+      if (clean) {
+        // مرحلهٔ ۵۹، مأموریت ۱ — اگر extra_json رنگ نداشت، ستونِ
+        // color مرجعِ دوم است (ردیف‌هایِ نوشته‌شده پیش از این مرحله،
+        // رنگ را فقط در ستون دارند).
+        if (!clean.color && typeof row.color === 'string' && row.color) clean.color = row.color.slice(0, 40);
+        return clean;
+      }
     }
   } catch (_) {}
   const fallback = {
@@ -2059,6 +2152,7 @@ function sqliteBookmarkRowToRecord(row) {
     focalPoint: 'center',
     name: row.label || '',
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    color: row.color,
   };
   return sanitizeBookmarkRecord(fallback);
 }
@@ -2157,6 +2251,29 @@ function sqliteCleanColorSystem(customColorSystem) {
   return next;
 }
 
+// مرحلهٔ ۵۹، مأموریت ۱ — مهاجرتِ آیدم‌پوتنتِ ستونِ extra_json:
+// اگر دیتابیسی قدیمی (پیش از extra_json) رویِ دیسک بود، CREATE TABLE
+// IF NOT EXISTS ستون را اضافه نمی‌کند و prepare ِ upsert با «no column
+// named extra_json» می‌مرد؛ پس پیش از prepare، با PRAGMA table_info
+// بررسی می‌شود و فقط در صورتِ نبودن، ستون اضافه می‌شود. اجرایِ
+// دوباره رویِ دیتابیسِ تازه، هیچ تغییری نمی‌دهد.
+function ensureExtraJsonColumns() {
+  const ensureColumn = (table, column) => {
+    let cols = [];
+    try {
+      cols = sqliteDb.prepare('PRAGMA table_info(' + table + ')').all();
+    } catch (_) {
+      return;
+    }
+    const has = (Array.isArray(cols) ? cols : []).some((c) => c && c.name === column);
+    if (!has) {
+      try { sqliteDb.exec('ALTER TABLE ' + table + ' ADD COLUMN ' + column + ' TEXT'); } catch (_) {}
+    }
+  };
+  ensureColumn('history', 'extra_json');
+  ensureColumn('bookmarks', 'extra_json');
+}
+
 // راه‌اندازیِ موتورِ SQLite: باز کردنِ فایل، تنظیمِ PRAGMAها، ساختِ
 // جداول و ایندکس‌ها، آماده‌سازیِ Prepared Statementها، مهاجرتِ
 // یک‌باره از db.json و همگام‌سازیِ آینهٔ درون‌حافظه‌ای. هر خطایی،
@@ -2238,12 +2355,19 @@ CREATE TABLE IF NOT EXISTS kv_store (
   updated_at INTEGER
 );
 `);
+    ensureExtraJsonColumns();
     sqliteStmts = {
       upsertHistory: sqliteDb.prepare('INSERT OR REPLACE INTO history (file_key, name, path, type, current_page, total_pages, progress, cover, last_read, pinned, favorite, extra_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'),
       updateHistoryPinned: sqliteDb.prepare('UPDATE history SET pinned = ? WHERE file_key = ?'),
+      // مرحلهٔ ۵۹ §۲.۵: بازنویسیِ extra_jsonِ یک ردیفِ تاریخچه (برایِ
+      // صفر کردنِ pinnedِ داخلِ آن، هم‌زمان با ستون‌ها).
+      updateHistoryExtraJson: sqliteDb.prepare('UPDATE history SET extra_json = ? WHERE file_key = ?'),
       getHistory: sqliteDb.prepare('SELECT * FROM history WHERE file_key = ?'),
       deleteHistory: sqliteDb.prepare('DELETE FROM history WHERE file_key = ?'),
-      clearHistory: sqliteDb.prepare('DELETE FROM history'),
+      // مرحلهٔ ۵۹ §۲.۳: پاک‌سازیِ تاریخچه، ردیف‌هایِ پین‌شده را نگه
+      // می‌دارد (پین، خانهٔ دیگری ندارد؛ ستونِ pinned همین جدول است).
+      // DELETE FROM historyِ قبلی، پین‌ها را هم می‌برد.
+      clearNonPinnedHistory: sqliteDb.prepare('DELETE FROM history WHERE COALESCE(pinned, 0) = 0'),
       listHistoryRecent: sqliteDb.prepare('SELECT * FROM history ORDER BY last_read DESC LIMIT 500'),
       listAllHistory: sqliteDb.prepare('SELECT * FROM history'),
       countHistory: sqliteDb.prepare('SELECT COUNT(*) AS n FROM history'),
@@ -2348,17 +2472,7 @@ function migrateJsonToSqlite(jsonDb) {
       for (const bm of list) {
         const clean = sanitizeBookmarkRecord(bm);
         if (!clean) continue;
-        sqliteStmts.upsertBookmark.run(
-          clean.id,
-          norm,
-          clean.page,
-          clean.yRatio,
-          clean.name || '',
-          '',
-          clean.template,
-          Date.parse(clean.createdAt) || 0,
-          JSON.stringify(clean)
-        );
+        sqliteStmts.upsertBookmark.run(...buildBookmarkBindValues(clean, norm));
       }
     }
     for (const [norm, list] of Object.entries(src.epubHighlights || {})) {
@@ -2717,14 +2831,26 @@ function handleSqliteAction(action, payload, db, sendReply) {
     }
 
     case 'CLEAR_RECENTS': {
-      const removedFiles = Object.values(db.history || {})
-        .map((h) => coverFileFromUrl(h?.cover))
+      // مرحلهٔ ۵۹ §۲.۳: فقط ردیف‌هایِ بی‌پین پاک می‌شوند؛ ردیفِ
+      // پین‌شده، با همان ورودیِ تاریخچه، در SQLite و در آینه می‌ماند تا
+      // پینِ کتابخانه گم نشود. کاور و ورودیِ کش، فقط برایِ ردیف‌هایِ
+      // واقعاً حذف‌شده آزاد می‌شود. پیامدِ دانسته: کتابِ پین‌شده،
+      // ورودیِ «اخیر»ش را هم نگه می‌دارد (در همین اسکیما، پین جدا از
+      // تاریخچه خانه‌ای ندارد — تفکیکِ کامل، موضوعِ §۲.۲ است).
+      const pinnedRows = sqliteStmts.listAllHistory.all().filter((row) => Number(row.pinned) === 1);
+      const pinnedNorms = new Set(pinnedRows.map((row) => row.file_key));
+      const removedNorms = Object.keys(db.history || {}).filter((normKey) => !pinnedNorms.has(normKey));
+      const removedFiles = removedNorms
+        .map((normKey) => coverFileFromUrl(db.history[normKey]?.cover))
         .filter(Boolean);
-      const removedNorms = Object.keys(db.history || {});
       db.history = {};
+      for (const row of pinnedRows) {
+        const entry = sqliteHistoryRowToEntry(row);
+        if (entry) db.history[row.file_key] = entry;
+      }
       removedNorms.forEach((normKey) => purgeCoverCacheEntryIfBookGone(db, normKey));
       removedFiles.forEach((file) => deleteCoverFileIfUnreferenced(db, file));
-      sqliteStmts.clearHistory.run();
+      sqliteStmts.clearNonPinnedHistory.run();
       sqliteTouchMirror();
       sendReply({ type: 'done', action, success: true });
       break;
@@ -2853,19 +2979,9 @@ function handleSqliteAction(action, payload, db, sendReply) {
       if (clean.length === 0) delete db.bookmarks[norm];
       else db.bookmarks[norm] = clean;
       const run = sqliteDb.transaction(() => {
-        sqliteStmts.deleteBookmarksForFile.run(norm);
+        sqliteStmts.deleteBookmarksForFile.run(toSqliteBindable(norm));
         for (const bm of clean) {
-          sqliteStmts.upsertBookmark.run(
-            bm.id,
-            norm,
-            bm.page,
-            bm.yRatio,
-            bm.name || '',
-            '',
-            bm.template,
-            Date.parse(bm.createdAt) || 0,
-            JSON.stringify(bm)
-          );
+          sqliteStmts.upsertBookmark.run(...buildBookmarkBindValues(bm, norm));
         }
       });
       run();
@@ -3465,6 +3581,55 @@ parentPort.on('message', (request) => {
         if (removedFile) deleteCoverFileIfUnreferenced(db, removedFile);
         writeDB(db);
         sendReply({ type: 'done', action, library: db.library });
+        break;
+      }
+
+      // مرحلهٔ ۵۹ §۲.۵: پاک‌سازیِ واقعیِ کتابخانه. پیش از این، هیچ
+      // اکشنی به این نام نبود و clearLibraryِ رندرر فقط حافظه و
+      // localStorage را خالی می‌کرد؛ initLibraryِ بعدی، همهٔ کتاب‌ها
+      // را از db.json برمی‌گرداند. حالا:
+      // - کتابخانه، علاقه‌مندی‌ها و پوشه‌هایِ هر دو، از db.json می‌روند؛
+      // - در SQLite، کتابخانه جدولی ندارد (§۲.۲)؛ ولی ستون‌هایِ
+      //   pinned/favorite در history، آینهٔ همین وضعیت‌اند و باید صفر
+      //   شوند تا resync آن‌ها را زنده نکند؛ ورودیِ تاریخچهٔ آینه هم
+      //   همان‌طور صفر می‌شود و extra_jsonِ ردیف هم (pinned:false)
+      //   بازنویسی می‌شود تا sqliteHistoryRowToEntry، پینِ کهنه
+      //   برنگرداند؛
+      // - تاریخچه، آمار و بوک‌مارک‌ها دست نمی‌خورند (پاک‌کردنِ
+      //   کتابخانه، پاک‌کردنِ تاریخچه نیست)؛ کاورها هم فقط وقتی آزاد
+      //   می‌شوند که کتاب از هر سه جدول رفته باشد (همان قانونِ
+      //   REMOVE_FROM_LIBRARY).
+      case 'CLEAR_LIBRARY': {
+        const clearedNorms = [
+          ...(Array.isArray(db.library) ? db.library : []),
+          ...(Array.isArray(db.favorites) ? db.favorites : []),
+        ].map((item) => normalizePath(item.path || item.filePath)).filter(Boolean);
+        db.library = [];
+        db.favorites = [];
+        db.libraryFolders = [];
+        db.favoriteFolders = [];
+        for (const historyEntry of Object.values(db.history || {})) {
+          if (historyEntry && typeof historyEntry === 'object') historyEntry.pinned = false;
+        }
+        if (sqliteReady && sqliteDb) {
+          try {
+            const clearLibraryTx = sqliteDb.transaction(() => {
+              sqliteDb.exec('UPDATE history SET pinned = 0, favorite = 0;');
+              for (const row of sqliteStmts.listAllHistory.all()) {
+                let extra = null;
+                try { extra = JSON.parse(row.extra_json || 'null'); } catch (_) {}
+                if (extra && typeof extra === 'object' && extra.pinned) {
+                  extra.pinned = false;
+                  sqliteStmts.updateHistoryExtraJson.run(JSON.stringify(extra), row.file_key);
+                }
+              }
+            });
+            clearLibraryTx();
+          } catch (_) {}
+        }
+        clearedNorms.forEach((normKey) => purgeCoverCacheEntryIfBookGone(db, normKey));
+        writeDB(db);
+        sendReply({ type: 'done', action, success: true, library: [], folders: [] });
         break;
       }
 

@@ -228,6 +228,11 @@ export default function ComicCard({
 
   const [isHovered, setIsHovered] = useState(false);
   const [showFolderMenu, setShowFolderMenu] = useState(false);
+  // مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۴٫۱ ممیزی): ژستِ درگِ همین کارت فعال
+  // است یا نه. فقط تا وقتی این پرچم روشن است، شنونده‌هایِ پنجرهٔ
+  // pointerup/pointercancel ثبت می‌شوند؛ در حالتِ عادی، هیچ کارتی
+  // شنوندهٔ دائمی رویِ window ندارد.
+  const [isDraggingThisCard, setIsDraggingThisCard] = useState(false);
 
   // مرحلهٔ ۵۴ — مأموریت ۱: گرفتنِ فوریِ کارت (grab-and-drag، بدونِ
 // نگه‌داشتن و بدونِ هیچ تایمری). pointerdown فقط نقطهٔ شروع را
@@ -258,6 +263,10 @@ const handleCardPointerDown = (e) => {
   }
   dragActivatedRef.current = false;
   pendingDragRef.current = { x: e.clientX, y: e.clientY };
+  // ژستِ درگِ همین کارت شروع شد (هنوز فعال نشده؛ فعال‌شدن با ۶
+  // پیکسل حرکت است)؛ شنونده‌هایِ پنجره از همین لحظه ثبت می‌شوند تا
+  // رها کردنِ اشاره‌گر بیرونِ کارت هم دیده شود.
+  setIsDraggingThisCard(true);
 };
 
 const handleCardPointerMove = (e) => {
@@ -290,17 +299,29 @@ const handleCardPointerCancel = () => {
   pendingDragRef.current = null;
 };
 
-  // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲ + ادغام: تورِ امنِ پاک‌شدنِ پرچم.
+  // مرحلهٔ ۵۴ — مأموریت ۲ (m2) لایهٔ ۲ + ادغام، بازنویسی در
+  // مرحلهٔ ۵۹ (§۴٫۱ ممیزی): تورِ امنِ پاک‌شدنِ پرچم.
   // pointerup ممکن است بیرونِ کارت (مثلاً رویِ تبِ پوشه) رخ دهد و
   // هندلرِ رویِ کارت اصلاً صدا زده نشود؛ پس شنوندهٔ پنجره با هر
   // pointerup/pointercancel، پاک‌شدنِ ۱۰۰ میلی‌ثانیه‌ای را زمان‌بندی
   // می‌کند و شروعِ هنوز-فعال‌نشده را هم پاک می‌کند تا حرکتِ بعدیِ
   // ماوس بدونِ دکمه، درگِ خیالی نسازد.
+  // تفاوتِ مرحلهٔ ۵۹: این شنونده‌ها دیگر دائمی نیستند. پیش از این،
+  // هر کارت با useEffect خالی، یک جفت شنوندهٔ دائمی رویِ window
+  // ثبت می‌کرد (۵۰۰ کارت = ۵۰۰ جفت شنونده در هر کلیک). حالا فقط
+  // وقتی ژستِ درگِ همین کارت فعال است (isDraggingThisCard) ثبت
+  // می‌شوند و با پایانِ ژست — رها کردن یا لغو — همان لحظه برداشته
+  // می‌شوند؛ پس در هر لحظه، حداکثر یک کارت شنوندهٔ پنجره دارد.
   useEffect(() => {
+    if (!isDraggingThisCard) return undefined;
     if (typeof window === 'undefined') return undefined;
     const onPointerEnd = () => {
       pendingDragRef.current = null;
       if (isInternalCardDragActive()) scheduleClearInternalCardDragActive();
+      // پایانِ ژستِ همین کارت؛ افکت با خاموش‌شدنِ پرچم، شنونده‌ها
+      // را برمی‌دارد. این خط، پس از پاک‌سازیِ پرچمِ سراسری صدا
+      // زده می‌شود تا ترتیبِ پاک‌شدن (اول پرچم، بعد شنونده) حفظ شود.
+      setIsDraggingThisCard(false);
     };
     window.addEventListener('pointerup', onPointerEnd);
     window.addEventListener('pointercancel', onPointerEnd);
@@ -308,7 +329,7 @@ const handleCardPointerCancel = () => {
       window.removeEventListener('pointerup', onPointerEnd);
       window.removeEventListener('pointercancel', onPointerEnd);
     };
-  }, []);
+  }, [isDraggingThisCard]);
 
   // مرحله ۴۷ §۲: فهرستِ کاورهایِ خراب و شمارشِ تلاش‌هایِ بازیابی، تا
   // خطایِ گذرایِ تصویر یا لغوِ درخواستِ تنبل، کارت را برای همیشه

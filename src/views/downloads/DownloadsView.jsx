@@ -405,6 +405,10 @@ export default function DownloadsView() {
 
   return (
     <div style={styles.container}>
+      {/* مرحلهٔ ۵۹ (m3): کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا نوارِ
+          اسکرول در لبهٔ سمتِ راست رندر شود؛ همهٔ محتوا داخلِ
+          containerInnerِ راست‌به‌چپ است تا چیدمانِ فارسی سالم بماند. */}
+      <div dir="rtl" style={styles.containerInner}>
       {/* هدر بالای مرکز آپدیت */}
       <div style={styles.header}>
         <div style={styles.titleWrap}>
@@ -707,6 +711,7 @@ export default function DownloadsView() {
           ))}
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -719,8 +724,22 @@ const styles = {
     flexDirection: 'column',
     gap: '20px',
     overflowY: 'auto',
-    direction: 'rtl',
+    direction: 'ltr',
     userSelect: 'none',
+  },
+  // مرحلهٔ ۵۹ (m3): محتوای درونیِ اسکرول‌خور — جهتِ راست‌به‌چپِ
+  // فارسی، دقیقاً با همان فاصله‌ها (gap) حفظ می‌شود؛ فقط
+  // خودِ کانتینرِ اسکرول‌خور، چپ‌به‌راست است تا کرومیوم،
+  // نوارِ اسکرول را در لبهٔ سمتِ راست رندر کند؛ paddingRight
+  // از چسبیدنِ متن به نوارِ اسکرول جلوگیری می‌کند.
+  containerInner: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '20px',
+    direction: 'rtl',
+    flex: 1,
+    minWidth: 0,
+    paddingRight: '10px',
   },
   header: {
     display: 'flex',

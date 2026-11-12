@@ -20,6 +20,16 @@ const MAX_EPUB_BYTES = 200 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 30 * 1024 * 1024;
 const MAX_CHAPTERS = 5000;
 
+// مرحلهٔ ۴۴ §۵ (OPT-07): کشِ تک‌ورودیِ نمونهٔ بازشدهٔ JSZip برایِ
+// loadEpubChapter — فصل‌هایِ پیاپیِ یک کتاب (ورق، پیش‌بارگذاریِ
+// همسایه، جستجو) دیگر در هر miss کلِ فایل را نمی‌خوانند و zip را
+// از نو پارس نمی‌کنند. کلید، مسیر + اندازه + زمانِ تغییر است، پس
+// ویرایشِ فایل از بیرون، کش را باطل می‌کند. سقفِ ۵۰ مگابایت یعنی
+// فایل‌هایِ غول‌پیکر کش نمی‌شوند تا رم قفل نشود. loadEpubBook دست
+// نمی‌خورد و zip را جداگانه می‌سازد.
+const MAX_CACHED_EPUB_ZIP_BYTES = 50 * 1024 * 1024;
+let cachedEpubZip = null; // { key, zip } | null
+
 function sha256Hex(s) {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
@@ -195,6 +205,10 @@ function zipEntry(zip, zipPath) {
 async function sanitizeChapterHtml(rawHtml, opts) {
   const { zip, chapterDir, imagesDir } = opts || {};
   let html = String(rawHtml || '');
+  // مرحلهٔ ۴۴ §۴: اورلیِ پخته‌شدهٔ خودِ برنامه، هرگز دوباره در
+  // خواننده نمایش داده نمی‌شود (وگرنه حاشیه‌نویسیِ زنده رویِ تصویرِ
+  // پخته‌شده، دو بار دیده می‌شد)؛ مانیفست، مرجعِ بازیابی است.
+  html = removeOldEpubOverlayBlock(html);
   const bodyM = html.match(/<body\b[^>]*>([\s\S]*)<\/body\s*>/i);
   if (bodyM) html = bodyM[1];
   html = html.replace(/<!--[\s\S]*?-->/g, '');
@@ -216,15 +230,31 @@ async function sanitizeChapterHtml(rawHtml, opts) {
   html = html.replace(/<p\b(?![^>]*\bdir\s*=)/gi, '<p dir="auto"');
   // تصاویر: استخراج به کش و بازنویسی به comic://.
   if (zip && imagesDir) {
+    // مرحلهٔ ۵۹ §۳٫۲ — علاوه بر <img>، تگ‌های <image> داخلِ SVG هم پردازش
+    // می‌شوند (مانگاهای EPUB صفحه‌ها را به‌شکل
+    // ‎<svg><image xlink:href="..." /></svg>‎ جاسازی می‌کنند)؛ خاصیتِ
+    // آن‌ها href یا xlink:href است، نه src.
     const imgRe = /<img\b[^>]*>/gi;
+    const imageRe = /<image\b[^>]*>/gi;
     const matches = [];
     let mm;
-    while ((mm = imgRe.exec(html)) !== null) matches.push({ tag: mm[0], index: mm.index });
+    while ((mm = imgRe.exec(html)) !== null) matches.push({ tag: mm[0], index: mm.index, kind: 'img' });
+    while ((mm = imageRe.exec(html)) !== null) matches.push({ tag: mm[0], index: mm.index, kind: 'image' });
+    // مرتب‌سازی بر اساسِ موقعیت تا جایگزینیِ از انتها به ابتدا درست کار کند.
+    matches.sort((a, b) => a.index - b.index);
     // از انتها به ابتدا جایگزین می‌کنیم تا ایندکس‌ها به‌هم نریزند.
     for (let i = matches.length - 1; i >= 0; i--) {
-      const { tag, index } = matches[i];
-      let newTag = tag.replace(/\s+srcset\s*=\s*"[^"]*"/gi, '').replace(/\s+srcset\s*=\s*'[^']*'/gi, '');
-      const srcM = newTag.match(/\ssrc\s*=\s*"([^"]*)"/i) || newTag.match(/\ssrc\s*=\s*'([^']*)'/i);
+      const { tag, index, kind } = matches[i];
+      let newTag = tag;
+      let srcM = null;
+      if (kind === 'image') {
+        // در SVG اول xlink:href، بعد href ساده.
+        srcM = newTag.match(/\sxlink:href\s*=\s*"([^"]*)"/i) || newTag.match(/\sxlink:href\s*=\s*'([^']*)'/i)
+          || newTag.match(/\shref\s*=\s*"([^"]*)"/i) || newTag.match(/\shref\s*=\s*'([^']*)'/i);
+      } else {
+        newTag = newTag.replace(/\s+srcset\s*=\s*"[^"]*"/gi, '').replace(/\s+srcset\s*=\s*'[^']*'/gi, '');
+        srcM = newTag.match(/\ssrc\s*=\s*"([^"]*)"/i) || newTag.match(/\ssrc\s*=\s*'([^']*)'/i);
+      }
       if (!srcM) continue;
       const src = srcM[1];
       if (!src || /^(data:|https?:|comic:)/i.test(src)) continue;
@@ -244,7 +274,11 @@ async function sanitizeChapterHtml(rawHtml, opts) {
         if (!fs.existsSync(absPath)) fs.writeFileSync(absPath, buf);
       } catch (_) { continue; }
       const comicUrl = `comic://media/?path=${encodeURIComponent(absPath)}`;
-      newTag = newTag.replace(srcM[0], ` src="${comicUrl}"`);
+      // نامِ خاصیت حفظ می‌شود (src برایِ img، و xlink:href یا href برایِ image).
+      const attrName = kind === 'image'
+        ? (/\sxlink:href\s*=/i.test(srcM[0]) ? 'xlink:href' : 'href')
+        : 'src';
+      newTag = newTag.replace(srcM[0], ` ${attrName}="${comicUrl}"`);
       html = html.slice(0, index) + newTag + html.slice(index + tag.length);
     }
   }
@@ -289,6 +323,11 @@ async function loadEpubBook(filePath, dataDir) {
         success: true,
         fromCache: true,
         title: meta.title || '',
+        // مرحلهٔ ۴۴ §۴: در مسیرِ کش، zip باز نمی‌شود؛ مانیفست فقط
+        // در پارسِ کامل خوانده می‌شود. فایلِ دارایِ مانیفست، پس از
+        // هر ذخیره اندازه/زمانش عوض می‌شود، پس مسیرِ کامل اجرا
+        // می‌شود و مانیفست همان‌جا خوانده می‌شود.
+        embeddedAnnotations: null,
         creator: meta.creator || '',
         coverUrl: meta.coverUrl || null,
         chapters: meta.chapters,
@@ -302,6 +341,9 @@ async function loadEpubBook(filePath, dataDir) {
     const JSZip = require('jszip');
     const buf = await fs.promises.readFile(filePath);
     const zip = await JSZip.loadAsync(buf);
+    // مرحلهٔ ۴۴ §۴: مانیفستِ جاسازی‌شدهٔ حاشیه‌نویسی (اگر بود) از
+    // همان zipِ بازشده خوانده می‌شود تا باز کردنِ دوباره لازم نباشد.
+    const embeddedAnnotations = await readEmbeddedEpubAnnotationsFromZip(zip);
     const names = Object.keys(zip.files || {});
     const findCaseInsensitive = (target) => names.find((n) => n.toLowerCase() === target.toLowerCase()) || null;
     const encName = findCaseInsensitive('META-INF/encryption.xml');
@@ -399,6 +441,7 @@ async function loadEpubBook(filePath, dataDir) {
     return {
       success: true,
       fromCache: false,
+      embeddedAnnotations,
       title: opf.title,
       creator: opf.creator,
       coverUrl,
@@ -442,9 +485,18 @@ async function loadEpubChapter(filePath, chapterId, dataDir) {
       const cached = await fs.promises.readFile(htmlPath, 'utf8');
       if (cached) return { success: true, fromCache: true, chapterId, title: chapter.title, html: cached };
     } catch (_) {}
-    const JSZip = require('jszip');
-    const buf = await fs.promises.readFile(filePath);
-    const zip = await JSZip.loadAsync(buf);
+    const zipCacheKey = `${filePath}|${stat.size}|${stat.mtimeMs}`;
+    let zip = cachedEpubZip && cachedEpubZip.key === zipCacheKey ? cachedEpubZip.zip : null;
+    if (!zip) {
+      const JSZip = require('jszip');
+      const buf = await fs.promises.readFile(filePath);
+      zip = await JSZip.loadAsync(buf);
+      if (stat.size <= MAX_CACHED_EPUB_ZIP_BYTES) {
+        cachedEpubZip = { key: zipCacheKey, zip };
+      } else {
+        cachedEpubZip = null;
+      }
+    }
     const entry = zipEntry(zip, chapter.href);
     if (!entry) return { success: false, message: 'متنِ فصل داخلِ EPUB یافت نشد.' };
     const rawHtml = await entry.async('string');
@@ -461,9 +513,369 @@ async function loadEpubChapter(filePath, chapterId, dataDir) {
   }
 }
 
+
+// ============================================================================
+// مرحلهٔ ۴۴ §۴: مانیفستِ جاسازی‌شدهٔ حاشیه‌نویسی (CBZ و EPUB — یک شکلِ واحد)
+// ============================================================================
+const EMBEDDED_ANNOTATIONS_FORMAT = 'comic-reader-annotations';
+const EMBEDDED_ANNOTATIONS_VERSION = 1;
+const EPUB_EMBEDDED_MANIFEST_PATH = 'META-INF/comic-reader-annotations.json';
+const EPUB_OVERLAY_CLASS = 'cr-baked-epub-overlay';
+const EPUB_OVERLAY_BEGIN_MARKER = '<!--cr-baked-epub-overlay-begin-->';
+const EPUB_OVERLAY_END_MARKER = '<!--cr-baked-epub-overlay-end-->';
+const MAX_EMBEDDED_MANIFEST_BYTES = 20 * 1024 * 1024;
+const MAX_OVERLAY_IMAGE_BYTES = 50 * 1024 * 1024;
+
+// پاک‌سازیِ annotationsByPage: فقط کلیدهایِ عددیِ مثبت با آیتم‌هایِ آبجکتی.
+function cleanAnnotationPages(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [key, items] of Object.entries(raw)) {
+    const n = Number(key);
+    if (!Number.isFinite(n) || n < 1 || Math.floor(n) !== n) continue;
+    if (!Array.isArray(items) || items.length === 0) continue;
+    const cleanItems = items.filter((it) => it && typeof it === 'object' && !Array.isArray(it));
+    if (cleanItems.length > 0) out[String(n)] = cleanItems;
+  }
+  return out;
+}
+
+function cleanObjectList(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((it) => it && typeof it === 'object' && !Array.isArray(it));
+}
+
+// ساختِ مانیفستِ جاسازی‌شده (همان شکل در CBZ و EPUB).
+function buildAnnotationManifest(fileType, annotationsByPage, extra) {
+  return {
+    format: EMBEDDED_ANNOTATIONS_FORMAT,
+    version: EMBEDDED_ANNOTATIONS_VERSION,
+    app: 'my-comic-reader',
+    fileType,
+    savedAt: new Date().toISOString(),
+    annotationsByPage: cleanAnnotationPages(annotationsByPage),
+    highlights: cleanObjectList(extra && extra.highlights),
+    bookmarks: cleanObjectList(extra && extra.bookmarks),
+  };
+}
+
+// پارسِ مانیفستِ جاسازی‌شده؛ هر ساختارِ نامعتبر → null (نه throw).
+function parseAnnotationManifest(text, fileType) {
+  try {
+    if (typeof text !== 'string' || text.length === 0 || text.length > MAX_EMBEDDED_MANIFEST_BYTES) return null;
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    if (parsed.format !== EMBEDDED_ANNOTATIONS_FORMAT) return null;
+    if (parsed.version !== EMBEDDED_ANNOTATIONS_VERSION) return null;
+    if (fileType && parsed.fileType && parsed.fileType !== fileType) return null;
+    return {
+      annotationsByPage: cleanAnnotationPages(parsed.annotationsByPage),
+      highlights: cleanObjectList(parsed.highlights),
+      bookmarks: cleanObjectList(parsed.bookmarks),
+    };
+  } catch (_) { return null; }
+}
+
+async function readEmbeddedEpubAnnotationsFromZip(zip) {
+  try {
+    if (!zip) return null;
+    const entry = zipEntry(zip, EPUB_EMBEDDED_MANIFEST_PATH);
+    if (!entry) return null;
+    const text = await entry.async('string');
+    return parseAnnotationManifest(text, 'epub');
+  } catch (_) { return null; }
+}
+
+async function readEmbeddedEpubAnnotations(filePath) {
+  try {
+    if (!filePath || typeof filePath !== 'string') return null;
+    const stat = await fs.promises.stat(filePath);
+    if (!stat.isFile() || stat.size > MAX_EPUB_BYTES) return null;
+    const JSZip = require('jszip');
+    const buf = await fs.promises.readFile(filePath);
+    const zip = await JSZip.loadAsync(buf);
+    return await readEmbeddedEpubAnnotationsFromZip(zip);
+  } catch (_) { return null; }
+}
+
+// پاک‌سازی و بازسازیِ کشِ epub-cache پس از ذخیرهٔ درجا: پوشهٔ کشِ
+// همان فایل حذف می‌شود و نمونهٔ کش‌شدهٔ JSZip (OPT-07) هم باطل
+// می‌شود تا باز شدنِ بعدی، فصل‌ها را از فایلِ تازه بخواند.
+async function clearEpubCache(filePath, dataDir) {
+  try {
+    if (!filePath || !dataDir) return false;
+    if (cachedEpubZip && typeof cachedEpubZip.key === 'string' && cachedEpubZip.key.startsWith(String(filePath) + '|')) cachedEpubZip = null;
+    const cacheDir = path.join(dataDir, 'epub-cache', sha256Hex(normalizeKey(filePath)));
+    await fs.promises.rm(cacheDir, { recursive: true, force: true });
+    return true;
+  } catch (_) { return false; }
+}
+
+// اعتبارسنجِ سبکِ خوش‌فرمیِ XML/XHTML (بدونِ وابستگی): توازنِ تگ‌ها
+// با پشته؛ کامنت، CDATA، دستورِ پردازش و DOCTYPE نادیده گرفته
+// می‌شوند و تگ‌هایِ void حتی بدونِ «/» هم خودبسته حساب می‌شوند.
+function validateXhtmlWellFormed(xhtml) {
+  try {
+    let s = String(xhtml || '');
+    s = s.replace(/<!--[\s\S]*?-->/g, '');
+    s = s.replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+    s = s.replace(/<\?[\s\S]*?\?>/g, '');
+    s = s.replace(/<!DOCTYPE[^>]*>/gi, '');
+    const VOID = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+    const stack = [];
+    const tagRe = /<(\/?)([A-Za-z][A-Za-z0-9_.:-]*)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\/?)>/g;
+    let m;
+    while ((m = tagRe.exec(s)) !== null) {
+      const isClose = m[1] === '/';
+      const name = m[2].toLowerCase();
+      const selfClose = m[4] === '/';
+      if (isClose) {
+        if (VOID.has(name)) continue;
+        if (stack.length === 0 || stack[stack.length - 1] !== name) return false;
+        stack.pop();
+      } else if (!selfClose && !VOID.has(name)) {
+        stack.push(name);
+      }
+    }
+    return stack.length === 0;
+  } catch (_) { return false; }
+}
+
+// حذفِ بلوکِ اورلیِ پخته‌شدهٔ قبلی: اول با مارکرهایِ خودمان (دقیق)،
+// بعد با کلاس (دفاعِ دوم برایِ بلوکِ بدونِ مارکر).
+function removeOldEpubOverlayBlock(xhtml) {
+  let s = String(xhtml || '');
+  s = s.replace(/<!--cr-baked-epub-overlay-begin-->[\s\S]*?<!--cr-baked-epub-overlay-end-->/g, '');
+  s = s.replace(/<div\b[^>]*cr-baked-epub-overlay[^>]*>[\s\S]*?<\/div\s*>/gi, '');
+  return s;
+}
+
+// بلوکِ اورلیِ تطبیقی: divای مطلق که کلِ جعبهٔ فصل را می‌پوشاند و
+// تصویر(ها) با object-fit:fill کش می‌آیند؛ pointer-events ندارد تا
+// خواندن/انتخابِ متن مختل نشود. ترتیبِ imgها: هایلایت زیر، لایهٔ اصلی رو.
+function buildEpubOverlayBlock(files) {
+  const imgs = files.map((f) => `<img src="${f.src}" alt="" style="position:absolute;top:0;left:0;width:100%;height:100%;object-fit:fill;pointer-events:none;" />`).join('');
+  return `${EPUB_OVERLAY_BEGIN_MARKER}<div class="${EPUB_OVERLAY_CLASS}" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1;">${imgs}</div>${EPUB_OVERLAY_END_MARKER}`;
+}
+
+// تزریقِ بلوک در انتهایِ <body> — با جستجویِ ساختاری (نه جایگذاریِ
+// کورکورانه): نزدیک‌ترین </body> که داخلِ کامنت نباشد؛ اگر <body>
+// نبود، پیش از </html>؛ اگر آن هم نبود، انتهایِ سند.
+function injectEpubOverlay(xhtml, overlayBlock) {
+  let s = String(xhtml || '');
+  s = removeOldEpubOverlayBlock(s);
+  const bodyCloseRe = /<\/body\s*>/gi;
+  let match = null;
+  let last = null;
+  while ((match = bodyCloseRe.exec(s)) !== null) last = match;
+  if (last) {
+    const prefix = s.slice(0, last.index);
+    const openComments = (prefix.match(/<!--/g) || []).length;
+    const closeComments = (prefix.match(/-->/g) || []).length;
+    if (openComments === closeComments) {
+      return { xhtml: s.slice(0, last.index) + overlayBlock + s.slice(last.index), injected: true };
+    }
+  }
+  const htmlCloseRe = /<\/html\s*>/gi;
+  let hMatch = null;
+  let hLast = null;
+  while ((hMatch = htmlCloseRe.exec(s)) !== null) hLast = hMatch;
+  if (hLast) {
+    return { xhtml: s.slice(0, hLast.index) + overlayBlock + s.slice(hLast.index), injected: true };
+  }
+  return { xhtml: s + overlayBlock, injected: true };
+}
+
+// مسیرِ نسبیِ POSIX از پوشهٔ OPF تا فایلِ هدف (برایِ hrefِ مانیفست).
+function posixRelativePath(fromDir, toPath) {
+  const from = String(fromDir || '').split('/').filter(Boolean);
+  const to = String(toPath || '').split('/').filter(Boolean);
+  let i = 0;
+  while (i < from.length && i < to.length && from[i] === to[i]) i++;
+  const parts = [];
+  for (let k = 0; k < from.length - i; k++) parts.push('..');
+  for (let k = i; k < to.length; k++) parts.push(to[k]);
+  return parts.join('/');
+}
+
+// به‌روزرسانیِ مانیفستِ OPF: آیتم‌هایِ اورلیِ قبلی حذف و آیتم‌هایِ
+// تازه پیش از </manifest> درج می‌شوند؛ اگر </manifest> نبود، ناموفق.
+function updateOpfManifestXml(opfXml, opfDir, overlayFiles) {
+  let s = String(opfXml || '');
+  s = s.replace(/<(?:[A-Za-z0-9_]+:)?item\b[^>]*\bid\s*=\s*"cr-overlay-[^"]*"[^>]*\/?>/gi, '');
+  s = s.replace(/<(?:[A-Za-z0-9_]+:)?item\b[^>]*\bid\s*=\s*'cr-overlay-[^']*'[^>]*\/?>/gi, '');
+  if (!overlayFiles || overlayFiles.length === 0) return { opfXml: s, updated: true };
+  const itemsXml = overlayFiles.map((f) => `    <item id="${f.id}" href="${f.href}" media-type="image/png" />`).join('\n');
+  const closeRe = /<\/(?:[A-Za-z0-9_]+:)?manifest\s*>/i;
+  const m = s.match(closeRe);
+  if (!m) return { opfXml: s, updated: false };
+  const idx = s.search(closeRe);
+  return { opfXml: s.slice(0, idx) + itemsXml + '\n' + s.slice(idx), updated: true };
+}
+
+// دیکدِ data URLِ تصویری (base64) به بافر؛ هر چیزِ دیگر → null.
+function decodeImageDataUrl(dataUrl, maxBytes) {
+  if (typeof dataUrl !== 'string') return null;
+  const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!m) return null;
+  try {
+    const buf = Buffer.from(m[2], 'base64');
+    const cap = typeof maxBytes === 'number' && maxBytes > 0 ? maxBytes : MAX_OVERLAY_IMAGE_BYTES;
+    if (!buf || buf.length === 0 || buf.length > cap) return null;
+    return { buffer: buf, mime: m[1] };
+  } catch (_) { return null; }
+}
+
+// مرحلهٔ ۴۴ §۴: خروجیِ EPUBِ حاشیه‌نویسی‌شده.
+// ورودی: { epubPath, outputPath, chapters, annotationsByPage, highlights, bookmarks }
+// که chapters همان [{ chapterId, chapterIndex, href, overlayPng, highlightPng }] است.
+// همهٔ ویرایش‌ها اول در حافظه انجام می‌شوند و فقط بافرِ نهایی
+// برگردانده می‌شود (نوشتنِ اتمیک با هندلرِ main است)؛ پس هر خطا
+// پیش از نوشتن، فایل را دست‌نخورده می‌گذارد.
+// برایِ هر فصلِ spine: بلوکِ قدیمی همیشه پاک می‌شود و بلوکِ تازه
+// فقط برایِ فصل‌هایِ دارایِ لایه تزریق می‌شود (ذخیرهٔ دوم، بلوک را
+// دو تا نمی‌کند). اگر هیچ حاشیه‌نویسی/هایلایت/بوک‌مارکی نمانده باشد،
+// مانیفست و اورلی‌ها حذف می‌شوند (restoredClean).
+async function exportAnnotatedEpub(args) {
+  try {
+    const { epubPath, outputPath, chapters, annotationsByPage, highlights, bookmarks } = args || {};
+    if (!epubPath || typeof epubPath !== 'string') return { success: false, error: 'مسیرِ فایلِ EPUB مشخص نیست.' };
+    if (!outputPath || typeof outputPath !== 'string') return { success: false, error: 'مسیرِ خروجی مشخص نیست.' };
+    const stat = await fs.promises.stat(epubPath);
+    if (!stat.isFile()) return { success: false, error: 'فایلِ EPUB یافت نشد.' };
+    if (stat.size > MAX_EPUB_BYTES) return { success: false, error: 'فایلِ EPUB بزرگ‌تر از حدِ مجاز (۲۰۰ مگابایت) است.' };
+    const JSZip = require('jszip');
+    const buf = await fs.promises.readFile(epubPath);
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files || {});
+    const findCaseInsensitive = (target) => names.find((n) => n.toLowerCase() === target.toLowerCase()) || null;
+    const containerName = findCaseInsensitive('META-INF/container.xml');
+    const containerEntry = containerName ? zipEntry(zip, containerName) : null;
+    if (!containerEntry) return { success: false, error: 'ساختارِ EPUB معتبر نیست (container.xml یافت نشد).' };
+    const containerXml = await containerEntry.async('string');
+    const opfPath = parseContainerXml(containerXml);
+    if (!opfPath) return { success: false, error: 'فایلِ ریشهٔ EPUB (OPF) یافت نشد.' };
+    const opfEntry = zipEntry(zip, opfPath);
+    if (!opfEntry) return { success: false, error: 'فایلِ OPF داخلِ EPUB یافت نشد.' };
+    const opfXml = await opfEntry.async('string');
+    const opf = parseOpf(opfXml);
+    const opfDir = posixDirname(opfPath);
+    const spineChapters = [];
+    for (let i = 0; i < opf.spine.length; i++) {
+      const item = opf.manifest[opf.spine[i]];
+      if (!item) continue;
+      const zipPath = resolveZipPath(opfDir, item.href);
+      if (!zipPath) continue;
+      spineChapters.push({ id: `ch${i}`, href: zipPath });
+    }
+    const wanted = Array.isArray(chapters) ? chapters : [];
+    const wantedById = new Map();
+    for (const ch of wanted) {
+      if (!ch || typeof ch !== 'object') continue;
+      const chapterId = typeof ch.chapterId === 'string' ? ch.chapterId : '';
+      if (!chapterId) continue;
+      wantedById.set(chapterId, ch);
+    }
+    const manifest = buildAnnotationManifest('epub', annotationsByPage, { highlights, bookmarks });
+    const hasManifestContent = Object.keys(manifest.annotationsByPage).length > 0 || manifest.highlights.length > 0 || manifest.bookmarks.length > 0;
+    let injectedCount = 0;
+    let removedChapters = 0;
+    let removedFiles = 0;
+    const newOverlayFiles = [];
+    const newOverlayZipPaths = new Set();
+    for (const spineCh of spineChapters) {
+      const entry = zipEntry(zip, spineCh.href);
+      if (!entry) continue;
+      const xhtml = await entry.async('string');
+      const hadOld = xhtml.includes(EPUB_OVERLAY_BEGIN_MARKER) || /cr-baked-epub-overlay/.test(xhtml);
+      const wantedCh = wantedById.get(spineCh.id);
+      const preValid = validateXhtmlWellFormed(xhtml);
+      const cleaned = removeOldEpubOverlayBlock(xhtml);
+      if (hadOld) removedChapters++;
+      const overlayPng = wantedCh && typeof wantedCh.overlayPng === 'string' ? decodeImageDataUrl(wantedCh.overlayPng) : null;
+      const highlightPng = wantedCh && typeof wantedCh.highlightPng === 'string' ? decodeImageDataUrl(wantedCh.highlightPng) : null;
+      if (!overlayPng && !highlightPng) {
+        if (cleaned !== xhtml) zip.file(spineCh.href, cleaned);
+        continue;
+      }
+      const chapterDir = posixDirname(spineCh.href);
+      const safeId = String(spineCh.id).replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'ch';
+      const files = [];
+      if (highlightPng) {
+        const hlName = `cr-overlay-${safeId}-hl.png`;
+        const hlZipPath = chapterDir ? `${chapterDir}/${hlName}` : hlName;
+        zip.file(hlZipPath, highlightPng.buffer);
+        newOverlayZipPaths.add(hlZipPath);
+        newOverlayFiles.push({ id: `cr-overlay-${safeId}-hl`, href: posixRelativePath(opfDir, hlZipPath) });
+        files.push({ src: hlName });
+      }
+      if (overlayPng) {
+        const ovName = `cr-overlay-${safeId}.png`;
+        const ovZipPath = chapterDir ? `${chapterDir}/${ovName}` : ovName;
+        zip.file(ovZipPath, overlayPng.buffer);
+        newOverlayZipPaths.add(ovZipPath);
+        newOverlayFiles.push({ id: `cr-overlay-${safeId}`, href: posixRelativePath(opfDir, ovZipPath) });
+        files.push({ src: ovName });
+      }
+      const block = buildEpubOverlayBlock(files);
+      const injected = injectEpubOverlay(cleaned, block);
+      const postValid = validateXhtmlWellFormed(injected.xhtml);
+      if (!postValid && preValid) {
+        return { success: false, error: `تزریقِ اورلی در فصلِ ${spineCh.href} سند را خراب می‌کند؛ فایل دست نخورده است.` };
+      }
+      zip.file(spineCh.href, injected.xhtml);
+      injectedCount++;
+    }
+    for (const name of Object.keys(zip.files || {})) {
+      if (/(^|\/)cr-overlay-[A-Za-z0-9._-]+\.png$/.test(name) && !newOverlayZipPaths.has(name)) {
+        try { zip.remove(name); } catch (_) {}
+        removedFiles++;
+      }
+    }
+    let restoredClean = false;
+    if (hasManifestContent || injectedCount > 0) {
+      zip.file(EPUB_EMBEDDED_MANIFEST_PATH, JSON.stringify(manifest, null, 2));
+    } else {
+      const existing = zipEntry(zip, EPUB_EMBEDDED_MANIFEST_PATH);
+      if (existing) {
+        try { zip.remove(EPUB_EMBEDDED_MANIFEST_PATH); } catch (_) {}
+        restoredClean = true;
+      }
+      if (removedChapters > 0 || removedFiles > 0) restoredClean = true;
+    }
+    const opfUpdated = updateOpfManifestXml(opfXml, opfDir, newOverlayFiles);
+    if (!opfUpdated.updated) {
+      return { success: false, error: 'مانیفستِ OPF قابلِ به‌روزرسانی نیست؛ فایل دست نخورده است.' };
+    }
+    if (opfUpdated.opfXml !== opfXml) {
+      const opfPreValid = validateXhtmlWellFormed(opfXml);
+      const opfPostValid = validateXhtmlWellFormed(opfUpdated.opfXml);
+      if (!opfPostValid && opfPreValid) {
+        return { success: false, error: 'به‌روزرسانیِ مانیفستِ OPF سند را خراب می‌کند؛ فایل دست نخورده است.' };
+      }
+      zip.file(opfPath, opfUpdated.opfXml);
+    }
+    const outBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
+    return { success: true, buffer: outBuffer, injectedChapters: injectedCount, removedChapters, removedFiles, restoredClean };
+  } catch (err) {
+    return { success: false, error: `خطا در ذخیرهٔ EPUBِ حاشیه‌نویسی‌شده: ${err && err.message ? err.message : 'نامشخص'}` };
+  }
+}
+
 module.exports = {
   loadEpubBook,
   loadEpubChapter,
+  readEmbeddedEpubAnnotations,
+  readEmbeddedEpubAnnotationsFromZip,
+  exportAnnotatedEpub,
+  clearEpubCache,
+  buildAnnotationManifest,
+  parseAnnotationManifest,
+  validateXhtmlWellFormed,
+  injectEpubOverlay,
+  removeOldEpubOverlayBlock,
+  updateOpfManifestXml,
+  decodeImageDataUrl,
   parseContainerXml,
   parseOpf,
   parseTocNcx,

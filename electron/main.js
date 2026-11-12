@@ -623,6 +623,7 @@ function createSafeWebFileStream(filePath, options, abortSignal) {
 const MIME_TYPES = {
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
+  '.jfif': 'image/jpeg', // مرحلهٔ ۵۹ §۳٫۲ — ‎.jfif‎ همان JPEG است
   '.png': 'image/png',
   '.webp': 'image/webp',
   '.gif': 'image/gif',
@@ -642,10 +643,15 @@ const MIME_TYPES = {
 // سرو می‌شود)؛ بستنِ کامل، به رجیستریِ «فایل‌های بازِ فعلی» نیاز
 // دارد که کارِ فازِ بعد است — ولی فایل‌های سیستمی، اجرایی، دیتابیس
 // و اسنادِ متنی از همین‌جا مسدود می‌شوند.
+// مرحلهٔ ۵۹ §۳٫۲ — ‎.img‎ و ‎.jfif‎ اضافه شد: epubService برای فایلِ
+// بدونِ پسوند، پسوندِ ‎.img‎ می‌گذارد وگرنه پروتکل 403 می‌داد؛ ‎.jfif‎ هم
+// همان JPEG است. اصلاحِ فرضِ ممیزی: ‎.svg‎ و ‎.avif‎ از قبل در لیست
+// بودند و دوباره اضافه نشدند (تکراری در Set بی‌اثر بود ولی اشتباهِ
+// گزارش اصلاح می‌شود).
 const ALLOWED_COMIC_EXTS = new Set([
   '.zip', '.cbz', '.cbr', '.rar', '.7z',
   '.pdf', '.epub',
-  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif', '.svg'
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.avif', '.svg', '.img', '.jfif'
 ]);
 
 // پوشهٔ کاورهای روی دیسک (همان که ورکرِ دیتابیس می‌نویسد).

@@ -119,6 +119,45 @@ export function computeSafePopoverPosition(desiredTop, panelHeight, desiredLeft,
   return { top: clampedTop, left: clampedLeft, maxHeight };
 }
 
+// مرحلهٔ ۵۹ مأموریتِ ۲ — دروازهٔ نمایان بودنِ بخش‌های پانلِ بنتو
+// (secondaryContent)، خالص و قابلِ تست در Node: ورودی، فقط ابزارِ
+// فعال، داشتنِ آیتمِ انتخاب‌شده و سه پرچمِ از پیش حساب‌شدهٔ بخش‌ها
+// (hideColorControls و showThickness و showOpacity) است؛ خروجی،
+// برای هر بخش می‌گوید رندر شود یا null. قانون:
+// - دست (hand): هیچ پانلی ندارد (مثلِ قبل).
+// - پاک‌کن (eraser): هیچ پانلی ندارد — در پایهٔ مرحلهٔ ۵۸، هیچ
+//   کنترلِ اندازه/حالتِ پاک‌کن در تولبار نیست (شعاع، ثابتِ ۱۴ در
+//   لایه است، به کامنتِ مرحلهٔ ۵۱ §۴ مراجعه کنید)؛ پس چیزی برای
+//   نشان دادن نیست و ساختِ کنترلِ بی‌سیم، دروغ می‌شد.
+// - انتخاب (select): فقط پیلِ فشردهٔ تک‌ردیفهٔ باکسی/کمند (+ دکمهٔ
+//   حذف فقط وقتی آیتمی انتخاب شده است)؛ بخش‌های ۲ (رنگ) و ۳
+//   (ضخامت + شفافیت) و ۴ (زوم) همیشه null.
+// - ابزارهای ترسیمی (pen ،box ،arrow ،text ،sticky ،highlighter):
+//   همهٔ بخش‌ها دقیقاً مثلِ قبل می‌مانند (پرچم‌های ورودی دست
+//   نخورده عبور می‌کنند).
+// ورودی می‌تواند رشتهٔ شناسهٔ ابزار هم باشد (برای فرمولِ انیمیشنِ
+// فلای‌اوت که قبل از returnِ زودهنگام است و پرچم‌های بخش را ندارد).
+export function computeSecondaryVisibility(input) {
+  const source = typeof input === 'string' ? { annotationTool: input } : (input || {});
+  const tool = typeof source.annotationTool === 'string' ? source.annotationTool : 'pen';
+  const hasSelectedItem = Boolean(source.hasSelectedItem);
+  const isSelect = tool === 'select';
+  const showPanel = tool !== 'hand' && tool !== 'eraser';
+  const hideColorControls = Boolean(source.hideColorControls);
+  const showThickness = source.showThickness !== false;
+  const showOpacity = source.showOpacity !== false;
+  return {
+    isSelect,
+    showPanel,
+    showSelectPill: isSelect,
+    showDeleteSelected: isSelect && hasSelectedItem,
+    showColorSection: showPanel && !isSelect && !hideColorControls,
+    showThicknessOpacitySection: showPanel && !isSelect && (showThickness || showOpacity),
+    showZoomSection: showPanel && !isSelect,
+    isCompact: isSelect,
+  };
+}
+
 // فاز ۳ پالت — دسته‌بندی‌های تخصصیِ دراور (دقیقاً همان ۲۵ رنگِ
 // فهرست‌شده در تسک: پزشکی ۸ + نئون ۵ + سایبرپانک ۶ + پاستلی ۶.
 // توجهِ صادقانه: عنوانِ تسک «پالت ۳۰ رنگ» می‌گوید، ولی فهرستِ
@@ -605,9 +644,10 @@ export function AnnotationToolbar({
   useEffect(() => { if (hasSelection) setPanelClosed(false); }, [hasSelection]);
   // بسته شدنِ دراورِ رنگ وقتی پنلِ فرعی پنهان می‌شود (دکمهٔ پالت
   // خودش داخلِ همان پنل است، پس دراورِ باز، بی‌صاحب می‌ماند).
-  // فرمول، همان showSecondary است که پایین‌تر تعریف می‌شود.
+  // فرمول، همان showSecondary است که پایین‌تر تعریف می‌شود
+  // (مرحلهٔ ۵۹ مأموریتِ ۲: پاک‌کن هم مثلِ دست، پانلی ندارد).
   useEffect(() => {
-    if (!(annotationTool !== 'hand' && !panelClosed)) setColorDrawerOpen(false);
+    if (!(annotationTool !== 'hand' && annotationTool !== 'eraser' && !panelClosed)) setColorDrawerOpen(false);
   }, [annotationTool, panelClosed]);
   // تنفس: درگ یا دراورِ باز، کم‌نور شدن را لغو می‌کند؛ و پاک‌سازیِ
   // تایمرها هنگامِ unmount.
@@ -760,7 +800,10 @@ export function AnnotationToolbar({
   // The formulas mirror showSecondary/colorDrawerOpen below (same
   // inputs, computed here because hooks must stay above the early
   // return); the canonical consts after the return stay untouched.
-  const showSecondaryForAnim = annotationTool !== 'hand' && !panelClosed;
+  // مرحلهٔ ۵۹ مأموریتِ ۲: پاک‌کن هم مثلِ دست، پانلی ندارد (در پایه،
+  // هیچ کنترلِ اندازه/حالتی برای پاک‌کن در تولبار نیست)؛ فرمول، از
+  // computeSecondaryVisibility می‌آید تا با showSecondary یکی بماند.
+  const showSecondaryForAnim = computeSecondaryVisibility(annotationTool).showPanel && !panelClosed;
   const [flyoutMounted, setFlyoutMounted] = useState(false);
   const [flyoutExiting, setFlyoutExiting] = useState(false);
   useEffect(() => {
@@ -910,6 +953,28 @@ export function AnnotationToolbar({
     if (!sid) return;
     window.dispatchEvent(new CustomEvent('annotation:update-selected', {
       detail: { id: sid, ...patch },
+    }));
+  }, []);
+
+  // مرحلهٔ ۵۹ مأموریتِ ۲: حذفِ آیتمِ انتخاب‌شده از پیلِ فشردهٔ
+  // انتخاب — قراردادِ رویدادیِ همین فایل (مثلِ
+  // broadcastSelectedPropertyPatch): شناسه در detail می‌آید و
+  // لایه، آن را می‌خواند. توجهِ صادقانه: در فایل‌های پایهٔ تحویل‌شده،
+  // هیچ شنونده‌ای برای «annotation:delete-selected» نیست (حذفِ
+  // آیتم، تا امروز فقط با کلیدِ Delete/Backspace در لایه انجام
+  // می‌شد)؛ پس این دکمه، تا وقتی لایه این رویداد را بگیرد، در
+  // برنامهٔ نصب‌شده باید راستی‌آزمایی شود (به محدودیت‌های صادقانه
+  // در گزارش مراجعه کنید). اگر انتخابی نباشد، هیچ رویدادی نیست.
+  const handleDeleteSelected = useCallback(() => {
+    hideTooltip();
+    const state = typeof useAppStore.getState === 'function' ? useAppStore.getState() : {};
+    const sid = state.selectedAnnotationId
+      || (Array.isArray(state.selectedAnnotationIds) && state.selectedAnnotationIds.length > 0
+        ? state.selectedAnnotationIds[0]
+        : null);
+    if (!sid) return;
+    window.dispatchEvent(new CustomEvent('annotation:delete-selected', {
+      detail: { id: sid },
     }));
   }, []);
 
@@ -1110,12 +1175,15 @@ export function AnnotationToolbar({
   // سمتِ راست باز می‌شوند (به سمتِ مرکز)؛ وگرنه به سمتِ چپ.
   const dockX = toolbarPos ? toolbarPos.x : (isVertical ? viewportW - 80 : viewportW / 2);
   const isDockOnLeft = dockX < viewportW / 2;
-  // میکروانیمیشن‌ها §۲ و §۳ + مرحلهٔ ۵۸ مأموریتِ ۳ و ۵ — نمایان
-  // بودنِ پانلِ بنتوی ابزار: برای همهٔ ابزارها جز دست (دست، هیچ
-  // پانلی ندارد و فقط صفحه را جابه‌جا می‌کند)، وقتی پنل با دوبار
-  // کلیک بسته نشده باشد. در غیر این صورت، فقط داکِ جمع‌وجور دیده
-  // می‌شود (ابزارها + بازگردانی + جهت + Done).
-  const showSecondary = annotationTool !== 'hand' && !panelClosed;
+  // میکروانیمیشن‌ها §۲ و §۳ + مرحلهٔ ۵۸ مأموریتِ ۳ و ۵ + مرحلهٔ ۵۹
+  // مأموریتِ ۲ — نمایان بودنِ پانلِ بنتوی ابزار: برای همهٔ ابزارها
+  // جز دست و پاک‌کن (هر دو هیچ پانلی ندارند؛ پاک‌کن در پایه هیچ
+  // کنترلِ اندازه/حالتی در تولبار ندارد)، وقتی پنل با دوبار کلیک
+  // بسته نشده باشد. در غیر این صورت، فقط داکِ جمع‌وجور دیده
+  // می‌شود (ابزارها + بازگردانی + جهت + Done). دروازهٔ دقیقِ هر
+  // بخش (رنگ/ضخامت/زوم/پیلِ انتخاب) در secondaryVisibility کنارِ
+  // secondaryContent است؛ این فرمول، فقط بودنِ خودِ پانل را می‌گوید.
+  const showSecondary = computeSecondaryVisibility(annotationTool).showPanel && !panelClosed;
   // هم‌رنگ‌سازیِ مرز و درخشش با رنگِ فعال (§۴٫۲): hexی ۶رقمی را
   // به rgba با آلفای خواسته‌شده تبدیل می‌کند؛ اگر رنگ، hex نبود،
   // همان مقدار برگردانده می‌شود تا چیزی خراب نشود.
@@ -1745,6 +1813,44 @@ export function AnnotationToolbar({
   const hasModeSection = annotationTool === 'select' || annotationTool === 'box'
     || annotationTool === 'arrow' || selectedAnnotationTool === 'arrow' || isTypoMode;
   const zoomHasSectionsAbove = hasModeSection || !hideColorControls || showThickness || showOpacity;
+
+  // مرحلهٔ ۵۹ مأموریتِ ۲: دروازهٔ بخش‌های پانل — برای ابزارِ انتخاب،
+  // بخش‌های ۲ و ۳ و ۴ null می‌شوند و فقط پیلِ فشرده می‌ماند؛ برای
+  // دست/پاک‌کن، کلِ پانل نیست؛ برای ابزارهای ترسیمی، هر سه بخش
+  // دقیقاً مثلِ قبل می‌مانند (به computeSecondaryVisibility مراجعه
+  // کنید). isSelectCompact، چیدمانِ جمع‌شوندهٔ ریشهٔ پانل و کارتِ
+  // فلای‌اوت را هم کنترل می‌کند.
+  const secondaryVisibility = computeSecondaryVisibility({
+    annotationTool,
+    hasSelectedItem,
+    hideColorControls,
+    showThickness,
+    showOpacity,
+  });
+  const isSelectCompact = secondaryVisibility.isSelect;
+  // مرحلهٔ ۵۹ مأموریتِ ۲: دکمهٔ پیلِ فشردهٔ انتخاب — تک‌ردیفه،
+  // باریک (ارتفاعِ ۲۸) و کاملاً گرد؛ برخلافِ bentoSegmentedBtn
+  // (ارتفاعِ ۳۲، گوشهٔ ۸)، چون پیل باید دقیقاً به اندازهٔ یک ردیف
+  // جمع شود. برچسب‌ها، همان دو عبارتِ کاملِ تسک‌اند.
+  const selectPillBtn = (active) => ({
+    ...btnBase,
+    height: 28,
+    padding: '0 10px',
+    borderRadius: 999,
+    fontSize: 12,
+    fontFamily: 'inherit',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minWidth: 0,
+    background: active ? 'rgba(34,211,238,0.22)' : 'transparent',
+    color: active ? '#67e8f9' : 'rgba(255,255,255,0.65)',
+    outline: active ? '1.5px solid #22d3ee' : 'none',
+    outlineOffset: -1,
+  });
   // مرحلهٔ ۵۸ مأموریتِ ۵: پانلِ بنتو — همهٔ پاپ‌اورهای ابزار، رویِ
   // یک چیدمانِ ثابتِ ۲۸۸ پیکسلیِ متقارن بازسازی شدند: بخشِ ۱
   // کنترلِ یکپارچهٔ حالتِ ابزار (فقط وقتی ابزار، حالتی دارد)،
@@ -1752,43 +1858,98 @@ export function AnnotationToolbar({
   // ضخامت + شفافیت در یک جعبهٔ فشرده، و بخشِ ۴ فوترِ فشردهٔ زوم.
   // برای دست، پانل اصلاً رندر نمی‌شود (به showSecondary مراجعه
   // کنید — مأموریتِ ۳). راهنمای دوبار کلیکِ قدیمی حذف شد.
+  // مرحلهٔ ۵۹ مأموریتِ ۲: برای ابزارِ انتخاب، فقط پیلِ فشردهٔ
+  // تک‌ردیفهٔ بخشِ ۱ می‌ماند و بخش‌های ۲ و ۳ و ۴ null می‌شوند؛
+  // برای پاک‌کن، پانل اصلاً نیست (به showSecondary مراجعه کنید).
   const secondaryContent = (
     <div
       dir="rtl"
       style={{
-        width: 288,
+        // مرحلهٔ ۵۹ مأموریتِ ۲: در حالتِ فشردهٔ انتخاب، ریشهٔ پانل
+        // هیچ فاصلهٔ اضافه‌ای ندارد (gap صفر، padding صفر، عرض،
+        // اندازهٔ محتوا) تا کانتینر دقیقاً به اندازهٔ ارتفاعِ پیل
+        // جمع شود؛ برای بقیهٔ ابزارها، چیدمانِ ۲۸۸ پیکسلیِ قبل
+        // دست نخورده می‌ماند.
+        width: isSelectCompact ? 'auto' : 288,
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
-        gap: 10,
+        gap: isSelectCompact ? 0 : 10,
         alignItems: 'stretch',
+        ...(isSelectCompact ? { maxWidth: 'calc(100vw - 24px)', padding: 0 } : {}),
       }}
     >
-      {/* بخشِ ۱ — حالتِ ابزار: انتخاب (باکسی/کمند) */}
-      {annotationTool === 'select' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, animation: 'submenuIn 0.2s ease' }}>
-          <div style={bentoSegmentedWrap(2)}>
-            {selectSubModeOptions.map((opt) => {
-              const active = selectSubMode === opt.id;
-              const OptIcon = opt.Icon;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  aria-pressed={active}
-                  aria-label={opt.label}
-                  title={opt.label}
-                  onClick={() => { setSelectSubMode(opt.id); }}
-                  style={{ ...bentoSegmentedBtn(active), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, padding: '0 6px' }}
-                >
-                  <span style={{ display: 'inline-flex', flexShrink: 0 }}>
-                    <OptIcon size={16} />
-                  </span>
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{opt.id === 'box' ? 'کادری' : 'کمند'}</span>
-                </button>
-              );
-            })}
-          </div>
+      {/* بخشِ ۱ — حالتِ ابزار: انتخاب — مرحلهٔ ۵۹ مأموریتِ ۲: پیلِ
+          فشردهٔ تک‌ردیفه (Compact Pill). وقتی ابزارِ انتخاب فعال
+          است، این تنها چیزی است که در پانل دیده می‌شود: فقط دو
+          دکمهٔ «انتخابِ کادری (باکسی)» و «انتخابِ آزاد (کمند)» در
+          یک ردیفِ باریک، و وقتی آیتمی روی بوم انتخاب شده باشد،
+          فقط دکمهٔ حذفِ همان آیتم کنارِ آن‌ها در همان ردیف.
+          بخش‌های ۲ و ۳ و ۴ برای انتخاب، null رندر می‌شوند (به
+          secondaryVisibility مراجعه کنید) و ریشهٔ پانل هم gap و
+          padding ندارد، پس کانتینر دقیقاً به ارتفاعِ همین پیل
+          جمع می‌شود. */}
+      {secondaryVisibility.showSelectPill && (
+        <div
+          dir="rtl"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+            background: 'rgba(15,23,42,0.75)',
+            border: '1px solid rgba(255,255,255,0.10)',
+            borderRadius: 999,
+            padding: 2,
+            boxSizing: 'border-box',
+            animation: 'submenuIn 0.2s ease',
+          }}
+        >
+          {selectSubModeOptions.map((opt) => {
+            const active = selectSubMode === opt.id;
+            const OptIcon = opt.Icon;
+            const pillLabel = opt.id === 'box' ? 'انتخابِ کادری (باکسی)' : 'انتخابِ آزاد (کمند)';
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                aria-pressed={active}
+                aria-label={pillLabel}
+                title={pillLabel}
+                onClick={() => { setSelectSubMode(opt.id); }}
+                style={selectPillBtn(active)}
+              >
+                <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+                  <OptIcon size={16} />
+                </span>
+                <span>{pillLabel}</span>
+              </button>
+            );
+          })}
+          {secondaryVisibility.showDeleteSelected && (
+            <>
+              <span aria-hidden="true" style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)', flexShrink: 0 }} />
+              <button
+                type="button"
+                aria-label="حذفِ آیتمِ انتخاب‌شده"
+                title="حذفِ آیتمِ انتخاب‌شده"
+                onClick={handleDeleteSelected}
+                style={{
+                  ...btnBase,
+                  width: 28,
+                  height: 28,
+                  borderRadius: 999,
+                  flexShrink: 0,
+                  background: 'rgba(244,63,94,0.20)',
+                  border: '1px solid rgba(244,63,94,0.55)',
+                  color: '#fda4af',
+                  cursor: 'pointer',
+                  padding: 0,
+                }}
+              >
+                <Icons.Trash size={15} />
+              </button>
+            </>
+          )}
         </div>
       )}
 
@@ -1833,8 +1994,9 @@ export function AnnotationToolbar({
       )}
 
       {/* بخشِ ۱ — حالتِ ابزار: فلش — وقتی ابزار arrow فعال است
-          یا آیتمِ انتخاب‌شده فلش است (طبقِ TASK: tool OR selectedAnnotationTool) */}
-      {(annotationTool === 'arrow' || selectedAnnotationTool === 'arrow') && (
+          یا آیتمِ انتخاب‌شده فلش است (طبقِ TASK: tool OR selectedAnnotationTool).
+          مرحلهٔ ۵۹ مأموریتِ ۲: وقتی ابزارِ انتخاب فعال است، این بخش هم پنهان است (فقط پیل دیده می‌شود). */}
+      {(annotationTool === 'arrow' || selectedAnnotationTool === 'arrow') && !secondaryVisibility.isSelect && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, animation: 'submenuIn 0.2s ease' }}>
           <div style={bentoSegmentedWrap(2)}>
             {ARROW_STYLES.map((as) => {
@@ -1890,8 +2052,9 @@ export function AnnotationToolbar({
         </div>
       )}
 
-      {/* بخشِ ۱ — حالتِ ابزار: فونتِ متن/استیکی (کنسولِ تایپو) */}
-      {isTypoMode && (
+      {/* بخشِ ۱ — حالتِ ابزار: فونتِ متن/استیکی (کنسولِ تایپو).
+          مرحلهٔ ۵۹ مأموریتِ ۲: وقتی ابزارِ انتخاب فعال است، این بخش هم پنهان است (فقط پیل دیده می‌شود). */}
+      {isTypoMode && !secondaryVisibility.isSelect && (
         <div key={annotationTool} style={{ display: 'flex', flexDirection: 'column', gap: 8, animation: 'typoConsoleIn 0.25s ease' }}>
           <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)' }}>
             فونتِ متن — پیش‌فرض: استعداد
@@ -1957,8 +2120,9 @@ export function AnnotationToolbar({
 
       {/* بخشِ ۲ — رنگِ ابزار: سربرگ + گریدِ ۸ ستونهٔ سوآچ‌ها.
           دکمه‌های ویرایش و +، دیگر ردیفِ سوآچ را نمی‌شکنند؛ در
-          سربرگ‌اند. مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است. */}
-      {!hideColorControls && (
+          سربرگ‌اند. مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن پنهان است.
+          مرحلهٔ ۵۹ مأموریتِ ۲: برای ابزارِ انتخاب هم پنهان است (فقط پیل دیده می‌شود). */}
+      {secondaryVisibility.showColorSection && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, ...bentoSepIf(hasModeSection) }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap' }}>
@@ -2111,8 +2275,9 @@ export function AnnotationToolbar({
 
       {/* بخشِ ۳ — ضخامت + شفافیت در یک جعبهٔ فشرده.
           مرحلهٔ ۵۱ §۴: برای دست/پاک‌کن، کلِ بخش پنهان است؛ برای
-          متن/استیکی/باکس، ردیفِ ضخامت پنهان است و فقط شفافیت می‌ماند. */}
-      {(showThickness || showOpacity) && (
+          متن/استیکی/باکس، ردیفِ ضخامت پنهان است و فقط شفافیت می‌ماند.
+          مرحلهٔ ۵۹ مأموریتِ ۲: برای ابزارِ انتخاب هم کلِ بخش پنهان است. */}
+      {secondaryVisibility.showThicknessOpacitySection && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid rgba(255,255,255,0.10)', borderRadius: 12, padding: 10, background: 'rgba(255,255,255,0.03)' }}>
           {showThickness && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4 }}>
@@ -2204,7 +2369,9 @@ export function AnnotationToolbar({
           استیکی‌نوت با زوم + تنظیمِ دستیِ مقیاسِ استیکی. تاگل،
           مقیاسِ رندرِ معکوسِ زوم را فعال می‌کند؛ دکمه‌های − و +،
           مقیاسِ دستیِ استیکیِ انتخاب‌شده را عوض می‌کنند. برای
-          متن، اندازه با کنترلِ فونتِ بخشِ ۱ تنظیم می‌شود.) */}
+          متن، اندازه با کنترلِ فونتِ بخشِ ۱ تنظیم می‌شود.
+          مرحلهٔ ۵۹ مأموریتِ ۲: برای ابزارِ انتخاب و پاک‌کن پنهان است (فقط ابزارهای ترسیمی فوترِ زوم دارند).) */}
+      {secondaryVisibility.showZoomSection && (
       <div style={{ ...bentoSepIf(zoomHasSectionsAbove) }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, height: 32 }}>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'rgba(255,255,255,0.6)', whiteSpace: 'nowrap', cursor: 'pointer' }}>
@@ -2243,6 +2410,7 @@ export function AnnotationToolbar({
           </div>
         </div>
       </div>
+      )}
     </div>
   );
   const actionsContent = (
@@ -3193,8 +3361,11 @@ export function AnnotationToolbar({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: 8,
-        padding: '10px 12px',
+        // مرحلهٔ ۵۹ مأموریتِ ۲: در حالتِ فشردهٔ انتخاب، کارت هیچ
+        // فاصلهٔ اضافه‌ای ندارد (gap و padding صفر) تا ارتفاعش
+        // دقیقاً برابرِ ارتفاعِ پیل شود.
+        gap: isSelectCompact ? 0 : 8,
+        padding: isSelectCompact ? 0 : '10px 12px',
         pointerEvents: flyoutExiting ? 'none' : shellPointerEvents,
         alignSelf: 'flex-start',
         animation: flyoutExiting
@@ -3220,8 +3391,11 @@ export function AnnotationToolbar({
         flexWrap: 'wrap',
         justifyContent: 'center',
         alignItems: 'center',
-        gap: 8,
-        padding: '10px 12px',
+        // مرحلهٔ ۵۹ مأموریتِ ۲: در حالتِ فشردهٔ انتخاب، کارت هیچ
+        // فاصلهٔ اضافه‌ای ندارد (gap و padding صفر) تا ارتفاعش
+        // دقیقاً برابرِ ارتفاعِ پیل شود.
+        gap: isSelectCompact ? 0 : 8,
+        padding: isSelectCompact ? 0 : '10px 12px',
         pointerEvents: flyoutExiting ? 'none' : shellPointerEvents,
         alignSelf: 'center',
         maxWidth: 'calc(100vw - 24px)',

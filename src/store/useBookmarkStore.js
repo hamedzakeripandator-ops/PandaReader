@@ -64,11 +64,15 @@ function readPrefsLocalStorage() {
   }
 }
 
+// مرحلهٔ ۵۹، مأموریت ۱ — بازگشتِ بولین: فراخواننده باید بداند
+// آینهٔ محلی واقعاً نوشته شد یا نه، چون توستِ خطا فقط وقتی می‌آید
+// که هم دیتابیس و هم همین آینه ناموفق بوده باشند.
 function writePrefsLocalStorage(prefs) {
   try {
-    if (typeof window === 'undefined' || !window.localStorage || !prefs) return;
+    if (typeof window === 'undefined' || !window.localStorage || !prefs) return false;
     window.localStorage.setItem(LS_PREFS_KEY, JSON.stringify(prefs));
-  } catch (_) {}
+    return true;
+  } catch (_) { return false; }
 }
 
 // مرحله ۱۹ — آینهٔ همگامِ بوک‌مارک‌ها در localStorage
@@ -86,18 +90,19 @@ function readBookmarksLocalStorage(filePath) {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     const list = parsed && Array.isArray(parsed[filePath]) ? parsed[filePath] : [];
-    return list.map(sanitizeBookmark).filter(Boolean);
+    return list.map(sanitizeBookmarkWithExtras).filter(Boolean);
   } catch (_) { return []; }
 }
 function writeBookmarksLocalStorage(filePath, list) {
   try {
-    if (typeof window === 'undefined' || !window.localStorage || !filePath) return;
+    if (typeof window === 'undefined' || !window.localStorage || !filePath) return false;
     let parsed = {};
     try { parsed = JSON.parse(window.localStorage.getItem(LS_BOOKMARKS_KEY) || '{}') || {}; } catch (_) { parsed = {}; }
     if (!list || list.length === 0) delete parsed[filePath];
     else parsed[filePath] = list;
     window.localStorage.setItem(LS_BOOKMARKS_KEY, JSON.stringify(parsed));
-  } catch (_) {}
+    return true;
+  } catch (_) { return false; }
 }
 // مرحلهٔ ۵۲ §۱: حذفِ آینهٔ localStorage برایِ چند فایل، با تطابقِ
 // کلیدِ نرمال‌شده (کلیدهایِ آینه، مسیرِ خام‌اند و ممکن است با
@@ -151,7 +156,7 @@ function readAllBookmarksLocalStorage() {
     const parsed = JSON.parse(raw) || {};
     const out = {};
     Object.entries(parsed).forEach(([key, list]) => {
-      const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmark).filter(Boolean);
+      const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmarkWithExtras).filter(Boolean);
       if (clean.length > 0) out[key] = clean;
     });
     return out;
@@ -186,7 +191,7 @@ function buildLocalAllBookmarksMap(bookmarksByFile) {
   const map = {};
   Object.entries(bookmarksByFile || {}).forEach(([key, list]) => {
     const norm = normalizeBookKey(key);
-    const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmark).filter(Boolean);
+    const clean = (Array.isArray(list) ? list : []).map(sanitizeBookmarkWithExtras).filter(Boolean);
     if (clean.length > 0) map[norm] = { fileName: fileBaseName(norm), bookmarks: clean };
   });
   Object.entries(readAllBookmarksLocalStorage()).forEach(([key, list]) => {
@@ -237,6 +242,30 @@ export function normalizeBookKey(filePath) {
   return filePath.trim().replace(/[\\/]+/g, '\\').toLowerCase();
 }
 
+// مرحلهٔ ۵۹، مأموریت ۱ — پاک‌سازیِ بوک‌مارک با حفظِ فیلدهایِ
+// ظاهریِ اختیاری (رنگ، استایلِ سفارشی، شناسهٔ پریست): پاک‌سازِ
+// bookmarkTemplates این فیلدها را نمی‌شناسد و می‌اندازد؛ پس پس از
+// پاک‌سازی، همان‌ها از رکوردِ خامِ ورودی برگردانده می‌شوند تا
+// دورِ کاملِ ذخیره و خواندن، ظاهرِ استودیو را پس از ری‌استارت
+// حفظ کند. نبودنشان، هیچ فیلدی اضافه نمی‌کند.
+function attachBookmarkExtras(clean, raw) {
+  if (!clean || !raw || typeof raw !== 'object') return clean;
+  if (typeof raw.color === 'string' && raw.color) clean.color = raw.color.slice(0, 40);
+  if (typeof raw.presetId === 'string' && raw.presetId) clean.presetId = raw.presetId.slice(0, 80);
+  if (raw.customStyle && typeof raw.customStyle === 'object' && !Array.isArray(raw.customStyle)) {
+    try {
+      const styleJson = JSON.stringify(raw.customStyle);
+      if (styleJson && styleJson.length <= 2000) clean.customStyle = JSON.parse(styleJson);
+    } catch (_) {}
+  }
+  return clean;
+}
+
+function sanitizeBookmarkWithExtras(raw) {
+  const clean = sanitizeBookmark(raw);
+  return clean ? attachBookmarkExtras(clean, raw) : null;
+}
+
 // مرحله ۱۳: استورِ بوک‌مارک‌هایِ دیجیتال. کلیدِ bookmarksByFile،
 // همان filePathای است که comicData می‌دهد (ورکرِ دیتابیس، خودش
 // آن را نرمال می‌کند). ذخیره‌سازی، همیشه از راهِ dbAction است تا
@@ -258,7 +287,11 @@ function toast(message, type = 'info') {
 // پاسخی که هیچ‌کدام از نشانه‌هایِ موفقیت را ندارد، شکست حساب می‌شود تا
 // هیچ‌وقت، موفقیتِ کاذب ساخته نشود.
 function normalizeDbResult(res) {
-  if (!res || typeof res !== 'object') return { ok: false, error: 'پاسخی از دیتابیس نرسید.' };
+  if (res === null || res === undefined) return { ok: false, error: 'پاسخی از دیتابیس نرسید.' };
+  // مرحلهٔ ۵۹، مأموریت ۱ — آرایهٔ خام، خودش یک پاسخِ موفق است
+  // (فهرستِ بوک‌مارک‌ها، بدونِ هیچ پوششی).
+  if (Array.isArray(res)) return { ok: true, data: res };
+  if (typeof res !== 'object') return { ok: false, error: 'پاسخی از دیتابیس نرسید.' };
   if (res.type === 'error') {
     return { ok: false, error: typeof res.message === 'string' && res.message ? res.message : 'خطا در عملیات دیتابیس' };
   }
@@ -269,6 +302,17 @@ function normalizeDbResult(res) {
     return { ok: false, error: msg };
   }
   if (res.type === 'done' || res.ok === true || res.success === true) return { ok: true, data: res };
+  // مرحلهٔ ۵۹، مأموریت ۱ — خطایِ صریحِ بدونِ نشانه، پیش از
+  // موفقیتِ بدونِ نشانه بررسی می‌شود؛ پاسخِ موفق، هرگز فیلدِ
+  // error ِ رشته‌ای ندارد.
+  if (typeof res.error === 'string' && res.error) return { ok: false, error: res.error };
+  // مرحلهٔ ۵۹، مأموریت ۱ — شکل‌هایِ موفقِ بدونِ نشانه (منبعِ
+  // خطایِ کاذبِ مرحلهٔ ۵۸): شیءِ { bookmarks: [...] } یا
+  // { preferences: {...} } یا { files: [...] } بدونِ type:done و
+  // بدونِ ok/success، دادهٔ سالم‌اند، نه خطا.
+  if (Array.isArray(res.bookmarks) || Array.isArray(res.files)) return { ok: true, data: res };
+  if (res.preferences && typeof res.preferences === 'object') return { ok: true, data: res };
+  if (typeof res.message === 'string' && res.message) return { ok: false, error: res.message };
   return { ok: false, error: 'پاسخِ دیتابیس به شکلِ موردِ انتظار نبود.' };
 }
 
@@ -410,7 +454,7 @@ export const useBookmarkStore = create((set, get) => ({
     try {
       const res = await coreApi.dbAction({ action: 'GET_BOOKMARKS', payload: { filePath } });
       const dbList = Array.isArray(res && res.bookmarks)
-        ? res.bookmarks.map(sanitizeBookmark).filter(Boolean)
+        ? res.bookmarks.map(sanitizeBookmarkWithExtras).filter(Boolean)
         : [];
       // مرحله ۱۹ — اتحادِ دیتابیس با آینهٔ محلی (محلی برندهٔ تعارض
       // است، چون هر تغییر اولِ اول همان‌جا نوشته می‌شود)؛ هرگز یک
@@ -458,7 +502,7 @@ export const useBookmarkStore = create((set, get) => ({
     const filePath = normalizeBookKey(draft && draft.filePath);
     if (!filePath) return null;
     const prefs = get().preferences || {};
-    const bm = sanitizeBookmark({
+    const bm = sanitizeBookmarkWithExtras({
       ...draft,
       id: newBookmarkId(),
       template: draft.template || prefs.defaultTemplate || 'MARGIN',
@@ -486,13 +530,17 @@ export const useBookmarkStore = create((set, get) => ({
     // دیگر به prev برنمی‌گردد (برگرداندن، با نوشتنِ بعدیِ آینه،
     // بوک‌مارک را از آینه هم پاک می‌کرد). فقط مقدارِ برگشتی null
     // می‌شود تا فراخواننده (مودال/منو) موفقیتِ کاذب نشان ندهد.
-    writeBookmarksLocalStorage(filePath, next);
-    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
+    // مرحلهٔ ۵۹، مأموریت ۱ — آینهٔ محلی، همین بالا همگام نوشته شد؛
+    // اگر فقط دیتابیس ناموفق بود، بوک‌مارک در حافظهٔ محلی امن است و
+    // در بارگذاریِ بعدی با سینکِ برگشتی به دیتابیس برمی‌گردد؛ پس
+    // توستِ خطا فقط وقتی می‌آید که آینهٔ محلی هم ننوشته باشد.
+    const lsOk = writeBookmarksLocalStorage(filePath, next);
+    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ هر دو لایه، توستِ خطا
     // می‌گیرد و null برمی‌گرداند؛ در موفقیت، هیچ توستِ خطایی نیست.
     // توستِ سبزِ موفقیت، در مودال است تا توست، دوتایی نشود.
     const saved = await get().persistBookmarks(filePath, next);
-    if (!saved || !saved.ok) {
-      toast('ذخیره در دیتابیس ناموفق بود؛ بوک‌مارک در حافظهٔ محلی نگه داشته شد.', 'error');
+    if ((!saved || !saved.ok) && !lsOk) {
+      toast('ذخیرهٔ بوک‌مارک ناموفق بود؛ نه در دیتابیس و نه در حافظهٔ محلی ذخیره نشد.', 'error');
       return null;
     }
     return bm;
@@ -504,7 +552,7 @@ export const useBookmarkStore = create((set, get) => ({
     const prev = get().bookmarksByFile?.[filePath] || [];
     const idx = prev.findIndex((b) => b.id === id);
     if (idx < 0) return null;
-    const updated = sanitizeBookmark({ ...prev[idx], ...patch, id });
+    const updated = sanitizeBookmarkWithExtras({ ...prev[idx], ...patch, id });
     if (!updated) return null;
     // مرحلهٔ ۵۷، مأموریت ۱ — جهشِ خوش‌بینانه و همگام (مانندِ addBookmark).
     let next = null;
@@ -524,12 +572,14 @@ export const useBookmarkStore = create((set, get) => ({
     // مرحله ۱۹ — آینهٔ همگام، پیش از IPC (مانندِ addBookmark): تغییر،
     // حتی با شکستِ IPC، در حافظهٔ محلی امن می‌ماند و در بارگذاریِ
     // بعدی به دیتابیس برمی‌گردد؛ state به prev برنمی‌گردد.
-    writeBookmarksLocalStorage(filePath, next);
-    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
+    // مرحلهٔ ۵۹، مأموریت ۱ — مانندِ addBookmark: توستِ خطا فقط
+    // وقتی می‌آید که هم دیتابیس و هم آینهٔ محلی ناموفق بوده باشند.
+    const lsOk = writeBookmarksLocalStorage(filePath, next);
+    // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ هر دو لایه، توستِ خطا
     // می‌گیرد و null برمی‌گرداند؛ توستِ سبزِ موفقیت، در مودال است.
     const saved = await get().persistBookmarks(filePath, next);
-    if (!saved || !saved.ok) {
-      toast('ذخیرهٔ تغییر در دیتابیس ناموفق بود؛ تغییر در حافظهٔ محلی نگه داشته شد.', 'error');
+    if ((!saved || !saved.ok) && !lsOk) {
+      toast('ذخیرهٔ تغییرِ بوک‌مارک ناموفق بود؛ نه در دیتابیس و نه در حافظهٔ محلی ذخیره نشد.', 'error');
       return null;
     }
     return updated;
@@ -556,6 +606,12 @@ export const useBookmarkStore = create((set, get) => ({
     // دیتابیس هنوز بوک‌مارک را دارد و اتحادِ بارگذاریِ بعدی آن را
     // برمی‌گرداند؛ توستِ خطا هم همین را می‌گوید.
     writeBookmarksLocalStorage(filePath, next);
+    // مرحلهٔ ۵۹، مأموریت ۱ — انحرافِ آگاهانه از قانونِ «هر دو لایه»:
+    // آینهٔ محلی نمی‌تواند حذف را حفظ کند، چون loadBookmarksForFile
+    // در بارگذاریِ بعدی، نسخهٔ دیتابیس را (که هنوز رکورد را دارد) با
+    // آینه اتحاد می‌کند و بوک‌مارکِ حذف‌شده بازمی‌گردد؛ پس شکستِ
+    // دیتابیس در حذف، خطایِ واقعی است و توستِ خطا می‌ماند. (نگه‌داشتنِ
+    // حذف بدونِ دیتابیس، سنگِ قبر می‌خواهد و در حوزهٔ این مأموریت نیست.)
     // مرحلهٔ ۵۸، مأموریت ۱ — فقط شکستِ واقعیِ دیتابیس، توستِ خطا
     // می‌گیرد؛ موفقیت، true برمی‌گرداند تا مودال/نما بدانند حذف
     // واقعاً تأیید شده است.
@@ -617,7 +673,12 @@ export const useBookmarkStore = create((set, get) => ({
       savedPresets,
     };
     // مرحله ۱۸ — لایهٔ ۱، پیش از هر IPC: همین‌جا، همگام.
-    writePrefsLocalStorage(next);
+    // مرحلهٔ ۵۹، مأموریت ۱ — نتیجهٔ lsOk، گیتِ توستِ خطاست: وقتی
+    // آینهٔ محلی نوشته شده، تنظیمات امن‌اند و در بارگذاریِ بعدی با
+    // سینکِ برگشتی به دیتابیس برمی‌گردند؛ پس شکستِ تنها دیتابیس،
+    // توستِ خطا نمی‌گیرد و ok:true با dbError برمی‌گردد تا
+    // فراخواننده (ساخت/حذفِ پریست) رفتارِ درست را ادامه دهد.
+    const lsOk = writePrefsLocalStorage(next);
     // مرحلهٔ ۵۷، مأموریت ۱ — شمارنده، فقط وقتی بالا می‌رود که
     // محتوا واقعاً عوض شده باشد؛ پس تأییدِ پس‌زمینهٔ یک پریستِ
     // خوش‌بینانه، شمارنده را دو بار بالا نمی‌برد.
@@ -629,17 +690,23 @@ export const useBookmarkStore = create((set, get) => ({
     // مرحلهٔ ۵۸، مأموریت ۱ — نتیجهٔ ورکر خوانده می‌شود (پیش از این،
     // نتیجه نادیده گرفته می‌شد و شکستِ واقعی، بی‌صدا می‌ماند)؛ فقط
     // شکستِ واقعی توستِ خطا می‌گیرد. بازگشت: { ok, preferences, error }.
-    if (!coreApi.isAvailable()) return { ok: false, preferences: next, error: 'ارتباط با دیتابیس برقرار نیست.' };
+    if (!coreApi.isAvailable()) {
+      if (lsOk) return { ok: true, preferences: next, dbError: 'ارتباط با دیتابیس برقرار نیست.' };
+      return { ok: false, preferences: next, error: 'ارتباط با دیتابیس برقرار نیست.' };
+    }
     try {
       const res = await coreApi.dbAction({ action: 'SAVE_BOOKMARK_PREFERENCES', payload: { preferences: next } });
       const saved = normalizeDbResult(res);
       if (!saved.ok) {
-        toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد.', 'error');
+        if (lsOk) return { ok: true, preferences: next, dbError: saved.error };
+        toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد؛ نه در دیتابیس و نه در حافظهٔ محلی ذخیره نشد.', 'error');
         return { ok: false, preferences: next, error: saved.error };
       }
     } catch (err) {
-      toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد.', 'error');
-      return { ok: false, preferences: next, error: String((err && err.message) || err) };
+      const msg = String((err && err.message) || err);
+      if (lsOk) return { ok: true, preferences: next, dbError: msg };
+      toast('ذخیرهٔ تنظیماتِ بوک‌مارک انجام نشد؛ نه در دیتابیس و نه در حافظهٔ محلی ذخیره نشد.', 'error');
+      return { ok: false, preferences: next, error: msg };
     }
     return { ok: true, preferences: next };
   },
@@ -697,7 +764,7 @@ export const useBookmarkStore = create((set, get) => ({
       const files = Array.isArray(res && res.files) ? res.files : [];
       const map = {};
       files.forEach((f) => {
-        const list = Array.isArray(f.bookmarks) ? f.bookmarks.map(sanitizeBookmark).filter(Boolean) : [];
+        const list = Array.isArray(f.bookmarks) ? f.bookmarks.map(sanitizeBookmarkWithExtras).filter(Boolean) : [];
         if (list.length === 0) return;
         map[normalizeBookKey(f.filePath)] = { fileName: f.fileName || String(f.filePath).split(/[\\/]/).pop() || f.filePath, bookmarks: list };
       });

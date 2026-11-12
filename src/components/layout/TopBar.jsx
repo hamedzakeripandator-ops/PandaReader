@@ -96,9 +96,9 @@ export default function TopBar({
   const probeCacheRef = useRef(new Map());
   const probeInFlightRef = useRef(false);
   const memoryOnlyRef = useRef(new Set());
-  // مرحله ۹: آینهٔ ref برای مودالِ محافظت — نگهبان‌هایِ ماوس/هاید
-  // (releaseOverlappingBlockers و scheduleAutoHide) باید تازه‌ترین
-  // وضعیتِ مودال را بدونِ وابستگی به رندرِ بعدی ببینند.
+  // مرحله ۹: آینهٔ ref برای مودالِ محافظت — نگهبانِ هاید
+  // (scheduleAutoHide) باید تازه‌ترین وضعیتِ مودال را بدونِ
+  // وابستگی به رندرِ بعدی ببیند.
   const protectedModalRef = useRef(null);
   useEffect(() => {
     protectedModalRef.current = protectedModal;
@@ -140,56 +140,14 @@ export default function TopBar({
     }
   }, []);
 
-  // سپر محافظتی: خنثی‌سازی هر المان نامرئی بیرونی که روی کادر سرچ افتاده و کرسر را به pointer تغییر می‌دهد
-  const releaseOverlappingBlockers = useCallback(() => {
-    const barEl = searchBarRef.current;
-    const hdrEl = headerRef.current;
-    if (!barEl || !hdrEl) return;
-    // مرحله ۹: وقتی مودالِ محافظت (پورتالِ روی body) باز است، این
-    // اسکن اصلاً اجرا نمی‌شود؛ مودال، خودش pointerEvents دارد و
-    // جهشِ ماوس به سمتِ وسطِ صفحه، نباید روی آن بنویسد.
-    if (protectedModalRef.current) return;
-
-    const appState = useAppStore.getState();
-    if (
-      appState.isContextMenuOpen ||
-      appState.isQuickSettingsOpen ||
-      appState.isSnippingActive ||
-      appState.isAreaZoomActive
-    ) {
-      return;
-    }
-
-    const rect = barEl.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-
-    const midY = rect.top + rect.height / 2;
-    const sampleRatios = [0.1, 0.25, 0.4, 0.55, 0.7, 0.85, 0.92];
-
-    sampleRatios.forEach((ratio) => {
-      const sampleX = rect.left + rect.width * ratio;
-      const hitElements = document.elementsFromPoint(sampleX, midY);
-
-      for (const el of hitElements) {
-        if (el === hdrEl || hdrEl.contains(el)) {
-          break; // به خود TopBar رسیدیم؛ هیچ مانعی بالاتر از آن نیست
-        }
-        if (el.closest?.('[data-modal-overlay]')) {
-          continue;
-        }
-        if (
-          el.id === 'custom-context-menu' ||
-          el.closest?.('#custom-context-menu') ||
-          el === document.body ||
-          el === document.documentElement
-        ) {
-          continue;
-        }
-        // خنثی کردن لایه مزاحمی که روی سرچ‌باکس افتاده است
-        el.style.pointerEvents = 'none';
-      }
-    });
-  }, []);
+  // مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۵٫۱ ممیزی): سپرِ محافظتیِ کادرِ
+  // سرچ کاملاً حذف شد. آن منطق در هر حرکتِ ماوس، المان‌هایِ رویِ
+  // کادرِ سرچ را پیدا می‌کرد و دریافتِ کلیک را برایِ همیشه رویِ
+  // استایلِ آن‌ها خاموش می‌کرد، بدونِ اینکه هیچ‌کجا آن را برگرداند؛
+  // پس یک توست، تولتیپ یا پاپ‌آپِ گذرا برایِ همیشه غیرقابلِ کلیک
+  // می‌شد. از این به بعد، دسترسی به کادرِ سرچ فقط با z-indexِ
+  // استانداردِ خودِ TopBar (هدر: 9000) و pointer-events: autoیِ
+  // کادرِ سرچ تضمین می‌شود؛ هیچ استایلِ بیرونی دست‌کاری نمی‌شود.
 
   const scheduleAutoHide = useCallback(
     (delayMs = 1600) => {
@@ -215,23 +173,19 @@ export default function TopBar({
     [clearHideTimer, updateShowBar]
   );
 
-  // ۱. اجرای اسکن محافظتی کادر سرچ و مدیریت اتوهاید اولیه در ورود به ریدر
+  // ۱. مدیریت اتوهاید اولیه در ورود به ریدر (مرحلهٔ ۵۹: اجرایِ
+  // اسکنِ محافظتیِ کادرِ سرچ حذف شد — §۵٫۱ ممیزی).
   useEffect(() => {
-    const raf = requestAnimationFrame(() => {
-      releaseOverlappingBlockers();
-    });
-
     if (!effectiveReaderMode) {
       clearHideTimer();
       updateShowBar(true);
-      return () => cancelAnimationFrame(raf);
+      return undefined;
     }
 
     updateShowBar(true);
     scheduleAutoHide(1100);
 
     return () => {
-      cancelAnimationFrame(raf);
       clearHideTimer();
     };
   }, [
@@ -240,7 +194,6 @@ export default function TopBar({
     clearHideTimer,
     updateShowBar,
     scheduleAutoHide,
-    releaseOverlappingBlockers,
   ]);
 
   // مرحله ۳ ـ بخش ب: انحصارِ متقابل فقط در حالتِ خواندن.
@@ -276,18 +229,13 @@ export default function TopBar({
       // مقدار را می‌دهد (بدونِ وابستگی به رندرِ بعدی)، پس رفتنِ ماوس
       // به سمتِ دکمه‌های بالاییِ پنل‌ها هرگز TopBar را بیرون
       // نمی‌پراند. در حالتِ غیرخواندن این نگهبان اعمال نمی‌شود تا
-      // رفتارِ عادیِ نوار (از جمله آزادسازیِ مسدودکننده‌ها) بماند.
+      // رفتارِ عادیِ نوار بماند.
       if (
         effectiveReaderMode &&
         (useAppStore.getState().isLeftSidebarOpen ||
           useAppStore.getState().isRightSidebarOpen)
       ) {
         return;
-      }
-
-      // اگر ماوس در محدوده کادر سرچ است، اطمینان حاصل کن هیچ لایه بیرونی روی آن نیفتاده باشد
-      if (e.clientY <= 65 && showBarRef.current) {
-        releaseOverlappingBlockers();
       }
 
       if (!effectiveReaderMode) return;
@@ -322,7 +270,7 @@ export default function TopBar({
         time: Date.now(),
       };
 
-      // اگر کاربر دقیقاً درون مستطیل هندسی کادر سرچ کلیک کرد، حتی اگر المان دیگری مزاحم بود فوکوس را فعال کن
+      // اگر کاربر دقیقاً درون مستطیل هندسی کادر سرچ کلیک کرد، فوکوس را فعال کن
       if (searchBarRef.current && showBarRef.current) {
         const rect = searchBarRef.current.getBoundingClientRect();
         if (
@@ -331,7 +279,6 @@ export default function TopBar({
           e.clientY >= rect.top &&
           e.clientY <= rect.bottom
         ) {
-          releaseOverlappingBlockers();
           clearHideTimer();
           setIsSearchFocused(true);
           if (e.target !== inputRef.current) {
@@ -388,7 +335,6 @@ export default function TopBar({
     updateShowBar,
     scheduleAutoHide,
     setIsSearchFocused,
-    releaseOverlappingBlockers,
   ]);
 
   useEffect(() => {
@@ -949,7 +895,6 @@ export default function TopBar({
         onMouseEnter={(e) => {
           isBarHoveredRef.current = true;
           clearHideTimer();
-          releaseOverlappingBlockers();
           // مرحله ۳ ـ بخش الف: وقتی پنلِ کناری باز است، هاور روی خودِ
           // نوار هم آن را باز نمی‌کند (نوار در این حالت مخفی است و
           // این نگهبان از بازگشتِ غافلگیرکننده جلوگیری می‌کند).

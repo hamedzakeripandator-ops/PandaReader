@@ -38,6 +38,9 @@ function recentItemType(item) {
   if (p.endsWith('.epub')) return 'epub';
   return 'comic';
 }
+// مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۴٫۲ ممیزی): کلیدِ ماندگاریِ حالتِ
+// نمایشِ بخشِ مواردِ اخیر در localStorage.
+const RECENT_VIEW_MODE_STORAGE_KEY = 'pandaReader.recentViewMode';
 const STAT_VIEW_COLORS = ['#22d3ee', '#a855f7', '#f59e0b', '#10b981', '#ec4899', '#f97316'];
 const STAT_VIEW_METRICS = [
   { id: 'hours', label: 'مجموعِ ساعتِ مطالعه' },
@@ -284,7 +287,27 @@ export default function RecentView({ onOpenComic }) {
   const { searchQuery, showToast, isStatsBookSelectionMode, statsSelectedBookPaths, editingStatCategoryId, statsSelectionOrigin, enterStatsSelectionFromRecent, setStatsSelectedBookPaths, toggleStatsSelectedBookPath, cancelStatsSelection, finishStatsSelectionToProfile, finishWithSavedStatView } = useAppStore();
   const [statModal, setStatModal] = useState(null);
 
-  const [viewMode, setViewMode] = useState('list'); // 'list' | 'grid'
+  // مرحلهٔ ۵۹ — مأموریت ۴٫۳ (§۴٫۲ ممیزی): حالتِ نمایش از
+  // localStorage خوانده می‌شود؛ مقدارِ نامعتبر یا غایب، 'list'
+  // برمی‌گرداند. پیش از این، همیشه 'list' بود و با هر بار خروج از
+  // صفحه، انتخابِ کاربر از بین می‌رفت.
+  const [viewMode, setViewMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem(RECENT_VIEW_MODE_STORAGE_KEY);
+      return saved === 'grid' || saved === 'list' ? saved : 'list';
+    } catch (_) {
+      return 'list';
+    }
+  });
+  // ماندگاریِ حالتِ نمایش با گیتِ برابری: فقط وقتی مقدارِ ذخیره‌شده
+  // با مقدارِ جاری فرق دارد، نوشته می‌شود تا نوشتنِ تکراری رخ ندهد.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(RECENT_VIEW_MODE_STORAGE_KEY) !== viewMode) {
+        localStorage.setItem(RECENT_VIEW_MODE_STORAGE_KEY, viewMode);
+      }
+    } catch (_) {}
+  }, [viewMode]);
   const [confirmClear, setConfirmClear] = useState(false);
   // مرحلهٔ ۳۰ — ورودیِ عددِ دلخواهِ حدِ نمایش (۱ تا ۵۰۰).
   const [customLimitInput, setCustomLimitInput] = useState('');
