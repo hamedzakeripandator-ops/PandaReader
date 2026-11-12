@@ -169,6 +169,92 @@ const POLYFILL_RAW_CODE = `
 })();
 `;
 
+// ============================================================================
+// مرحلهٔ ۵۶ — ماموریت ۲: تابع‌هایِ خالصِ بازیابیِ صفحهٔ گیرکرده، زومِ واضح و حلِ ورکر.
+// این تابع‌ها هیچ وابستگی‌ای به React یا DOM ندارند تا در Node هم با همان کدِ واقعی
+// آزمون شوند؛ کامپوننت‌ها فقط آن‌ها را صدا می‌زنند.
+// ============================================================================
+// مهلتِ سکوتِ صف: اگر رندرِ پایه بیش از این مدت نه آماده شد، نه در حالِ اجرا بود
+// و نه در صفِ تازه بود، نگهبان آن را گیرکرده می‌شمارد و با اولویتِ بالا از نو صف می‌کند.
+const WATCHDOG_STALE_MS = 1500;
+// سقفِ یکنواختِ ضلعِ تصویرِ پایه (از مرحلهٔ ۳۴؛ برایِ جلوگیری از قفلِ حافظه).
+const PDF_BASE_MAX_SIDE = 1920;
+// آستانهٔ وضوحِ زوم: فقط وقتی زومِ نشسته بیش از ۲۰٪ از زومی که تصویرِ پایه با آن
+// واضح است بالاتر رفت، بازتازه‌سازیِ وضوح انجام می‌شود (تاریِ کمتر از این، دیده نمی‌شود).
+const PDF_ZOOM_CRISP_RATIO = 1.2;
+
+// حلِ نشانیِ فایلِ ورکرِ pdf.js نسبت به صفحهٔ جاری.
+// حفرهٔ واقعیِ نسخهٔ پیشین: new URL(pdfjsWorker, location.href) وقتی Vite با base
+// برابرِ '/' بیلد می‌دهد و pdfjsWorker با '/' شروع می‌شود، زیرِ file:// به
+// file:///assets/pdf.worker... یعنی ریشهٔ دیسک می‌رسد و فایل پیدا نمی‌شود؛ در
+// حالتِ dev زیرِ http همین نشانی درست کار می‌کند و حفره دیده نمی‌شود.
+// با base برابرِ './' (پیکربندیِ دیده‌شده در آینهٔ پروژه) نشانی نسبی است و درست
+// حل می‌شود؛ این تابع، هر دو حالت را به نشانیِ نسبیِ به صفحه برمی‌گرداند.
+export function resolvePdfWorkerAssetUrl(rawWorkerUrl, pageHref) {
+  const raw = String(rawWorkerUrl || '');
+  const href = String(pageHref || '');
+  if (!raw) return { url: '', strategy: 'empty' };
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return { url: raw, strategy: 'absolute' };
+  if (!href) return { url: raw, strategy: 'relative-unresolved' };
+  try {
+    if (raw.startsWith('/')) {
+      return { url: new URL(raw.slice(1), href).href, strategy: 'vite-absolute-to-relative' };
+    }
+    return { url: new URL(raw, href).href, strategy: 'page-relative' };
+  } catch (_) {
+    return { url: raw, strategy: 'fallback-raw' };
+  }
+}
+
+// مقیاسِ رندرِ پایه؛ همان فرمول‌هایِ مرحلهٔ ۳۴/۳۸، به‌علاوهٔ شاخهٔ بازتازه‌سازیِ زوم.
+// crispZoom یعنی تصویر با این مقیاسِ پیکسلی، تا چه زومی واضح است:
+// crispZoom = scale / min(dpr, 2.5) و در بازتازه‌سازیِ زوم، scale = min(dpr, 2.5) * zoom.
+export function computeBaseRenderScale(input) {
+  const src = input || {};
+  const dpr = Number(src.dpr) || 1;
+  const cappedDpr = Math.min(dpr, 2.5);
+  const zoom = Math.max(0.1, Number(src.renderZoomLevel) || 1);
+  let scale;
+  if (src.zoomRefresh) {
+    scale = cappedDpr * zoom;
+  } else if (src.isFirstLoadPage) {
+    scale = Math.min(Math.max(dpr * 1.25, 1.9), 2.2);
+  } else {
+    scale = Math.min(Math.max(dpr * 1.15, 1.75), 2.0);
+  }
+  const vw = Number(src.viewportWidth) || 0;
+  const vh = Number(src.viewportHeight) || 0;
+  const maxSide = Math.max(vw, vh) * scale;
+  if (maxSide > PDF_BASE_MAX_SIDE && Math.max(vw, vh) > 0) scale = PDF_BASE_MAX_SIDE / Math.max(vw, vh);
+  return { scale, crispZoom: scale / cappedDpr };
+}
+
+// تصمیمِ نگهبانِ صفحهٔ گیرکرده؛ برمی‌گرداند: 'restore-cache' | 'retry' | null.
+// ترتیب مهم است: اگر نشانیِ آماده در کش هست، بی‌درنگ برگردانده می‌شود (بدونِ رندرِ تازه)؛
+// اگر رندری در حالِ اجراست یا صف هنوز در مهلتِ سکوت است، نگهبان کاری نمی‌کند؛
+// در غیرِ این صورت، صفحه گیرکرده است و باید با اولویتِ بالا از نو صف شود.
+export function decideWatchdogAction(input) {
+  const src = input || {};
+  if (!src.shouldRender || !src.hasPdfDoc || src.baseReady || src.renderFailed) return null;
+  if (src.cachedUrl) return 'restore-cache';
+  if (src.inflight) return null;
+  if (typeof src.queuedAtMs !== 'number' || typeof src.nowMs !== 'number') return null;
+  if (src.nowMs - src.queuedAtMs < WATCHDOG_STALE_MS) return null;
+  return 'retry';
+}
+
+// آیا تصویرِ پایهٔ فعلی برایِ زومِ نشستهٔ تازه، تُرش (soft) شده و باید از نو رندر شود؟
+// فقط برایِ صفحه‌هایِ نزدیک (فاصله تا ۲) و فقط وقتی زوم، بیش از ۲۰٪ بالاتر رفته است؛
+// کم شدنِ زوم، بازتازه‌سازی نمی‌خواهد چون تصویرِ کهنه از نیاز واضح‌تر است.
+export function needsZoomRefresh(input) {
+  const src = input || {};
+  if (!src.baseReady) return false;
+  if (typeof src.distance !== 'number' || src.distance > 2) return false;
+  const z = Number(src.renderZoomLevel) || 1;
+  const prev = Number(src.baseZoom) || 1;
+  return z > prev * PDF_ZOOM_CRISP_RATIO;
+}
+
 export function ensurePdfJsEnvironmentReady() {
   try {
     // eslint-disable-next-line no-new-func
@@ -177,13 +263,41 @@ export function ensurePdfJsEnvironmentReady() {
 
   if (typeof window !== 'undefined' && !window.__pdfWorkerPatchedUrlV2) {
     try {
-      const resolvedWorkerUrl = new URL(pdfjsWorker, window.location.href).href;
+      const resolved = resolvePdfWorkerAssetUrl(pdfjsWorker, window.location.href);
+      const resolvedWorkerUrl = resolved.url;
+      // مرحلهٔ ۵۶ — ماموریت ۲: گزارشِ تشخیصیِ ورکر برایِ راستی‌آزمایی در برنامهٔ نصب‌شده:
+      // پس از باز شدنِ یک PDF، در DevTools بخوانید window.__pdfWorkerDiag:
+      // realConstructed برابرِ true یعنی یک Workerِ واقعی با نشانیِ blob ساخته شد و
+      // pdf.js به ورکرِ تقلبیِ (fake worker) تک‌تردی نیفتاده است.
+      window.__pdfWorkerDiag = {
+        assetUrl: resolvedWorkerUrl,
+        strategy: resolved.strategy,
+        wrapperOk: false,
+        fetchOk: null,
+        realConstructed: false,
+      };
       const polyfillModuleUrl =
         'data:text/javascript;charset=utf-8,' + encodeURIComponent(POLYFILL_RAW_CODE);
 
       const wrapperSource = `${POLYFILL_RAW_CODE}\nimport "${polyfillModuleUrl}";\nimport "${resolvedWorkerUrl}";\n`;
       const blob = new Blob([wrapperSource], { type: 'text/javascript' });
       window.__pdfWorkerPatchedUrlV2 = URL.createObjectURL(blob);
+      window.__pdfWorkerDiag.wrapperOk = true;
+      // مرحلهٔ ۵۶ — ماموریت ۲: راستی‌آزماییِ خواناییِ فایلِ ورکر در همین مبدا
+      // (file:// + app.asar در بیلدِ بسته‌بندی‌شده). اگر fetch ناکام شود، فقط در
+      // __pdfWorkerDiag و کنسول دیده می‌شود و مسیرِ اصلی (wrapper) دست نمی‌خورد.
+      // انحرافِ آگاهانه: ورکر به‌صورتِ درون‌خطی (inline) در blob ریخته نشد، چون
+      // pdf.worker.mjs نسخهٔ ۶٫۴٫۲۹۹ از import.meta.url برایِ بارگذاریِ باینریِ
+      // wasm استفاده می‌کند (خط‌هایِ ۹۳۲۱ و ۱۰۱۲۱) و درون‌خطی کردن، آن مسیر را
+      // می‌شکند؛ wrapper که فایلِ واقعی را import می‌کند، import.meta.url را سالم نگه می‌دارد.
+      try {
+        fetch(resolvedWorkerUrl).then((res) => {
+          if (window.__pdfWorkerDiag) window.__pdfWorkerDiag.fetchOk = Boolean(res && res.ok);
+          try { if (res && res.body && typeof res.body.cancel === 'function') res.body.cancel(); } catch (_) {}
+        }).catch(() => {
+          if (window.__pdfWorkerDiag) window.__pdfWorkerDiag.fetchOk = false;
+        });
+      } catch (_) {}
 
       const NativeWorker = window.__OriginalNativeWorker || window.Worker;
       window.__OriginalNativeWorker = NativeWorker;
@@ -191,10 +305,17 @@ export function ensurePdfJsEnvironmentReady() {
       if (NativeWorker) {
         const PatchedWorker = function (scriptURL, options) {
           const urlStr = String(scriptURL || '');
+          // مرحلهٔ ۵۶ — ماموریت ۲: ثبتِ ساختِ ورکرِ واقعی. pdf.js وقتی به ورکرِ
+          // تقلبی می‌افتد، اصلاً Worker نمی‌سازد؛ پس true شدنِ realConstructed
+          // پس از باز شدنِ یک PDF، یعنی ورکرِ واقعی کار می‌کند.
+          if (urlStr && urlStr === window.__pdfWorkerPatchedUrlV2 && window.__pdfWorkerDiag) {
+            window.__pdfWorkerDiag.realConstructed = true;
+          }
           if (
             (urlStr.includes('pdf.worker') || urlStr === window.__pdfWorkerPatchedUrl) &&
             window.__pdfWorkerPatchedUrlV2
           ) {
+            if (window.__pdfWorkerDiag) window.__pdfWorkerDiag.realConstructed = true;
             return new NativeWorker(window.__pdfWorkerPatchedUrlV2, {
               ...(options || {}),
               type: 'module',
@@ -465,6 +586,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
   searchHighlights,
   pageFilter,
   scrollContainerRef,
+  watchdogTick,
 }) {
   // مرحلهٔ ۳۲ — همهٔ اشتراک‌هایِ استور، در بالاترین نقطهٔ بدنهٔ
   // کامپوننت‌اند (پیش از هر متغیرِ محاسباتی): خواندنِ یک const پیش
@@ -492,6 +614,22 @@ const PdfPageItem = React.memo(function PdfPageItem({
   const [deepUrl, setDeepUrl] = useState(null);
   const deepUrlRef = useRef(null);
   const deepDoneRef = useRef(null);
+  // مرحلهٔ ۵۶ — ماموریت ۲: قفلِ پروازِ رندر و حافظهٔ نگهبان.
+  // انحرافِ پرامپت: renderedPagesRef / renderingPagesRef در کدِ واقعی وجود ندارند؛
+  // وضعیتِ رندر در baseReady و baseUrlRef و deepDoneRef و صفِ renderQueue پخش است.
+  // این refها، «در حالِ اجرا» بودن را صریح می‌کنند تا لغوِ رندر، هرگز صفحه را بی‌صدا
+  // گیر نیندازد: هر run در شروع، قفل را می‌گیرد و در finallyِ خودش، در همهٔ مسیرها
+  // (موفقیت، لغو، خطا) آن را آزاد می‌کند.
+  const baseInflightRef = useRef(null);
+  const deepInflightRef = useRef(null);
+  const baseRunIdRef = useRef(0);
+  const deepRunIdRef = useRef(0);
+  const baseQueuedAtRef = useRef(0);
+  const baseZoomRef = useRef(1);
+  const forcePriorityRef = useRef(false);
+  const zoomRefreshRef = useRef(false);
+  const resetDocRef = useRef(null);
+  const resetFileRef = useRef(null);
   // مرحلهٔ ۳۱ — آزادسازیِ معوقِ pdf.js (جایگزینِ شمارندهٔ
   // مرحلهٔ ۳۰): page.cleanup() دیگر بلافاصله پس از رندر صدا
   // زده نمی‌شود، چون پاسِ دیپِ همان صفحه، چند صد میلی‌ثانیه
@@ -552,7 +690,15 @@ const PdfPageItem = React.memo(function PdfPageItem({
     if (!shouldRender || !pdfDoc) return undefined;
     const key = `base:${filePath}:${pageNumber}`;
     const distance = distanceRef.current ?? 99;
-    const priority = distance === 0 ? 1 : distance === 1 ? 2 : 3;
+    // مرحلهٔ ۵۶ — ماموریت ۲: پرچم‌هایِ نگهبان و زوم، پیش از priority مصرف می‌شوند؛
+    // خواندنِ آن‌ها پس از priority، خطایِ TDZ می‌دهد چون const هستند.
+    // بازتازه‌سازیِ وضوح، شاخهٔ کش را دور می‌زند (وگرنه تصویرِ کهنهٔ کم‌وضوح همیشه برنده بود)؛
+    // بازیابیِ نگهبان، با اولویتِ ۱ و بدونِ تأخیرِ ۶۵ میلی‌ثانیه‌ای صف می‌شود.
+    const needZoomRefresh = zoomRefreshRef.current === true;
+    zoomRefreshRef.current = false;
+    const forcePriority = forcePriorityRef.current === true;
+    forcePriorityRef.current = false;
+    const priority = forcePriority ? 1 : (distance === 0 ? 1 : distance === 1 ? 2 : 3);
     // مرحلهٔ ۳۴ — کشِ اول: اگر نشانیِ پایهٔ همین صفحه در کشِ
     // LRUِ ۱۸ صفحه‌ایِ سرویس هست، بی‌درنگ همان نشانی نشان داده
     // می‌شود؛ هیچ getPage و رندری لازم نیست. گیتِ سرعتِ اسکرول:
@@ -564,7 +710,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
     // را پاک می‌کند.
     const baseCacheKey = `${filePath}:${pageNumber}`;
     const cachedBaseUrl = getBasePngUrl(baseCacheKey);
-    if (cachedBaseUrl) {
+    if (cachedBaseUrl && !needZoomRefresh) {
       baseUrlRef.current = cachedBaseUrl;
       setBaseUrl(cachedBaseUrl);
       setBaseReady(true);
@@ -575,13 +721,16 @@ const PdfPageItem = React.memo(function PdfPageItem({
         renderQueue.cancel(key);
       };
     }
+    baseQueuedAtRef.current = Date.now();
     renderQueue.enqueue({
       key,
       filePath,
       kind: 'base',
       priority,
-      delayMs: distance === 0 ? 0 : 65,
+      delayMs: forcePriority || needZoomRefresh ? 0 : (distance === 0 ? 0 : 65),
       run: async (hooks) => {
+        const baseRunId = (baseRunIdRef.current += 1);
+        baseInflightRef.current = { runId: baseRunId };
         try {
           let renderTask = null;
           hooks.onCancel(() => {
@@ -596,22 +745,21 @@ const PdfPageItem = React.memo(function PdfPageItem({
           if (baseViewport.width > 0 && baseViewport.height > 0) {
             onPageRatioMeasured?.(pageNumber - 1, baseViewport.height / baseViewport.width);
           }
-          // مرحلهٔ ۳۴ — مقیاسِ پایه = min(max(dpr × 1.15, 1.75), 2.0)
-          // با سقفِ یکنواختِ ضلعِ ۱۹۲۰ پیکسل.
-          // مرحلهٔ ۳۸ §۴: صفحهٔ فعالِ اول (distance 0) با مقیاسِ
-          // بالاتر min(max(dpr × 1.25, 1.9), 2.2) رندر می‌شود تا باز
-          // شدنِ اولیهٔ PDF فوری و واضح باشد؛ بقیهٔ صفحه‌ها با فرمولِ
-          // مرحلهٔ ۳۴ می‌مانند. سقفِ ضلعِ ۱۹۲۰ پیکسل، در هر دو یکی است.
-          // (کلیدِ کشِ پایه، مقیاس ندارد — اولین رندر برنده است و بعد
-          // همان نشانی بازاستفاده می‌شود؛ پس این تفاوت فقط بارِ اول
-          // اثر می‌گذارد.)
+          // مرحلهٔ ۵۶ — ماموریت ۲: مقیاسِ پایه از تابعِ خالصِ computeBaseRenderScale می‌آید.
+          // حالتِ عادی، همان فرمولِ مرحلهٔ ۳۴/۳۸ است (صفحهٔ فعالِ اول با مقیاسِ بالاتر)؛
+          // در بازتازه‌سازیِ پس از زوم، مقیاس برابرِ min(dpr, 2.5) ضرب‌در زومِ نشسته است،
+          // با همان سقفِ ضلعِ ۱۹۲۰ پیکسل. تصویرِ کهنه تا آماده شدنِ تصویرِ تازه سرِ جایش
+          // می‌ماند (تعویضِ دو بافره: setBaseUrl فقط پس از آماده شدنِ نشانی صدا زده می‌شود).
           const isFirstLoadPage = distance === 0;
-          const dpr = isFirstLoadPage
-            ? Math.min(Math.max((window.devicePixelRatio || 1) * 1.25, 1.9), 2.2)
-            : Math.min(Math.max((window.devicePixelRatio || 1) * 1.15, 1.75), 2.0);
-          let scale = dpr;
-          const maxSide = Math.max(baseViewport.width, baseViewport.height) * scale;
-          if (maxSide > 1920) scale = 1920 / Math.max(baseViewport.width, baseViewport.height);
+          const baseScaleResult = computeBaseRenderScale({
+            dpr: window.devicePixelRatio || 1,
+            renderZoomLevel: renderZoomLevel || 1,
+            zoomRefresh: needZoomRefresh,
+            isFirstLoadPage,
+            viewportWidth: baseViewport.width,
+            viewportHeight: baseViewport.height,
+          });
+          const scale = baseScaleResult.scale;
           const viewport = page.getViewport({ scale });
           const tmp = document.createElement('canvas');
           tmp.width = Math.max(1, Math.floor(viewport.width));
@@ -654,6 +802,7 @@ const PdfPageItem = React.memo(function PdfPageItem({
           setBaseUrl(url);
           registerBasePngUrl(`${filePath}:${pageNumber}`, url);
           setBaseReady(true);
+          baseZoomRef.current = baseScaleResult.crispZoom;
           setRenderFailed(false);
           // ندایِ «نشست» برایِ HUD: اگر دیپ برایِ این صفحه در راه
           // است، نشست را دیپ اعلام می‌کند، نه پایه.
@@ -663,6 +812,11 @@ const PdfPageItem = React.memo(function PdfPageItem({
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           setRenderFailed(true);
           throw err;
+        } finally {
+          // مرحلهٔ ۵۶ — ماموریت ۲: آزادسازیِ قفلِ پرواز در همهٔ مسیرها؛ رندرِ لغوشده
+          // هرگز صفحه را «در حالِ رندر» رها نمی‌کند و baseReady هم فقط پس از تکمیلِ
+          // واقعی true می‌شود (در مسیرهایِ returnِ لغو، هیچ‌کدام ست نمی‌شوند).
+          if (baseInflightRef.current && baseInflightRef.current.runId === baseRunId) baseInflightRef.current = null;
         }
       },
     });
@@ -671,17 +825,90 @@ const PdfPageItem = React.memo(function PdfPageItem({
     };
   }, [shouldRender, pdfDoc, filePath, pageNumber, retryTick, onPageRatioMeasured, onHiDpiSettled]);
 
-  // مرحلهٔ ۲۹ — با عوض شدنِ سند/فایل/صفحه، هر دو نشانی صفر
-  // می‌شود (آزادسازی از طریقِ کشِ LRUِ سرویس) و کارهایِ صف لغو
-  // می‌شوند.
+  // مرحلهٔ ۵۶ — ماموریت ۲: نگهبانِ صفحهٔ گیرکرده + بازیابیِ پس از سکونِ اسکرول.
+  // مکانیزمِ گیرکردنِ کهنه (صفحهٔ ۱۸ در اسکرین‌شات): در remountِ صفحه با کشِ گرم،
+  // اثرِ پایه اول از کش برمی‌گرداند (baseReady=true) و اثرِ بازنشانیِ بعدی، در همان
+  // کامیت، نشانی را باطل و baseReady را false می‌کرد؛ بدونِ هیچ محرکِ دوباره‌ای،
+  // صفحه برایِ همیشه رویِ اسپینر می‌ماند (renderFailed هم false بود، پس دکمهٔ
+  // «تلاش مجدد» هم نبود). ریشه در اثرِ بازنشانی درست شد و این نگهبان، تورِ امنِ
+  // همهٔ مسیرهایِ مانده است: با تیکِ والد (۱۲۰ میلی‌ثانیه پس از آخرین اسکرول و
+  // بررسیِ دوره‌ایِ ۱۵۰۰ میلی‌ثانیه‌ای) و با تغییرِ زومِ نشسته بیدار می‌شود و
+  // صفحهٔ دیده‌شده (یا تا ۲ صفحه دورتر) را بررسی می‌کند: کشِ آماده را بی‌درنگ
+  // برمی‌گرداند، یا صفحهٔ گیرکرده را با اولویتِ بالا از نو صف می‌کند، یا وضوحِ
+  // پس از زوم را بازتازه می‌کند. هیچ صفحهٔ دیده‌شده‌ای رویِ اسپینر نمی‌ماند.
   useEffect(() => {
-    setBaseReady(false);
-    revokeBasePngUrl(`${filePath}:${pageNumber}`);
-    baseUrlRef.current = null;
+    if (!shouldRender || !pdfDoc) return undefined;
+    const cacheKey = `${filePath}:${pageNumber}`;
+    const decision = decideWatchdogAction({
+      shouldRender,
+      hasPdfDoc: Boolean(pdfDoc),
+      baseReady,
+      renderFailed,
+      inflight: baseInflightRef.current,
+      queuedAtMs: baseQueuedAtRef.current,
+      nowMs: Date.now(),
+      cachedUrl: getBasePngUrl(cacheKey),
+    });
+    if (decision === 'restore-cache') {
+      const cached = getBasePngUrl(cacheKey);
+      if (cached) {
+        baseUrlRef.current = cached;
+        setBaseUrl(cached);
+        setBaseReady(true);
+        setRenderFailed(false);
+      }
+      return undefined;
+    }
+    if (decision === 'retry') {
+      forcePriorityRef.current = true;
+      setRetryTick((t) => t + 1);
+      return undefined;
+    }
+    if (
+      needsZoomRefresh({
+        baseReady,
+        distance: distanceRef.current ?? 99,
+        renderZoomLevel: renderZoomLevel || 1,
+        baseZoom: baseZoomRef.current || 1,
+      }) &&
+      !baseInflightRef.current
+    ) {
+      zoomRefreshRef.current = true;
+      setRetryTick((t) => t + 1);
+    }
+    return undefined;
+  }, [watchdogTick, shouldRender, baseReady, renderFailed, renderZoomLevel, pdfDoc, filePath, pageNumber]);
+
+  // مرحلهٔ ۲۹ — با عوض شدنِ سند/فایل، نشانیِ دیپ همیشه صفر می‌شود و
+  // کارهایِ صف لغو می‌شوند. نشانیِ پایه فقط وقتی سند/فایل واقعاً عوض شده
+  // باشد صفر می‌شود (مرحلهٔ ۵۶: در remountِ همان صفحه، دست نمی‌خورد).
+  useEffect(() => {
+    // مرحلهٔ ۵۶ — ماموریت ۲ (رفعِ ریشهٔ صفحهٔ گیرکرده): پیش از این، بدنهٔ این اثر
+    // در هر مانت — از جمله remountِ همان صفحه با همان سند — نشانیِ پایه را باطل
+    // (revokeBasePngUrl: حذف از کش + ابطالِ blob) و baseReady را false می‌کرد،
+    // در حالی که اثرِ پایه در همان کامیت، پیش‌تر همان نشانی را از کش برگردانده بود؛
+    // نتیجه: صفحهٔ تاریکِ همیشگی بدونِ هیچ محرکِ رندرِ دوباره. حالا در مانتِ تازه
+    // (نمونهٔ تازه، refها خالی‌اند) به تصویرِ پایه دست نمی‌خورد و اثرِ پایه مالکِ
+    // آن است؛ فقط وقتی سند یا فایل واقعاً در همین نمونه عوض شده باشد، تصویرِ کهنه
+    // پاک و با retryTick، رندرِ تازه صف می‌شود. دیپ، وابسته به زوم است و همیشه
+    // از نو ساخته می‌شود.
+    const docChanged = resetDocRef.current !== null && resetDocRef.current !== pdfDoc;
+    const fileChanged = resetFileRef.current !== null && resetFileRef.current !== filePath;
+    resetDocRef.current = pdfDoc;
+    resetFileRef.current = filePath;
+    if (docChanged || fileChanged) {
+      revokeBasePngUrl(`${filePath}:${pageNumber}`);
+      baseUrlRef.current = null;
+      setBaseUrl(null);
+      setBaseReady(false);
+      setRenderFailed(false);
+      baseZoomRef.current = 1;
+      setRetryTick((t) => t + 1);
+    }
     revokeDeepPngUrl(`${filePath}:${pageNumber}`);
     deepUrlRef.current = null;
     deepDoneRef.current = null;
-    setBaseUrl(null);
+    deepInflightRef.current = null;
     setDeepUrl(null);
     return () => {
       renderQueue.cancel(`base:${filePath}:${pageNumber}`);
@@ -777,6 +1004,8 @@ const PdfPageItem = React.memo(function PdfPageItem({
       // enqueueی هم‌کلید، کارِ قبلی را لغو می‌کند.
       delayMs: 320,
       run: async (hooks) => {
+        const deepRunId = (deepRunIdRef.current += 1);
+        deepInflightRef.current = { runId: deepRunId };
         try {
           let renderTask = null;
           hooks.onCancel(() => {
@@ -856,6 +1085,9 @@ const PdfPageItem = React.memo(function PdfPageItem({
         } catch (err) {
           if (hooks.isCancelled() || err?.name === 'RenderingCancelledException') return;
           throw err;
+        } finally {
+          // مرحلهٔ ۵۶ — ماموریت ۲: آزادسازیِ قفلِ پروازِ دیپ در همهٔ مسیرها.
+          if (deepInflightRef.current && deepInflightRef.current.runId === deepRunId) deepInflightRef.current = null;
         }
       },
     });
@@ -1353,6 +1585,11 @@ export default function PdfViewer({ filePath }) {
   const zoomAnchorRef = useRef({ page: 1, ratioInPage: 0 });
   const prevAnchorZoomRef = useRef(zoomLevel);
   const scrollIdleTimerRef = useRef(null);
+  // مرحلهٔ ۵۶ — ماموریت ۲: تیکِ بازیابیِ نگهبانِ صفحهٔ گیرکرده.
+  // هر تیک، همهٔ آیتم‌هایِ مانت‌شده را وادار می‌کند خودشان را بررسی کنند؛
+  // تیک فقط عدد است و هیچ رندری را به‌تنهایی راه نمی‌اندازد.
+  const [recoveryTick, setRecoveryTick] = useState(0);
+  const scrollRecoveryTimerRef = useRef(null);
   const activePageRef = useRef(1);
   activePageRef.current = activePage;
   // مرحلهٔ ۳۴ — همگام‌سازیِ معوقِ صفحهٔ فعال با استورِ سراسری
@@ -1463,11 +1700,15 @@ export default function PdfViewer({ filePath }) {
   // مرحله ۱۲: زومِ «تثبیت‌شده» برای رسترایزِ سنگین — در حینِ
   // زومِ پیوسته (ترک‌پد/اسلایدر)، فقط چیدمان (ارتفاع‌ها/عرض‌ها)
   // با زومِ زنده به‌روز می‌شود و تصویرِ موجود، مقیاس می‌گیرد؛
-  // رندرِ مجددِ pdf.js، فقط ۱۵۰ میلی‌ثانیه پس از آخرین تیکِ
+  // رندرِ مجددِ pdf.js، فقط ۱۴۰ میلی‌ثانیه پس از آخرین تیکِ
   // زوم انجام می‌شود. `rasterZoomRef`، جلوی ست‌شدنِ دوبارهٔ
   // همان مقدار را می‌گیرد تا حلقهٔ effect/state نسازد. تیکِ
   // `hiDpiRenderTick` در استور (مرحله ۶-ب) دست‌نخورده می‌ماند:
   // همان ماشهٔ «توقفِ اسکرول» برای شارپ شدنِ صفحه‌هاست.
+  // مرحلهٔ ۵۶ — ماموریت ۲: دیبانسِ زوم از ۱۵۰ به ۱۴۰ میلی‌ثانیه رسید (دو فازِ
+  // زومِ واضح: در حینِ زوم، تصویرِ آماده با مقیاسِ CSS دیده می‌شود و هیچ اسپینری
+  // نمی‌آید؛ ۱۴۰ میلی‌ثانیه پس از توقف، رندرِ تازه با وضوحِ کامل در پس‌زمینه
+  // انجام و بدونِ سیاه‌شدن جایگزین می‌شود).
   const [rasterZoomLevel, setRasterZoomLevel] = useState(safeZoom);
   const rasterZoomRef = useRef(safeZoom);
 
@@ -1476,7 +1717,7 @@ export default function PdfViewer({ filePath }) {
     const timer = setTimeout(() => {
       rasterZoomRef.current = safeZoom;
       setRasterZoomLevel(safeZoom);
-    }, 150);
+    }, 140);
     return () => clearTimeout(timer);
   }, [safeZoom]);
 
@@ -3442,6 +3683,16 @@ export default function PdfViewer({ filePath }) {
         triggerHiDpiRender?.();
       }, 420);
 
+      // مرحلهٔ ۵۶ — ماموریت ۲: ۱۲۰ میلی‌ثانیه پس از آخرین رویدادِ اسکرول،
+      // نگهبان بیدار می‌شود و صفحه‌هایِ دیده‌شدهٔ گیرکرده را بازیابی می‌کند.
+      if (scrollRecoveryTimerRef.current) {
+        clearTimeout(scrollRecoveryTimerRef.current);
+      }
+      scrollRecoveryTimerRef.current = setTimeout(() => {
+        scrollRecoveryTimerRef.current = null;
+        setRecoveryTick((t) => (t + 1) % 100000);
+      }, 120);
+
       // مرحله ۲۲ — به‌روزرسانیِ نقطهٔ کانونیِ زوم در هر رویدادِ
       // اسکرول (همگام، نه با rAF) تا اثرِ قفل، همیشه تازه‌ترین
       // مرکزِ دید را داشته باشد.
@@ -3476,6 +3727,7 @@ export default function PdfViewer({ filePath }) {
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
       if (scrollIdleTimerRef.current) clearTimeout(scrollIdleTimerRef.current);
+      if (scrollRecoveryTimerRef.current) clearTimeout(scrollRecoveryTimerRef.current);
       if (storeSyncTimerRef.current) clearTimeout(storeSyncTimerRef.current);
       if (resizeObserver) resizeObserver.disconnect();
       container.removeEventListener('scroll', handleScroll);
@@ -3489,6 +3741,18 @@ export default function PdfViewer({ filePath }) {
     updateReadingProgress,
     triggerHiDpiRender,
   ]);
+
+  // مرحلهٔ ۵۶ — ماموریت ۲: بررسیِ دوره‌ایِ سبکِ نگهبان (هر ۱۵۰۰ میلی‌ثانیه):
+  // حتی اگر هیچ اسکرولی رخ ندهد، صفحه‌هایِ دیده‌شده (تا ۲ صفحه آن‌سوتر) بررسی
+  // می‌شوند تا هیچ صفحه‌ای در حالتِ اسپینر نماند. بررسی فقط چند خواندنِ Map و
+  // چند مقایسه است؛ فقط صفحهٔ گیرکرده رندرِ تازه می‌گیرد.
+  useEffect(() => {
+    if (isLoading || numPages <= 0 || !filePath) return undefined;
+    const id = setInterval(() => {
+      setRecoveryTick((t) => (t + 1) % 100000);
+    }, 1500);
+    return () => clearInterval(id);
+  }, [isLoading, numPages, filePath]);
 
   // ۹. زوم کانونی با چرخ ماوس (Ctrl + Wheel تا سقف 3.5x) — مرحله ۶:
   // نسخهٔ قبلی، شنوندهٔ wheel را فقط وقتی Ctrl نگه داشته شده بود
@@ -4008,6 +4272,7 @@ export default function PdfViewer({ filePath }) {
                   onMoveBookmark={handleMoveBookmark}
                   onHiDpiSettled={handleHiDpiSettled}
                   scrollContainerRef={containerRef}
+                  watchdogTick={recoveryTick}
                 />
               );
             })}

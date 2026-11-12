@@ -903,13 +903,13 @@ const CommittedText = React.memo(function CommittedText({ item, onErase, onEdit,
 //  • حاشیه: ۱ پیکسل با رنگِ انتخابی در آلفای ۰٫۵۵، به‌صورتِ یک
 //    Rectِ جداگانهٔ بدونِ fill که بعد از هدر کشیده می‌شود تا دورِ
 //    کلِ کارت (از جمله هدر) خطِ یکدستی داشته باشد.
-//  • سایه: فقط روی زیره (نه روی لایه‌ها و هدر، تا سایه دو برابر
-//    نشود): shadowColor '#000000'، shadowBlur 4 (فاز ۱ بهینه‌سازی:
-  //    قبلاً ۱۶ بود؛ هزینهٔ بلار تقریباً با مربعِ شعاع بالا می‌رود، پس
-  //    ۴ به‌جای ۱۶، پاسِ بلار را حدود ۱۶ برابر ارزان‌تر می‌کند؛
-  //    perfectDrawEnabled و shadowForStrokeEnabled از قبل false بودند)،
-  //    shadowOpacity
-//    0.22، shadowOffset {x: 0, y: 6} — دقیقاً طبقِ تسک.
+//  • سایه: مرحلهٔ ۵۶ (مأموریت ۳) — سایهٔ سیاهِ زیره کاملاً حذف شد
+//    (قبلاً shadowColor '#000000' با shadowBlur 4 و shadowOpacity
+//    0.22 و shadowOffset {x: 0, y: 6} بود؛ فاز ۱ بهینه‌سازی، بلار را
+//    از ۱۶ به ۴ رسانده بود). دلیلِ حذف: همان سایه در خروجیِ PDF
+//    دورِ کارت یک هالهٔ سیاه می‌ساخت؛ با حذفش، کارتِ روی صفحه
+//    دقیقاً همان کارتِ خروجی است و دیگر سایه‌ای برای پختن در
+//    خروجی وجود ندارد.
 //  • پین: وسطِ هدر — هاله (رنگِ متن در آلفای ۰٫۲۲) + دیسکِ سفیدِ
 //    ۱۳ پیکسلی + نقطهٔ ۶ پیکسلی به رنگِ انتخابی. هاله، عامدانه
 //    از رنگِ متن ساخته شده، نه از رنگِ انتخابی: هالهٔ هم‌رنگِ
@@ -1030,17 +1030,13 @@ const CommittedSticky = React.memo(function CommittedSticky({ item, onErase, onE
       onTap={handleClick}
       onDblClick={handleDblClick}
     >
-      {/* زیرهٔ مات + سایهٔ چندلایه (سایه فقط همین‌جاست). */}
+      {/* زیرهٔ مات (مرحلهٔ ۵۶: سایهٔ سیاه حذف شد تا کارتِ روی صفحه
+          دقیقاً همان کارتِ خروجیِ PDF باشد). */}
       <Rect
         width={w}
         height={h}
         fill={theme.bodyBase}
         cornerRadius={14}
-        shadowColor="#000000"
-        shadowBlur={4}
-        shadowOpacity={0.22}
-        shadowOffsetX={0}
-        shadowOffsetY={6}
         perfectDrawEnabled={false}
         shadowForStrokeEnabled={false}
       />
@@ -1390,7 +1386,7 @@ function TextEditorOverlay({ editor, scaleX, scaleY, size, onChangeValue, onComm
 //    ۰٫۱۶ + هدرِ ۲۴ پیکسلی با همان رنگ + پینِ وسطِ هدر (هاله +
 //    دیسکِ سفید + نقطهٔ رنگی) + حاشیهٔ ۱ پیکسلیِ هم‌رنگ.
 //  • گوشه‌های ۱۴ پیکسل با overflow hidden تا هدر، گوشه‌های کارت را
-//    دقیق بگیرد؛ سایهٔ ۰ ۶px ۱۶px rgba(0,0,0,0.22) مثلِ کارتِ Konva.
+//    دقیق بگیرد؛ سایهٔ ۰ ۶px ۱۶px rgba(0,0,0,0.22) برای جدا شدنِ پنلِ ویرایش از صفحه است.
 //  • بدونِ بوردرهای پیش‌فرضِ مرورگر: textarea با border و outlineی
 //    none و پس‌زمینهٔ شفاف، دقیقاً روی پدینگِ کارت می‌نشیند.
 //  • ترازِ خودکارِ زنده: جهتِ textarea از detectTextDirectionی

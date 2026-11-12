@@ -375,16 +375,25 @@ export const useAppStore = create((set, get) => ({
     }),
 
   // مرحلهٔ ۳۹ §۳: رنگ‌هایِ موردِ علاقه (سقف ۴۸ رنگ).
-  addFavoriteColor: (color) =>
+  // مرحلهٔ ۵۶ مأموریتِ ۱: true برمی‌گرداند اگر رنگ اضافه شد، وگرنه
+  // false (نامعتبر، تکراری یا سقفِ پر) — تا تولبار بتواند به کاربر
+  // بگوید چه شد؛ قبلاً همیشه undefined بود و ردِ بی‌صدا، شبیهِ
+  // «ذخیره نشد» دیده می‌شد.
+  addFavoriteColor: (color) => {
+    let added = false;
     set((state) => {
       const c = sanitizeColorHex(typeof color === 'string' ? color.trim() : '');
       if (!c) return state;
       if ((state.favoriteColors || []).some((x) => x.toLowerCase() === c.toLowerCase())) return state;
+      if ((state.favoriteColors || []).length >= 48) return state;
       const next = { ...state, favoriteColors: [...(state.favoriteColors || []), c].slice(0, 48) };
       persistCustomColorSystem(next);
       scheduleColorDbSync();
+      added = true;
       return next;
-    }),
+    });
+    return added;
+  },
 
   removeFavoriteColor: (color) =>
     set((state) => {
@@ -398,10 +407,19 @@ export const useAppStore = create((set, get) => ({
     }),
 
   // مرحلهٔ ۳۹ §۳: تمپلیت‌هایِ رنگیِ شخصی (سقف ۲۴ تمپلیت، هر کدام تا ۱۲ رنگ).
-  createCustomColorTemplate: (name, colors) =>
+  // مرحلهٔ ۵۶ مأموریتِ ۱: true برمی‌گرداند اگر تمپلیت ساخته شد،
+  // false اگر رنگِ معتبری نرسید یا سقفِ ۲۴ تمپلیت پر بود. قبلاً در
+  // هر دو حالت، بی‌صدا state برمی‌گشت (و در سقفِ پر، slice(0, 24)
+  // تمپلیتِ تازه را دور می‌انداخت) و تولبار هم فرم را می‌بست؛ پس
+  // کاربر هیچ بازخوردی نمی‌دید و لیست خالی می‌ماند — همان شکستِ
+  // خاموشِ گزارش‌شده. localStorage مرجعِ اول است و سینکِ دیتابیس،
+  // مثلِ قبل، debounceدار (۸۰۰ میلی‌ثانیه) انجام می‌شود.
+  createCustomColorTemplate: (name, colors) => {
+    let created = false;
     set((state) => {
       const clean = (Array.isArray(colors) ? colors : []).map(sanitizeColorHex).filter(Boolean).slice(0, 12);
       if (clean.length === 0) return state;
+      if ((state.customColorTemplates || []).length >= 24) return state;
       const id = `tpl_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
       const next = {
         ...state,
@@ -412,8 +430,11 @@ export const useAppStore = create((set, get) => ({
       };
       persistCustomColorSystem(next);
       scheduleColorDbSync();
+      created = true;
       return next;
-    }),
+    });
+    return created;
+  },
 
   deleteCustomColorTemplate: (id) =>
     set((state) => {
@@ -487,11 +508,16 @@ export const useAppStore = create((set, get) => ({
     }
   },
 
+  // مرحلهٔ ۵۶ مأموریتِ ۱: true برمی‌گرداند اگر ورکر، نوشتن را
+  // تأیید کرد، وگرنه false. کلیدِ payload (customColorSystem) دقیقاً
+  // همان است که ورکرِ دیتابیس در هر دو شاخهٔ JSON و SQLite از آن
+  // می‌خواند (SAVE_CUSTOM_COLOR_SYSTEM)؛ localStorage همچنان مرجعِ
+  // اول است و شکستِ سینک، state را خراب نمی‌کند.
   syncCustomColorSystemToDb: async () => {
     try {
       const { coreApi } = await import('../services/coreApi.js');
       const s = get();
-      await coreApi.dbAction({
+      const res = await coreApi.dbAction({
         action: 'SAVE_CUSTOM_COLOR_SYSTEM',
         payload: {
           customColorSystem: {
@@ -501,7 +527,10 @@ export const useAppStore = create((set, get) => ({
           },
         },
       });
-    } catch (_) {}
+      return Boolean(res && res.type !== 'error' && res.success !== false);
+    } catch (_) {
+      return false;
+    }
   },
 
   setAnnotationStrokeWidth: (width) =>

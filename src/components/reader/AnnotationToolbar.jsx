@@ -255,6 +255,8 @@ export function AnnotationToolbar({
   const customColorTemplates = useAppStore((s) => s.customColorTemplates || []);
   const createCustomColorTemplate = useAppStore((s) => s.createCustomColorTemplate);
   const deleteCustomColorTemplate = useAppStore((s) => s.deleteCustomColorTemplate);
+  // مرحلهٔ ۵۶ مأموریتِ ۱: توست برای بازخوردِ ذخیرهٔ تمپلیت/رنگ.
+  const showToast = useAppStore((s) => s.showToast);
   const annotationStrokeWidth = useAppStore((s) => s.annotationStrokeWidth || 4);
   const setAnnotationStrokeWidth = useAppStore((s) => s.setAnnotationStrokeWidth);
   // فاز ۲: استیت‌های باکس
@@ -373,6 +375,9 @@ export function AnnotationToolbar({
   const [activeTemplateId, setActiveTemplateId] = useState(null);
   const [newTemplateName, setNewTemplateName] = useState('');
   const [isCreatingTemplate, setIsCreatingTemplate] = useState(false);
+  // مرحلهٔ ۵۶ مأموریتِ ۱: پیامِ خطایِ درون‌خطیِ فرمِ تمپلیت —
+  // حتی اگر showToast در استورِ نصب‌شده نباشد، شکست دیده می‌شود.
+  const [templateFormError, setTemplateFormError] = useState('');
   const [hexDraft, setHexDraft] = useState('');
   // فازِ عبورِ ژست از زیرِ تولبار + بستنِ خودکارِ دراور:
   // لایه، شروعِ هر ژستِ واقعیِ درگ (قلم، هایلایتر، باکس، فلش،
@@ -1342,6 +1347,69 @@ export function AnnotationToolbar({
     setAnnotationColor(hex);
     broadcastSelectedPropertyPatch({ color: hex });
   };
+  // مرحلهٔ ۵۶ مأموریتِ ۱: ذخیرهٔ تمپلیتِ رنگی با بازخوردِ صریح.
+  // علتِ خاموشِ گزارش‌شده این بود که createCustomColorTemplate،
+  // وقتی رنگِ معتبری نمی‌رسید یا سقفِ ۲۴ تمپلیت پر بود، بی‌صدا
+  // state برمی‌گشت و تولبار هم فرم را می‌بست؛ پس کاربر هیچ خطایی
+  // نمی‌دید و لیست خالی می‌ماند. حالا: (۱) اگر اکشن در استورِ
+  // نصب‌شده نباشد (استورِ قدیمی‌تر از مرحلهٔ ۳۹)، به‌جای TypeError،
+  // پیامِ درون‌خطی + توست نشان داده می‌شود؛ (۲) نتیجهٔ boolean
+  // بررسی می‌شود و موفقیت/شکست، هم با توست و هم با پیامِ درون‌خطی
+  // گفته می‌شود؛ (۳) نامِ پیش‌فرض، خودکار «تمپلیت ۱»، «تمپلیت ۲»…
+  // است (نخستین شمارهٔ استفاده‌نشده) و کاربر می‌تواند عوضش کند.
+  // این‌ها تابعِ ساده‌اند، نه هوک؛ پس این‌جا، بعد از returnِ
+  // زودهنگام، مشکلی ندارند (فقط در هندلرهای رویداد صدا زده می‌شوند).
+  const suggestTemplateName = () => {
+    const used = new Set((customColorTemplates || []).map((tm) => tm.name));
+    let n = (customColorTemplates || []).length + 1;
+    for (;;) {
+      const candidate = `تمپلیت ${n.toLocaleString('fa-IR')}`;
+      if (!used.has(candidate)) return candidate;
+      n += 1;
+    }
+  };
+  const saveColorTemplate = () => {
+    if (typeof createCustomColorTemplate !== 'function') {
+      const msg = 'ذخیرهٔ تمپلیت در این نسخه پشتیبانی نمی‌شود؛ فایلِ useAppStore.js را با نسخهٔ مرحلهٔ ۵۶ جایگزین کنید.';
+      setTemplateFormError(msg);
+      if (typeof showToast === 'function') showToast(msg, { type: 'error' });
+      return;
+    }
+    const hexRe = /^#[0-9a-fA-F]{6}$/;
+    const source = favoriteColors.length > 0 ? favoriteColors : [annotationColor];
+    const colors = source.filter((c) => typeof c === 'string' && hexRe.test(c));
+    if (colors.length === 0) {
+      const msg = 'رنگی برای ذخیره نیست؛ اول یک رنگ انتخاب کن.';
+      setTemplateFormError(msg);
+      if (typeof showToast === 'function') showToast(msg, { type: 'error' });
+      return;
+    }
+    const name = newTemplateName.trim() || suggestTemplateName();
+    const ok = createCustomColorTemplate(name, colors);
+    if (ok) {
+      setTemplateFormError('');
+      setNewTemplateName('');
+      setIsCreatingTemplate(false);
+      if (typeof showToast === 'function') showToast(`تمپلیت «${name}» ذخیره شد.`, { type: 'success' });
+    } else {
+      const msg = 'تمپلیت ذخیره نشد؛ سقفِ ۲۴ تمپلیت پر است یا رنگ‌ها نامعتبرند.';
+      setTemplateFormError(msg);
+      if (typeof showToast === 'function') showToast(msg, { type: 'error' });
+    }
+  };
+  // مرحلهٔ ۵۶ مأموریتِ ۱: «ذخیرهٔ رنگِ فعلی» هم بی‌بازخورد بود —
+  // رنگِ تکراری یا نامعتبر، بی‌صدا رد می‌شد. حالا نتیجه گفته می‌شود.
+  const saveCurrentFavoriteColor = () => {
+    if (typeof annotationColor !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(annotationColor)) {
+      if (typeof showToast === 'function') showToast('رنگِ فعلی معتبر نیست؛ اول یک رنگ انتخاب کن.', { type: 'error' });
+      return;
+    }
+    if (typeof addFavoriteColor !== 'function') return;
+    const added = addFavoriteColor(annotationColor);
+    if (typeof showToast !== 'function') return;
+    if (added) showToast('رنگِ فعلی در رنگ‌های من ذخیره شد.', { type: 'success' });
+    else showToast('این رنگ قبلاً در رنگ‌های من است.', { type: 'info' });
+  };
   // مرحله ۴۸ §۵: باز کردنِ پاپ‌اورِ زیرحالتِ انتخاب — موقعیتِ ثابت،
   // با اندازه‌گیریِ دکمهٔ select در لحظهٔ باز شدن (دقیقاً مثلِ
   // toggleColorDrawer): عمودی → کنارِ دکمه با قانونِ آینه‌ایِ §۱؛
@@ -1394,7 +1462,7 @@ export function AnnotationToolbar({
     // دراور با position: fixed رندر می‌شود تا overflowی نوارِ افقی
     // (overflowX: auto) آن را نبرد؛ پس مختصاتش در لحظهٔ باز شدن، از
     // کادرِ دکمه اندازه‌گیری می‌شود. افقی: پایینِ دکمه، وسط‌چین، با
-    // clamp در لبه‌های پنجره (عرضِ دراور ۳۰۰ است). عمودی: سمتِ
+    // clamp در لبه‌های پنجره (عرضِ دراور ۲۷۲ است). عمودی: سمتِ
     // باز شدن، همان سمتِ فلای‌اوت است (قانونِ آینه‌ایِ §۱: داک در
     // نیمهٔ چپ → سمتِ راستِ دکمه؛ وگرنه سمتِ چپ)، با fallback به
     // سمتِ دیگر اگر سمتِ خواسته‌شده جا نداشت، و clamp در لبه‌ها.
@@ -1405,23 +1473,23 @@ export function AnnotationToolbar({
         : { top: 80, left: '50%', transform: 'translateX(-50%)', above: false });
     } else if (isVertical) {
       const cy = rect.top + rect.height / 2;
-      const fitsLeft = rect.left - 10 >= 300;
-      const fitsRight = viewportW - rect.right - 10 >= 300;
+      const fitsLeft = rect.left - 10 >= 272;
+      const fitsRight = viewportW - rect.right - 10 >= 272;
       const openRight = isDockOnLeft ? (fitsRight || !fitsLeft) : (fitsRight && !fitsLeft);
       if (openRight) {
-        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 300)), transform: 'translate(0, -50%)', above: false });
+        setColorDrawerPos({ top: cy, left: Math.max(10, Math.min(rect.right + 10, viewportW - 272)), transform: 'translate(0, -50%)', above: false });
       } else {
-        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 300), transform: 'translate(-100%, -50%)', above: false });
+        setColorDrawerPos({ top: cy, left: Math.max(rect.left - 10, 272), transform: 'translate(-100%, -50%)', above: false });
       }
     } else {
-      const cx = Math.max(160, Math.min(rect.left + rect.width / 2, window.innerWidth - 160));
+      const cx = Math.max(144, Math.min(rect.left + rect.width / 2, window.innerWidth - 144));
       // Stage 8 Part A (Axis 3): smart flip — if there is not enough
-      // room below the bar (drawer ~320px) but more room above, the
+      // room below the bar (drawer ~460px) but more room above, the
       // drawer opens ABOVE the bar so it is never clipped by the
       // bottom edge of the monitor.
       const spaceBelow = viewportH - rect.bottom;
       const spaceAbove = rect.top;
-      if (spaceBelow < 330 && spaceAbove > spaceBelow) {
+      if (spaceBelow < 470 && spaceAbove > spaceBelow) {
         setColorDrawerPos({ top: rect.top - 10, left: cx, transform: 'translateX(-50%) translateY(-100%)', above: true });
       } else {
         setColorDrawerPos({ top: rect.bottom + 10, left: cx, transform: 'translateX(-50%)', above: false });
@@ -2404,16 +2472,17 @@ export function AnnotationToolbar({
       <div
         ref={colorDrawerRef}
         style={{
-          width: 300,
-          maxHeight: 'calc(100vh - 40px)',
+          width: 272,
+          maxHeight: 'min(72vh, 460px)',
           pointerEvents: drawerExiting ? 'none' : 'auto',
           // transformOrigin follows the smart flip so the drawer grows
           // out of the bar edge it opened from.
           transformOrigin: colorDrawerPos.above ? '50% 100%' : '50% 0',
           overflowY: 'auto',
-          scrollbarWidth: 'none',
-          padding: 12,
-          borderRadius: 16,
+          scrollbarWidth: 'thin',
+          scrollbarColor: 'rgba(255,255,255,0.25) transparent',
+          padding: 10,
+          borderRadius: 14,
           background: 'radial-gradient(160px circle at var(--spot-x, 50%) var(--spot-y, 50%), rgba(34, 211, 238, 0.12), rgba(147, 51, 234, 0.10) 45%, transparent 70%), rgba(10, 15, 24, 0.94)',
           border: '1px solid rgba(255,255,255,0.12)',
           boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
@@ -2435,11 +2504,11 @@ export function AnnotationToolbar({
         onMouseLeave={handleSpotLeave}
       >
         {PALETTE_CATEGORIES.map((cat) => (
-          <div key={cat.id} style={{ marginBottom: 12, paddingBottom: 10, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div key={cat.id} style={{ marginBottom: 10, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
             <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
               {cat.label}
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
               {cat.colors.map((c) => {
                 const active = annotationColor.toLowerCase() === c.hex.toLowerCase();
                 return (
@@ -2451,8 +2520,8 @@ export function AnnotationToolbar({
                     onClick={() => applyDrawerColor(c.hex)}
                     style={{
                       ...btnBase,
-                      width: 26,
-                      height: 26,
+                      width: 24,
+                      height: 24,
                       borderRadius: '50%',
                       flexShrink: 0,
                       padding: 0,
@@ -2468,8 +2537,8 @@ export function AnnotationToolbar({
                     <span
                       style={{
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        width: 26,
-                        height: 26,
+                        width: 24,
+                        height: 24,
                         borderRadius: '50%',
                         pointerEvents: 'none',
                         background: c.hex,
@@ -2482,7 +2551,7 @@ export function AnnotationToolbar({
                       }}
                     >
                       {active && (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
                           <polyline points="20 6 9 17 4 12" />
                         </svg>
                       )}
@@ -2497,7 +2566,7 @@ export function AnnotationToolbar({
           <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
             رنگ‌های من
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
             {favoriteColors.map((hex) => {
               const active = annotationColor.toLowerCase() === hex.toLowerCase();
               const hovered = hoverUserHex === hex;
@@ -2511,8 +2580,8 @@ export function AnnotationToolbar({
                     onMouseLeave={() => { setHoverUserHex(null); setHoverSwatch(null); }}
                     style={{
                       ...btnBase,
-                      width: 26,
-                      height: 26,
+                      width: 24,
+                      height: 24,
                       borderRadius: '50%',
                       flexShrink: 0,
                       padding: 0,
@@ -2528,8 +2597,8 @@ export function AnnotationToolbar({
                     <span
                       style={{
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        width: 26,
-                        height: 26,
+                        width: 24,
+                        height: 24,
                         borderRadius: '50%',
                         pointerEvents: 'none',
                         background: hex,
@@ -2542,7 +2611,7 @@ export function AnnotationToolbar({
                       }}
                     >
                       {active && (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.85))', pointerEvents: 'none' }}>
                           <polyline points="20 6 9 17 4 12" />
                         </svg>
                       )}
@@ -2559,14 +2628,14 @@ export function AnnotationToolbar({
               onClick={() => { if (colorInputRef.current) colorInputRef.current.click(); }}
               style={{
                 ...btnBase,
-                width: 26,
-                height: 26,
+                width: 24,
+                height: 24,
                 borderRadius: '50%',
                 flexShrink: 0,
                 background: 'transparent',
                 border: '1px dashed rgba(255,255,255,0.4)',
                 color: 'rgba(255,255,255,0.75)',
-                fontSize: 18,
+                fontSize: 16,
                 lineHeight: 1,
               }}
             >
@@ -2584,8 +2653,8 @@ export function AnnotationToolbar({
             <button
               type="button"
               title="ذخیرهٔ رنگِ فعلی در رنگ‌هایِ موردِ علاقه"
-              onClick={() => addFavoriteColor(annotationColor)}
-              style={{ ...btnBase, height: 26, padding: '0 10px', borderRadius: 13, background: 'rgba(34,211,238,0.14)', border: '1px solid rgba(34,211,238,0.45)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+              onClick={saveCurrentFavoriteColor}
+              style={{ ...btnBase, height: 24, padding: '0 8px', borderRadius: 12, background: 'rgba(34,211,238,0.14)', border: '1px solid rgba(34,211,238,0.45)', color: '#67e8f9', fontSize: 11, fontWeight: 700, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
             >
               + ذخیرهٔ رنگِ فعلی
             </button>
@@ -2598,7 +2667,7 @@ export function AnnotationToolbar({
         </div>
 
         {/* مرحلهٔ ۳۹ §۳: تمپلیت‌هایِ رنگیِ من (پالت‌هایِ سفارشی) */}
-        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
             تمپلیت‌هایِ رنگیِ من
           </div>
@@ -2633,37 +2702,48 @@ export function AnnotationToolbar({
             </div>
           ))}
           {isCreatingTemplate ? (
-            <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-              <input
-                type="text"
-                value={newTemplateName}
-                onChange={(e) => setNewTemplateName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    createCustomColorTemplate(newTemplateName.trim() || 'تمپلیتِ جدید', favoriteColors.length > 0 ? favoriteColors : [annotationColor]);
-                    setNewTemplateName('');
-                    setIsCreatingTemplate(false);
-                  } else if (e.key === 'Escape') {
-                    setIsCreatingTemplate(false);
-                  }
-                }}
-                placeholder="نامِ تمپلیت…"
-                autoFocus
-                style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, padding: '6px 8px' }}
-              />
-              <button
-                type="button"
-                onClick={() => { createCustomColorTemplate(newTemplateName.trim() || 'تمپلیتِ جدید', favoriteColors.length > 0 ? favoriteColors : [annotationColor]); setNewTemplateName(''); setIsCreatingTemplate(false); }}
-                style={{ ...btnBase, height: 30, padding: '0 10px', borderRadius: 8, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}
-              >
-                ساخت
-              </button>
+            <div>
+              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <input
+                  type="text"
+                  value={newTemplateName}
+                  onChange={(e) => { setNewTemplateName(e.target.value); setTemplateFormError(''); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      saveColorTemplate();
+                    } else if (e.key === 'Escape') {
+                      setIsCreatingTemplate(false);
+                      setTemplateFormError('');
+                    }
+                  }}
+                  placeholder="نامِ تمپلیت…"
+                  autoFocus
+                  style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: 12, padding: '6px 8px' }}
+                />
+                <button
+                  type="button"
+                  onClick={saveColorTemplate}
+                  style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'rgba(34,211,238,0.16)', border: '1px solid rgba(34,211,238,0.5)', color: '#67e8f9', fontSize: 12, fontWeight: 700, fontFamily: 'inherit', cursor: 'pointer' }}
+                >
+                  ثبت
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setIsCreatingTemplate(false); setNewTemplateName(''); setTemplateFormError(''); }}
+                  style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'transparent', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+                >
+                  لغو
+                </button>
+              </div>
+              {templateFormError ? (
+                <div style={{ fontSize: 11, color: '#fca5a5', marginTop: 6, lineHeight: 1.7 }}>{templateFormError}</div>
+              ) : null}
             </div>
           ) : (
             <button
               type="button"
-              onClick={() => setIsCreatingTemplate(true)}
+              onClick={() => { setNewTemplateName(suggestTemplateName()); setTemplateFormError(''); setIsCreatingTemplate(true); }}
               style={{ ...btnBase, height: 28, padding: '0 10px', borderRadius: 8, background: 'transparent', border: '1px dashed rgba(255,255,255,0.35)', color: 'rgba(255,255,255,0.8)', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
             >
               + ساخت تمپلیتِ رنگیِ جدید
@@ -2672,16 +2752,16 @@ export function AnnotationToolbar({
         </div>
 
         {/* مرحلهٔ ۳۹ §۳: انتخابگرِ پیشرفتهٔ رنگ (چرخِ رنگ + هگز + HSL + قطره‌چکان) */}
-        <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.5)', marginBottom: 6 }}>
             انتخابگرِ پیشرفته
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6 }}>
             <input
               type="color"
               value={/^#[0-9a-fA-F]{6}$/.test(annotationColor) ? annotationColor : '#06b6d4'}
               onChange={(e) => applyPickerColor(e.target.value)}
-              style={{ width: 34, height: 34, padding: 0, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 8, background: 'transparent', cursor: 'pointer', flexShrink: 0 }}
+              style={{ width: 30, height: 30, padding: 0, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 8, background: 'transparent', cursor: 'pointer', flexShrink: 0 }}
             />
             <input
               type="text"
@@ -2697,7 +2777,7 @@ export function AnnotationToolbar({
               }}
               placeholder="#RRGGBB"
               dir="ltr"
-              style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '7px 8px', textAlign: 'left' }}
+              style={{ flex: 1, minWidth: 0, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, color: 'var(--text)', fontFamily: "'JetBrains Mono', monospace", fontSize: 12, padding: '6px 8px', textAlign: 'left' }}
             />
             {typeof window !== 'undefined' && window.EyeDropper && (
               <button
@@ -2710,7 +2790,7 @@ export function AnnotationToolbar({
                     if (r && r.sRGBHex) applyPickerColor(r.sRGBHex.toLowerCase());
                   } catch (_) {}
                 }}
-                style={{ ...btnBase, height: 34, padding: '0 10px', borderRadius: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.85)', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
+                style={{ ...btnBase, height: 30, padding: '0 10px', borderRadius: 8, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.85)', fontSize: 12, fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer' }}
               >
                 قطره‌چکان
               </button>
@@ -2723,10 +2803,10 @@ export function AnnotationToolbar({
               applyPickerColor(hslToHex(next.h, next.s, next.l));
             };
             const sliderRow = (label, value, min, max, onChange) => (
-              <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, color: 'rgba(255,255,255,0.6)', marginBottom: 2 }}>
                 <span style={{ width: 14, flexShrink: 0 }}>{label}</span>
                 <input type="range" min={min} max={max} value={value} onChange={(e) => onChange(Number(e.target.value))} style={{ flex: 1, accentColor: '#22d3ee' }} />
-                <span style={{ width: 28, textAlign: 'left', color: 'var(--text)', direction: 'ltr' }}>{value}</span>
+                <span style={{ width: 24, textAlign: 'left', color: 'var(--text)', direction: 'ltr' }}>{value}</span>
               </label>
             );
             return (

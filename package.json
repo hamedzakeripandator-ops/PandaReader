@@ -99,5 +99,5 @@
     "electron": "electron .",
     "publish": "vite build && electron-builder --win --x64 --publish always"
   },
-  "version": "1.0.1"
+  "version": "1.0.2"
 }

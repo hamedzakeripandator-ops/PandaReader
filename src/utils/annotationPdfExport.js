@@ -571,6 +571,126 @@ export function convertPageItemsToVector(items, geometry) {
   return vector;
 }
 
+// --- پاک‌سازیِ آلفا و بازیابیِ رنگِ خالص (مرحلهٔ ۵۶، مأموریت ۳) -----------
+//
+// هالهٔ سیاهِ دورِ لبه‌های قلم و هایلایتر، دو علت داشت که در این فایل
+// جدا جدا رفع می‌شوند:
+//  ۱) سایهٔ سیاهِ استیکی در drawStickyItem (حذف شد؛ بالاتر ببینید).
+//  ۲) آلفای پیش‌ضرب‌شده (premultiplied alpha) روی شفافِ سیاه:
+//     بومِ Canvas 2D رنگ‌ها را در حافظهٔ داخلی به‌صورتِ پیش‌ضرب‌شده
+//     نگه می‌دارد؛ یعنی رنگِ خالصِ C با آلفای a به‌صورتِ C*a ذخیره
+//     می‌شود و لبهٔ آنتی‌الیاس‌شدهٔ یک ضربهٔ نیمه‌شفاف، با
+//     C*a کوچک، به‌سمتِ سیاه تیره می‌شود.
+//
+// نکتهٔ مهمِ پیاده‌سازی (خواندنِ دقیقِ همین قرارداد، پیش از هر
+// تغییری): مرورگر هنگامِ getImageData و toDataURL خودش
+// unpremultiply می‌کند؛ یعنی داده‌ای که از بوم خوانده می‌شود،
+// آلفای مستقیم (straight alpha) دارد و رنگش از قبل خالص است. پس
+// تقسیمِ دوبارهٔ همان داده بر آلفا، رنگ را خراب می‌کند؛ مثلاً
+// پیکسلِ لبهٔ فیروزه‌ای (34,211,238) با آلفای 121، بعد از تقسیمِ
+// دوباره (72,255,255) می‌شود، یعنی یک هالهٔ روشنِ غلط. به همین
+// دلیل، تقسیمِ unpremultiply فقط روی داده‌ای اعمال می‌شود که
+// قراردادش واقعاً پیش‌ضرب‌شده باشد (تابعِ unpremultiplyImageData
+// در پایین)، و گذرِ روی بومِ خروجی (cleanExportCanvasAlpha) فقط
+// ناوردایِ سالمِ آلفا را اعمال می‌کند: پیکسلِ کاملاً شفاف (a=0)
+// هیچ رنگی حمل نمی‌کند (سیاهِ شفافِ کانونی)، تا هیچ RGBِ سرگردانی
+// در جاهایی که رمزگشای PNG ماسکِ آلفا را نادیده می‌گیرد، به‌صورتِ
+// لکهٔ تیره دیده نشود. putImageData فقط وقتی صدا زده می‌شود که
+// چیزی واقعاً عوض شده باشد؛ چون رفت‌وبرگشتِ putImageData خودش از
+// حافظهٔ پیش‌ضرب‌شده می‌گذرد و لبه‌های کم‌آلفا را دوباره
+// کمّی‌سازی (quantize) می‌کند.
+//
+// همهٔ این محاسبات در sRGB انجام می‌شوند (فضای رنگیِ خودِ بوم، که
+// با colorSpace: 'srgb' ساخته شده) و هیچ تبدیلِ گامایی ندارند.
+
+/**
+ * بازیابیِ رنگِ خالص از دادهٔ پیش‌ضرب‌شده (قراردادِ ورودی: هر پیکسل
+ * به‌صورتِ (R*a, G*a, B*a, a) روی شفافِ سیاه ذخیره شده است).
+ * برای هر پیکسل با آلفای بزرگ‌تر از صفر، R و G و B با تقسیم بر آلفا
+ * به رنگِ خالص برمی‌گردند؛ آلفای صفر دست نمی‌خورد (شفافِ سیاه) و
+ * آلفای ۲۵۵ هم دست نمی‌خورد (مات). تابعِ خالص است (بدونِ DOM) تا
+ * در تستِ Node هم مستقیم قابلِ اجرا باشد.
+ */
+export function unpremultiplyImageData(imageData) {
+  if (!imageData || !imageData.data || !imageData.width || !imageData.height) {
+    return { pixels: 0, recovered: 0 };
+  }
+  const data = imageData.data;
+  let recovered = 0;
+  for (let i = 0; i + 3 < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a === 0 || a === 255) continue;
+    const inv = 255 / a;
+    const r = Math.round(data[i] * inv);
+    const g = Math.round(data[i + 1] * inv);
+    const b = Math.round(data[i + 2] * inv);
+    const nr = r > 255 ? 255 : r;
+    const ng = g > 255 ? 255 : g;
+    const nb = b > 255 ? 255 : b;
+    if (nr !== data[i] || ng !== data[i + 1] || nb !== data[i + 2]) {
+      data[i] = nr;
+      data[i + 1] = ng;
+      data[i + 2] = nb;
+      recovered += 1;
+    }
+  }
+  return { pixels: imageData.width * imageData.height, recovered };
+}
+
+/**
+ * پاک‌سازیِ امنِ آلفا روی ImageDataای که از بوم خوانده شده
+ * (آلفای مستقیم؛ مرورگر از قبل unpremultiply کرده است). فقط
+ * پیکسل‌های کاملاً شفاف را به سیاهِ شفافِ کانونی (0,0,0,0)
+ * برمی‌گرداند تا هیچ رنگِ سرگردانی در ناحیهٔ شفاف نماند. رنگِ
+ * پیکسل‌های نیمه‌شفاف، عمداً دست نمی‌خورد (دلیلش در سربرگِ همین
+ * بخش آمده است). شمارِ پیکسل‌های اصلاح‌شده را برمی‌گرداند.
+ */
+export function cleanExportAlphaImageData(imageData) {
+  if (!imageData || !imageData.data) return 0;
+  const data = imageData.data;
+  let fixed = 0;
+  for (let i = 0; i + 3 < data.length; i += 4) {
+    if (data[i + 3] !== 0) continue;
+    if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 0) {
+      data[i] = 0;
+      data[i + 1] = 0;
+      data[i + 2] = 0;
+      fixed += 1;
+    }
+  }
+  return fixed;
+}
+
+/**
+ * گذرِ پاک‌سازیِ آلفا روی بومِ خروجی، دقیقاً پیش از toDataURL.
+ * ImageData را می‌خواند، پاک‌سازیِ امن را اعمال می‌کند و فقط در
+ * صورتِ اصلاحِ واقعی، putImageData می‌زند تا بومِ سالم، هیچ
+ * رفت‌وبرگشتی از حافظهٔ پیش‌ضرب‌شده نخورد.
+ */
+export function cleanExportCanvasAlpha(ctx, width, height) {
+  const w = Math.floor(Number(width) || 0);
+  const h = Math.floor(Number(height) || 0);
+  if (!ctx || w <= 0 || h <= 0 || typeof ctx.getImageData !== 'function') {
+    return { pixels: 0, fixed: 0, skipped: true };
+  }
+  let imageData = null;
+  try {
+    imageData = ctx.getImageData(0, 0, w, h);
+  } catch (_) {
+    return { pixels: 0, fixed: 0, skipped: true };
+  }
+  if (!imageData) return { pixels: 0, fixed: 0, skipped: true };
+  const fixed = cleanExportAlphaImageData(imageData);
+  if (fixed > 0 && typeof ctx.putImageData === 'function') {
+    try {
+      ctx.putImageData(imageData, 0, 0);
+    } catch (_) {
+      return { pixels: w * h, fixed, skipped: true };
+    }
+  }
+  return { pixels: w * h, fixed, skipped: fixed === 0 };
+}
+
 // --- رندرِ overlay با Canvas 2D ----------------------------------------------
 
 async function ensureExportFonts(items) {
@@ -720,21 +840,14 @@ function drawStickyItem(ctx, item, px, py, unitScale) {
   ctx.save();
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = opacity;
-  // زیره + سایه. مرحله ۷ ـ بخش ب: سایهٔ لایه، shadowOpacityی
-  // ۰٫۲۲ دارد (Konva)؛ رنگِ سایهٔ کاملاً مات ('#000000')، در PDF
-  // سایه‌ای ~۴ برابر تیره‌تر از روی صفحه می‌ساخت. آلفای ۰٫۲۲، با
-  // globalAlphaی opacity ضرب می‌شود — دقیقاً مثلِ Groupِ لایه.
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.22)';
-  ctx.shadowBlur = 4 * unitScale;
-  ctx.shadowOffsetY = 6 * unitScale;
-  ctx.shadowOffsetX = 0;
+  // زیره، بدونِ سایه. مرحلهٔ ۵۶ (مأموریت ۳): سایهٔ سیاهِ استیکی
+  // (rgba(0,0,0,0.22) با blur ۴ و offset ۶) حذف شد، چون در PDFِ
+  // خروجی دورِ کارت یک هالهٔ سیاه می‌ساخت؛ همان سایه در لایهٔ Konva
+  // هم حذف شده تا کارتِ روی صفحه دقیقاً همان کارتِ خروجی باشد.
   ctx.beginPath();
   ctx.roundRect(px, py, w, h, radius);
   ctx.fillStyle = theme.bodyBase;
   ctx.fill();
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 0;
   // شست‌وشوی رنگی.
   ctx.beginPath();
   ctx.roundRect(px, py, w, h, radius);
@@ -888,6 +1001,10 @@ export async function renderPageOverlay(items, geometry) {
       drawArrowItemCanvas(targetCtx, item, geometry, canvasW, canvasH, unitScale);
     }
   }
+  // مرحلهٔ ۵۶ (مأموریت ۳): پاک‌سازیِ آلفا دقیقاً پیش از کدگذاریِ PNG،
+  // روی هر دو بوم — روی پیکسل‌های واقعیِ خروجی، در فضای sRGB.
+  if (hasMain) cleanExportCanvasAlpha(ctx, canvasW, canvasH);
+  if (hasHighlight) cleanExportCanvasAlpha(hlCtx, canvasW, canvasH);
   const overlayPng = hasMain ? canvas.toDataURL('image/png') : null;
   const highlightPng = hasHighlight ? hlCanvas.toDataURL('image/png') : null;
   // مرحلهٔ ۳۲ — آزادسازیِ فوریِ بوم‌هایِ موقت بلافاصله پس از گرفتنِ
